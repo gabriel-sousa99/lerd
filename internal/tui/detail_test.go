@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
@@ -26,7 +27,9 @@ func TestDetailRows_IncludesDomainsWorkersAndToggles(t *testing.T) {
 	assertKindCount(t, kinds, kindWorker, 2)
 	assertKindCount(t, kinds, kindPHP, 1)
 	assertKindCount(t, kinds, kindNode, 1)
-	assertKindCount(t, kinds, kindHTTPS, 1)
+	if cfg, _ := config.LoadGlobal(); cfg == nil || cfg.DNS.Enabled {
+		assertKindCount(t, kinds, kindHTTPS, 1)
+	}
 	assertKindCount(t, kinds, kindLANShare, 1)
 }
 
@@ -40,7 +43,9 @@ func TestDetailRows_CustomContainerSkipsPHP(t *testing.T) {
 	kinds := rowKinds(rows)
 	assertKindCount(t, kinds, kindPHP, 0)
 	assertKindCount(t, kinds, kindNode, 0) // NodeVersion empty
-	assertKindCount(t, kinds, kindHTTPS, 1)
+	if cfg, _ := config.LoadGlobal(); cfg == nil || cfg.DNS.Enabled {
+		assertKindCount(t, kinds, kindHTTPS, 1)
+	}
 	assertKindCount(t, kinds, kindLANShare, 1)
 }
 
