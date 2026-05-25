@@ -997,15 +997,17 @@ func runSetupInit(cwd string, skipWizard bool) error {
 	hasExisting := statErr == nil
 
 	if !hasExisting && skipWizard {
-		// CI path: link with auto-detection, then run env so the caller
-		// (lerd setup) doesn't have to do it itself.
+		// CI path: link with auto-detection, then refresh URL/domain-scoped
+		// keys in .env. Connection settings (DB_*, REDIS_*, MAIL_*) are left
+		// untouched — the caller can run `lerd env` explicitly to wire them
+		// to lerd's managed services when that's actually wanted.
 		linkSkipSetupPrompt = true
 		defer func() { linkSkipSetupPrompt = false }()
 		if err := runLink([]string{}); err != nil {
 			return err
 		}
-		if err := runEnv(nil, nil); err != nil {
-			fmt.Printf("[WARN] lerd env: %v\n", err)
+		if err := runEnvDomainOnly(cwd); err != nil {
+			fmt.Printf("[WARN] lerd env --domain-only: %v\n", err)
 		}
 		return nil
 	}
@@ -1054,12 +1056,14 @@ func applyProjectConfig(cwd string) error {
 		return err
 	}
 
-	// Apply the wizard's service choices (database, etc.) to .env so the user
-	// sees DB_CONNECTION/DB_HOST/etc. updated immediately after the wizard.
-	// Best-effort — failures are warned, not fatal, since the link itself
-	// succeeded and the user can re-run `lerd env` manually.
-	if err := runEnv(nil, nil); err != nil {
-		fmt.Printf("[WARN] lerd env: %v\n", err)
+	// Only refresh URL/domain-scoped keys in .env (APP_URL, SESSION_DOMAIN,
+	// VITE_REVERB_*, …). Connection settings the developer already wrote
+	// (DB_*, REDIS_*, MAIL_*, credentials) are intentionally left alone so
+	// uploading a project to lerd never silently rewrites those values.
+	// `lerd env` (without --domain-only) is still available for the wizard's
+	// service choices to be wired up explicitly when the user wants it.
+	if err := runEnvDomainOnly(cwd); err != nil {
+		fmt.Printf("[WARN] lerd env --domain-only: %v\n", err)
 	}
 	return nil
 }

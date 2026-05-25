@@ -199,10 +199,33 @@ func UpdateAppURL(projectPath, scheme, domain string) error {
 	})
 }
 
-// SyncPrimaryDomain updates APP_URL and VITE_REVERB_HOST/SCHEME/PORT in the
-// project's .env to reflect the current primary domain and TLS state.
-// Only keys that already exist in the .env are touched.
-// Silently does nothing if no .env exists.
+// DomainScopedKeys lists every .env key that SyncPrimaryDomain will rewrite
+// when the value is already present. Anything outside this set is considered
+// a service/credentials/config concern and must NOT be touched by the
+// automatic flows that run on link/init/UI upload.
+//
+// Exported so callers (tests, audits) can prove the scope is bounded.
+var DomainScopedKeys = []string{
+	"APP_URL",
+	"ASSET_URL",
+	"APP_DOMAIN",
+	"VITE_APP_URL",
+	"SESSION_DOMAIN",
+	"SANCTUM_STATEFUL_DOMAINS",
+	"VITE_REVERB_HOST",
+	"VITE_REVERB_SCHEME",
+	"VITE_REVERB_PORT",
+	"REVERB_HOST",
+	"REVERB_SCHEME",
+	"REVERB_PORT",
+}
+
+// SyncPrimaryDomain updates the URL/domain-scoped keys in the project's .env
+// to reflect the current primary domain and TLS state. Only keys that already
+// exist in the .env are touched — keys outside DomainScopedKeys (DB_*, REDIS_*,
+// MAIL_*, credentials, etc.) are never modified, so the automatic flows that
+// run when a project is uploaded to lerd preserve everything the developer
+// already configured. Silently does nothing if no .env exists.
 func SyncPrimaryDomain(projectPath, domain string, secured bool) error {
 	envPath := filepath.Join(projectPath, ".env")
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
@@ -224,19 +247,32 @@ func SyncPrimaryDomain(projectPath, domain string, secured bool) error {
 		scheme = "https"
 		port = "443"
 	}
+	url := scheme + "://" + domain
+
+	// Each domain-scoped key gets a derived value from (scheme, domain, port).
+	// Reverb keys mirror the broadcaster host/port pair; SANCTUM_STATEFUL_DOMAINS
+	// is set to the bare host (Sanctum accepts a comma-separated list, but for
+	// a freshly-uploaded project the single primary domain is the right default).
+	derived := map[string]string{
+		"APP_URL":                  url,
+		"ASSET_URL":                url,
+		"VITE_APP_URL":             url,
+		"APP_DOMAIN":               domain,
+		"SESSION_DOMAIN":           domain,
+		"SANCTUM_STATEFUL_DOMAINS": domain,
+		"VITE_REVERB_HOST":         domain,
+		"VITE_REVERB_SCHEME":       scheme,
+		"VITE_REVERB_PORT":         port,
+		"REVERB_HOST":              domain,
+		"REVERB_SCHEME":            scheme,
+		"REVERB_PORT":              port,
+	}
 
 	updates := map[string]string{}
-	if present["APP_URL"] {
-		updates["APP_URL"] = scheme + "://" + domain
-	}
-	if present["VITE_REVERB_HOST"] {
-		updates["VITE_REVERB_HOST"] = domain
-	}
-	if present["VITE_REVERB_SCHEME"] {
-		updates["VITE_REVERB_SCHEME"] = scheme
-	}
-	if present["VITE_REVERB_PORT"] {
-		updates["VITE_REVERB_PORT"] = port
+	for _, k := range DomainScopedKeys {
+		if present[k] {
+			updates[k] = derived[k]
+		}
 	}
 
 	if len(updates) == 0 {

@@ -38,9 +38,18 @@ func projectDBName(path string) string {
 	return config.SiteSlug(name)
 }
 
+// envDomainOnly toggles the reduced "URL/domain only" path of `lerd env`.
+// When true, runEnv leaves service-related keys (DB_*, REDIS_*, MAIL_*,
+// credentials, etc.) untouched and only refreshes the URL/domain-scoped keys
+// (see envfile.DomainScopedKeys). This is the flag used by the automatic
+// flows that run when a project is uploaded to lerd via `lerd init`,
+// `lerd setup --all`, or the dashboard's link endpoint — they must never
+// silently rewrite the developer's connection settings.
+var envDomainOnly bool
+
 // NewEnvCmd returns the env command.
 func NewEnvCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "env",
 		Short: "Configure .env for this project with lerd service connection settings",
 		Long: `Sets up .env for the current project:
@@ -48,9 +57,130 @@ func NewEnvCmd() *cobra.Command {
   - Detects which services the project uses and sets lerd connection values
   - Starts any referenced services that are not already running
   - Generates APP_KEY if missing
-  - Sets APP_URL to the registered .test domain`,
+  - Sets APP_URL to the registered .test domain
+
+With --domain-only, only the URL/domain-scoped keys (APP_URL, ASSET_URL,
+SESSION_DOMAIN, SANCTUM_STATEFUL_DOMAINS, VITE_REVERB_*, …) are touched.
+Service settings (DB_*, REDIS_*, MAIL_*, credentials) are preserved exactly
+as the developer wrote them. This is the mode used by the automatic upload
+flows (lerd init, lerd setup --all, dashboard link).`,
 		RunE: runEnv,
 	}
+	cmd.Flags().BoolVar(&envDomainOnly, "domain-only", false,
+		"Only update URL/domain-scoped keys (APP_URL, SESSION_DOMAIN, VITE_REVERB_*, …); leave DB/redis/mail/credentials untouched")
+	return cmd
+}
+
+// runEnvDomainOnly is the reduced path of `lerd env`: it creates .env from
+// .env.example when missing, backs up the original on first write, refreshes
+// the URL/domain-scoped keys via envfile.SyncPrimaryDomain, and generates the
+// framework's application key if missing. Service-related keys are never
+// touched. Used by the automatic upload flows (init, setup --all, UI link)
+// where silently rewriting DB credentials etc. would surprise the developer.
+func runEnvDomainOnly(cwd string) error {
+	site, _ := config.FindSiteByPath(cwd)
+	if site == nil {
+		return fmt.Errorf("no site registered for this directory\nRun 'lerd link' first")
+	}
+
+	fwName := site.Framework
+	if fwName == "" {
+		fwName, _ = config.DetectFrameworkForDir(cwd)
+	}
+	if fwName == "" {
+		return fmt.Errorf("no framework detected for this site")
+	}
+
+	fw, ok := config.GetFramework(fwName)
+	if !ok {
+		return fmt.Errorf("framework %q is not defined", fwName)
+	}
+
+	envRelPath, envFormat := fw.Env.Resolve(cwd)
+	envPath := filepath.Join(cwd, envRelPath)
+
+	exampleRelPath := fw.Env.ExampleFile
+	if exampleRelPath == "" {
+		exampleRelPath = ".env.example"
+	}
+	examplePath := filepath.Join(cwd, exampleRelPath)
+
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		if _, err := os.Stat(examplePath); err == nil {
+			fmt.Printf("Creating %s from %s...\n", envRelPath, exampleRelPath)
+			if err := copyEnvFile(examplePath, envPath); err != nil {
+				return fmt.Errorf("copying %s: %w", exampleRelPath, err)
+			}
+		} else {
+			// No .env and no .env.example — nothing to sync. Not an error;
+			// some custom frameworks don't ship one (the user will create
+			// it later) and we explicitly don't want to invent service
+			// keys for them.
+			fmt.Printf("No %s or %s — skipping domain sync.\n", envRelPath, exampleRelPath)
+			return nil
+		}
+	} else {
+		fmt.Printf("Updating existing %s (URL/domain only)...\n", envRelPath)
+		// First-write backup, same policy as full runEnv: only if lerd
+		// hasn't already written to it.
+		backupPath := filepath.Join(cwd, ".env.before_lerd")
+		if !envFileHasLerd(envPath) {
+			if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+				if err := copyEnvFile(envPath, backupPath); err != nil {
+					fmt.Printf("  [WARN] could not back up %s: %v\n", envRelPath, err)
+				} else {
+					fmt.Printf("  Backed up original %s → .env.before_lerd\n", envRelPath)
+					addToGitignore(cwd, ".env.before_lerd")
+				}
+			}
+		}
+	}
+
+	// Refresh URL/domain-scoped keys only — anything else (DB, redis, mail,
+	// credentials) stays exactly as the developer wrote it.
+	if err := envfile.SyncPrimaryDomain(cwd, site.PrimaryDomain(), site.Secured); err != nil {
+		return fmt.Errorf("syncing domain in %s: %w", envRelPath, err)
+	}
+	fmt.Printf("  Synced URL/domain keys for %s\n", site.PrimaryDomain())
+
+	// Generate application key when missing — same policy as the full
+	// runEnv. APP_KEY isn't really a "connection setting", it's a Laravel
+	// requirement, so we still create it on a fresh upload.
+	if kg := fw.Env.KeyGeneration; kg != nil {
+		var envMap map[string]string
+		var err error
+		switch envFormat {
+		case "php-const":
+			envMap, err = envfile.ReadPhpConst(envPath)
+		default:
+			envMap, err = parseEnvMap(envPath)
+		}
+		if err == nil && strings.TrimSpace(envMap[kg.EnvKey]) == "" {
+			if kg.Command != "" {
+				if _, statErr := os.Stat(filepath.Join(cwd, "vendor")); statErr == nil {
+					fmt.Printf("  Generating %s...\n", kg.EnvKey)
+					if err := artisanIn(cwd, kg.Command); err != nil {
+						fmt.Printf("  [WARN] %s failed: %v\n", kg.Command, err)
+					}
+				} else if kg.FallbackPrefix != "" {
+					fmt.Printf("  Generating %s (vendor not installed yet)...\n", kg.EnvKey)
+					key := generateRandomKey(kg.FallbackPrefix)
+					if err := envfile.ApplyUpdates(envPath, map[string]string{kg.EnvKey: key}); err != nil {
+						fmt.Printf("  [WARN] writing %s: %v\n", kg.EnvKey, err)
+					}
+				}
+			} else if kg.FallbackPrefix != "" {
+				fmt.Printf("  Generating %s...\n", kg.EnvKey)
+				key := generateRandomKey(kg.FallbackPrefix)
+				if err := envfile.ApplyUpdates(envPath, map[string]string{kg.EnvKey: key}); err != nil {
+					fmt.Printf("  [WARN] writing %s: %v\n", kg.EnvKey, err)
+				}
+			}
+		}
+	}
+
+	fmt.Println("Done. Run 'lerd env' (without --domain-only) to wire DB/redis/mail to lerd's managed services.")
+	return nil
 }
 
 // userPickedDBFromYAML returns true when the user has named any database
@@ -119,6 +249,10 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
+	}
+
+	if envDomainOnly {
+		return runEnvDomainOnly(cwd)
 	}
 
 	// Determine framework-specific env file path and format

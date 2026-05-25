@@ -277,6 +277,139 @@ func TestSyncPrimaryDomain_noEnvFile_silent(t *testing.T) {
 	}
 }
 
+// TestSyncPrimaryDomain_updatesExtendedDomainKeys pins the expanded scope:
+// when a developer uploads a Laravel project to lerd, every URL/domain key
+// that is already present in the .env must be refreshed — APP_URL/ASSET_URL/
+// VITE_APP_URL, APP_DOMAIN/SESSION_DOMAIN/SANCTUM_STATEFUL_DOMAINS, both
+// VITE_REVERB_* and REVERB_* — so the frontend bundler, session cookies,
+// Sanctum CSRF, and the Reverb websocket all point at the new local domain.
+func TestSyncPrimaryDomain_updatesExtendedDomainKeys(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".env"), []byte(
+		"APP_URL=http://old.test\n"+
+			"ASSET_URL=http://old.test\n"+
+			"VITE_APP_URL=http://old.test\n"+
+			"APP_DOMAIN=old.test\n"+
+			"SESSION_DOMAIN=old.test\n"+
+			"SANCTUM_STATEFUL_DOMAINS=old.test\n"+
+			"REVERB_HOST=old.test\n"+
+			"REVERB_SCHEME=http\n"+
+			"REVERB_PORT=80\n",
+	), 0644)
+
+	if err := SyncPrimaryDomain(dir, "new.test", true); err != nil {
+		t.Fatal(err)
+	}
+	got := readEnv(t, filepath.Join(dir, ".env"))
+
+	wants := []string{
+		"APP_URL=https://new.test",
+		"ASSET_URL=https://new.test",
+		"VITE_APP_URL=https://new.test",
+		"APP_DOMAIN=new.test",
+		"SESSION_DOMAIN=new.test",
+		"SANCTUM_STATEFUL_DOMAINS=new.test",
+		"REVERB_HOST=new.test",
+		"REVERB_SCHEME=https",
+		"REVERB_PORT=443",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in:\n%s", w, got)
+		}
+	}
+}
+
+// TestSyncPrimaryDomain_preservesServiceAndCredentialKeys is the regression
+// fence for the bug we're fixing: when lerd processes an uploaded project,
+// it must NEVER rewrite DB credentials, Redis host, Mail host, queue driver,
+// cache store, or any other non-URL setting. The developer's existing
+// connection settings stay byte-for-byte intact.
+func TestSyncPrimaryDomain_preservesServiceAndCredentialKeys(t *testing.T) {
+	dir := t.TempDir()
+	original := "APP_URL=http://old.test\n" +
+		"DB_CONNECTION=oracle\n" +
+		"DB_HOST=ora-prod.corp.local\n" +
+		"DB_PORT=1521\n" +
+		"DB_DATABASE=PROD\n" +
+		"DB_USERNAME=myapp_user\n" +
+		"DB_PASSWORD=super-secret-pw\n" +
+		"REDIS_HOST=corp-redis.internal\n" +
+		"REDIS_PASSWORD=redis-secret\n" +
+		"MAIL_HOST=smtp.corp.local\n" +
+		"MAIL_USERNAME=mailer\n" +
+		"MAIL_PASSWORD=mail-secret\n" +
+		"QUEUE_CONNECTION=database\n" +
+		"CACHE_STORE=redis\n" +
+		"AWS_ACCESS_KEY_ID=AKIAFAKE\n" +
+		"AWS_SECRET_ACCESS_KEY=fake-secret\n"
+	os.WriteFile(filepath.Join(dir, ".env"), []byte(original), 0644)
+
+	if err := SyncPrimaryDomain(dir, "myapp.test", false); err != nil {
+		t.Fatal(err)
+	}
+	got := readEnv(t, filepath.Join(dir, ".env"))
+
+	if !strings.Contains(got, "APP_URL=http://myapp.test") {
+		t.Errorf("APP_URL should have been refreshed:\n%s", got)
+	}
+
+	forbiddenRewrites := []string{
+		"DB_CONNECTION=oracle",
+		"DB_HOST=ora-prod.corp.local",
+		"DB_PORT=1521",
+		"DB_DATABASE=PROD",
+		"DB_USERNAME=myapp_user",
+		"DB_PASSWORD=super-secret-pw",
+		"REDIS_HOST=corp-redis.internal",
+		"REDIS_PASSWORD=redis-secret",
+		"MAIL_HOST=smtp.corp.local",
+		"MAIL_USERNAME=mailer",
+		"MAIL_PASSWORD=mail-secret",
+		"QUEUE_CONNECTION=database",
+		"CACHE_STORE=redis",
+		"AWS_ACCESS_KEY_ID=AKIAFAKE",
+		"AWS_SECRET_ACCESS_KEY=fake-secret",
+	}
+	for _, line := range forbiddenRewrites {
+		if !strings.Contains(got, line) {
+			t.Errorf("non-URL key was modified — expected %q to remain intact in:\n%s", line, got)
+		}
+	}
+}
+
+// TestDomainScopedKeys_listIsBounded guards against accidentally growing the
+// set of keys lerd touches when uploading a project. Anything outside this
+// list belongs to the explicit `lerd env` flow, not the automatic one.
+// If you add a key here, you are widening the implicit-rewrite blast radius
+// for every uploaded project — update the changelog and the unimed-vr-security
+// review accordingly.
+func TestDomainScopedKeys_listIsBounded(t *testing.T) {
+	want := map[string]bool{
+		"APP_URL":                  true,
+		"ASSET_URL":                true,
+		"APP_DOMAIN":               true,
+		"VITE_APP_URL":             true,
+		"SESSION_DOMAIN":           true,
+		"SANCTUM_STATEFUL_DOMAINS": true,
+		"VITE_REVERB_HOST":         true,
+		"VITE_REVERB_SCHEME":       true,
+		"VITE_REVERB_PORT":         true,
+		"REVERB_HOST":              true,
+		"REVERB_SCHEME":            true,
+		"REVERB_PORT":              true,
+	}
+	if len(DomainScopedKeys) != len(want) {
+		t.Fatalf("DomainScopedKeys size = %d, want %d. Did you intentionally widen the automatic-rewrite scope?",
+			len(DomainScopedKeys), len(want))
+	}
+	for _, k := range DomainScopedKeys {
+		if !want[k] {
+			t.Errorf("unexpected key in DomainScopedKeys: %q — automatic flows must not touch this", k)
+		}
+	}
+}
+
 // TestApplyUpdates_rejectsNewlineInValue pins the fix for the env-overrides
 // injection vector: a value containing \n could split a single .env line
 // into two, silently introducing an unrelated key. Refuse the write so the

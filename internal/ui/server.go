@@ -3666,10 +3666,13 @@ func handleSiteLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run env setup (non-fatal).
-	fmt.Fprintf(w, "data: → Setting up environment...\n\n")
+	// Refresh URL/domain-scoped keys only — connection settings (DB_*, REDIS_*,
+	// MAIL_*, credentials) are left as the developer wrote them. The user can
+	// run `lerd env` from a terminal afterwards to wire DB/redis/mail to lerd's
+	// managed services when that's actually wanted.
+	fmt.Fprintf(w, "data: → Refreshing URL/domain in .env (connection settings preserved)...\n\n")
 	flusher.Flush()
-	streamCmd(self, "env") //nolint:errcheck
+	streamCmd(self, "env", "--domain-only") //nolint:errcheck
 
 	// Find the newly linked site to return its domain.
 	site, err := config.FindSiteByPath(path)
