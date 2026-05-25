@@ -873,3 +873,60 @@ func TestEnsureLerdVhost_darwinProxiesHostContainersInternal(t *testing.T) {
 		t.Errorf("expected catch-all 'return 444' in:\n%s", content)
 	}
 }
+
+func TestGenerateProxyVhostPlain(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	if err := GenerateProxyVhost("spa.localhost", "host.containers.internal", 9000, false); err != nil {
+		t.Fatalf("GenerateProxyVhost: %v", err)
+	}
+	confPath := filepath.Join(config.NginxConfD(), "spa.localhost.conf")
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatalf("read conf: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "proxy_pass http://host.containers.internal:9000") {
+		t.Fatalf("missing proxy_pass:\n%s", content)
+	}
+	if !strings.Contains(content, "$connection_upgrade") {
+		t.Fatalf("missing upgrade header:\n%s", content)
+	}
+	sslPath := filepath.Join(config.NginxConfD(), "spa.localhost-ssl.conf")
+	if _, err := os.Stat(sslPath); !os.IsNotExist(err) {
+		t.Fatalf("ssl vhost should not exist for plain mode")
+	}
+}
+
+func TestGenerateProxyVhostSecured(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	// Pre-create a plain vhost to verify it gets removed on secure flip.
+	confPath := filepath.Join(config.NginxConfD(), "spa.localhost.conf")
+	if err := os.MkdirAll(filepath.Dir(confPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(confPath, []byte("# old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := GenerateProxyVhost("spa.localhost", "host.containers.internal", 9000, true); err != nil {
+		t.Fatalf("GenerateProxyVhost(secured): %v", err)
+	}
+	sslPath := filepath.Join(config.NginxConfD(), "spa.localhost-ssl.conf")
+	data, err := os.ReadFile(sslPath)
+	if err != nil {
+		t.Fatalf("read ssl conf: %v", err)
+	}
+	if !strings.Contains(string(data), "listen 443 ssl") {
+		t.Fatalf("missing listen 443:\n%s", data)
+	}
+	if !strings.Contains(string(data), "ssl_certificate /etc/nginx/certs/spa.localhost.crt") {
+		t.Fatalf("missing cert path:\n%s", data)
+	}
+	if _, err := os.Stat(confPath); !os.IsNotExist(err) {
+		t.Fatalf("plain vhost should be removed when secured=true")
+	}
+}
