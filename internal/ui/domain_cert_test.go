@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/certs"
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // installFakeMkcert writes a stub mkcert binary into the test's bin dir.

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // WriteContainerUnitFn writes a container unit file for the given name and content.
@@ -232,7 +232,7 @@ func tryPullBaseImage(version string, w io.Writer) string {
 		return ""
 	}
 	short := strings.ReplaceAll(version, ".", "")
-	ref := fmt.Sprintf("ghcr.io/geodro/lerd-php%s-fpm-base:%s", short, hash)
+	ref := fmt.Sprintf("ghcr.io/gabriel-sousa99/lerd-php%s-fpm-base:%s", short, hash)
 	fmt.Fprintf(w, "  Pulling pre-built PHP %s base image...\n", version)
 
 	// Use an empty auth file so the pull is always anonymous, regardless of

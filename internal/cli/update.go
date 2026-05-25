@@ -10,12 +10,12 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	phpPkg "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/store"
-	"github.com/geodro/lerd/internal/systemd"
-	lerdUpdate "github.com/geodro/lerd/internal/update"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/store"
+	"github.com/gabriel-sousa99/lerd/internal/systemd"
+	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 	"github.com/spf13/cobra"
 )
 

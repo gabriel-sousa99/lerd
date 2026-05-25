@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	defaultBaseURL = "https://raw.githubusercontent.com/geodro/lerd-frameworks/main/frameworks"
+	defaultBaseURL = "https://raw.githubusercontent.com/gabriel-sousa99/lerd-frameworks/main/frameworks"
 	httpTimeout    = 10 * time.Second
 )
 

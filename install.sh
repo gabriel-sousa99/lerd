@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lerd Oracle Edition installer — https://github.com/gabriel-sousa99/lerd
 #
-# Fork of geodro/lerd with:
+# Fork of gabriel-sousa99/lerd with:
 #   • Oracle Instant Client 21.18 (LTS) em /opt/oracle/instantclient
 #   • Extensão oci8 pré-compilada em toda imagem PHP (PHP 7.4 → 8.4)
 #   • Extensões memcached + amqp pré-instaladas (ecossistema Laravel)
@@ -511,7 +511,7 @@ main() {
   echo -e "${RESET}"
   echo "  Lerd — Podman-powered local PHP dev environment for Linux"
   echo "  Fork:     https://github.com/${REPO}  (release scheme: v1.21.2-oracle.N)"
-  echo "  Upstream: https://github.com/geodro/lerd"
+  echo "  Upstream: https://github.com/gabriel-sousa99/lerd"
   echo ""
   echo "  Bundled in every PHP-FPM image: Oracle Instant Client 21.18 + oci8,"
   echo "  memcached, amqp.  Extra service presets: oracle-xe, typesense,"
@@ -539,7 +539,7 @@ main() {
       echo "  --uninstall     Remove Lerd and optionally its data"
       echo "  --check         Check prerequisites only (no install)"
       echo ""
-      echo "Release scheme:  v1.21.2-oracle.N  (fork of geodro/lerd v1.21.2)"
+      echo "Release scheme:  v1.21.2-oracle.N  (fork of gabriel-sousa99/lerd v1.21.2)"
       echo "Latest releases: https://github.com/${REPO}/releases"
       ;;
     --install|install|"") cmd_install ;;

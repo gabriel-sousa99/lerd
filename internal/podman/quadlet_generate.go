@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // GenerateCustomQuadlet builds a quadlet .container file for a custom service.

@@ -1,4 +1,4 @@
-module github.com/geodro/lerd
+module github.com/gabriel-sousa99/lerd
 
 go 1.25.0
 

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	lerdUpdate "github.com/geodro/lerd/internal/update"
-	"github.com/geodro/lerd/internal/version"
+	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
+	"github.com/gabriel-sousa99/lerd/internal/version"
 	"github.com/spf13/cobra"
 )
 

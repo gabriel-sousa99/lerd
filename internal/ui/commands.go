@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // runLocks holds a per-site mutex so two browser tabs (or the palette + the

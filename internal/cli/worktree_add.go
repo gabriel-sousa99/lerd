@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/huh"
-	"github.com/geodro/lerd/internal/config"
-	gitpkg "github.com/geodro/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/spf13/cobra"
 )
 

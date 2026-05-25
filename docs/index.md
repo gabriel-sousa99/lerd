@@ -16,7 +16,7 @@ hero:
       link: /getting-started/requirements
     - theme: alt
       text: View on GitHub
-      link: https://github.com/geodro/lerd
+      link: https://github.com/gabriel-sousa99/lerd
 
 features:
   - icon: 🌐

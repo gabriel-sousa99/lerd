@@ -1,6 +1,6 @@
 package cli
 
-import "github.com/geodro/lerd/internal/config"
+import "github.com/gabriel-sousa99/lerd/internal/config"
 
 // WorkerSupportedOnPlatform is the exported entry point to the platform
 // support gate. External packages (the watcher's exec_workers loop, future

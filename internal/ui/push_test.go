@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // withFreshDataDir gives each ui-push test its own XDG_DATA_HOME so VAPID

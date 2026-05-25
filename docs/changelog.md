@@ -115,7 +115,7 @@ The 1.20.0 line makes git worktrees a first-class concept throughout the stack. 
 
 ### Added
 
-- **Manage git worktrees from the site dashboard** (#341). The site detail panel's path line gains a worktrees icon next to the branch picker that opens a modal for adding and removing worktrees, so the picker is no longer read-only. The modal lists each worktree with a link to its URL (https when the parent site is secured) and a trash button; *Remove* expands an inline confirm with *Discard uncommitted changes* (`--force`) and, for isolated worktrees, *Also drop database* (off by default, matching `lerd worktree remove`). *Add worktree* presents the same choices as the `lerd worktree add` prompts: a new branch (with optional base ref) or an existing branch (the dropdown lists local branches not already checked out plus remote-tracking branches, which git dwims into a fresh local branch), the database (share parent / isolated empty / cloned from main / cloned from another worktree / reuse-or-reset a preserved DB), a Laravel migrations checkbox, and the frontend-asset choice (asset worker / `npm run <script>` / skip), and it streams the `git worktree add` + dependency-install + build + DB-setup output live. The checkout directory is picked automatically (`<project-path>-<branch>`). Backed by extracted non-interactive helpers in `internal/cli` (`RunWorktreeAdd`, `RemoveWorktreeAndCleanup`, `ApplyWorktreeDBChoice`, `ApplyWorktreeBuildChoice`, `RunWorktreeMigrations`) shared with the CLI prompts, new HTTP endpoints `GET /api/sites/worktree-options`, `POST /api/sites/worktree-add` (SSE), a `worktree:remove` site action, and new locale strings across all seven languages. The site detail header also got a mobile-layout pass: the path and `git:(branch)` picker stack on separate rows on narrow screens, and the pause / unlink / open / terminal buttons move into a left-aligned full-width row instead of crowding the top-right corner.
+- **Manage git worktrees from the site dashboard** (#341). The site detail panel's path line gains a worktrees icon next to the branch picker that opens a modal for adding and removing worktrees, so the picker is no longer read-only. The modal lists each worktree with a link to its URL (https when the parent site is secured) and a trash button; _Remove_ expands an inline confirm with _Discard uncommitted changes_ (`--force`) and, for isolated worktrees, _Also drop database_ (off by default, matching `lerd worktree remove`). _Add worktree_ presents the same choices as the `lerd worktree add` prompts: a new branch (with optional base ref) or an existing branch (the dropdown lists local branches not already checked out plus remote-tracking branches, which git dwims into a fresh local branch), the database (share parent / isolated empty / cloned from main / cloned from another worktree / reuse-or-reset a preserved DB), a Laravel migrations checkbox, and the frontend-asset choice (asset worker / `npm run <script>` / skip), and it streams the `git worktree add` + dependency-install + build + DB-setup output live. The checkout directory is picked automatically (`<project-path>-<branch>`). Backed by extracted non-interactive helpers in `internal/cli` (`RunWorktreeAdd`, `RemoveWorktreeAndCleanup`, `ApplyWorktreeDBChoice`, `ApplyWorktreeBuildChoice`, `RunWorktreeMigrations`) shared with the CLI prompts, new HTTP endpoints `GET /api/sites/worktree-options`, `POST /api/sites/worktree-add` (SSE), a `worktree:remove` site action, and new locale strings across all seven languages. The site detail header also got a mobile-layout pass: the path and `git:(branch)` picker stack on separate rows on narrow screens, and the pause / unlink / open / terminal buttons move into a left-aligned full-width row instead of crowding the top-right corner.
 - **Per-worktree worker lifecycle as a first-class concept, with dashboard surfaces** (#319). Two new framework-yaml flags: `per_worktree` (worker can run independently per git worktree under `lerd-<wname>-<site>-<wt>`) and `replaces_build` (while running, the worker provides the asset manifest so the static `npm run build` step is unnecessary). The two flags answer independent questions ("where can this run?" vs "do we still need a build?") so future host-mode workers can mix and match. The watcher's `syncWorktree` now only auto-starts host workers the user opted into via `.lerd.yaml workers:` AND that declare `per_worktree: true`, replacing the previous blanket auto-start of every `host: true` worker. Dashboard surfaces: `/api/services` enumerates worktree workers per site with new `worker_worktree` / `worker_worktree_domain` fields, `/api/sites` worktrees carry `framework_workers`, `SiteControls` renders per-worktree toggles next to the parent toggles, and `ServiceDetail` builds `/api/worker/<site-wt>/<name>/logs` URLs for worktree-suffixed unit names. `lerd setup` uses `GetFrameworkForDir` so store-defined workers (vite) appear in the toggles and falls back to the parent site when run inside a worktree. `runLink` rejects worktree paths instead of registering them as separate top-level sites, eliminating the "main" entries that bled into the dashboard. `lerd install` runs `refreshStoreFrameworks` to re-fetch every cached framework yaml so users pick up the new flags without waiting for the 24h staleness check.
 - **Built-in Vite dev server worker with host execution and worktree auto-start** (#310). New `vite` worker for Laravel runs `npm run dev` on the host via fnm rather than inside the PHP-FPM container, so Vite has direct filesystem access for HMR without port publishing or a proxy. A new `host: true` field on `FrameworkWorker` lets future host-mode workers (Tailwind watcher, Encore, etc.) ship with the same execution profile. Per-worktree unit naming (`lerd-vite-<site>-<wt>`) allows simultaneous Vite instances across worktrees with auto-incremented ports. The vite definition lives in the `lerd-frameworks` store (`laravel/11-13.yaml`), not in the Go binary, so future framework workers don't require a lerd release.
 - **`env_overrides` in `.lerd.yaml` for worktree env templating** (#308). Projects can declare templated or static env variables that resolve when worktrees are created, layered on top of the existing `APP_URL` rewrite. Values can use `{{domain}}`, `{{scheme}}`, and `{{site}}` placeholders or be plain strings. When `APP_URL` is present in `env_overrides` it takes precedence over the default rewrite; declared keys override defaults and undeclared defaults still apply. Multi-tenant apps that depend on session domains, tenant routing, or signed-URL hosts no longer need a manual `.env` patch per worktree.
@@ -335,7 +335,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
   - Remove MCP integration (global skills + per-site `.claude`/`.cursor`/`.junie`/`.mcp.json` entries, preserves other MCP servers in shared files).
   - Uninstall mkcert CA from system trust stores.
   - Purge lerd-built container images (`lerd-php*-fpm:local`, `lerd-custom-*:local`, `lerd-dnsmasq:local`; upstream pulls like mysql/redis are deliberately kept, data lives in host bind mounts not in the images).
-  `--force` answers yes to all.
+    `--force` answers yes to all.
 - **`lerd install` refreshes MCP skills and heals Claude Code registration** (#235, #240). Global skill files (`~/.claude/skills/lerd/`, `~/.cursor/rules/lerd.mdc`, `~/.junie/guidelines.md`) and every opted-in site's per-project copies are re-written on install to match the new binary; previously this only ran on `lerd update`. If Claude Code's user-scope MCP config has lost the lerd entry, install also re-adds it via `claude mcp add`.
 - **Stale-site auto-cleanup covers non-parked sites** (#239). The 30 second watcher sweep now removes any registered site whose directory has been deleted, not only those under `parked_directories`. Publishes a `sites` eventbus event so the dashboard reflects the removal without a manual refresh.
 
@@ -399,7 +399,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 ### Added
 
 - **Nginx per-site overrides** (#225). User snippets dropped in `~/.local/share/lerd/nginx/custom.d/{domain}.conf` now survive every vhost regeneration and every `lerd update`. Each generated server block ends with an `include` that pulls that file in, and lerd never writes into `custom.d/` so your edits stay put. Fixes #223.
-- **X-Forwarded-* propagation into PHP** (#225). Generated vhosts now set `HTTP_HOST`, `SERVER_NAME`, `HTTP_X_FORWARDED_HOST`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_PORT`, `HTTP_X_REAL_IP`, and `HTTP_X_FORWARDED_FOR` via two http-level `map` blocks (`$real_forwarded_host`, `$real_forwarded_proto`) declared once in a new `conf.d/_forwarded.conf`. Direct browser access is unchanged because the maps fall back to `$host` and `$scheme`; tunnels like `lerd share`, ngrok, and cloudflared now produce correct absolute URLs out of the box, without any app-side `trust_proxies` config. Fixes #224.
+- **X-Forwarded-\* propagation into PHP** (#225). Generated vhosts now set `HTTP_HOST`, `SERVER_NAME`, `HTTP_X_FORWARDED_HOST`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_PORT`, `HTTP_X_REAL_IP`, and `HTTP_X_FORWARDED_FOR` via two http-level `map` blocks (`$real_forwarded_host`, `$real_forwarded_proto`) declared once in a new `conf.d/_forwarded.conf`. Direct browser access is unchanged because the maps fall back to `$host` and `$scheme`; tunnels like `lerd share`, ngrok, and cloudflared now produce correct absolute URLs out of the box, without any app-side `trust_proxies` config. Fixes #224.
 - **Global AI skill docs refreshed on `lerd update`** (#222). `mcp:enable-global` now also writes user-scope `SKILL.md`, cursor rules, and junie guidelines so AI assistants know about the current lerd MCP tools. `lerd update` rewrites those three files from the new binary whenever global MCP is enabled, keeping them aligned with any added or renamed tools. The gate detects both Claude user-scope registration and the lerd-owned marker files, so users without Claude Code installed are still covered.
 - **TUI responsive layout, scrollbars, and color refresh** (#217). Below 100 columns the dashboard stacks into a narrow layout: list pane (40%) above detail (60%), `v` toggles between sites and services, `tab` cycles only through the active list and detail. Sites, services, and the site detail pane gained a scrollbar; the log pane is scrollable with `{` and `}` and its header shows the current offset. Colors were rebalanced to match the web UI palette: emerald for running, violet for accents, amber for paused, red for failing.
 
@@ -587,7 +587,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Added
 
-- **macOS release pipeline and Homebrew tap** — tagged releases now build darwin amd64/arm64 binaries and publish to the `geodro/homebrew-lerd` tap. Install on macOS with `brew tap geodro/lerd && brew install lerd && lerd install`.
+- **macOS release pipeline and Homebrew tap** — tagged releases now build darwin amd64/arm64 binaries and publish to the `geodro/homebrew-lerd` tap. Install on macOS with `brew tap gabriel-sousa99/lerd && brew install lerd && lerd install`.
 
 ### Fixed
 
@@ -672,7 +672,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Added
 
-- **Framework definition store** — community framework store backed by `geodro/lerd-frameworks` with `lerd framework search`, `lerd framework install`, and `lerd framework update` commands. Definitions auto-fetch when linking a project and auto-refresh after 24 hours. MCP tools `framework_search` and `framework_install` expose the store to AI assistants. (#103)
+- **Framework definition store** — community framework store backed by `gabriel-sousa99/lerd-frameworks` with `lerd framework search`, `lerd framework install`, and `lerd framework update` commands. Definitions auto-fetch when linking a project and auto-refresh after 24 hours. MCP tools `framework_search` and `framework_install` expose the store to AI assistants. (#103)
 - **Framework-agnostic worker system** — all hardcoded Laravel worker logic replaced with a generic system driven by framework YAML definitions. Dedicated commands (`queue`, `schedule`, `reverb`, `horizon`) are now aliases that read from the framework definition. Workers support `conflicts_with`, proxy config with auto port assignment, and port collision prevention across sites.
 - **Worker add/remove CLI and MCP tools** — `lerd worker add` and `lerd worker remove` manage custom workers in `.lerd.yaml` (project-level) or the global framework overlay (`--global`). Orphaned workers (running units with no framework definition) are detected and surfaced in `worker list`, `worker stop`, and setup.
 - **PHP version ranges** — framework definitions declare supported PHP min/max ranges. `lerd link` and `lerd init` clamp the PHP version to the framework's supported range. `lerd sites` and the UI show the framework version (e.g. "Laravel 11").
@@ -727,7 +727,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Fixed
 
-- **Queue workers silently lost on uninstall+reinstall** — `queueStartExplicit` ran a Redis preflight that returned an error before the unit file was written. Install-time `restoreSiteInfrastructure` runs *before* any services are started, so for sites with `QUEUE_CONNECTION=redis` the write step always failed and the worker units stayed missing on disk while systemd remembered them as `not-found failed`. The preflight is gone; the dependency now lives in the systemd unit itself. `lerd-queue-<site>.service` declares `After=`/`Wants=` for whatever the queue backend needs (`lerd-redis.service` when `QUEUE_CONNECTION=redis`, `lerd-mysql.service` / `lerd-postgres.service` for database-backed queues) on top of the FPM container, and `lerd-horizon-<site>.service` always declares `lerd-redis.service`. systemd handles the activation order and `Restart=always` covers the small ready-window between activation and the backing container accepting connections.
+- **Queue workers silently lost on uninstall+reinstall** — `queueStartExplicit` ran a Redis preflight that returned an error before the unit file was written. Install-time `restoreSiteInfrastructure` runs _before_ any services are started, so for sites with `QUEUE_CONNECTION=redis` the write step always failed and the worker units stayed missing on disk while systemd remembered them as `not-found failed`. The preflight is gone; the dependency now lives in the systemd unit itself. `lerd-queue-<site>.service` declares `After=`/`Wants=` for whatever the queue backend needs (`lerd-redis.service` when `QUEUE_CONNECTION=redis`, `lerd-mysql.service` / `lerd-postgres.service` for database-backed queues) on top of the FPM container, and `lerd-horizon-<site>.service` always declares `lerd-redis.service`. systemd handles the activation order and `Restart=always` covers the small ready-window between activation and the backing container accepting connections.
 - **Preset-installed services not regenerated on reinstall** — `restoreSiteInfrastructure` only handled inline custom services and built-in named refs. Preset references like `mariadb-11` (declared in `.lerd.yaml` as `mariadb-11: {preset: mariadb, version: "11"}`) fell through to `ensureServiceQuadlet`, which only knows about built-ins, so the silently-swallowed `unknown service` error left sites with no quadlet for any preset-installed service after an uninstall+reinstall cycle. The restore path now goes through `ProjectService.Resolve()` which already knows how to render both inline and preset references back into a concrete `CustomService`.
 
 ### Changed
@@ -748,7 +748,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 - **Custom service `files:` field** — declare inline-rendered config files materialised on the host and bind-mounted into the container, with optional `mode` (octal perms) and `chown: true` (adds `:U` so podman re-chowns to the container's non-root uid). Used by the `pgadmin` preset to ship a `servers.json` + `pgpass` that autoconnects to `lerd-postgres`. Files re-render on every `lerd service start` so editing the YAML and restarting picks up changes.
 - **Custom service `connection_url:` field** — non-built-in databases now get the same "Open connection URL" link surface as the built-in mysql/postgres services. The detail panel renders a real `<a>` element pointing at `mysql://`, `postgresql://`, or `mongodb://` so right-click "Copy link" works and left-click hands the URL to the user's registered DB client (DBeaver, TablePlus, Compass, etc.).
 - **Recursive `service start`** — `lerd service start <svc>` now ensures every entry in `depends_on` is up first, recursively, in both the CLI and the Web UI. Pairs with the existing recursive stop that takes dependents down before the parent. Starting any preset that depends on a built-in (`phpmyadmin`, `pgadmin`) auto-starts the database.
-- **Preset dependency gating at install time** — installing a preset whose dependency is another *custom* service (e.g. `mongo-express` on `mongo`) is rejected with a clear error until the dependency is installed first. Built-in deps (mysql, postgres) are auto-satisfied. The Web UI's Add button is disabled with a matching amber "install mongo first" hint.
+- **Preset dependency gating at install time** — installing a preset whose dependency is another _custom_ service (e.g. `mongo-express` on `mongo`) is rejected with a clear error until the dependency is installed first. Built-in deps (mysql, postgres) are auto-satisfied. The Web UI's Add button is disabled with a matching amber "install mongo first" hint.
 - **Database service quality-of-life suggestions** — the detail panel of every database service (mysql, postgres, and an installed `mongo`) now shows a sky-blue suggestion banner offering to install its paired admin UI when missing. The banner is dismissable per-preset and the dismissal persists in `localStorage`. When the admin UI is installed, the header gains an Open phpMyAdmin / pgAdmin / Mongo Express button that auto-starts the admin service if needed.
 - **Lerd health dot in the Web UI** — the Lerd entry in the System list now reflects overall core health (green when DNS / nginx / watcher are all running, red when any is down, yellow when an update is available) instead of only the update flag. The lerd logo in the left rail gains a small yellow badge when an update is available and is clickable, jumping straight to the Lerd entry.
 - **One-click update terminal** — when an update is available, the Lerd entry exposes an "Open terminal & update" button that POSTs to the new loopback-only `/api/lerd/update-terminal` endpoint, which spawns the user's preferred terminal emulator (kitty / foot / alacritty / wezterm / ghostty / ptyxis / konsole / gnome-terminal / xfce4-terminal / tilix / terminator / xterm) running `lerd update` so the host can prompt for sudo and stream download progress.
@@ -1006,11 +1006,11 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Added
 
-- **Multiple Reverb sites without port collisions** — when `lerd env` detects `BROADCAST_CONNECTION=reverb`, it auto-assigns a unique `REVERB_SERVER_PORT` per site starting at 8080 and incrementing for each additional site. `reverb:start` (including the UI toggle) also assigns and persists the port on first start if still missing, so the fix applies even when `lerd env` has not been re-run. The nginx WebSocket proxy uses the per-site port instead of the old hardcoded 8080. Fixes [#47](https://github.com/geodro/lerd/issues/47).
+- **Multiple Reverb sites without port collisions** — when `lerd env` detects `BROADCAST_CONNECTION=reverb`, it auto-assigns a unique `REVERB_SERVER_PORT` per site starting at 8080 and incrementing for each additional site. `reverb:start` (including the UI toggle) also assigns and persists the port on first start if still missing, so the fix applies even when `lerd env` has not been re-run. The nginx WebSocket proxy uses the per-site port instead of the old hardcoded 8080. Fixes [#47](https://github.com/gabriel-sousa99/lerd/issues/47).
 - **New MCP tools: `db_import`, `db_create`, `php_list`, `php_ext`, `park`, `unpark`** — six new tools for AI agents covering database import from a SQL file, on-demand database creation, listing installed PHP versions, managing PHP extensions, and parking/unparking directories.
 - **`lerd whatsnew`** — new command that prints the changelog for the currently installed version. The changelog excerpt has been removed from `lerd status` and `lerd doctor` output.
-- **Portable `.lerd.yaml`** — `.lerd.yaml` can now describe a site's full local environment (PHP version, Node version, framework, services, custom workers). Running `lerd link` in a project that has a `.lerd.yaml` applies all settings automatically, so cloning a project and running `lerd link && lerd env` is enough to reproduce the full environment. Closes [#33](https://github.com/geodro/lerd/issues/33).
-- **Pre-built PHP base images** — PHP images are now built on top of pre-built base images pulled from `ghcr.io` instead of compiling all extensions from source. First-install time drops from ~5 minutes to ~30 seconds. Closes [#43](https://github.com/geodro/lerd/issues/43).
+- **Portable `.lerd.yaml`** — `.lerd.yaml` can now describe a site's full local environment (PHP version, Node version, framework, services, custom workers). Running `lerd link` in a project that has a `.lerd.yaml` applies all settings automatically, so cloning a project and running `lerd link && lerd env` is enough to reproduce the full environment. Closes [#33](https://github.com/gabriel-sousa99/lerd/issues/33).
+- **Pre-built PHP base images** — PHP images are now built on top of pre-built base images pulled from `ghcr.io` instead of compiling all extensions from source. First-install time drops from ~5 minutes to ~30 seconds. Closes [#43](https://github.com/gabriel-sousa99/lerd/issues/43).
 
 ---
 
@@ -1022,7 +1022,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Fixed
 
-- **Inter-application `.test` domain resolution inside containers** — HTTP/HTTPS requests from one site to another (e.g. `booking.test` calling `staffing.test`) were failing because `.test` domains resolved to `127.0.0.1` inside containers, which points to the container itself rather than the host Nginx. A shared hosts file (`~/.local/share/lerd/hosts`) is now bind-mounted into every PHP-FPM container at `/etc/hosts` with a `169.254.1.2` entry per linked site. Since it is a bind mount, `lerd link` and `lerd unlink` update all running containers instantly without a restart. Fixes [#39](https://github.com/geodro/lerd/issues/39).
+- **Inter-application `.test` domain resolution inside containers** — HTTP/HTTPS requests from one site to another (e.g. `booking.test` calling `staffing.test`) were failing because `.test` domains resolved to `127.0.0.1` inside containers, which points to the container itself rather than the host Nginx. A shared hosts file (`~/.local/share/lerd/hosts`) is now bind-mounted into every PHP-FPM container at `/etc/hosts` with a `169.254.1.2` entry per linked site. Since it is a bind mount, `lerd link` and `lerd unlink` update all running containers instantly without a restart. Fixes [#39](https://github.com/gabriel-sousa99/lerd/issues/39).
 - **Reverb proxy returns 502 after container restart** — the Nginx `location /app` block used a bare hostname in `proxy_pass`, which Nginx resolves once at config load time. If the PHP-FPM container restarted and received a new IP, subsequent WebSocket and broadcast requests failed with 502. The proxy now uses a variable (`set $reverb`) to force per-request DNS resolution, matching how the FastCGI location already handles the FPM upstream.
 
 ---
@@ -1055,7 +1055,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Fixed
 
-- **`lerd init` installs PHP FPM with a progress indicator** — when the required PHP FPM version is not yet installed, `lerd init` now shows a spinner rather than silently blocking. (PR [#34](https://github.com/geodro/lerd/pull/34))
+- **`lerd init` installs PHP FPM with a progress indicator** — when the required PHP FPM version is not yet installed, `lerd init` now shows a spinner rather than silently blocking. (PR [#34](https://github.com/gabriel-sousa99/lerd/pull/34))
 
 ---
 
@@ -1063,10 +1063,10 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Fixed
 
-- **`mcp:inject` and `mcp:enable-global` fail on empty JSON config files** — `mergeMCPServersJSON` now skips `json.Unmarshal` when the target file exists but is empty, preventing a spurious "unexpected end of JSON input" error. Affects `~/.ai/mcp/mcp.json`, `~/.junie/mcp/mcp.json`, and `.mcp.json`. (PR [#31](https://github.com/geodro/lerd/pull/31))
-- **`lerd new` runs `composer install` with the wrong PHP version** — `composer create-project` for Laravel now passes `--no-install --no-plugins --no-scripts` so dependency installation is deferred to `lerd setup`, where the correct PHP version is already active. (PR [#28](https://github.com/geodro/lerd/pull/28) by @voronkovich)
-- **Duplicate `export PATH` entries written to `.zshrc` on repeated `lerd install`** — `appendShellRC` now checks whether the PATH line already exists before appending. (PR [#30](https://github.com/geodro/lerd/pull/30) by @voronkovich)
-- **Redundant `appendShellRC` call writes a broken `export PATH=":$PATH"` line to `.zshrc`** — the call with an empty `binDir` has been removed; `ensureZshFpath` already handles the fpath setup. (PR [#29](https://github.com/geodro/lerd/pull/29) by @voronkovich)
+- **`mcp:inject` and `mcp:enable-global` fail on empty JSON config files** — `mergeMCPServersJSON` now skips `json.Unmarshal` when the target file exists but is empty, preventing a spurious "unexpected end of JSON input" error. Affects `~/.ai/mcp/mcp.json`, `~/.junie/mcp/mcp.json`, and `.mcp.json`. (PR [#31](https://github.com/gabriel-sousa99/lerd/pull/31))
+- **`lerd new` runs `composer install` with the wrong PHP version** — `composer create-project` for Laravel now passes `--no-install --no-plugins --no-scripts` so dependency installation is deferred to `lerd setup`, where the correct PHP version is already active. (PR [#28](https://github.com/gabriel-sousa99/lerd/pull/28) by @voronkovich)
+- **Duplicate `export PATH` entries written to `.zshrc` on repeated `lerd install`** — `appendShellRC` now checks whether the PATH line already exists before appending. (PR [#30](https://github.com/gabriel-sousa99/lerd/pull/30) by @voronkovich)
+- **Redundant `appendShellRC` call writes a broken `export PATH=":$PATH"` line to `.zshrc`** — the call with an empty `binDir` has been removed; `ensureZshFpath` already handles the fpath setup. (PR [#29](https://github.com/gabriel-sousa99/lerd/pull/29) by @voronkovich)
 
 ---
 
@@ -1079,7 +1079,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 - **`console` MCP tool** — execute framework console commands from an AI assistant session. Resolves the correct binary via `config.GetConsoleCommand` so it works for any framework that defines a `console` field.
 - **Cloudflare Tunnel backend for `lerd share`** — pass `--cloudflare` to tunnel a site via `cloudflared`. Without the flag, lerd auto-detects between ngrok and Expose as before. The tunnel is routed through the host proxy to fix Host header and TLS SNI for secured sites.
 - **pcov bundled in PHP-FPM images** — pcov is now pre-installed via PECL in all lerd PHP-FPM images; `lerd php:ext add pcov` is no longer needed to run `pest --coverage`.
-- **WebP support in PHP-FPM images** — gd and imagick now include WebP support out of the box (PR [#15](https://github.com/geodro/lerd/pull/15) by @ReyArlena).
+- **WebP support in PHP-FPM images** — gd and imagick now include WebP support out of the box (PR [#15](https://github.com/gabriel-sousa99/lerd/pull/15) by @ReyArlena).
 - **Connection URLs and hostname note in the dashboard** — database service cards now show ready-to-use connection URLs alongside a note about the internal container hostname.
 
 ### Fixed
@@ -1132,9 +1132,9 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Fixed
 
-- **`lerd setup` npm step fails without a lockfile** — the npm install step now runs `npm ci` when `package-lock.json` or `yarn.lock` is present, and falls back to `npm install` otherwise. Previously `npm ci` was always used, causing the step to fail on projects without a lockfile. (PR [#5](https://github.com/geodro/lerd/pull/5) by @voronkovich)
-- **Duplicate `PATH` entry on `lerd install`** — `add_to_path` in `install.sh` now checks the live `$PATH` before modifying shell rc files. If the install directory is already present, the function returns early and skips rc modification. (PR [#7](https://github.com/geodro/lerd/pull/7) by @voronkovich)
-- **zsh completions moved to XDG directory** — zsh completions are written to `~/.local/share/zsh/site-functions/_lerd` instead of `~/.zfunc/_lerd`, aligning with the XDG base directory convention. (PR [#8](https://github.com/geodro/lerd/pull/8) by @voronkovich)
+- **`lerd setup` npm step fails without a lockfile** — the npm install step now runs `npm ci` when `package-lock.json` or `yarn.lock` is present, and falls back to `npm install` otherwise. Previously `npm ci` was always used, causing the step to fail on projects without a lockfile. (PR [#5](https://github.com/gabriel-sousa99/lerd/pull/5) by @voronkovich)
+- **Duplicate `PATH` entry on `lerd install`** — `add_to_path` in `install.sh` now checks the live `$PATH` before modifying shell rc files. If the install directory is already present, the function returns early and skips rc modification. (PR [#7](https://github.com/gabriel-sousa99/lerd/pull/7) by @voronkovich)
+- **zsh completions moved to XDG directory** — zsh completions are written to `~/.local/share/zsh/site-functions/_lerd` instead of `~/.zfunc/_lerd`, aligning with the XDG base directory convention. (PR [#8](https://github.com/gabriel-sousa99/lerd/pull/8) by @voronkovich)
 - **`.php-version` changes not reflected in nginx** — writing a `.php-version` file (via `lerd isolate` or directly) updated the queue worker but left the nginx vhost pointing at the old FPM socket. The watcher daemon now detects when the resolved PHP version changes, updates the site registry, regenerates the vhost, and reloads nginx automatically (debounced to 2 seconds).
 - **PHP version resolution order** — `.php-version` now takes priority over `composer.json`'s `require.php` constraint, matching the documented and intuitive precedence (explicit pin beats inferred constraint).
 
@@ -1162,7 +1162,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 
 ### Added
 
-- **RustFS replaces MinIO** — MinIO OSS is no longer maintained; lerd now ships RustFS as its built-in S3-compatible object storage service. RustFS exposes the same API and credentials (`lerd` / `lerdpassword`) so no application changes are needed. Closes [#3](https://github.com/geodro/lerd/issues/3).
+- **RustFS replaces MinIO** — MinIO OSS is no longer maintained; lerd now ships RustFS as its built-in S3-compatible object storage service. RustFS exposes the same API and credentials (`lerd` / `lerdpassword`) so no application changes are needed. Closes [#3](https://github.com/gabriel-sousa99/lerd/issues/3).
 - **`lerd minio:migrate`** — one-command migration from an existing MinIO installation to RustFS. Stops the MinIO container, copies data to the RustFS data directory, removes the MinIO quadlet, updates `config.yaml`, and starts RustFS. The original MinIO data directory is preserved for manual cleanup.
 - **Auto-migration prompt during `lerd update`** — if a MinIO data directory is detected at update time, lerd offers to run the migration automatically before continuing.
 - **`lerd.localhost` custom domain** — the Lerd dashboard is now accessible at `http://lerd.localhost` (nginx proxies the domain to the UI service). `lerd dashboard` opens the new URL. `.localhost` resolves to `127.0.0.1` natively on all modern systems with no DNS configuration.
@@ -1397,7 +1397,7 @@ A large feature release. Highlights: a brand-new Svelte 5 dashboard with a comma
 ### Fixed
 
 - **Park watcher depth** — the filesystem watcher no longer registers projects found in subdirectories of parked directories. Only direct children of a parked directory are eligible for auto-registration.
-- **Nginx reload ordering for secure/unsecure** — `lerd secure` / `lerd unsecure` (and their UI/MCP equivalents) now save the updated `secured` flag to `sites.yaml` *before* reloading nginx. Previously a failed nginx reload would leave `sites.yaml` with a stale `secured` state, causing the watcher to regenerate the wrong vhost type on restart.
+- **Nginx reload ordering for secure/unsecure** — `lerd secure` / `lerd unsecure` (and their UI/MCP equivalents) now save the updated `secured` flag to `sites.yaml` _before_ reloading nginx. Previously a failed nginx reload would leave `sites.yaml` with a stale `secured` state, causing the watcher to regenerate the wrong vhost type on restart.
 - **Tray always restarts on `lerd start`** — any existing tray process is killed before relaunching, preventing duplicate tray instances after repeated `lerd start` calls.
 - **FPM quadlet skip-write optimisation** — `WriteFPMQuadlet` skips writing and daemon-reloading when the quadlet content is unchanged. Unnecessary daemon-reloads caused Podman's quadlet generator to regenerate all service files, which could briefly disrupt `lerd-dns` and cause `.test` resolution failures.
 
@@ -2227,6 +2227,7 @@ Initial release.
 ### Added
 
 **Core**
+
 - Single static Go binary built with Cobra
 - XDG-compliant config (`~/.config/lerd/`) and data (`~/.local/share/lerd/`) directories
 - Global config at `~/.config/lerd/config.yaml` with sensible defaults
@@ -2235,12 +2236,14 @@ Initial release.
 - Build metadata injected at compile time: version, commit SHA, build date
 
 **Site management**
+
 - `lerd park [dir]` — auto-discover and register all Laravel projects in a directory
 - `lerd link [name]` — register the current directory as a named site
 - `lerd unlink` — remove a site and clean up its vhost
 - `lerd sites` — tabular view of all registered sites
 
 **PHP**
+
 - `lerd install` — one-time setup: directories, Podman network, binary downloads, DNS, nginx
 - `lerd use <version>` — set the global PHP version
 - `lerd isolate <version>` — pin PHP version per-project via `.php-version`
@@ -2248,35 +2251,42 @@ Initial release.
 - PHP version resolution order: `.php-version` → `.lerd.yaml` → `composer.json` → global default
 
 **Node**
+
 - `lerd isolate:node <version>` — pin Node version per-project via `.node-version`
 - Node version resolution order: `.nvmrc` → `.node-version` → `package.json engines.node` → global default
 - fnm bundled for Node version management
 
 **TLS**
+
 - `lerd secure [name]` — issue a locally-trusted mkcert certificate for a site
 - Automatic HTTPS vhost generation
 - mkcert CA installed into system trust store on `lerd install`
 
 **Services**
+
 - `lerd service start|stop|restart|status|list` — manage optional services
 - Bundled services: MySQL 8.0, Redis 7, PostgreSQL 16, Meilisearch v1.7, MinIO
 
 **Infrastructure**
+
 - All containers run rootless on a dedicated `lerd` Podman network
 - Nginx and PHP-FPM as Podman Quadlet containers (auto-managed by systemd)
 - dnsmasq container for `.test` TLD resolution via NetworkManager
 - fsnotify-based watcher daemon (`lerd-watcher.service`) for auto-discovery of new projects
 
 **Diagnostics**
+
 - `lerd status` — health overview: DNS, nginx, PHP-FPM containers, services, cert expiry
 - `lerd dns:check` — verify `.test` resolution
 
 **Lifecycle**
+
 - `lerd update` — self-update from latest GitHub release (atomic binary swap)
 - `lerd uninstall` — stop all containers, remove units, binary, PATH entry, optionally data
 - Shell completion via `lerd completion bash|zsh|fish`
 
 **Installer (`install.sh`)**
+
 - curl and wget support
 - Prerequisite checking with per-distro install prompts (pacman / apt / dnf / zypper)
 - Automatic `lerd install` invocation post-download
@@ -2285,62 +2295,62 @@ Initial release.
 
 ---
 
-[0.6.0]: https://github.com/geodro/lerd/compare/v0.5.16...v0.6.0
-[0.5.3]: https://github.com/geodro/lerd/compare/v0.5.2...v0.5.3
-[0.5.2]: https://github.com/geodro/lerd/compare/v0.5.1...v0.5.2
-[0.5.1]: https://github.com/geodro/lerd/compare/v0.5.0...v0.5.1
-[0.5.0]: https://github.com/geodro/lerd/compare/v0.4.3...v0.5.0
-[0.1.53]: https://github.com/geodro/lerd/compare/v0.1.52...v0.1.53
-[0.1.52]: https://github.com/geodro/lerd/compare/v0.1.51...v0.1.52
-[0.1.51]: https://github.com/geodro/lerd/compare/v0.1.50...v0.1.51
-[0.1.50]: https://github.com/geodro/lerd/compare/v0.1.49...v0.1.50
-[0.1.49]: https://github.com/geodro/lerd/compare/v0.1.48...v0.1.49
-[0.1.48]: https://github.com/geodro/lerd/compare/v0.1.47...v0.1.48
-[0.1.47]: https://github.com/geodro/lerd/compare/v0.1.46...v0.1.47
-[0.1.46]: https://github.com/geodro/lerd/compare/v0.1.45...v0.1.46
-[0.1.45]: https://github.com/geodro/lerd/compare/v0.1.44...v0.1.45
-[0.1.44]: https://github.com/geodro/lerd/compare/v0.1.43...v0.1.44
-[0.1.43]: https://github.com/geodro/lerd/compare/v0.1.42...v0.1.43
-[0.1.42]: https://github.com/geodro/lerd/compare/v0.1.41...v0.1.42
-[0.1.41]: https://github.com/geodro/lerd/compare/v0.1.40...v0.1.41
-[0.1.40]: https://github.com/geodro/lerd/compare/v0.1.39...v0.1.40
-[0.1.39]: https://github.com/geodro/lerd/compare/v0.1.38...v0.1.39
-[0.1.38]: https://github.com/geodro/lerd/compare/v0.1.37...v0.1.38
-[0.1.37]: https://github.com/geodro/lerd/compare/v0.1.36...v0.1.37
-[0.1.36]: https://github.com/geodro/lerd/compare/v0.1.35...v0.1.36
-[0.1.35]: https://github.com/geodro/lerd/compare/v0.1.34...v0.1.35
-[0.1.34]: https://github.com/geodro/lerd/compare/v0.1.33...v0.1.34
-[0.1.33]: https://github.com/geodro/lerd/compare/v0.1.32...v0.1.33
-[0.1.32]: https://github.com/geodro/lerd/compare/v0.1.31...v0.1.32
-[0.1.31]: https://github.com/geodro/lerd/compare/v0.1.30...v0.1.31
-[0.1.30]: https://github.com/geodro/lerd/compare/v0.1.29...v0.1.30
-[0.1.29]: https://github.com/geodro/lerd/compare/v0.1.28...v0.1.29
-[0.1.28]: https://github.com/geodro/lerd/compare/v0.1.27...v0.1.28
-[0.1.27]: https://github.com/geodro/lerd/compare/v0.1.26...v0.1.27
-[0.1.26]: https://github.com/geodro/lerd/compare/v0.1.25...v0.1.26
-[0.1.25]: https://github.com/geodro/lerd/compare/v0.1.24...v0.1.25
-[0.1.24]: https://github.com/geodro/lerd/compare/v0.1.23...v0.1.24
-[0.1.23]: https://github.com/geodro/lerd/compare/v0.1.22...v0.1.23
-[0.1.22]: https://github.com/geodro/lerd/compare/v0.1.21...v0.1.22
-[0.1.21]: https://github.com/geodro/lerd/compare/v0.1.20...v0.1.21
-[0.1.20]: https://github.com/geodro/lerd/compare/v0.1.19...v0.1.20
-[0.1.19]: https://github.com/geodro/lerd/compare/v0.1.18...v0.1.19
-[0.1.18]: https://github.com/geodro/lerd/compare/v0.1.17...v0.1.18
-[0.1.17]: https://github.com/geodro/lerd/compare/v0.1.16...v0.1.17
-[0.1.16]: https://github.com/geodro/lerd/compare/v0.1.15...v0.1.16
-[0.1.15]: https://github.com/geodro/lerd/compare/v0.1.14...v0.1.15
-[0.1.14]: https://github.com/geodro/lerd/compare/v0.1.13...v0.1.14
-[0.1.13]: https://github.com/geodro/lerd/compare/v0.1.12...v0.1.13
-[0.1.12]: https://github.com/geodro/lerd/compare/v0.1.11...v0.1.12
-[0.1.11]: https://github.com/geodro/lerd/compare/v0.1.10...v0.1.11
-[0.1.10]: https://github.com/geodro/lerd/compare/v0.1.9...v0.1.10
-[0.1.9]: https://github.com/geodro/lerd/compare/v0.1.8...v0.1.9
-[0.1.8]: https://github.com/geodro/lerd/compare/v0.1.7...v0.1.8
-[0.1.7]: https://github.com/geodro/lerd/compare/v0.1.6...v0.1.7
-[0.1.6]: https://github.com/geodro/lerd/compare/v0.1.5...v0.1.6
-[0.1.5]: https://github.com/geodro/lerd/compare/v0.1.4...v0.1.5
-[0.1.4]: https://github.com/geodro/lerd/compare/v0.1.3...v0.1.4
-[0.1.3]: https://github.com/geodro/lerd/compare/v0.1.2...v0.1.3
-[0.1.2]: https://github.com/geodro/lerd/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/geodro/lerd/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/geodro/lerd/releases/tag/v0.1.0
+[0.6.0]: https://github.com/gabriel-sousa99/lerd/compare/v0.5.16...v0.6.0
+[0.5.3]: https://github.com/gabriel-sousa99/lerd/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/gabriel-sousa99/lerd/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/gabriel-sousa99/lerd/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/gabriel-sousa99/lerd/compare/v0.4.3...v0.5.0
+[0.1.53]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.52...v0.1.53
+[0.1.52]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.51...v0.1.52
+[0.1.51]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.50...v0.1.51
+[0.1.50]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.49...v0.1.50
+[0.1.49]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.48...v0.1.49
+[0.1.48]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.47...v0.1.48
+[0.1.47]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.46...v0.1.47
+[0.1.46]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.45...v0.1.46
+[0.1.45]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.44...v0.1.45
+[0.1.44]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.43...v0.1.44
+[0.1.43]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.42...v0.1.43
+[0.1.42]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.41...v0.1.42
+[0.1.41]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.40...v0.1.41
+[0.1.40]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.39...v0.1.40
+[0.1.39]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.38...v0.1.39
+[0.1.38]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.37...v0.1.38
+[0.1.37]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.36...v0.1.37
+[0.1.36]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.35...v0.1.36
+[0.1.35]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.34...v0.1.35
+[0.1.34]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.33...v0.1.34
+[0.1.33]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.32...v0.1.33
+[0.1.32]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.31...v0.1.32
+[0.1.31]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.30...v0.1.31
+[0.1.30]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.29...v0.1.30
+[0.1.29]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.28...v0.1.29
+[0.1.28]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.27...v0.1.28
+[0.1.27]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.26...v0.1.27
+[0.1.26]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.25...v0.1.26
+[0.1.25]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.24...v0.1.25
+[0.1.24]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.23...v0.1.24
+[0.1.23]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.22...v0.1.23
+[0.1.22]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.21...v0.1.22
+[0.1.21]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.20...v0.1.21
+[0.1.20]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.19...v0.1.20
+[0.1.19]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.18...v0.1.19
+[0.1.18]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.17...v0.1.18
+[0.1.17]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.16...v0.1.17
+[0.1.16]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.15...v0.1.16
+[0.1.15]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.14...v0.1.15
+[0.1.14]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.12...v0.1.13
+[0.1.12]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.11...v0.1.12
+[0.1.11]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/gabriel-sousa99/lerd/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/gabriel-sousa99/lerd/releases/tag/v0.1.0

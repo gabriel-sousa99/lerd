@@ -4,7 +4,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // hostGatewayDeps is the injection surface for tickHostGateway so the

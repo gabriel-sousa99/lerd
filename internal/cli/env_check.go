@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	"github.com/spf13/cobra"
 )
 

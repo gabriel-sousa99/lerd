@@ -5,9 +5,9 @@ import (
 	"io"
 	"strings"
 
-	phpPkg "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/spf13/cobra"
 )
 

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // setupConfD points NginxConfD() at a temp dir via XDG_DATA_HOME and returns the conf.d path.

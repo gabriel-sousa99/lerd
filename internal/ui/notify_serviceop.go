@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // notificationForServiceOp builds the notification for a long-running

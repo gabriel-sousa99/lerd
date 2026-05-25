@@ -2,30 +2,30 @@
 
 Lerd uses **framework definitions** to describe how a PHP project type behaves: where the document root is, how to detect it automatically, which env file to use, and which background workers it supports.
 
-Laravel has a built-in definition. Other frameworks (Symfony, WordPress, Drupal, CakePHP, Statamic, etc.) can be installed from the [community store](https://github.com/geodro/lerd-frameworks) or defined manually.
+Laravel has a built-in definition. Other frameworks (Symfony, WordPress, Drupal, CakePHP, Statamic, etc.) can be installed from the [community store](https://github.com/gabriel-sousa99/lerd-frameworks) or defined manually.
 
 ---
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `lerd new <name-or-path>` | Scaffold a new PHP project using a framework's create command |
-| `lerd framework list` | List all framework definitions with source and workers |
-| `lerd framework list --check` | Compare local definitions against the store |
-| `lerd framework search [query]` | Search the community store for available definitions |
-| `lerd framework install <name>[@version]` | Install a framework definition from the store |
-| `lerd framework update [name[@version]]` | Update installed definitions from the store |
-| `lerd framework update --diff` | Preview changes before applying updates |
-| `lerd framework add <name>` | Add or update a user-defined framework definition |
-| `lerd framework remove <name>[@version]` | Remove a framework definition (prompts if multiple versions) |
-| `lerd framework remove <name> --all` | Remove all versions of a framework definition |
+| Command                                   | Description                                                   |
+| ----------------------------------------- | ------------------------------------------------------------- |
+| `lerd new <name-or-path>`                 | Scaffold a new PHP project using a framework's create command |
+| `lerd framework list`                     | List all framework definitions with source and workers        |
+| `lerd framework list --check`             | Compare local definitions against the store                   |
+| `lerd framework search [query]`           | Search the community store for available definitions          |
+| `lerd framework install <name>[@version]` | Install a framework definition from the store                 |
+| `lerd framework update [name[@version]]`  | Update installed definitions from the store                   |
+| `lerd framework update --diff`            | Preview changes before applying updates                       |
+| `lerd framework add <name>`               | Add or update a user-defined framework definition             |
+| `lerd framework remove <name>[@version]`  | Remove a framework definition (prompts if multiple versions)  |
+| `lerd framework remove <name> --all`      | Remove all versions of a framework definition                 |
 
 ---
 
 ## Framework store
 
-Lerd has a community-driven framework store backed by [geodro/lerd-frameworks](https://github.com/geodro/lerd-frameworks). The store hosts definitions for popular PHP frameworks, versioned by major release.
+Lerd has a community-driven framework store backed by [gabriel-sousa99/lerd-frameworks](https://github.com/gabriel-sousa99/lerd-frameworks). The store hosts definitions for popular PHP frameworks, versioned by major release.
 
 ### Available frameworks
 
@@ -95,7 +95,7 @@ During `lerd link`, `lerd init`, or `lerd setup`, if no framework is detected at
 
 ### Contributing to the store
 
-Submit a pull request to [geodro/lerd-frameworks](https://github.com/geodro/lerd-frameworks) with a YAML file under `frameworks/<name>/<version>.yaml` and update `frameworks/index.json`.
+Submit a pull request to [gabriel-sousa99/lerd-frameworks](https://github.com/gabriel-sousa99/lerd-frameworks) with a YAML file under `frameworks/<name>/<version>.yaml` and update `frameworks/index.json`.
 
 ---
 
@@ -118,7 +118,6 @@ The installer walks you through starter kit selection, database setup, and other
 
 `lerd new` is a framework-agnostic shortcut that runs the framework's scaffold command:
 
-
 ```bash
 lerd new myapp                          # create using Laravel (default)
 lerd new myapp --framework=symfony      # create using Symfony's create command
@@ -127,6 +126,7 @@ lerd new myapp -- --no-interaction      # pass extra flags to the scaffold comma
 ```
 
 After creation:
+
 ```bash
 cd myapp
 lerd link
@@ -141,12 +141,12 @@ Laravel has a built-in definition compiled into the binary as a fallback. When a
 
 Default workers:
 
-| Worker | Label | Command | Check | Extra |
-|---|---|---|---|---|
-| `queue` | Queue Worker | `php artisan queue:work --queue=default --tries=3 --timeout=60` | - | - |
-| `schedule` | Task Scheduler | `php artisan schedule:work` | - | - |
-| `reverb` | Reverb WebSocket | `php artisan reverb:start` | `laravel/reverb` | proxy at `/app`, auto-assigned port |
-| `horizon` | Horizon | `php artisan horizon` | `laravel/horizon` | conflicts with `queue` |
+| Worker     | Label            | Command                                                         | Check             | Extra                               |
+| ---------- | ---------------- | --------------------------------------------------------------- | ----------------- | ----------------------------------- |
+| `queue`    | Queue Worker     | `php artisan queue:work --queue=default --tries=3 --timeout=60` | -                 | -                                   |
+| `schedule` | Task Scheduler   | `php artisan schedule:work`                                     | -                 | -                                   |
+| `reverb`   | Reverb WebSocket | `php artisan reverb:start`                                      | `laravel/reverb`  | proxy at `/app`, auto-assigned port |
+| `horizon`  | Horizon          | `php artisan horizon`                                           | `laravel/horizon` | conflicts with `queue`              |
 
 ### Adding workers to Laravel
 
@@ -167,6 +167,7 @@ lerd framework add laravel --from-file horizon.yaml
 ```
 
 To remove the overlay (built-in workers remain):
+
 ```bash
 lerd framework remove laravel
 ```

@@ -1,8 +1,8 @@
 package mcp
 
 import (
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
 )
 
 // dnsDiagnoseTool returns the MCP tool descriptor. The schema is

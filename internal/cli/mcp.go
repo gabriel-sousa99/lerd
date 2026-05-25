@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/geodro/lerd/internal/mcp"
+	"github.com/gabriel-sousa99/lerd/internal/mcp"
 	"github.com/spf13/cobra"
 )
 

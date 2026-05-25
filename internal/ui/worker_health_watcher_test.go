@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/workerheal"
+	"github.com/gabriel-sousa99/lerd/internal/workerheal"
 )
 
 func resetHealthState() {

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 func TestNextFocus_SkipsServicesWhenHidden(t *testing.T) {

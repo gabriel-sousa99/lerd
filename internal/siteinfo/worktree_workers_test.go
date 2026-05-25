@@ -3,7 +3,7 @@ package siteinfo
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 func vitePerWT() config.FrameworkWorker {

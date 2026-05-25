@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // handlePhpVersionInstallStream is the SSE variant of the legacy POST /install

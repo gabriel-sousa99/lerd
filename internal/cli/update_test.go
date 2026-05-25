@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	lerdUpdate "github.com/geodro/lerd/internal/update"
+	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 )
 
 // ── stripV ───────────────────────────────────────────────────────────────────

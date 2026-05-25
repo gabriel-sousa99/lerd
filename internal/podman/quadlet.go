@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/systemd"
 )
 
 // quadletReloadPending records that a previous DaemonReloadIfNeeded call
@@ -205,7 +205,7 @@ func unitOpCaller() string {
 	frames := runtime.CallersFrames(pc[:n])
 	for {
 		frame, more := frames.Next()
-		if !strings.Contains(frame.Function, "geodro/lerd/internal/podman") {
+		if !strings.Contains(frame.Function, "gabriel-sousa99/lerd/internal/podman") {
 			return fmt.Sprintf("%s (%s:%d)", frame.Function, filepath.Base(frame.File), frame.Line)
 		}
 		if !more {

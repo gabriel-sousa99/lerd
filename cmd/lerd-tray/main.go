@@ -4,7 +4,7 @@ import (
 	"flag"
 	"os"
 
-	"github.com/geodro/lerd/internal/tray"
+	"github.com/gabriel-sousa99/lerd/internal/tray"
 )
 
 func main() {

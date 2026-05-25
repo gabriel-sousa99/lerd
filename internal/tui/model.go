@@ -11,11 +11,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/eventbus"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/siteinfo"
-	lerdUpdate "github.com/geodro/lerd/internal/update"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
+	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 )
 
 // focusPane identifies which pane currently owns keyboard focus. Detail sits

@@ -3,8 +3,8 @@ package ui
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // dispatchNotification is the single choke point for emitting notifications.

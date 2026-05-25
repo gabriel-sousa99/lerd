@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // laravelSignatureRe captures the contents of $signature in a Console\Command

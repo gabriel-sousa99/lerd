@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )

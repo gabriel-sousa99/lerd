@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // filterConflictingDomains splits desired into the domains that ownPath is

@@ -3,7 +3,7 @@ package dns
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // When dns.enabled is false, Check must short-circuit to OK without resolving.

@@ -3,7 +3,7 @@ package dns
 import (
 	"net"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // Check resolves test-lerd-probe.{tld} and reports whether the answer is one

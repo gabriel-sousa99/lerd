@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 type fakeServiceMgr struct {

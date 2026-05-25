@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/spf13/cobra"
 )
 

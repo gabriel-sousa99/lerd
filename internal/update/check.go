@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 const changelogRawURL = "https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/CHANGELOG.md"

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/workerheal"
+	"github.com/gabriel-sousa99/lerd/internal/workerheal"
 )
 
 // installBatchTestSink swaps the dispatcher and shrinks the delay so a real

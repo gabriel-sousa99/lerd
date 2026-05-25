@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/geodro/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 )
 
 // publishAfter wraps a mutating HTTP handler so that every successful

@@ -11,7 +11,7 @@ lerd status   # quick health snapshot of all running services
 
 ## Filing a bug report
 
-If you need help on the [issue tracker](https://github.com/geodro/lerd/issues), run:
+If you need help on the [issue tracker](https://github.com/gabriel-sousa99/lerd/issues), run:
 
 ```bash
 lerd bug-report
@@ -58,15 +58,15 @@ Otherwise, the fastest way to find the broken rung is `lerd doctor`. The DNS sec
 
 The chain in order:
 
-| Rung | What it checks | If it fails |
-|---|---|---|
-| `lerd-dns container` | The dnsmasq container is running. | `lerd start` (or `podman logs lerd-dns` to see why it crashed). |
-| `dnsmasq config` | `~/.local/share/lerd/dnsmasq/lerd.conf` exists with `port=5300` and `address=/.<tld>/`. | `lerd start` regenerates the config from your registered TLD. |
-| `port 5300 listening` | TCP/UDP 5300 is reachable on 127.0.0.1. | Another process owns the port. Find it with `ss -tlnp sport = :5300` on Linux, or `lsof -nP -iTCP:5300 -sTCP:LISTEN` on macOS. |
-| `dig @127.0.0.1 -p 5300` | A direct query at port 5300 returns 127.0.0.1 for `lerd-probe.<tld>`. | dnsmasq is up but its config drifted. `systemctl --user restart lerd-dns`. |
-| `resolver hookup` | The NetworkManager dispatcher script or systemd-resolved drop-in is installed. | Rerun `lerd install`. |
-| `interface routes .test to 5300` | `resolvectl status` shows `127.0.0.1:5300` and `~<tld>` on the active interface. | `sudo systemctl restart NetworkManager`, or set the routing manually with `sudo resolvectl domain <iface> ~test ~.`. |
-| `system DNS lookup` | `host lerd-probe.test` (the system resolver) returns 127.0.0.1. | The drop-in is installed but resolved isn't honouring it. Check whether cloud-init or another tool wrote a higher-priority resolver config. Common on EC2 / cloud images. |
+| Rung                             | What it checks                                                                          | If it fails                                                                                                                                                               |
+| -------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lerd-dns container`             | The dnsmasq container is running.                                                       | `lerd start` (or `podman logs lerd-dns` to see why it crashed).                                                                                                           |
+| `dnsmasq config`                 | `~/.local/share/lerd/dnsmasq/lerd.conf` exists with `port=5300` and `address=/.<tld>/`. | `lerd start` regenerates the config from your registered TLD.                                                                                                             |
+| `port 5300 listening`            | TCP/UDP 5300 is reachable on 127.0.0.1.                                                 | Another process owns the port. Find it with `ss -tlnp sport = :5300` on Linux, or `lsof -nP -iTCP:5300 -sTCP:LISTEN` on macOS.                                            |
+| `dig @127.0.0.1 -p 5300`         | A direct query at port 5300 returns 127.0.0.1 for `lerd-probe.<tld>`.                   | dnsmasq is up but its config drifted. `systemctl --user restart lerd-dns`.                                                                                                |
+| `resolver hookup`                | The NetworkManager dispatcher script or systemd-resolved drop-in is installed.          | Rerun `lerd install`.                                                                                                                                                     |
+| `interface routes .test to 5300` | `resolvectl status` shows `127.0.0.1:5300` and `~<tld>` on the active interface.        | `sudo systemctl restart NetworkManager`, or set the routing manually with `sudo resolvectl domain <iface> ~test ~.`.                                                      |
+| `system DNS lookup`              | `host lerd-probe.test` (the system resolver) returns 127.0.0.1.                         | The drop-in is installed but resolved isn't honouring it. Check whether cloud-init or another tool wrote a higher-priority resolver config. Common on EC2 / cloud images. |
 
 You can also call this programmatically over MCP via the `dns_diagnose` tool, useful for AI-driven troubleshooting:
 
@@ -85,6 +85,7 @@ lerd status                         # check nginx and FPM are running
 podman logs lerd-nginx              # nginx error log
 cat ~/.local/share/lerd/nginx/conf.d/my-app.test.conf   # check generated vhost
 ```
+
 :::
 
 ::: details My custom nginx directive disappeared after an update
@@ -105,6 +106,7 @@ If the image is missing (e.g. after `podman rmi`):
 ```bash
 lerd php:rebuild
 ```
+
 :::
 
 ::: details `podman exec` fails with "chdir: No such file or directory"
@@ -166,6 +168,7 @@ systemctl --user edit lerd-watcher
 # Environment=LERD_DEBUG=1
 systemctl --user restart lerd-watcher
 ```
+
 :::
 
 ::: details HTTPS certificate warning in browser
@@ -203,6 +206,7 @@ If nginx still fails to start, check the logs:
 ```bash
 journalctl --user -u lerd-nginx -n 30 --no-pager
 ```
+
 :::
 
 ::: details Port conflicts on `lerd start`
@@ -232,9 +236,11 @@ The exact command lerd suggests in `lerd doctor` and `lerd start` output is alre
 If you ran `lerd uninstall` and then reinstalled, worker units and service quadlets are deleted during uninstall. Running `lerd start` after reinstalling automatically restores them from the `workers` list saved in each site's `.lerd.yaml`. If `.lerd.yaml` does not exist or was not committed, you will need to start workers again manually (`lerd queue:start`, etc.).
 
 To check what was restored:
+
 ```bash
 lerd status   # shows all active workers and services
 ```
+
 :::
 
 ::: details Workers failing or crash-looping
@@ -247,6 +253,7 @@ journalctl --user -u lerd-queue-my-app -f    # or lerd-horizon-my-app, lerd-sche
 ```
 
 Common causes:
+
 - Missing Redis when `QUEUE_CONNECTION=redis`, start it with `lerd service start redis`
 - Missing dependencies after a fresh clone, run `lerd setup` to install them
 - Bad `.env` values, run `lerd env` to reset service connection settings
@@ -267,6 +274,7 @@ To ensure a clean switch and recreate the networks with the new backend, reset t
 ```bash
 podman system reset
 ```
+
 :::
 
 ::: details Error: unable to parse ip fe80::...%18 specified in AddDNSServer: invalid argument
@@ -290,6 +298,7 @@ If the v6 subnet is missing, run `lerd install` once to migrate. To verify resol
 ```bash
 podman run --rm --network lerd alpine sh -c 'nslookup laravel.test; nslookup -type=AAAA laravel.test'
 ```
+
 :::
 
 ::: details Services fail to start with "aardvark-dns failed to bind [fd00:1e7d::1]:53"
@@ -342,4 +351,5 @@ cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/networks/aardvark-dns/ler
 # expect both gateways, e.g.: fd00:1e7d::1,10.89.7.1 169.254.1.1
 # if only 10.89.7.1 is present, the drift fix didn't run — re-run lerd install
 ```
+
 :::

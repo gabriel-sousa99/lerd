@@ -5,7 +5,7 @@
 ::: warning Requires systemd
 Lerd runs every container as a Podman Quadlet and every worker as a systemd user service, so a systemd-based distro is required. OpenRC (Gentoo, Artix-openrc, Alpine), runit (Void, Artix-runit), s6, and sysvinit-based distros (Devuan) are not supported.
 
-Tested and known-good: Ubuntu, Fedora, Arch, Debian, Mint, Pop!_OS, openSUSE, CachyOS, Omarchy. Any systemd distro should work.
+Tested and known-good: Ubuntu, Fedora, Arch, Debian, Mint, Pop!\_OS, openSUSE, CachyOS, Omarchy. Any systemd distro should work.
 :::
 
 ### One-line installer (recommended)
@@ -13,15 +13,15 @@ Tested and known-good: Ubuntu, Fedora, Arch, Debian, Mint, Pop!_OS, openSUSE, Ca
 ::: code-group
 
 ```bash [curl]
-curl -fsSL https://raw.githubusercontent.com/geodro/lerd/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
 ```
 
 ```bash [wget]
-wget -qO- https://raw.githubusercontent.com/geodro/lerd/main/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
 ```
 
 ```bash [From source]
-git clone https://github.com/geodro/lerd
+git clone https://github.com/gabriel-sousa99/lerd
 cd lerd
 make build
 make install            # installs to ~/.local/bin/lerd
@@ -80,11 +80,11 @@ You can also re-run the installer:
 ::: code-group
 
 ```bash [curl]
-curl -fsSL https://raw.githubusercontent.com/geodro/lerd/main/install.sh | bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash -s -- --update
 ```
 
 ```bash [wget]
-wget -qO- https://raw.githubusercontent.com/geodro/lerd/main/install.sh | bash -s -- --update
+wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash -s -- --update
 ```
 
 :::
@@ -127,7 +127,7 @@ bash install.sh --check
 Install via the Homebrew tap:
 
 ```bash
-brew install geodro/lerd/lerd
+brew install gabriel-sousa99/lerd/lerd
 lerd install
 ```
 

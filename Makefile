@@ -6,7 +6,7 @@ BUILD_DIR   = ./build
 INSTALL_DIR = $(HOME)/.local/bin
 UI_DIR      = internal/ui/web
 
-PKG        = github.com/geodro/lerd/internal/version
+PKG        = github.com/gabriel-sousa99/lerd/internal/version
 LDFLAGS    = -s -w \
              -X $(PKG).Version=$(VERSION) \
              -X $(PKG).Commit=$(COMMIT) \

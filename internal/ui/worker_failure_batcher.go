@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/workerheal"
+	"github.com/gabriel-sousa99/lerd/internal/workerheal"
 )
 
 // workerFailureBatchDelay is the quiet window between the first new failure

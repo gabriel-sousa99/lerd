@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	phpDet "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // TinkerSymbols is the set of project-defined names surfaced to the Tinker

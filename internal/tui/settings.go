@@ -5,9 +5,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/geodro/lerd/internal/config"
-	phpPkg "github.com/geodro/lerd/internal/php"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 )
 
 // settingsRow describes one focusable line in the settings view.

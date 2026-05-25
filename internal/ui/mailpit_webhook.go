@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // mailpitWebhookPayload is the subset of Mailpit's message-summary JSON we

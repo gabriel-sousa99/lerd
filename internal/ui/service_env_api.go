@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // validServiceNameRe matches the same shape as config.validServiceName

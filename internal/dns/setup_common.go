@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // pastaDefaultForwarder is pasta's rootless-netns DNS forwarder IP, which

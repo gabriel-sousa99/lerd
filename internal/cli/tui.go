@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/geodro/lerd/internal/tui"
-	"github.com/geodro/lerd/internal/version"
+	"github.com/gabriel-sousa99/lerd/internal/tui"
+	"github.com/gabriel-sousa99/lerd/internal/version"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )

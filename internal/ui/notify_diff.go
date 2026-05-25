@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/push"
-	"github.com/geodro/lerd/internal/workerheal"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/workerheal"
 )
 
 // siteDomainForRoute resolves a registered site name to its primary domain

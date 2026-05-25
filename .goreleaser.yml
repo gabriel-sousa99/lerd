@@ -20,9 +20,9 @@ builds:
       - amd64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
   - id: lerd-arm64
     main: ./cmd/lerd
@@ -37,9 +37,9 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
   - id: lerd-darwin-amd64
     main: ./cmd/lerd
@@ -54,9 +54,9 @@ builds:
       - amd64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
   - id: lerd-darwin-arm64
     main: ./cmd/lerd
@@ -71,9 +71,9 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
   # lerd-tray is a separate CGO binary that links libayatana-appindicator.
   # lerd (nogui) execs it at runtime; if the library is missing the tray
@@ -89,9 +89,9 @@ builds:
       - amd64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
 archives:
   - id: lerd-amd64
@@ -139,7 +139,7 @@ brews:
       owner: geodro
       name: homebrew-lerd
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/geodro/lerd"
+    homepage: "https://github.com/gabriel-sousa99/lerd"
     description: "Local Laravel development environment for Linux and macOS"
     license: "MIT"
     skip_upload: auto
@@ -199,7 +199,7 @@ release:
     ### Install on Linux
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/geodro/lerd/main/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
     ```
 
     Or if already installed:
@@ -211,7 +211,7 @@ release:
     ### Install on macOS
 
     ```bash
-    brew tap geodro/lerd
+    brew tap gabriel-sousa99/lerd
     brew install lerd
     lerd install
     ```
@@ -223,4 +223,4 @@ release:
     lerd install
     ```
   footer: |
-    **Full Changelog**: https://github.com/geodro/lerd/compare/{{ .PreviousTag }}...{{ .Tag }}
+    **Full Changelog**: https://github.com/gabriel-sousa99/lerd/compare/{{ .PreviousTag }}...{{ .Tag }}

@@ -3,8 +3,8 @@ package ui
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/workerheal"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/workerheal"
 )
 
 func uw(unit, site, worker, state string) workerheal.UnhealthyWorker {

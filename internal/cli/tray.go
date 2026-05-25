@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"github.com/geodro/lerd/internal/tray"
+	"github.com/gabriel-sousa99/lerd/internal/tray"
 	"github.com/spf13/cobra"
 )
 

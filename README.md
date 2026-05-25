@@ -1,6 +1,6 @@
 # Lerd Oracle Edition
 
-> Fork do [`geodro/lerd`](https://github.com/geodro/lerd) com **suporte a
+> Fork do [`gabriel-sousa99/lerd`](https://github.com/gabriel-sousa99/lerd) com **suporte a
 > Oracle Database embutido em todas as imagens PHP** — Oracle Instant
 > Client 21.18 (LTS) + `oci8` + memcached + amqp já compilados, prontos
 > para PHP 7.4 → 8.5. Drop-in replacement: todo comando `lerd` existente
@@ -11,7 +11,7 @@
 > aponta o auto-update para **este** repositório em vez do upstream.
 > Releases publicadas aqui seguem o esquema `v1.21.2-oracle.N`.
 
-[![Fork base](https://img.shields.io/badge/forked%20from-geodro%2Flerd%20v1.21.2-blue)](https://github.com/geodro/lerd)
+[![Fork base](https://img.shields.io/badge/forked%20from-geodro%2Flerd%20v1.21.2-blue)](https://github.com/gabriel-sousa99/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
 [![PHP](https://img.shields.io/badge/PHP-7.4%20%E2%80%93%208.5-777BB4)]()
 
@@ -38,33 +38,33 @@
 
 ## O que muda em relação ao upstream
 
-| Recurso                                  | Upstream `geodro/lerd`         | Esta fork                                                          |
-|------------------------------------------|--------------------------------|--------------------------------------------------------------------|
-| Driver Oracle (`oci8`)                   | precisa instalar manual         | **compilado em toda imagem** (`oci8` 2.0.12 → 3.4.1 por versão PHP) |
-| Oracle Instant Client                    | n/a                            | **21.18 LTS** em `/opt/oracle/instantclient`                       |
-| Extensão `memcached`                     | precisa `lerd php:ext`         | **pré-instalada**                                                  |
-| Extensão `amqp` (RabbitMQ)               | precisa `lerd php:ext`         | **pré-instalada**                                                  |
-| `openssh-client` no container            | ausente (composer ssh falha)    | **instalado** + `$HOME/.ssh` montado em `/root/.ssh`               |
-| Suporte PHP                              | 7.4 → 8.5                      | **5.6 → 8.5** (5.6 legacy estendida com libresolv shim)            |
-| `lerd init` → "Database"                 | sqlite / mysql / postgres      | **+ Oracle (externo)**                                             |
-| `lerd link` pergunta DB                  | só `lerd init`                 | **também ao `link` se .lerd.yaml não tem DB**                      |
-| `.lerd.yaml` → bloco `oracle:`           | ✗                              | **host/port/service/user/pass/charset**                            |
-| DNS padrão                               | `lerd-dns` + `.test` (sudo)    | **off, `.localhost`**                                              |
-| Comandos destrutivos no dashboard        | `migrate:fresh` etc. um clique | **filtrados em 2 camadas** (lista + run-time HTTP 403)             |
-| Comandos artisan customizados            | só os do framework             | **auto-discovery de `app/Console/Commands/*.php`**                 |
-| Editor de `.env` no dashboard            | só leitura                     | **editor textarea com Save/Discard/Ctrl+S + backup auto**          |
-| Editor de env do serviço no dashboard    | só leitura                     | **editor key=value com restart hint**                              |
-| Instalar nova versão PHP                 | só CLI                         | **botão no dashboard + SSE logs ao vivo + beforeunload guard**     |
-| Botão "Abrir no editor" no site          | só terminal                    | **+ editor (code/cursor/phpstorm/…)**                              |
-| Service presets adicionais               | mysql/postgres/redis/…         | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**            |
-| Auto-update                              | `geodro/lerd/releases`         | `gabriel-sousa99/lerd/releases`                                    |
-| Versão                                   | `1.21.2`                       | `1.21.2-oracle.N`                                                  |
-| Xdebug por padrão                        | `start_with_request=yes`       | **`=trigger`** (sem spam em CLI sem IDE)                           |
+| Recurso                               | Upstream `gabriel-sousa99/lerd` | Esta fork                                                           |
+| ------------------------------------- | ------------------------------- | ------------------------------------------------------------------- |
+| Driver Oracle (`oci8`)                | precisa instalar manual         | **compilado em toda imagem** (`oci8` 2.0.12 → 3.4.1 por versão PHP) |
+| Oracle Instant Client                 | n/a                             | **21.18 LTS** em `/opt/oracle/instantclient`                        |
+| Extensão `memcached`                  | precisa `lerd php:ext`          | **pré-instalada**                                                   |
+| Extensão `amqp` (RabbitMQ)            | precisa `lerd php:ext`          | **pré-instalada**                                                   |
+| `openssh-client` no container         | ausente (composer ssh falha)    | **instalado** + `$HOME/.ssh` montado em `/root/.ssh`                |
+| Suporte PHP                           | 7.4 → 8.5                       | **5.6 → 8.5** (5.6 legacy estendida com libresolv shim)             |
+| `lerd init` → "Database"              | sqlite / mysql / postgres       | **+ Oracle (externo)**                                              |
+| `lerd link` pergunta DB               | só `lerd init`                  | **também ao `link` se .lerd.yaml não tem DB**                       |
+| `.lerd.yaml` → bloco `oracle:`        | ✗                               | **host/port/service/user/pass/charset**                             |
+| DNS padrão                            | `lerd-dns` + `.test` (sudo)     | **off, `.localhost`**                                               |
+| Comandos destrutivos no dashboard     | `migrate:fresh` etc. um clique  | **filtrados em 2 camadas** (lista + run-time HTTP 403)              |
+| Comandos artisan customizados         | só os do framework              | **auto-discovery de `app/Console/Commands/*.php`**                  |
+| Editor de `.env` no dashboard         | só leitura                      | **editor textarea com Save/Discard/Ctrl+S + backup auto**           |
+| Editor de env do serviço no dashboard | só leitura                      | **editor key=value com restart hint**                               |
+| Instalar nova versão PHP              | só CLI                          | **botão no dashboard + SSE logs ao vivo + beforeunload guard**      |
+| Botão "Abrir no editor" no site       | só terminal                     | **+ editor (code/cursor/phpstorm/…)**                               |
+| Service presets adicionais            | mysql/postgres/redis/…          | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**             |
+| Auto-update                           | `gabriel-sousa99/lerd/releases` | `gabriel-sousa99/lerd/releases`                                     |
+| Versão                                | `1.21.2`                        | `1.21.2-oracle.N`                                                   |
+| Xdebug por padrão                     | `start_with_request=yes`        | **`=trigger`** (sem spam em CLI sem IDE)                            |
 
 ### Lista completa de extensões PHP nas imagens
 
 > 25 extensões compiladas no builder + 7 via PECL — cobre o ecossistema
-> top-10 Laravel (Sanctum, Horizon, Telescope, spatie/*, Filament,
+> top-10 Laravel (Sanctum, Horizon, Telescope, spatie/\*, Filament,
 > Socialite, Livewire, Debugbar, Excel, Dompdf) sem `lerd php:ext add`.
 
 ```
@@ -91,12 +91,12 @@ Docker Desktop, banco externo, ou pacote do sistema além de `podman` +
 
 ### Versões PHP suportadas
 
-| Linha       | Versões             | Notas                                                                 |
-|-------------|---------------------|-----------------------------------------------------------------------|
-| Suportadas  | 7.4 → 8.5           | Build próprio FPM (Alpine `php:X.Y-fpm-alpine`), com `oci8` específico para cada versão |
-| Legacy      | 5.6                 | Build estendido com `libresolv` shim; oci8 2.0.12 + xdebug 2.5.5 + redis 4.3 + imagick + mongodb 1.7 |
-| Sem build   | qualquer            | `lerd php:install <X.Y>` puxa, builda quadlet systemd, registra no `php:list` |
-| FrankenPHP  | 8.2 / 8.3 / 8.4     | Runtime alternativo (modo worker), selecionado em `.lerd.yaml: runtime: frankenphp` |
+| Linha      | Versões         | Notas                                                                                                |
+| ---------- | --------------- | ---------------------------------------------------------------------------------------------------- |
+| Suportadas | 7.4 → 8.5       | Build próprio FPM (Alpine `php:X.Y-fpm-alpine`), com `oci8` específico para cada versão              |
+| Legacy     | 5.6             | Build estendido com `libresolv` shim; oci8 2.0.12 + xdebug 2.5.5 + redis 4.3 + imagick + mongodb 1.7 |
+| Sem build  | qualquer        | `lerd php:install <X.Y>` puxa, builda quadlet systemd, registra no `php:list`                        |
+| FrankenPHP | 8.2 / 8.3 / 8.4 | Runtime alternativo (modo worker), selecionado em `.lerd.yaml: runtime: frankenphp`                  |
 
 > Detecção da versão por projeto: `.lerd.yaml: php_version` → `.php-version`
 > → `composer.json: require.php` → `php.default_version` da config global.
@@ -130,17 +130,17 @@ Cada preset vira um container systemd user-unit (`lerd-<nome>.service`)
 gerenciado por `lerd service`. Versões alternadas (`mysql-5-6`,
 `postgres-14`, `mongo-6`, etc.) instaláveis via `lerd service preset`.
 
-| Categoria       | Presets                                                              |
-|-----------------|----------------------------------------------------------------------|
-| **Bancos**      | `mysql` (8.4 default), `mariadb` (11), `postgres` (16 + PostGIS), `mongo`, `oracle-xe` (21c XE, exclusivo deste fork) |
-| **Cache / KV**  | `redis`, `memcached`                                                 |
-| **Search**      | `meilisearch`, `typesense`, `elasticsearch`                          |
-| **Mensageria**  | `rabbitmq`                                                            |
-| **Object store**| `rustfs` (S3-compatível)                                             |
-| **Mail**        | `mailpit` (SMTP catcher + UI em `localhost:8025`)                    |
-| **PDF**         | `gotenberg` (API de conversão e geração)                             |
-| **Testes**      | `selenium` (Chromium para Dusk/Panther), `stripe-mock` (Cashier + webhooks) |
-| **Admin UI**    | `phpmyadmin`, `pgadmin`, `mongo-express`, `elasticvue`, `typesense-dashboard` |
+| Categoria        | Presets                                                                                                               |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------- |
+| **Bancos**       | `mysql` (8.4 default), `mariadb` (11), `postgres` (16 + PostGIS), `mongo`, `oracle-xe` (21c XE, exclusivo deste fork) |
+| **Cache / KV**   | `redis`, `memcached`                                                                                                  |
+| **Search**       | `meilisearch`, `typesense`, `elasticsearch`                                                                           |
+| **Mensageria**   | `rabbitmq`                                                                                                            |
+| **Object store** | `rustfs` (S3-compatível)                                                                                              |
+| **Mail**         | `mailpit` (SMTP catcher + UI em `localhost:8025`)                                                                     |
+| **PDF**          | `gotenberg` (API de conversão e geração)                                                                              |
+| **Testes**       | `selenium` (Chromium para Dusk/Panther), `stripe-mock` (Cashier + webhooks)                                           |
+| **Admin UI**     | `phpmyadmin`, `pgadmin`, `mongo-express`, `elasticvue`, `typesense-dashboard`                                         |
 
 Listar e inspecionar:
 
@@ -152,10 +152,10 @@ lerd service preset <nome>  # instala via wizard com seleção de versão
 
 ### Frameworks suportados
 
-| Framework   | Origem      | Detecção automática                                              |
-|-------------|-------------|------------------------------------------------------------------|
-| Laravel     | built-in    | `composer.json: laravel/framework` ou estrutura `artisan` na raiz |
-| Symfony     | built-in    | `composer.json: symfony/framework-bundle` ou `bin/console`       |
+| Framework                         | Origem                      | Detecção automática                                                              |
+| --------------------------------- | --------------------------- | -------------------------------------------------------------------------------- |
+| Laravel                           | built-in                    | `composer.json: laravel/framework` ou estrutura `artisan` na raiz                |
+| Symfony                           | built-in                    | `composer.json: symfony/framework-bundle` ou `bin/console`                       |
 | WordPress, Drupal, Statamic, etc. | via store / YAML do usuário | Adicionar em `~/.config/lerd/frameworks/<nome>.yaml` ou via `lerd framework add` |
 
 Cada framework define: range válido de PHP, env file path/format, regras de
@@ -338,7 +338,7 @@ sessão pegar a mudança.
 curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 ```
 
-Quando perguntar **"Enable lerd-managed DNS for *.test domains?"** responda
+Quando perguntar **"Enable lerd-managed DNS for \*.test domains?"** responda
 **N** (não). O fork já vem com `*.localhost` como padrão, que resolve
 para loopback automaticamente (RFC 6761) sem precisar de
 `systemd-resolved`/`NetworkManager` — coisas que normalmente não estão
@@ -451,8 +451,8 @@ exatamente como em Linux nativo.
 
 ### Troubleshooting WSL2
 
-| Sintoma                                          | Solução                                                          |
-|--------------------------------------------------|------------------------------------------------------------------|
+| Sintoma                                           | Solução                                                         |
+| ------------------------------------------------- | --------------------------------------------------------------- |
 | `System has not been booted with systemd as init` | `[boot] systemd=true` em `/etc/wsl.conf` + `wsl --shutdown`     |
 | `Failed to connect to bus` em `systemctl --user`  | falta `loginctl enable-linger` ou faltou relogar                |
 | `http://...localhost` não abre no Chrome Windows  | falta `networkingMode=mirrored` no `.wslconfig`                 |
@@ -564,8 +564,8 @@ oracle:
   port: 1521
   service_name: PRODPDB
   username: app_user
-  password: ${ORACLE_PASSWORD}   # use placeholder e set no shell
-  charset: AL32UTF8              # ou WE8MSWIN1252, WE8ISO8859P15
+  password: ${ORACLE_PASSWORD} # use placeholder e set no shell
+  charset: AL32UTF8 # ou WE8MSWIN1252, WE8ISO8859P15
 ```
 
 ---
@@ -614,7 +614,7 @@ lerd php:rebuild --local      # constrói tudo do zero (sem pull do ghcr)
 
 > [!NOTE]
 > Como o template Containerfile deste fork difere do upstream, o hash
-> SHA-256 dos pulls do `ghcr.io/geodro/lerd-php<X>-fpm-base` **não bate**
+> SHA-256 dos pulls do `ghcr.io/gabriel-sousa99/lerd-php<X>-fpm-base` **não bate**
 > e o lerd cai automaticamente no build local — é o comportamento correto
 > e garante que suas customizações (Instant Client, oci8, memcached, amqp)
 > fiquem na imagem.
@@ -675,7 +675,7 @@ Para limpar imagens podman também:
 ```bash
 podman ps -a --filter "name=lerd-" -q | xargs podman rm -f
 podman images --filter "reference=lerd-*" -q | xargs podman rmi -f
-podman images --filter "reference=ghcr.io/geodro/lerd-*" -q | xargs podman rmi -f
+podman images --filter "reference=ghcr.io/gabriel-sousa99/lerd-*" -q | xargs podman rmi -f
 ```
 
 ---
@@ -748,47 +748,47 @@ lerd bug-report                # gera arquivo .tar.gz com tudo necessário pra a
 
 Guias por tópico em [`docs/DEBUG.md`](docs/DEBUG.md):
 
-| Sintoma                                    | Onde olhar                                                             |
-|--------------------------------------------|------------------------------------------------------------------------|
-| Site retorna `502 Bad Gateway`             | [`debug/nginx.md`](docs/debug/nginx.md) + [`debug/php-fpm.md`](docs/debug/php-fpm.md) |
-| `.localhost` ou `.test` não resolve        | [`debug/dns.md`](docs/debug/dns.md)                                    |
-| Quadlet/systemd falha ao subir             | [`debug/podman.md`](docs/debug/podman.md)                              |
-| `ORA-12541` / `ORA-12154` / `ORA-01017`    | [`debug/oracle.md`](docs/debug/oracle.md)                              |
-| `lerd update` quebrou                      | [`debug/updates.md`](docs/debug/updates.md)                            |
-| Worker em loop / fila parou                | [`debug/workers.md`](docs/debug/workers.md)                            |
-| Conflito de porta em MySQL/Postgres        | [`debug/services.md`](docs/debug/services.md)                          |
+| Sintoma                                 | Onde olhar                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------- |
+| Site retorna `502 Bad Gateway`          | [`debug/nginx.md`](docs/debug/nginx.md) + [`debug/php-fpm.md`](docs/debug/php-fpm.md) |
+| `.localhost` ou `.test` não resolve     | [`debug/dns.md`](docs/debug/dns.md)                                                   |
+| Quadlet/systemd falha ao subir          | [`debug/podman.md`](docs/debug/podman.md)                                             |
+| `ORA-12541` / `ORA-12154` / `ORA-01017` | [`debug/oracle.md`](docs/debug/oracle.md)                                             |
+| `lerd update` quebrou                   | [`debug/updates.md`](docs/debug/updates.md)                                           |
+| Worker em loop / fila parou             | [`debug/workers.md`](docs/debug/workers.md)                                           |
+| Conflito de porta em MySQL/Postgres     | [`debug/services.md`](docs/debug/services.md)                                         |
 
 Também acessível direto pelo dashboard em **System → Debug & Troubleshoot**, com botões pra rodar os diagnósticos e copiar o relatório.
 
 ## Lista de comandos úteis
 
-| Comando                                | O que faz                                                  |
-|----------------------------------------|------------------------------------------------------------|
-| `lerd init`                            | Wizard interativo cria `.lerd.yaml`                        |
-| `lerd link`                            | Registra o diretório como site                             |
-| `lerd unlink`                          | Remove o site (sem deletar arquivos)                       |
-| `lerd open`                            | Abre o site no navegador                                   |
-| `lerd dashboard`                       | Abre o painel web (Cmd+K, live widgets)                    |
-| `lerd tui`                             | Painel terminal estilo btop                                |
-| `lerd php <args>`                      | Roda php no container do projeto (ex: `lerd php artisan tinker`) |
-| `lerd composer <args>`                 | Roda composer com binários `composer-global` no PATH       |
-| `lerd npm <args>` / `lerd npx <args>`  | Usa Node do projeto via fnm                                |
-| `lerd db:shell`                        | Abre shell do DB do projeto                                |
-| `lerd db:export` / `lerd db:import`    | Backup / restore                                           |
-| `lerd db:isolate`                      | DB próprio para o worktree atual (clone do parent ou vazio)|
-| `lerd horizon:start` / `:stop`         | Laravel Horizon como serviço systemd                       |
-| `lerd queue:start` / `:stop`           | Worker de filas                                            |
-| `lerd schedule:start` / `:stop`        | `php artisan schedule:work`                                |
-| `lerd reverb:start` / `:stop`          | WebSocket server (Laravel Reverb)                          |
-| `lerd lan`                             | Expõe sites para o LAN                                     |
-| `lerd remote-control`                  | Liga/desliga acesso ao dashboard via LAN                   |
-| `lerd mcp:enable-global`               | Registra MCP server para Claude / IDE / agentes            |
-| `lerd php:install <ver>`               | **(fork)** Provisiona nova versão (5.6 → 8.5) — build + quadlet + start |
-| `lerd php:rebuild [ver]`               | Reconstrói image FPM (após mudar Containerfile)            |
-| `lerd php:ext add <ext> [ver]`         | Instala extensão extra via PECL + apk-deps                 |
-| `lerd php:ini <ver>`                   | Edita `~/.local/share/lerd/php/<ver>/98-user.ini` (com validação) |
-| `lerd service preset <name>`           | Instala um service preset (ex: `oracle-xe`, `typesense`)   |
-| `lerd service start/stop/restart`      | Controle do serviço                                        |
+| Comando                               | O que faz                                                               |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `lerd init`                           | Wizard interativo cria `.lerd.yaml`                                     |
+| `lerd link`                           | Registra o diretório como site                                          |
+| `lerd unlink`                         | Remove o site (sem deletar arquivos)                                    |
+| `lerd open`                           | Abre o site no navegador                                                |
+| `lerd dashboard`                      | Abre o painel web (Cmd+K, live widgets)                                 |
+| `lerd tui`                            | Painel terminal estilo btop                                             |
+| `lerd php <args>`                     | Roda php no container do projeto (ex: `lerd php artisan tinker`)        |
+| `lerd composer <args>`                | Roda composer com binários `composer-global` no PATH                    |
+| `lerd npm <args>` / `lerd npx <args>` | Usa Node do projeto via fnm                                             |
+| `lerd db:shell`                       | Abre shell do DB do projeto                                             |
+| `lerd db:export` / `lerd db:import`   | Backup / restore                                                        |
+| `lerd db:isolate`                     | DB próprio para o worktree atual (clone do parent ou vazio)             |
+| `lerd horizon:start` / `:stop`        | Laravel Horizon como serviço systemd                                    |
+| `lerd queue:start` / `:stop`          | Worker de filas                                                         |
+| `lerd schedule:start` / `:stop`       | `php artisan schedule:work`                                             |
+| `lerd reverb:start` / `:stop`         | WebSocket server (Laravel Reverb)                                       |
+| `lerd lan`                            | Expõe sites para o LAN                                                  |
+| `lerd remote-control`                 | Liga/desliga acesso ao dashboard via LAN                                |
+| `lerd mcp:enable-global`              | Registra MCP server para Claude / IDE / agentes                         |
+| `lerd php:install <ver>`              | **(fork)** Provisiona nova versão (5.6 → 8.5) — build + quadlet + start |
+| `lerd php:rebuild [ver]`              | Reconstrói image FPM (após mudar Containerfile)                         |
+| `lerd php:ext add <ext> [ver]`        | Instala extensão extra via PECL + apk-deps                              |
+| `lerd php:ini <ver>`                  | Edita `~/.local/share/lerd/php/<ver>/98-user.ini` (com validação)       |
+| `lerd service preset <name>`          | Instala um service preset (ex: `oracle-xe`, `typesense`)                |
+| `lerd service start/stop/restart`     | Controle do serviço                                                     |
 
 ---
 
@@ -808,7 +808,7 @@ Requisitos: Go 1.25+, Node 22+, npm 10+.
 
 ## Créditos
 
-- **Lerd** original — [George Dumitrescu](https://github.com/geodro) ([geodro/lerd](https://github.com/geodro/lerd))
+- **Lerd** original — [George Dumitrescu](https://github.com/geodro) ([gabriel-sousa99/lerd](https://github.com/gabriel-sousa99/lerd))
 - **Suporte Oracle** (este fork) — [Gabriel Sousa](https://github.com/gabriel-sousa99)
 
 Licença: MIT (herdada do upstream — ver [`LICENSE`](LICENSE)).

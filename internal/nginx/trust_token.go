@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // trustTokenFile is the on-disk location of the per-install random token used
