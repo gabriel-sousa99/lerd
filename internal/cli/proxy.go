@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"text/tabwriter"
 
@@ -24,6 +26,9 @@ func NewProxyCmd() *cobra.Command {
 	cmd.AddCommand(newProxySecureCmd(false))
 	cmd.AddCommand(newProxyPauseCmd(true))
 	cmd.AddCommand(newProxyPauseCmd(false))
+	cmd.AddCommand(newProxyStartCmd())
+	cmd.AddCommand(newProxyStopCmd())
+	cmd.AddCommand(newProxyLogsCmd())
 	return cmd
 }
 
@@ -193,4 +198,69 @@ func scheme(secured bool) string {
 		return "HTTPS"
 	}
 	return "HTTP"
+}
+
+func newProxyStartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "start <nome-ou-domínio>",
+		Short: "Iniciar o dev server gerenciado (managed mode)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			name := resolveProxyName(args[0])
+			p, err := config.FindProxy(name)
+			if err != nil {
+				return err
+			}
+			if !p.Managed {
+				return fmt.Errorf("proxy %s não está em managed mode", name)
+			}
+			if err := proxyops.WriteManagedQuadlet(*p); err != nil {
+				return err
+			}
+			if err := proxyops.StartManaged(name); err != nil {
+				return err
+			}
+			fmt.Printf("Dev server %s iniciado.\n", name)
+			return nil
+		},
+	}
+}
+
+func newProxyStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop <nome-ou-domínio>",
+		Short: "Parar o dev server gerenciado",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			name := resolveProxyName(args[0])
+			if err := proxyops.StopManaged(name); err != nil {
+				return err
+			}
+			fmt.Printf("Dev server %s parado.\n", name)
+			return nil
+		},
+	}
+}
+
+func newProxyLogsCmd() *cobra.Command {
+	var follow bool
+	c := &cobra.Command{
+		Use:   "logs <nome-ou-domínio>",
+		Short: "Ver logs do dev server gerenciado (journalctl)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			name := resolveProxyName(args[0])
+			unit := proxyops.ManagedUnitName(name) + ".service"
+			argv := []string{"--user", "-u", unit, "--no-pager"}
+			if follow {
+				argv = append(argv, "-f")
+			}
+			jc := exec.Command("journalctl", argv...)
+			jc.Stdout = os.Stdout
+			jc.Stderr = os.Stderr
+			return jc.Run()
+		},
+	}
+	c.Flags().BoolVarP(&follow, "follow", "f", false, "Seguir logs em tempo real")
+	return c
 }
