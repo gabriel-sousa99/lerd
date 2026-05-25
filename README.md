@@ -20,6 +20,7 @@
 ## Sumário
 
 - [O que muda em relação ao upstream](#o-que-muda-em-relação-ao-upstream)
+- [Abrangência (tudo que vem na caixa)](#abrangência-tudo-que-vem-na-caixa)
 - [Instalação](#instalação)
 - [Instalando no WSL2 (Ubuntu/Debian)](#instalando-no-wsl2-ubuntudebian)
 - [Primeiro uso](#primeiro-uso)
@@ -79,6 +80,118 @@ calendar    dba        shmop       (e tudo que o php:X.Y-fpm-alpine já traz)
 (extensões PECL atuais não compilam em 5.6). Tem oci8 2.0.12 + xdebug
 2.5.5 + redis 4.3 + imagick + mongodb 1.7. Para apps Laravel 5.x legados
 que precisam falar com Oracle.
+
+---
+
+## Abrangência (tudo que vem na caixa)
+
+Catálogo completo do que esta fork instala/gerencia. Nada aqui depende de
+Docker Desktop, banco externo, ou pacote do sistema além de `podman` +
+`mkcert` (HTTPS opcional) + `git`.
+
+### Versões PHP suportadas
+
+| Linha       | Versões             | Notas                                                                 |
+|-------------|---------------------|-----------------------------------------------------------------------|
+| Suportadas  | 7.4 → 8.5           | Build próprio FPM (Alpine `php:X.Y-fpm-alpine`), com `oci8` específico para cada versão |
+| Legacy      | 5.6                 | Build estendido com `libresolv` shim; oci8 2.0.12 + xdebug 2.5.5 + redis 4.3 + imagick + mongodb 1.7 |
+| Sem build   | qualquer            | `lerd php:install <X.Y>` puxa, builda quadlet systemd, registra no `php:list` |
+| FrankenPHP  | 8.2 / 8.3 / 8.4     | Runtime alternativo (modo worker), selecionado em `.lerd.yaml: runtime: frankenphp` |
+
+> Detecção da versão por projeto: `.lerd.yaml: php_version` → `.php-version`
+> → `composer.json: require.php` → `php.default_version` da config global.
+> Sempre clampada ao range do framework detectado.
+
+### Extensões PHP nas imagens
+
+**~32 extensões prontas** — cobre o ecossistema top-10 Laravel sem precisar
+de `lerd php:ext add`.
+
+- **Sempre-compiladas no PHP core:** `ctype`, `dom`, `fileinfo`, `filter`,
+  `ftp`, `hash`, `iconv`, `json`, `libxml`, `openssl`, `pcre`, `pdo`,
+  `phar`, `posix`, `readline`, `session`, `simplexml`, `sodium`, `spl`,
+  `tokenizer`, `xml`, `xmlreader`, `xmlwriter`, `zlib`
+- **Compiladas via `docker-php-ext-install`:** `bcmath`, `bz2`, `calendar`,
+  `curl`, `dba`, `exif`, `gd`, `gmp`, `intl`, `ldap`, `mbstring`,
+  `mysqli`, `opcache`, `pcntl`, `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`,
+  `soap`, `shmop`, `sockets`, `sqlite3`, `sysvmsg`, `sysvsem`, `sysvshm`,
+  `xsl`, `zip`
+- **Via PECL (todas pré-builds):** `redis`, `imagick`, `igbinary`,
+  `mongodb`, `pcov`, `xdebug`
+- **Exclusivo deste fork:** `oci8` (Oracle), `memcached`, `amqp`
+
+Extras pelo dashboard ou CLI (`lerd php:ext add <nome>`): qualquer outra
+extensão PECL/PHP compila por cima da imagem, com gerenciamento de deps
+Alpine (`--apk-deps`) e verificação `php -m` pós-build.
+
+### Serviços disponíveis (21 presets)
+
+Cada preset vira um container systemd user-unit (`lerd-<nome>.service`)
+gerenciado por `lerd service`. Versões alternadas (`mysql-5-6`,
+`postgres-14`, `mongo-6`, etc.) instaláveis via `lerd service preset`.
+
+| Categoria       | Presets                                                              |
+|-----------------|----------------------------------------------------------------------|
+| **Bancos**      | `mysql` (8.4 default), `mariadb` (11), `postgres` (16 + PostGIS), `mongo`, `oracle-xe` (21c XE, exclusivo deste fork) |
+| **Cache / KV**  | `redis`, `memcached`                                                 |
+| **Search**      | `meilisearch`, `typesense`, `elasticsearch`                          |
+| **Mensageria**  | `rabbitmq`                                                            |
+| **Object store**| `rustfs` (S3-compatível)                                             |
+| **Mail**        | `mailpit` (SMTP catcher + UI em `localhost:8025`)                    |
+| **PDF**         | `gotenberg` (API de conversão e geração)                             |
+| **Testes**      | `selenium` (Chromium para Dusk/Panther), `stripe-mock` (Cashier + webhooks) |
+| **Admin UI**    | `phpmyadmin`, `pgadmin`, `mongo-express`, `elasticvue`, `typesense-dashboard` |
+
+Listar e inspecionar:
+
+```bash
+lerd service list           # mostra disponíveis vs instalados + versões
+lerd service status         # estado runtime de todos
+lerd service preset <nome>  # instala via wizard com seleção de versão
+```
+
+### Frameworks suportados
+
+| Framework   | Origem      | Detecção automática                                              |
+|-------------|-------------|------------------------------------------------------------------|
+| Laravel     | built-in    | `composer.json: laravel/framework` ou estrutura `artisan` na raiz |
+| Symfony     | built-in    | `composer.json: symfony/framework-bundle` ou `bin/console`       |
+| WordPress, Drupal, Statamic, etc. | via store / YAML do usuário | Adicionar em `~/.config/lerd/frameworks/<nome>.yaml` ou via `lerd framework add` |
+
+Cada framework define: range válido de PHP, env file path/format, regras de
+detecção de serviços (`env_detect`), workers (Horizon, Reverb, queue), e
+comandos artisan customizados (auto-discovery em `app/Console/Commands/`).
+
+### Recursos do dashboard
+
+- **Editor de `.env`** (sites + serviços) com `Save/Discard/Ctrl+S` + backup automático em `.env.before_lerd`
+- **Subir projeto preserva o `.env`** — só `APP_URL`/`SESSION_DOMAIN`/`SANCTUM_STATEFUL_DOMAINS`/`VITE_REVERB_*`/`REVERB_*` são tocados; `DB_*`, `REDIS_*`, `MAIL_*` e credenciais ficam intactos. Use `lerd env` (sem flag) quando quiser fiar o projeto aos serviços lerd
+- **Gerenciamento de extensões PHP** (instalar/remover/listar por versão)
+- **Instalador de versão PHP** com SSE logs ao vivo e `beforeunload` guard
+- **Comandos artisan customizados** com auto-discovery de `app/Console/Commands/*.php`
+- **Filtros de comandos destrutivos** (`migrate:fresh`, `db:wipe`, …) em 2 camadas (lista UI + HTTP 403 no backend)
+- **Botão "Abrir no editor"** ao lado do terminal (VS Code, Cursor, PHPStorm, Sublime, etc.)
+- **Worktrees**: cada branch ganha subdomínio `<branch>.<site>.test` com cert wildcard e DB isolado opcional
+
+### CLI — capacidades principais
+
+- **Setup do site:** `lerd init` (wizard), `lerd link` (registro simples), `lerd new <framework>` (scaffold)
+- **Worktrees:** `lerd worktree add/remove`, com DB isolation opcional
+- **PHP:** `lerd php:install <X.Y>`, `lerd php:list`, `lerd php:ext add/remove/list`, `lerd php:rebuild`, `lerd php:shell`
+- **Serviços:** `lerd service start/stop/restart/status/list/preset/migrate/rollback`
+- **Workers:** `lerd worker`, `lerd horizon`, `lerd reverb`, `lerd queue`, `lerd schedule`
+- **DB:** `lerd db isolate`, `lerd db set <connection>`, `lerd dump/restore`, `lerd composer-exec`
+- **HTTPS:** `lerd secure/unsecure` (mkcert + nginx reload automático)
+- **DNS:** `lerd dns` (lerd-dns dnsmasq containerizado) ou `.localhost` (sem sudo)
+- **LAN share:** `lerd lan` (expor site a outros devices da rede)
+- **Compartilhamento:** `lerd share` (tunnel público temporário)
+- **MCP:** `lerd mcp` (servidor MCP para Claude Code / outros agentes)
+- **Diagnóstico:** `lerd doctor`, `lerd bug-report`, `lerd logs <site|service>`
+- **Tray / TUI:** `lerd tray`, `lerd tui` (interfaces alternativas à web UI)
+- **Import:** `lerd import:sail` (migra projeto Laravel Sail mantendo dados)
+- **Setup:** `lerd setup` (provisiona FPM + serviços conforme `.lerd.yaml`), `lerd autostart`
+
+Lista completa: `lerd --help`.
 
 ---
 
