@@ -136,7 +136,7 @@ brews:
       - lerd-darwin-amd64
       - lerd-darwin-arm64
     repository:
-      owner: geodro
+      owner: gabriel-sousa99
       name: homebrew-lerd
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://github.com/gabriel-sousa99/lerd"
@@ -185,7 +185,7 @@ changelog:
 
 release:
   github:
-    owner: geodro
+    owner: gabriel-sousa99
     name: lerd
   name_template: "v{{ .Version }}"
   draft: false
