@@ -1,6 +1,6 @@
 # Lerd Oracle Edition
 
-> Fork do [`gabriel-sousa99/lerd`](https://github.com/gabriel-sousa99/lerd) com **suporte a
+> Fork do [`geodro/lerd`](https://github.com/geodro/lerd) com **suporte a
 > Oracle Database embutido em todas as imagens PHP** — Oracle Instant
 > Client 21.18 (LTS) + `oci8` + memcached + amqp já compilados, prontos
 > para PHP 5.6 → 8.5. Drop-in replacement: todo comando `lerd` existente
