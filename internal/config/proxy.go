@@ -29,7 +29,7 @@ type Proxy struct {
 }
 
 // PrimaryDomain returns the first registered domain.
-func (p *Proxy) PrimaryDomain() string {
+func (p Proxy) PrimaryDomain() string {
 	if len(p.Domains) > 0 {
 		return p.Domains[0]
 	}

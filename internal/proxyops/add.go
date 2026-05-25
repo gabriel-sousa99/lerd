@@ -60,9 +60,6 @@ func Add(opts AddOptions) (config.Proxy, error) {
 	}
 
 	name, _ := ProxyNameAndDomain(domain, "")
-	if name == "" {
-		name = "proxy"
-	}
 
 	p := config.Proxy{
 		Name:         name,
