@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"text/tabwriter"
 
@@ -76,16 +75,16 @@ func newProxyLsCmd() *cobra.Command {
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "Listar proxies",
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			reg, err := config.LoadProxies()
 			if err != nil {
 				return err
 			}
 			if len(reg.Proxies) == 0 {
-				fmt.Println("Nenhum proxy registrado. Use `lerd proxy add` para criar um.")
+				fmt.Fprintln(cmd.OutOrStdout(), "Nenhum proxy registrado. Use `lerd proxy add` para criar um.")
 				return nil
 			}
-			w := tabwriter.NewWriter(os.Stdout, 2, 0, 2, ' ', 0)
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "NAME\tDOMAIN\tPORT\tTLS\tMANAGED\tPATH")
 			for _, p := range reg.Proxies {
 				tls := "no"
@@ -162,7 +161,15 @@ func newProxyPauseCmd(pause bool) *cobra.Command {
 				return err
 			}
 			p.Paused = pause
-			return proxyops.ApplyPause(p)
+			if err := proxyops.ApplyPause(p); err != nil {
+				return err
+			}
+			verb := "pausado"
+			if !pause {
+				verb = "reativado"
+			}
+			fmt.Printf("Proxy %s %s.\n", p.Name, verb)
+			return nil
 		},
 	}
 }
