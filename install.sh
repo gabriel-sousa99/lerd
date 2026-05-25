@@ -13,8 +13,8 @@
 # Releases seguem o esquema v1.21.2-oracle.N (rebase periódico sobre upstream).
 #
 # Uso:
-#   Install:   curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
-#      ou:     wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
+#   Install:   curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
+#      ou:     wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 #   Update:    lerd-installer --update      (ou simplesmente: lerd update)
 #   Uninstall: lerd-installer --uninstall
 

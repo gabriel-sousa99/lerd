@@ -206,13 +206,13 @@ Lista completa: `lerd --help`.
 ### Instalar
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 ```
 
 ou via `wget`:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 ```
 
 O script:
@@ -335,7 +335,7 @@ sessão pegar a mudança.
 ### 5. Rodar o instalador em modo `.localhost`
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 ```
 
 Quando perguntar **"Enable lerd-managed DNS for *.test domains?"** responda
