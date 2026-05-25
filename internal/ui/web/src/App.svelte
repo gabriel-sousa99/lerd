@@ -14,6 +14,7 @@
   import { loadAutostart } from '$stores/autostart';
   import { loadSites } from '$stores/sites';
   import { loadServices } from '$stores/services';
+  import { loadProxies } from '$stores/proxies';
   import { loadWorkerHealth } from '$stores/workerHealth';
   import { connectWs, disconnectWs } from '$lib/ws';
   import { initDashboardRoute } from '$stores/dashboard';
@@ -29,9 +30,11 @@
 
   import SitesTab from '$tabs/SitesTab.svelte';
   import ServicesTab from '$tabs/ServicesTab.svelte';
+  import ProxiesTab from '$tabs/ProxiesTab.svelte';
   import SystemTab from '$tabs/SystemTab.svelte';
   import SitesDetail from '$tabs/SitesDetail.svelte';
   import ServicesDetail from '$tabs/ServicesDetail.svelte';
+  import ProxiesDetail from '$tabs/ProxiesDetail.svelte';
   import SystemDetail from '$tabs/SystemDetail.svelte';
   import AppsPage from '$tabs/AppsPage.svelte';
   import DashboardTab from '$tabs/DashboardTab.svelte';
@@ -49,6 +52,7 @@
     loadAutostart();
     loadSites();
     loadServices();
+    loadProxies();
     loadWorkerHealth();
     connectWs();
     initDashboardRoute();
@@ -78,6 +82,8 @@
         <SitesTab />
       {:else if $tab === 'services'}
         <ServicesTab />
+      {:else if $tab === 'proxies'}
+        <ProxiesTab />
       {:else if $tab === 'system'}
         <SystemTab />
       {/if}
@@ -96,6 +102,8 @@
         <SitesDetail />
       {:else if $tab === 'services'}
         <ServicesDetail />
+      {:else if $tab === 'proxies'}
+        <ProxiesDetail />
       {:else if $tab === 'system'}
         <SystemDetail />
       {/if}
@@ -115,6 +123,8 @@
           <SitesTab />
         {:else if $tab === 'services'}
           <ServicesTab />
+        {:else if $tab === 'proxies'}
+          <ProxiesTab />
         {:else if $tab === 'system'}
           <SystemTab />
         {/if}
@@ -126,6 +136,8 @@
           <SitesDetail />
         {:else if $tab === 'services'}
           <ServicesDetail />
+        {:else if $tab === 'proxies'}
+          <ProxiesDetail />
         {:else if $tab === 'system'}
           <SystemDetail />
         {/if}

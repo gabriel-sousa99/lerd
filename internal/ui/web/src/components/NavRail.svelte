@@ -14,6 +14,7 @@
     dashboard: m.nav_dashboard(),
     sites: m.nav_sites(),
     services: m.nav_services(),
+    proxies: m.nav_proxies(),
     system: m.nav_system()
   });
 
@@ -21,6 +22,7 @@
     dashboard: 'dashboard',
     sites: 'sites',
     services: 'services',
+    proxies: 'proxies',
     system: 'system'
   };
 </script>

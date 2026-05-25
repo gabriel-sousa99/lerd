@@ -115,6 +115,7 @@
   "time_day_ago": "il y a {n}j",
   "nav_sites": "Sites",
   "nav_services": "Services",
+  "nav_proxies": "Proxies",
   "nav_system": "Système",
   "nav_apps": "Apps",
   "nav_documentation": "Documentation",
