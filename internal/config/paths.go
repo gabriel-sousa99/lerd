@@ -94,6 +94,11 @@ func SitesFile() string {
 	return filepath.Join(DataDir(), "sites.yaml")
 }
 
+// ProxiesFile returns the path to proxies.yaml.
+func ProxiesFile() string {
+	return filepath.Join(DataDir(), "proxies.yaml")
+}
+
 // GlobalConfigFile returns the path to config.yaml.
 func GlobalConfigFile() string {
 	return filepath.Join(ConfigDir(), "config.yaml")
