@@ -244,15 +244,19 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// which used to drop .test resolution for a few seconds.
 	dnsChanged := false
 
-	if wantDNS {
-		// 4. mkcert CA, interactive (may prompt for sudo)
-		fmt.Println("  --> Installing mkcert CA")
-		mkcertCmd := exec.Command(certs.MkcertPath(), "-install")
-		mkcertCmd.Stdin = os.Stdin
-		mkcertCmd.Stdout = os.Stdout
-		mkcertCmd.Stderr = os.Stderr
-		mkcertCmd.Run() //nolint:errcheck
+	// 4. mkcert CA — installed regardless of DNS choice. HTTPS works for
+	// .localhost sites (loopback by RFC 6761) without dnsmasq, so the CA
+	// must be trusted by the system even when the user picks the DNS-off
+	// path. Without this, browsers reject every per-site cert as "not
+	// trusted" even though the cert is technically valid.
+	fmt.Println("  --> Installing mkcert CA")
+	mkcertCmd := exec.Command(certs.MkcertPath(), "-install")
+	mkcertCmd.Stdin = os.Stdin
+	mkcertCmd.Stdout = os.Stdout
+	mkcertCmd.Stderr = os.Stderr
+	mkcertCmd.Run() //nolint:errcheck
 
+	if wantDNS {
 		// 5. DNS config + sudoers
 		step("Writing DNS configuration")
 		dnsConfPath := filepath.Join(config.DnsmasqDir(), "lerd.conf")
@@ -268,7 +272,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		fmt.Println("  --> Installing DNS sudoers rule")
 		dns.InstallSudoers() //nolint:errcheck
 	} else {
-		fmt.Println("  --> DNS disabled, skipping mkcert CA, dnsmasq and sudoers")
+		fmt.Println("  --> DNS disabled, skipping dnsmasq and sudoers (mkcert CA still installed)")
 	}
 
 	// 6. Nginx
