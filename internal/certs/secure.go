@@ -11,16 +11,14 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 )
 
-// ErrDNSDisabled signals that the operation requires the lerd-managed DNS /
-// mkcert CA stack, which the user has opted out of. Surfaces through the CLI
-// `lerd secure` command and the dashboard HTTPS toggle.
-var ErrDNSDisabled = fmt.Errorf("HTTPS requires lerd-managed DNS, set dns.enabled: true and re-run lerd install")
-
 // SecureSite issues a TLS certificate for the site and switches its nginx vhost to HTTPS.
+//
+// Used to early-return when cfg.DNS.Enabled was false on the assumption that
+// "no managed DNS → no mkcert CA in trust store → certs the browser rejects".
+// That assumption is gone: lerd install now installs the mkcert CA regardless
+// of the DNS choice, and .localhost domains resolve via RFC 6761 without any
+// DNS stack. HTTPS works for both .test and .localhost paths.
 func SecureSite(site config.Site) error {
-	if cfg, _ := config.LoadGlobal(); cfg != nil && !cfg.DNS.Enabled {
-		return ErrDNSDisabled
-	}
 	if err := issueCertWithWorktrees(site); err != nil {
 		return fmt.Errorf("issuing certificate: %w", err)
 	}

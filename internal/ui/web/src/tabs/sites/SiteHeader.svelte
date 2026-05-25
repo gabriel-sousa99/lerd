@@ -17,7 +17,6 @@
   } from '$stores/sites';
   import { openDomainModal, openWorktreeAddModal, openWorktreeRemoveModal } from '$stores/modals';
   import { accessMode } from '$stores/accessMode';
-  import { status } from '$stores/status';
   import { apiBase } from '$lib/api';
   import ServiceBadgeRow from './ServiceBadgeRow.svelte';
   import DomainMorePill from './DomainMorePill.svelte';
@@ -66,8 +65,11 @@
   });
   const showWorktreeTabs = $derived(Boolean(site.branch) && !site.paused);
   const urlEditable = $derived(!site.paused && !activeWorktreeBranch);
-  const dnsEnabled = $derived($status.dns?.enabled !== false);
-  const tlsToggleable = $derived(urlEditable && dnsEnabled);
+  // HTTPS toggle no longer gated on dns.enabled: the mkcert CA is installed
+  // regardless of the DNS choice (see oracle.19), and .localhost domains
+  // resolve via RFC 6761. The previous && dnsEnabled hid the padlock from
+  // users on the recommended WSL2 / no-DNS path even though SecureSite works.
+  const tlsToggleable = $derived(urlEditable);
   const lanPort = $derived(activeWorktree ? activeWorktree.lan_port ?? 0 : site.lan_port ?? 0);
   const lanURL = $derived(activeWorktree ? activeWorktree.lan_share_url ?? '' : site.lan_share_url ?? '');
   const lanDomain = $derived(activeWorktree ? activeWorktree.domain ?? site.domain : site.domain);
