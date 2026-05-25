@@ -3,7 +3,7 @@
 > Fork do [`gabriel-sousa99/lerd`](https://github.com/gabriel-sousa99/lerd) com **suporte a
 > Oracle Database embutido em todas as imagens PHP** — Oracle Instant
 > Client 21.18 (LTS) + `oci8` + memcached + amqp já compilados, prontos
-> para PHP 7.4 → 8.5. Drop-in replacement: todo comando `lerd` existente
+> para PHP 5.6 → 8.5. Drop-in replacement: todo comando `lerd` existente
 > funciona igual.
 
 > [!IMPORTANT]
@@ -11,7 +11,7 @@
 > aponta o auto-update para **este** repositório em vez do upstream.
 > Releases publicadas aqui seguem o esquema `v1.21.2-oracle.N`.
 
-[![Fork base](https://img.shields.io/badge/forked%20from-geodro%2Flerd%20v1.21.2-blue)](https://github.com/gabriel-sousa99/lerd)
+[![Fork base](https://img.shields.io/badge/forked%20from-geodro%2Flerd%20v1.21.2-blue)](https://github.com/geodro/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
 [![PHP](https://img.shields.io/badge/PHP-7.4%20%E2%80%93%208.5-777BB4)]()
 
