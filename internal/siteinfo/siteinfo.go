@@ -8,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/geodro/lerd/internal/applog"
 	"github.com/geodro/lerd/internal/config"
 	"github.com/geodro/lerd/internal/envfile"
@@ -304,29 +302,6 @@ func Enrich(s config.Site, flags EnrichFlag) EnrichedSite {
 	return e
 }
 
-// readUserPHPPin returns the user's explicit PHP version override from
-// .lerd.yaml or .php-version (in that priority order) without going through
-// any framework-range clamping. Empty when no explicit pin exists. Fork
-// helper for enrichVersions — the upstream DetectVersionClamped would
-// clamp the result against the framework's stale Min/Max, overwriting the
-// user's intent on every snapshot refresh.
-func readUserPHPPin(dir string) string {
-	if data, err := os.ReadFile(filepath.Join(dir, ".lerd.yaml")); err == nil {
-		var cfg struct {
-			PHPVersion string `yaml:"php_version"`
-		}
-		if yaml.Unmarshal(data, &cfg) == nil && cfg.PHPVersion != "" {
-			return cfg.PHPVersion
-		}
-	}
-	if data, err := os.ReadFile(filepath.Join(dir, ".php-version")); err == nil {
-		if v := strings.TrimSpace(string(data)); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 // PersistVersionChanges writes back any detected version changes to the site registry.
 func PersistVersionChanges(sites []EnrichedSite) error {
 	for _, e := range sites {
@@ -373,24 +348,10 @@ func (e *EnrichedSite) enrichVersions(s config.Site, fw *config.Framework, hasFw
 	if hasFw {
 		phpMin, phpMax = fw.PHP.Min, fw.PHP.Max
 	}
-
-	// Oracle fork: when the user has an explicit pin (`.php-version` or
-	// `.lerd.yaml` php_version), respect it absolutely. The framework's
-	// PHP.Min/Max constraints come from the BUNDLED framework definition
-	// (always the upstream latest, e.g. Laravel 13 ≥ PHP 8.4), which would
-	// otherwise clamp a legitimate Laravel 8 + PHP 7.4 project up to PHP 8.5
-	// on every site-snapshot refresh, undoing the user's choice.
-	if pinned := readUserPHPPin(s.Path); pinned != "" {
-		if pinned != s.PHPVersion {
-			e.PHPVersion = pinned
-			e.PHPVersionChanged = true
-		}
-	} else {
-		detected := phpPkg.DetectVersionClamped(s.Path, phpMin, phpMax, s.PHPVersion)
-		if detected != s.PHPVersion {
-			e.PHPVersion = detected
-			e.PHPVersionChanged = true
-		}
+	detected := phpPkg.DetectVersionClamped(s.Path, phpMin, phpMax, s.PHPVersion)
+	if detected != s.PHPVersion {
+		e.PHPVersion = detected
+		e.PHPVersionChanged = true
 	}
 
 	if nodeDetected, err := nodePkg.DetectVersion(s.Path); err == nil && nodeDetected != "" {
@@ -678,17 +639,8 @@ func frameworkLabel(name, path string, fw *config.Framework, hasFw bool) string 
 		return ""
 	}
 	if hasFw {
-		// Prefer the version detected from the project's composer.json
-		// constraint (e.g. `"laravel/framework": "^8.75"` → "8") over
-		// fw.Version, which is the bundled definition's version — always
-		// the upstream latest, and stale for older projects. Fork fix for
-		// "Laravel 13 shown on a Laravel 8 project".
-		version := config.DetectMajorVersion(path, name)
-		if version == "" {
-			version = fw.Version
-		}
-		if version != "" {
-			return fw.Label + " " + version
+		if fw.Version != "" {
+			return fw.Label + " " + fw.Version
 		}
 		return fw.Label
 	}

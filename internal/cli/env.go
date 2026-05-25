@@ -63,7 +63,7 @@ func userPickedDBFromYAML(lerdYAMLServices map[string]bool) bool {
 		return true
 	}
 	for name := range lerdYAMLServices {
-		switch config.InferFamily(name) {
+		switch config.FamilyOfName(name) {
 		case "mysql", "mariadb", "postgres", "mongo":
 			return true
 		}
@@ -74,10 +74,17 @@ func userPickedDBFromYAML(lerdYAMLServices map[string]bool) bool {
 // shouldApplyService decides whether to apply env vars for svc. A built-in
 // DB service that wasn't explicitly picked is skipped when the user picked a
 // different DB, so a fresh-Laravel DB_CONNECTION=sqlite never re-imprints
-// itself when the wizard selected mysql. Otherwise apply when the env file
+// itself when the wizard selected mysql. The built-in redis is likewise
+// skipped when the project picked valkey. Otherwise apply when the env file
 // references the service or .lerd.yaml lists it.
-func shouldApplyService(svc string, detectedFromEnv, pickedFromYAML, userPickedDB bool) bool {
+func shouldApplyService(svc string, detectedFromEnv, pickedFromYAML, userPickedDB, valkeyPicked bool) bool {
 	if userPickedDB && (svc == "mysql" || svc == "postgres" || svc == "oracle") && !pickedFromYAML {
+		return false
+	}
+	// Valkey writes the same REDIS_* keys, so a redis-shaped .env re-detects
+	// the built-in redis on every later run; skip it so valkey projects don't
+	// also boot a redundant redis container.
+	if svc == "redis" && valkeyPicked && !pickedFromYAML {
 		return false
 	}
 	return detectedFromEnv || pickedFromYAML
@@ -226,6 +233,9 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		for _, svc := range proj.Services {
 			lerdYAMLServices[svc.Name] = true
 		}
+		if proj.Oracle != nil {
+			lerdYAMLServices["oracle"] = true
+		}
 	}
 
 	// Laravel ships .env / .env.example with DB_CONNECTION=sqlite. If the user
@@ -236,27 +246,24 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// so they don't hit a 500 from the missing .sqlite file; the user can
 	// still switch later with `lerd db set mysql` or the db_set MCP tool.
 	if len(fw.Env.Services) == 0 &&
-		!lerdYAMLServices["mysql"] && !lerdYAMLServices["postgres"] && !lerdYAMLServices["sqlite"] &&
+		!userPickedDBFromYAML(lerdYAMLServices) &&
 		strings.EqualFold(strings.TrimSpace(envMap["DB_CONNECTION"]), "sqlite") {
 
 		dbChoice := "sqlite"
 		if isInteractive() {
+			options, _ := buildDatabaseOptions()
 			dbForm := huh.NewForm(huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("Database").
-					Description(envRelPath+" uses SQLite. Use a lerd-managed database service instead?").
-					Options(
-						huh.NewOption("Keep SQLite", "sqlite"),
-						huh.NewOption("MySQL (lerd-mysql)", "mysql"),
-						huh.NewOption("PostgreSQL (lerd-postgres)", "postgres"),
-					).
+					Description(envRelPath + " uses SQLite. Use a lerd-managed database service instead?").
+					Options(options...).
 					Value(&dbChoice),
 			)).WithTheme(huh.ThemeCatppuccin())
 			if err := dbForm.Run(); err != nil {
 				return fmt.Errorf("database prompt: %w", err)
 			}
 		} else {
-			fmt.Println("  Defaulting to SQLite (non-interactive). Run `lerd db set <mysql|postgres>` or call db_set to switch.")
+			fmt.Println("  Defaulting to SQLite (non-interactive). Run `lerd db set <service>` or call db_set to switch.")
 		}
 
 		// Persist the choice to .lerd.yaml so future runs don't re-ask, and
@@ -273,6 +280,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	}
 
 	userPickedDB := userPickedDBFromYAML(lerdYAMLServices)
+	valkeyPicked := lerdYAMLServices["valkey"]
 
 	if len(fw.Env.Services) > 0 {
 		// Framework defines its own service detection and vars — use those.
@@ -285,7 +293,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			detectedFromEnv := frameworkServiceDetected(def, envMap)
 			pickedFromYAML := lerdYAMLServices[svc]
 
-			if !shouldApplyService(svc, detectedFromEnv, pickedFromYAML, userPickedDB) {
+			if !shouldApplyService(svc, detectedFromEnv, pickedFromYAML, userPickedDB, valkeyPicked) {
 				continue
 			}
 
@@ -356,7 +364,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			detectedFromEnv := ok && detector(envMap)
 			pickedFromYAML := lerdYAMLServices[svc]
 
-			if !shouldApplyService(svc, detectedFromEnv, pickedFromYAML, userPickedDB) {
+			if !shouldApplyService(svc, detectedFromEnv, pickedFromYAML, userPickedDB, valkeyPicked) {
 				continue
 			}
 
@@ -530,7 +538,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			k, v, _ := strings.Cut(kv, "=")
 			updates[k] = applySiteHandle(v, tplCtx)
 		}
-		family := config.InferFamily(svc.Name)
+		family := config.FamilyOf(svc)
 		isDB := family == "mysql" || family == "mariadb" || family == "postgres"
 		if isDB {
 			updates["DB_DATABASE"] = dbName
@@ -650,7 +658,7 @@ func CreateDatabase(svc, name string) (bool, error) { return serviceops.CreateDa
 func CloneDatabase(svc, src, dst string) error {
 	container := "lerd-" + svc
 	family := svc
-	if inferred := config.InferFamily(svc); inferred != "" {
+	if inferred := config.FamilyOfName(svc); inferred != "" {
 		family = inferred
 	}
 	switch family {
@@ -684,58 +692,8 @@ func CloneDatabase(svc, src, dst string) error {
 	}
 }
 
-// DropDatabase removes the named database from the service container. Returns
-// (true, nil) if it was dropped, (false, nil) if it was already gone, or
-// (false, err) on failure.
-func DropDatabase(svc, name string) (bool, error) {
-	container := "lerd-" + svc
-	family := svc
-	if inferred := config.InferFamily(svc); inferred != "" {
-		family = inferred
-	}
-	switch family {
-	case "mysql", "mariadb":
-		binaries := []string{"mysql", "mariadb"}
-		if family == "mariadb" {
-			binaries = []string{"mariadb", "mysql"}
-		}
-		var lastErr error
-		for _, bin := range binaries {
-			check := podman.Cmd("exec", container, bin, "-uroot", "-plerd",
-				"-sNe", fmt.Sprintf("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='%s';", name))
-			out, err := check.Output()
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			if strings.TrimSpace(string(out)) == "0" {
-				return false, nil
-			}
-			cmd := podman.Cmd("exec", container, bin, "-uroot", "-plerd",
-				"-e", fmt.Sprintf("DROP DATABASE IF EXISTS `%s`;", name))
-			cmd.Stderr = os.Stderr
-			return true, cmd.Run()
-		}
-		return false, lastErr
-	case "postgres":
-		// Postgres refuses DROP if any session has the DB open, so terminate
-		// stragglers (queue workers, lingering psql shells) first.
-		_ = podman.Cmd("exec", container, "psql", "-U", "postgres",
-			"-c", fmt.Sprintf(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid();`, name)).Run()
-		cmd := podman.Cmd("exec", container, "psql", "-U", "postgres",
-			"-c", fmt.Sprintf(`DROP DATABASE IF EXISTS "%s";`, name))
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			if strings.Contains(string(out), "does not exist") {
-				return false, nil
-			}
-			return false, fmt.Errorf("%s", strings.TrimSpace(string(out)))
-		}
-		return true, nil
-	default:
-		return false, nil
-	}
-}
+// DropDatabase delegates to serviceops.DropDatabase for cli-package callers.
+func DropDatabase(svc, name string) (bool, error) { return serviceops.DropDatabase(svc, name) }
 
 // createDatabase delegates to serviceops.CreateDatabase. Kept as a package-local
 // alias so existing call sites inside the cli package compile unchanged.

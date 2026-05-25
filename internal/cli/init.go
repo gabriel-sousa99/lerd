@@ -51,6 +51,7 @@ func runInit(fresh bool) error {
 		if err != nil {
 			return err
 		}
+		existing = applyImportSeed(cwd, existing)
 		cfg, err := runWizard(cwd, existing)
 		if err != nil {
 			return err
@@ -502,6 +503,71 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 	}, nil
 }
 
+// promptOracleConnection runs the Oracle connection sub-form (host/port/
+// service/user/pass). Extracted so both `lerd init` and `lerd link` can
+// surface the same UX when Oracle is picked. Existing values seed defaults
+// so re-running --fresh in a project with an oracle: block doesn't blow it
+// away on Enter-spam.
+func promptOracleConnection(existing *config.ProjectOracleConfig) (*config.ProjectOracleConfig, error) {
+	oracleHost, oraclePort, oracleService, oracleUser, oraclePass := "", "1521", "XEPDB1", "", ""
+	if existing != nil {
+		oracleHost = existing.Host
+		if existing.Port > 0 {
+			oraclePort = fmt.Sprintf("%d", existing.Port)
+		}
+		if existing.ServiceName != "" {
+			oracleService = existing.ServiceName
+		}
+		oracleUser = existing.Username
+		oraclePass = existing.Password
+	}
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewInput().Title("Oracle host").
+			Description("Hostname or IP of the Oracle server (leave blank to fill later)").
+			Value(&oracleHost),
+		huh.NewInput().Title("Oracle port").
+			Description("Listener port (default 1521)").
+			Value(&oraclePort).
+			Validate(func(s string) error {
+				if s == "" {
+					return nil
+				}
+				for _, c := range s {
+					if c < '0' || c > '9' {
+						return fmt.Errorf("port must be a number")
+					}
+				}
+				return nil
+			}),
+		huh.NewInput().Title("Service name / SID").
+			Description("Oracle service name (e.g. XEPDB1, ORCLPDB1) or SID").
+			Value(&oracleService),
+		huh.NewInput().Title("Username").
+			Description("DB user (leave blank to fill in .env later)").
+			Value(&oracleUser),
+		huh.NewInput().Title("Password").
+			Description("DB password (stored in .lerd.yaml — consider .env-only)").
+			EchoMode(huh.EchoModePassword).
+			Value(&oraclePass),
+	)).WithTheme(huh.ThemeCatppuccin()).Run(); err != nil {
+		return nil, err
+	}
+	cfg := &config.ProjectOracleConfig{
+		Host:        strings.TrimSpace(oracleHost),
+		ServiceName: strings.TrimSpace(oracleService),
+		Username:    strings.TrimSpace(oracleUser),
+		Password:    oraclePass,
+	}
+	if oraclePort != "" {
+		p := 0
+		fmt.Sscanf(oraclePort, "%d", &p)
+		if p > 0 {
+			cfg.Port = p
+		}
+	}
+	return cfg, nil
+}
+
 // runCustomContainerWizard runs the init wizard for custom container projects.
 // It collects the container port, containerfile path, HTTPS, services, and
 // custom workers, then returns a ProjectConfig with the container section.
@@ -672,71 +738,6 @@ func runCustomContainerWizard(cwd string, defaults *config.ProjectConfig, gcfg *
 	}, nil
 }
 
-// promptOracleConnection runs the Oracle connection sub-form (host/port/
-// service/user/pass). Extracted so both `lerd init` and `lerd link` can
-// surface the same UX when Oracle is picked. Existing values seed defaults
-// so re-running --fresh in a project with an oracle: block doesn't blow it
-// away on Enter-spam.
-func promptOracleConnection(existing *config.ProjectOracleConfig) (*config.ProjectOracleConfig, error) {
-	oracleHost, oraclePort, oracleService, oracleUser, oraclePass := "", "1521", "XEPDB1", "", ""
-	if existing != nil {
-		oracleHost = existing.Host
-		if existing.Port > 0 {
-			oraclePort = fmt.Sprintf("%d", existing.Port)
-		}
-		if existing.ServiceName != "" {
-			oracleService = existing.ServiceName
-		}
-		oracleUser = existing.Username
-		oraclePass = existing.Password
-	}
-	if err := huh.NewForm(huh.NewGroup(
-		huh.NewInput().Title("Oracle host").
-			Description("Hostname or IP of the Oracle server (leave blank to fill later)").
-			Value(&oracleHost),
-		huh.NewInput().Title("Oracle port").
-			Description("Listener port (default 1521)").
-			Value(&oraclePort).
-			Validate(func(s string) error {
-				if s == "" {
-					return nil
-				}
-				for _, c := range s {
-					if c < '0' || c > '9' {
-						return fmt.Errorf("port must be a number")
-					}
-				}
-				return nil
-			}),
-		huh.NewInput().Title("Service name / SID").
-			Description("Oracle service name (e.g. XEPDB1, ORCLPDB1) or SID").
-			Value(&oracleService),
-		huh.NewInput().Title("Username").
-			Description("DB user (leave blank to fill in .env later)").
-			Value(&oracleUser),
-		huh.NewInput().Title("Password").
-			Description("DB password (stored in .lerd.yaml — consider .env-only)").
-			EchoMode(huh.EchoModePassword).
-			Value(&oraclePass),
-	)).WithTheme(huh.ThemeCatppuccin()).Run(); err != nil {
-		return nil, err
-	}
-	cfg := &config.ProjectOracleConfig{
-		Host:        strings.TrimSpace(oracleHost),
-		ServiceName: strings.TrimSpace(oracleService),
-		Username:    strings.TrimSpace(oracleUser),
-		Password:    oraclePass,
-	}
-	if oraclePort != "" {
-		p := 0
-		fmt.Sscanf(oraclePort, "%d", &p)
-		if p > 0 {
-			cfg.Port = p
-		}
-	}
-	return cfg, nil
-}
-
 // dbFamilies is the set of service families considered databases by the init
 // wizard. Members of these families show up in the Database select instead of
 // the Services multi-select.
@@ -757,11 +758,8 @@ var dbFamilies = map[string]bool{
 // database. Honours the explicit Family field first, then falls back to
 // pattern inference for legacy installs that pre-date the field.
 func dbFamilyOf(svc *config.CustomService) string {
-	if svc.Family != "" && dbFamilies[svc.Family] {
-		return svc.Family
-	}
-	if inferred := config.InferFamily(svc.Name); dbFamilies[inferred] {
-		return inferred
+	if family := config.FamilyOf(svc); dbFamilies[family] {
+		return family
 	}
 	return ""
 }
@@ -781,8 +779,8 @@ var dbFamilyLabels = map[string]string{
 func formatDBOptionLabel(name string) string {
 	family := name
 	version := ""
-	if config.InferFamily(name) != "" {
-		family = config.InferFamily(name)
+	if inferred := config.FamilyOfName(name); inferred != "" {
+		family = inferred
 		if rest := strings.TrimPrefix(name, family); rest != "" && rest != name {
 			version = strings.TrimPrefix(rest, "-")
 			version = strings.ReplaceAll(version, "-", ".")
@@ -1012,6 +1010,7 @@ func runSetupInit(cwd string, skipWizard bool) error {
 
 	if !hasExisting {
 		existing, _ := config.LoadProjectConfig(cwd)
+		existing = applyImportSeed(cwd, existing)
 		cfg, err := runWizard(cwd, existing)
 		if err != nil {
 			return err

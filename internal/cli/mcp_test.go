@@ -508,7 +508,11 @@ func TestIsLerdBuiltImage_matchers(t *testing.T) {
 func TestClaudeSkillContent_underSizeCeiling(t *testing.T) {
 	// Bumped to 51000 for commands_list / commands_run tools (framework
 	// command runner) plus their quick-reference table entries.
-	const ceiling = 51000
+	// Bumped to 52000 for profiler_toggle / profiler_status (SPX profiler)
+	// plus their quick-reference table entry.
+	// Bumped to 53000 for the db_snapshot / db_snapshots / db_restore /
+	// db_snapshot_delete section (database snapshots).
+	const ceiling = 53000
 	if got := len(claudeSkillContent); got > ceiling {
 		t.Errorf("claudeSkillContent is %d bytes, ceiling is %d — trim before raising", got, ceiling)
 	}

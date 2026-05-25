@@ -51,6 +51,10 @@ type GlobalConfig struct {
 	Nginx struct {
 		HTTPPort  int `yaml:"http_port"  mapstructure:"http_port"`
 		HTTPSPort int `yaml:"https_port" mapstructure:"https_port"`
+		// RequestTimeout is the default nginx request timeout in seconds,
+		// overridable per project via .lerd.yaml request_timeout. Zero falls
+		// back to nginx's own 60s default; read it via RequestTimeoutSeconds.
+		RequestTimeout int `yaml:"request_timeout,omitempty" mapstructure:"request_timeout"`
 	} `yaml:"nginx" mapstructure:"nginx"`
 	DNS struct {
 		// Enabled=false skips lerd-dns, mkcert CA, sudoers, and resolver
@@ -139,6 +143,12 @@ type GlobalConfig struct {
 		// ships it.
 		Passthrough bool `yaml:"passthrough,omitempty" mapstructure:"passthrough"`
 	} `yaml:"dumps,omitempty" mapstructure:"dumps"`
+	Profiler struct {
+		// Enabled toggles the SPX profiler globally. When on, nginx injects
+		// SPX_ENABLED into every PHP-FPM site's requests so each is profiled.
+		// Toggled via `lerd profile on/off` and the dashboard Profiler view.
+		Enabled bool `yaml:"enabled,omitempty" mapstructure:"enabled"`
+	} `yaml:"profiler,omitempty" mapstructure:"profiler"`
 	Notifications struct {
 		// Disabled globally mutes the notifier (WebSocket banners + Web
 		// Push fanout). Inverted form so the zero value keeps existing
@@ -147,6 +157,19 @@ type GlobalConfig struct {
 	} `yaml:"notifications,omitempty" mapstructure:"notifications"`
 	ParkedDirectories []string                 `yaml:"parked_directories" mapstructure:"parked_directories"`
 	Services          map[string]ServiceConfig `yaml:"services"           mapstructure:"services"`
+}
+
+// DefaultRequestTimeout is nginx's built-in fastcgi/proxy read-timeout default
+// (seconds), used when neither the project nor the global config sets one.
+const DefaultRequestTimeout = 60
+
+// RequestTimeoutSeconds returns the effective global nginx request timeout in
+// seconds, falling back to nginx's 60s default when unset or non-positive.
+func (c *GlobalConfig) RequestTimeoutSeconds() int {
+	if c.Nginx.RequestTimeout > 0 {
+		return c.Nginx.RequestTimeout
+	}
+	return DefaultRequestTimeout
 }
 
 // Worker exec-mode constants. `exec` is the default on every platform;
@@ -174,13 +197,8 @@ func defaultConfig() *GlobalConfig {
 	cfg.Node.DefaultVersion = "22"
 	cfg.Nginx.HTTPPort = 80
 	cfg.Nginx.HTTPSPort = 443
-	// Oracle fork default: opt out of lerd-managed DNS so sites resolve at
-	// http://<site>.localhost — every modern OS resolves *.localhost to the
-	// loopback per RFC 6761 without dnsmasq, no system resolver tweaks, no
-	// sudo, no port-53 conflicts. Users who want full .test domains can
-	// flip DNS.Enabled back on and set DNS.TLD to "test" in ~/.config/lerd/config.yaml.
-	cfg.DNS.Enabled = false
-	cfg.DNS.TLD = "localhost"
+	cfg.DNS.Enabled = true
+	cfg.DNS.TLD = "test"
 
 	home, _ := os.UserHomeDir()
 	cfg.ParkedDirectories = []string{home + "/Lerd"}
@@ -558,6 +576,11 @@ func (c *GlobalConfig) IsDumpsEnabled() bool {
 // run dumpsops.Apply to actually rewrite the FPM quadlets.
 func (c *GlobalConfig) SetDumpsEnabled(enabled bool) {
 	c.Dumps.Enabled = enabled
+}
+
+// IsProfilerEnabled reports whether the SPX profiler is globally armed.
+func (c *GlobalConfig) IsProfilerEnabled() bool {
+	return c.Profiler.Enabled
 }
 
 // IsDumpsPassthrough reports whether the bridge should also forward each

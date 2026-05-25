@@ -198,10 +198,6 @@ func Start(currentVersion string) error {
 	}))
 	mux.HandleFunc("/api/php-versions", withCORS(handlePHPVersions))
 	mux.HandleFunc("/api/php-versions/", withCORS(publishAfter(handlePHPVersionAction, eventbus.KindStatus, eventbus.KindSites)))
-	// Debug & troubleshoot endpoints — read-only diagnostic shellouts that
-	// mirror `lerd doctor`/`dns:check`/`bug-report` for the dashboard's
-	// System → Debug panel. No CORS needed (loopback-only auth model).
-	mux.HandleFunc("/api/debug/", withCORS(handleDebugAction))
 	mux.HandleFunc("/api/node-versions", withCORS(handleNodeVersions))
 	mux.HandleFunc("/api/node-versions/install", withCORS(publishAfter(handleInstallNodeVersion, eventbus.KindStatus)))
 	mux.HandleFunc("/api/node-versions/", withCORS(publishAfter(handleNodeVersionAction, eventbus.KindStatus, eventbus.KindSites)))
@@ -218,6 +214,10 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/dumps/toggle", withCORS(publishAfter(handleDumpsToggle, eventbus.KindDumpsStatus)))
 	mux.HandleFunc("/api/dumps/passthrough", withCORS(publishAfter(handleDumpsPassthrough, eventbus.KindDumpsStatus)))
 	mux.HandleFunc("/api/dumps/notify-changed", withCORS(handleDumpsNotifyChanged))
+	mux.HandleFunc("/api/profiler/toggle", withCORS(publishAfter(handleProfilerToggle, eventbus.KindProfilerStatus)))
+	mux.HandleFunc("/api/profiler/status", withCORS(handleProfilerStatus))
+	mux.HandleFunc("/api/profiler/clear", withCORS(handleProfilerClear))
+	mux.HandleFunc("/_spx/", handleSpxProxy)
 	mux.HandleFunc("/api/queue/", withCORS(handleQueueLogs))
 	mux.HandleFunc("/api/horizon/", withCORS(handleHorizonLogs))
 	mux.HandleFunc("/api/stripe/", withCORS(handleStripeLogs))
@@ -518,65 +518,6 @@ func openTerminalAt(dir string) error {
 	return fmt.Errorf("no terminal emulator found; set $TERMINAL or install kitty, foot, alacritty, wezterm, ghostty, ptyxis, konsole, or gnome-terminal")
 }
 
-// openEditorAt opens dir in a GUI editor. Honours $EDITOR_GUI first (so users
-// can pin nvim-qt, sublime, idea, etc.), then probes the usual suspects in a
-// VS Code -> Cursor -> JetBrains -> generic-CLI fallback chain. Same fire-
-// and-forget exec pattern as openTerminalAt; the spawned editor inherits the
-// loginctl graphical env on Linux so it can attach to the user's wayland/X11
-// session even when lerd-ui runs as a systemd user service.
-func openEditorAt(dir string) error {
-	type editorCmd struct {
-		bin  string
-		args []string
-	}
-
-	candidates := []editorCmd{}
-
-	if e := os.Getenv("EDITOR_GUI"); e != "" {
-		candidates = append(candidates, editorCmd{e, []string{dir}})
-	}
-
-	candidates = append(candidates,
-		editorCmd{"code", []string{"--new-window", dir}},
-		editorCmd{"code-insiders", []string{"--new-window", dir}},
-		editorCmd{"codium", []string{"--new-window", dir}},
-		editorCmd{"cursor", []string{"--new-window", dir}},
-		editorCmd{"phpstorm", []string{dir}},
-		editorCmd{"webstorm", []string{dir}},
-		editorCmd{"idea", []string{dir}},
-		editorCmd{"goland", []string{dir}},
-		editorCmd{"subl", []string{dir}},
-		editorCmd{"zed", []string{dir}},
-		editorCmd{"nova", []string{dir}},
-	)
-
-	if runtime.GOOS == "darwin" {
-		candidates = append(candidates,
-			editorCmd{"open", []string{"-a", "Visual Studio Code", dir}},
-			editorCmd{"open", []string{"-a", "Cursor", dir}},
-			editorCmd{"open", []string{"-a", "PhpStorm", dir}},
-		)
-	}
-
-	for _, e := range candidates {
-		bin, err := exec.LookPath(e.bin)
-		if err != nil {
-			continue
-		}
-		cmd := exec.Command(bin, e.args...)
-		cmd.Dir = dir
-		if runtime.GOOS != "darwin" {
-			cmd.Env = graphicalEnv()
-		}
-		if err := cmd.Start(); err != nil {
-			return err
-		}
-		go func() { _ = cmd.Wait() }()
-		return nil
-	}
-	return fmt.Errorf("no GUI editor found; set $EDITOR_GUI or install one of: code, code-insiders, codium, cursor, phpstorm, webstorm, idea, goland, subl, zed")
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v) //nolint:errcheck
@@ -600,6 +541,8 @@ type StatusResponse struct {
 
 type DNSStatus struct {
 	OK      bool   `json:"ok"`
+	Status  string `json:"status"` // ok | degraded | down
+	VPN     bool   `json:"vpn"`    // a VPN tunnel is up; degraded is then expected
 	Enabled bool   `json:"enabled"`
 	TLD     string `json:"tld"`
 }
@@ -629,7 +572,7 @@ func buildStatus() StatusResponse {
 		dnsEnabled = cfg.DNS.Enabled
 	}
 
-	dnsOK, _ := dns.Check(tld)
+	dnsStatus := dns.CheckStatus(tld)
 	nginxRunning := podman.Cache.Running("lerd-nginx")
 	watcherRunning := services.Mgr.IsActive("lerd-watcher")
 
@@ -655,7 +598,7 @@ func buildStatus() StatusResponse {
 	_, nodeShimErr := os.Stat(nodeShim)
 	nodeManagedByLerd := nodeShimErr == nil
 	return StatusResponse{
-		DNS:               DNSStatus{OK: dnsOK, Enabled: dnsEnabled, TLD: tld},
+		DNS:               DNSStatus{OK: dnsStatus == dns.StatusOK, Status: string(dnsStatus), VPN: dns.VPNActive(), Enabled: dnsEnabled, TLD: tld},
 		Nginx:             ServiceCheck{Running: nginxRunning},
 		PHPFPMs:           phpStatuses,
 		PHPDefault:        phpDefault,
@@ -1252,7 +1195,8 @@ func handleServicePresets(w http.ResponseWriter, r *http.Request) {
 		}
 		// For single-version presets installed reflects "is the canonical
 		// service installed". For multi-version presets it reflects "are any
-		// version-suffixed instances installed", and InstalledTags lists them.
+		// instances installed" (canonical at the bare preset name OR alternates
+		// at the suffixed name), and InstalledTags lists them.
 		installed := false
 		var installedTags []string
 		if len(p.Versions) == 0 {
@@ -1261,8 +1205,7 @@ func handleServicePresets(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			for _, v := range p.Versions {
-				name := p.Name + "-" + config.SanitizeImageTag(v.Tag)
-				if _, err := config.LoadCustomService(name); err == nil {
+				if _, err := config.LoadCustomService(config.PresetVersionServiceName(p.Name, v)); err == nil {
 					installed = true
 					installedTags = append(installedTags, v.Tag)
 				}
@@ -1378,13 +1321,6 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	}
 	name, action := parts[0], parts[1]
 
-	// Service container env editor — fork addition. Both GET (read) and
-	// PUT (write) live here, dispatched into the dedicated handler.
-	if action == "env" {
-		handleServiceEnv(w, r)
-		return
-	}
-
 	// Allow GET for logs sub-resource
 	if action == "logs" {
 		writeJSON(w, map[string]string{"logs": serviceRecentLogs("lerd-" + name)})
@@ -1415,9 +1351,10 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "could not resolve current image", http.StatusBadRequest)
 			return
 		}
-		targetImage := avail.CurrentImage
-		if at := strings.LastIndex(targetImage, ":"); at > 0 {
-			targetImage = targetImage[:at] + ":" + targetTag
+		targetImage, err := serviceops.ResolveMigrateTarget(name, avail.CurrentImage, targetTag)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		writeLine, _ := startNDJSONStream(w, r)
 		start := time.Now()
@@ -1941,17 +1878,13 @@ func handleSiteFavicon(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-// handleSiteEnv serves and (in the fork) accepts writes to the site's (or
-// worktree's) .env file. A missing file on GET is reported as 200 with an
-// empty body so the UI can render an empty-state placeholder without a noisy
-// 404. PUT writes the request body verbatim, replacing the file atomically;
-// a backup at .env.before_lerd is created on the FIRST mutation per project
-// so the user can always restore the pre-edit state via `lerd env:restore`.
+// handleSiteEnv serves the raw contents of the site's (or worktree's) .env
+// file as text/plain. A missing file is reported as 200 with an empty body so
+// the UI can render an empty-state placeholder without a noisy 404.
 //
 //	GET /api/sites/{domain}/env[?branch=<sanitized>]
-//	PUT /api/sites/{domain}/env[?branch=<sanitized>]   (body: text/plain raw .env)
 func handleSiteEnv(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPut {
+	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -1973,48 +1906,10 @@ func handleSiteEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	envPath := filepath.Join(dir, ".env")
-
-	if r.Method == http.MethodPut {
-		// Loopback-only — the .env can contain secrets (DB credentials,
-		// API keys, app keys). Refuse if the request didn't originate on
-		// this machine.
-		if !isLoopbackRequest(r) {
-			http.Error(w, "forbidden: env editing is loopback-only", http.StatusForbidden)
-			return
-		}
-		// Cap upload to 1 MiB — .env files in the wild rarely exceed a
-		// few KB and the cap defends against accidental upload of a
-		// huge file via clipboard paste.
-		const maxBody = 1 << 20
-		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-		body, readErr := io.ReadAll(r.Body)
-		if readErr != nil {
-			http.Error(w, "reading body: "+readErr.Error(), http.StatusBadRequest)
-			return
-		}
-		// First-write backup: mirror what `lerd env` does on .env.example
-		// copy so the user has a "before lerd edited it" snapshot. We
-		// only create it once per project — subsequent edits leave the
-		// existing backup alone.
-		backupPath := filepath.Join(dir, ".env.before_lerd")
-		if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
-			if existing, readErr := os.ReadFile(envPath); readErr == nil && len(existing) > 0 {
-				_ = os.WriteFile(backupPath, existing, 0644)
-			}
-		}
-		if err := writeFileAtomic(envPath, body, 0644); err != nil {
-			http.Error(w, "writing .env: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, map[string]any{"ok": true, "bytes": len(body)})
-		return
-	}
-
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 
-	data, err := os.ReadFile(envPath)
+	data, err := os.ReadFile(filepath.Join(dir, ".env"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return
@@ -2023,32 +1918,6 @@ func handleSiteEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(data)
-}
-
-// writeFileAtomic writes data to path via a sibling temp file + os.Rename so
-// readers never see a half-written .env. Mirrors the behaviour the rest of
-// the codebase relies on for config files.
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".env.tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	if err := os.Chmod(tmpName, mode); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, path)
 }
 
 // handleLANQR serves a QR code PNG for the LAN share URL of a site or one
@@ -2187,15 +2056,6 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			break
-		}
-		// Persist php_version in sites.yaml so the next dashboard load reflects
-		// the choice and dependent UIs (status snapshot, sidebar grouping) get
-		// the right value. Without this AddSite call the registry stays on the
-		// previous version even though the vhost + .php-version were updated —
-		// fork fix for the "selecting 7.4 on a site doesn't stick" bug.
-		if err := config.AddSite(*site); err != nil {
-			writeJSON(w, SiteActionResponse{Error: "updating site registry: " + err.Error()})
-			return
 		}
 		if site.Secured {
 			if err := certs.SecureSite(*site); err != nil {
@@ -2434,20 +2294,6 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := openTerminalAt(path); err != nil {
-			writeJSON(w, SiteActionResponse{Error: err.Error()})
-			return
-		}
-		writeJSON(w, SiteActionResponse{OK: true})
-		return
-	case "editor":
-		// Companion to "terminal": open the project in VS Code (or any IDE
-		// the user has set via $EDITOR_GUI). Fork addition.
-		path := resolveSitePath(site, r.URL.Query().Get("branch"))
-		if path == "" {
-			writeJSON(w, SiteActionResponse{Error: "unknown worktree branch"})
-			return
-		}
-		if err := openEditorAt(path); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
@@ -2768,26 +2614,8 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
-	// path: /api/php-versions/{version}/{remove|set-default|start|stop|extensions[/<ext>]}
+	// path: /api/php-versions/{version}/{remove|set-default}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/php-versions/"), "/")
-
-	// Custom extension management — fork addition. Three shapes share the
-	// /api/php-versions/{version}/extensions/... prefix; dispatch here so the
-	// existing 2-part action handler stays single-purpose.
-	if len(parts) >= 2 && parts[1] == "extensions" {
-		switch {
-		case len(parts) == 2 && r.Method == http.MethodGet:
-			handlePhpExtensionsList(w, r)
-		case len(parts) == 2 && r.Method == http.MethodPost:
-			handlePhpExtensionAdd(w, r)
-		case len(parts) == 3 && (r.Method == http.MethodDelete || r.Method == http.MethodPost):
-			handlePhpExtensionRemove(w, r)
-		default:
-			http.NotFound(w, r)
-		}
-		return
-	}
-
 	if len(parts) != 2 || r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
@@ -2836,14 +2664,6 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = podman.DaemonReloadFn()
 		writeJSON(w, map[string]any{"ok": true})
-	case "install":
-		// Streams `lerd php:install <version>` over SSE: each stdout/stderr line
-		// from the underlying podman build pipes through as an `event: log` frame
-		// so the dashboard can show the user the actual progress (Alpine apk
-		// installs, pecl extensions compiling, COPY layers landing). Closes with
-		// `event: done` carrying ok/error; the frontend uses the ok flag to
-		// decide whether to drop the beforeunload warning.
-		handlePhpVersionInstallStream(w, r, version)
 	default:
 		http.NotFound(w, r)
 	}
@@ -3220,7 +3040,7 @@ func handleLerdUpdateTerminal(w http.ResponseWriter, r *http.Request) {
 // Extracted so tests can pin the absolute-path quoting without launching
 // a real terminal emulator.
 func buildUpdateScript(executable string) string {
-	return shQuote(executable) + ` update; echo; read -rp "Press Enter to close..."`
+	return podman.ShellQuote(executable) + ` update; echo; read -rp "Press Enter to close..."`
 }
 
 // openTerminalCommand opens the user's terminal emulator and runs the given
@@ -3232,7 +3052,7 @@ func openTerminalCommand(script string) error {
 		bin  string
 		args []string
 	}
-	combined := "sh -c " + shQuote(script)
+	combined := "sh -c " + podman.ShellQuote(script)
 	candidates := []termCmd{
 		{"kitty", []string{"sh", "-c", script}},
 		{"foot", []string{"sh", "-c", script}},
@@ -3272,12 +3092,6 @@ func openTerminalCommand(script string) error {
 		return nil
 	}
 	return fmt.Errorf("no terminal emulator found; set $TERMINAL or install kitty, foot, alacritty, wezterm, ghostty, ptyxis, konsole, or gnome-terminal")
-}
-
-// shQuote wraps s in single quotes, escaping any embedded single quotes
-// using the standard '\" dance so the result is safe for /bin/sh -c.
-func shQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // appleScriptStr returns an AppleScript string expression for s.

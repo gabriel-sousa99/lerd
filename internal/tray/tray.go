@@ -36,6 +36,7 @@ type Snapshot struct {
 	Running              bool
 	NginxRunning         bool
 	DNSOK                bool
+	DNSDegraded          bool // lerd-dns healthy but the system resolver is bypassed, typically a VPN
 	DNSDisabled          bool // explicit dns.enabled=false from API; zero value falls through to ok/error
 	PHPVersions          []phpInfo
 	PHPDefault           string
@@ -148,7 +149,7 @@ func onReady(mono bool) {
 		systray.SetIcon(iconPNG)
 	}
 	// SetTitle would show text next to the icon in the macOS menu bar — skip it.
-	systray.SetTooltip("Lerd Oracle Edition — local dev environment + Oracle DB support")
+	systray.SetTooltip("Lerd — local dev environment")
 
 	menu := buildMenu()
 
@@ -179,26 +180,8 @@ func onReady(mono bool) {
 	}
 	go handleDumps(menu.mDumps, refresh)
 	go handleNotifications(menu.mNotifications, refresh)
-	go handleDebugGuide(menu.mDebugGuide)
 	go handleUpdate(menu.mUpdate)
 	go handleQuit(menu.mQuit, cancel)
-}
-
-// handleDebugGuide opens the fork's DEBUG.md (rendered on GitHub) when the
-// tray entry is clicked. xdg-open on Linux, open on macOS — same shellout
-// pattern the systray package recommends.
-func handleDebugGuide(item *systray.MenuItem) {
-	if item == nil {
-		return
-	}
-	for range item.ClickedCh {
-		url := "https://github.com/gabriel-sousa99/lerd/blob/main/docs/DEBUG.md"
-		opener := "xdg-open"
-		if runtime.GOOS == "darwin" {
-			opener = "open"
-		}
-		_ = exec.Command(opener, url).Start()
-	}
 }
 
 func runPoller(ctx context.Context, updateCh chan<- *Snapshot) {
@@ -235,8 +218,9 @@ func fetchSnapshot() *Snapshot {
 			Running bool `json:"running"`
 		} `json:"nginx"`
 		DNS struct {
-			OK      bool `json:"ok"`
-			Enabled bool `json:"enabled"`
+			OK      bool   `json:"ok"`
+			Status  string `json:"status"`
+			Enabled bool   `json:"enabled"`
 		} `json:"dns"`
 		PHPFPMs []struct {
 			Version string `json:"version"`
@@ -249,6 +233,7 @@ func fetchSnapshot() *Snapshot {
 			snap.Running = sr.Nginx.Running
 			snap.NginxRunning = sr.Nginx.Running
 			snap.DNSOK = sr.DNS.OK
+			snap.DNSDegraded = sr.DNS.Status == "degraded"
 			snap.DNSDisabled = !sr.DNS.Enabled
 			snap.PHPDefault = sr.PHPDefault
 			for _, p := range sr.PHPFPMs {

@@ -10,10 +10,18 @@ Database commands work with any project type: Laravel, Symfony, NestJS, Next.js,
 | `lerd db:import [-s service] [-d name] <file.sql>` | Import a SQL dump |
 | `lerd db:export [-s service] [-d name] [-o file.sql]` | Export a database to a SQL dump |
 | `lerd db:shell [-s service] [-d name]` | Open an interactive MySQL or PostgreSQL shell |
+| `lerd db:snapshot [name] [-A]` | Create a named, restorable snapshot of a database |
+| `lerd db:snapshots [--all]` | List stored snapshots |
+| `lerd db:restore <name> [-A] [-f]` | Restore a database from a stored snapshot |
+| `lerd db:snapshot:rm <name> [-A]` | Delete a stored snapshot |
 | `lerd db create [name]` | Same as `db:create` (subcommand form) |
 | `lerd db import [-s service] [-d name] <file.sql>` | Same as `db:import` (subcommand form) |
 | `lerd db export [-s service] [-d name]` | Same as `db:export` (subcommand form) |
 | `lerd db shell [-s service] [-d name]` | Same as `db:shell` (subcommand form) |
+| `lerd db snapshot [name]` | Same as `db:snapshot` (subcommand form) |
+| `lerd db snapshots` | Same as `db:snapshots` (subcommand form) |
+| `lerd db restore <name>` | Same as `db:restore` (subcommand form) |
+| `lerd db snapshot:rm <name>` | Same as `db:snapshot:rm` (subcommand form) |
 
 ### Flags
 
@@ -22,6 +30,9 @@ Database commands work with any project type: Laravel, Symfony, NestJS, Next.js,
 | `--service <name>` | `-s` | Target a specific lerd service (e.g. `mysql`, `postgres`, `mysql-5-7`) |
 | `--database <name>` | `-d` | Override the database name |
 | `--output <file>` | `-o` | Output file for `db:export` (default: `<database>.sql`) |
+| `--all-databases` | `-A` | Snapshot or restore every database in the service at once |
+| `--force` | `-f` | Skip the `db:restore` confirmation prompt |
+| `--all` | | List snapshots across every database on the service (`db:snapshots`) |
 
 ---
 
@@ -75,6 +86,41 @@ A `<name>_testing` database is always created alongside the main one. If a datab
 
 ---
 
+## Snapshots
+
+Snapshots are named, restorable point-in-time copies of a database, stored inside lerd's own data directory. Use one as a safety net before a risky migration, a branch switch, or any destructive experiment, then roll back in a single command. Snapshots cover the SQL engines only: MySQL, MariaDB, and PostgreSQL.
+
+```bash
+lerd db:snapshot pre-migration       # snapshot the current project database
+lerd db:snapshot                     # name omitted: auto-named snapshot-<timestamp>
+lerd db:snapshots                    # list snapshots for this database
+lerd db:restore pre-migration        # restore it (prompts for confirmation)
+lerd db:snapshot:rm pre-migration    # delete it
+```
+
+Snapshots live under `~/.local/share/lerd/snapshots/<service>/`, one directory per snapshot holding a gzipped SQL dump and a `meta.json` sidecar. They are scoped to a `(service, database)` pair, so two projects can both keep a snapshot called `pre-migration` without colliding. The same service-and-database resolution chain as every other db command applies, so from inside a project directory the snapshot commands just work.
+
+### Restoring
+
+`lerd db:restore <name>` is destructive. A per-database restore **drops and recreates** the target database before loading the dump, so the restore is clean with no leftover tables. It prompts for confirmation; pass `--force` to skip the prompt (required when running non-interactively, e.g. in a script).
+
+### All databases
+
+Pass `--all-databases` (`-A`) to snapshot or restore every database in the service at once instead of a single one:
+
+```bash
+lerd db:snapshot --service mysql --all-databases nightly
+lerd db:restore --service mysql --all-databases nightly
+```
+
+An all-databases restore drops and recreates every database contained in the snapshot, but leaves databases that aren't in the snapshot untouched.
+
+### Reserved names
+
+`db:snapshot` rejects names that look like command verbs (`list`, `rm`, `delete`, `restore`, …), so `lerd db snapshot list` errors with a hint instead of silently creating a snapshot literally named "list". Use `lerd db:snapshots` to list.
+
+---
+
 ## Picking a database for a Laravel project
 
 The database for a Laravel project is configured through `.lerd.yaml` and applied to `.env` when `lerd env` runs (which the `lerd init` wizard calls automatically). The supported choices are:
@@ -85,9 +131,11 @@ The database for a Laravel project is configured through `.lerd.yaml` and applie
 | `mysql` | `lerd-mysql` (Podman) | `DB_CONNECTION=mysql`, `DB_HOST=lerd-mysql`, `DB_PORT=3306`, `DB_DATABASE=<project>`, `DB_USERNAME=root`, `DB_PASSWORD=lerd` |
 | `postgres` | `lerd-postgres` (Podman) | `DB_CONNECTION=pgsql`, `DB_HOST=lerd-postgres`, `DB_PORT=5432`, `DB_DATABASE=<project>`, `DB_USERNAME=postgres`, `DB_PASSWORD=lerd` |
 
+Installed family alternates are valid picks too: `mariadb` / `mariadb-10-11`, `mysql-5-7`, `postgres-pgvector` / `postgres-17`, etc. They go through the same env-write + database-create flow as the built-ins, using the host and port from their preset. Install one first with `lerd service preset <name>`, then list it in `.lerd.yaml` under `services:` or pick it in the `lerd init` wizard.
+
 For SQLite, the `database/database.sqlite` file is created automatically if it doesn't exist. No service is started.
 
-For MySQL or PostgreSQL, the matching `lerd-<engine>` service is started if it isn't already, and the project database (plus a `_testing` variant) is created via `lerd db:create`.
+For MySQL or PostgreSQL (and their family alternates), the matching `lerd-<service>` container is started if it isn't already, and the project database (plus a `_testing` variant) is created via `lerd db:create`.
 
 You can change the choice at any time by editing the `services:` list in `.lerd.yaml` and re-running `lerd env`, or by running `lerd init --fresh` and picking a different database in the wizard.
 

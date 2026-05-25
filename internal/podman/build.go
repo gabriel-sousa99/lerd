@@ -527,14 +527,7 @@ func WriteXdebugIni(version, mode string) error {
 	if mode == "" {
 		mode = "off"
 	}
-	// Oracle fork: start_with_request=trigger (not yes) so xdebug only fires
-	// when the user explicitly opts in per-request via the XDEBUG_TRIGGER
-	// cookie/header/query param. The upstream default of `yes` makes every
-	// CLI command + every web request attempt a TCP connect to 9003 — when
-	// no IDE is listening, that produces "Could not connect to debugging
-	// client" spam on every artisan call. Users who want always-on debug
-	// can flip it back via `lerd php:ini <v>`.
-	content := fmt.Sprintf("[xdebug]\nxdebug.mode=%s\nxdebug.start_with_request=trigger\nxdebug.client_host=host.containers.internal\nxdebug.client_port=9003\n", mode)
+	content := fmt.Sprintf("[xdebug]\nxdebug.mode=%s\nxdebug.start_with_request=yes\nxdebug.client_host=host.containers.internal\nxdebug.client_port=9003\n", mode)
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
@@ -606,6 +599,9 @@ func WriteFPMQuadlet(version string) error {
 	if err := EnsureDumpAssets(); err != nil {
 		return fmt.Errorf("ensuring dump assets: %w", err)
 	}
+	if err := EnsureProfilerAssets(); err != nil {
+		return fmt.Errorf("ensuring profiler assets: %w", err)
+	}
 
 	if err := ensureFPMHostsFile(); err != nil {
 		return err
@@ -621,8 +617,9 @@ func WriteFPMQuadlet(version string) error {
 	content = strings.ReplaceAll(content, "{{.UserIniPath}}", config.PHPUserIniFile(version))
 	content = strings.ReplaceAll(content, "{{.DumpsDir}}", config.DumpsAssetsDir())
 	content = strings.ReplaceAll(content, "{{.DumpsIniPath}}", config.DumpsIniFile())
+	content = strings.ReplaceAll(content, "{{.SpxIniPath}}", config.SpxIniFile())
+	content = strings.ReplaceAll(content, "{{.SpxDataDir}}", config.SpxDataDir())
 	content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
-	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
 	content = applyShellMounts(content, short)
 	content = InjectExtraVolumes(content, ExtraVolumePaths())
 
@@ -667,8 +664,9 @@ func RewriteFPMQuadlets() error {
 		content = strings.ReplaceAll(content, "{{.UserIniPath}}", config.PHPUserIniFile(v))
 		content = strings.ReplaceAll(content, "{{.DumpsDir}}", config.DumpsAssetsDir())
 		content = strings.ReplaceAll(content, "{{.DumpsIniPath}}", config.DumpsIniFile())
+		content = strings.ReplaceAll(content, "{{.SpxIniPath}}", config.SpxIniFile())
+		content = strings.ReplaceAll(content, "{{.SpxDataDir}}", config.SpxDataDir())
 		content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
-	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
 		content = applyShellMounts(content, short)
 		content = InjectExtraVolumes(content, extraPaths)
 
@@ -710,23 +708,6 @@ func zshHistoryDir(versionShort string) string {
 	dir := filepath.Join(config.DataDir(), "shell-state", "php-"+versionShort, "zsh")
 	_ = os.MkdirAll(dir, 0o755)
 	return dir
-}
-
-// hostSSHDir returns the user's $HOME/.ssh path for the FPM quadlet's
-// read-only mount into /root/.ssh — lets composer/git inside the container
-// authenticate against remote repos with the user's host keys. Falls back
-// to /dev/null when $HOME/.ssh doesn't exist so the mount line is still
-// syntactically valid (podman tolerates a /dev/null source).
-func hostSSHDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "/dev/null"
-	}
-	candidate := filepath.Join(home, ".ssh")
-	if info, statErr := os.Stat(candidate); statErr != nil || !info.IsDir() {
-		return "/dev/null"
-	}
-	return candidate
 }
 
 // hostNameLine returns the `HostName=<host>` directive for the FPM quadlet so

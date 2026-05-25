@@ -853,26 +853,39 @@ Arguments:
 
 > Run this right after ` + bt + `site_link` + bt + ` when setting up a fresh project.
 >
-> **Database default:** on a fresh Laravel clone where ` + bt + `.env` + bt + ` still says ` + bt + `DB_CONNECTION=sqlite` + bt + `, ` + bt + `env_setup` + bt + ` leaves the database choice alone. Call ` + bt + `db_set` + bt + ` first to pick ` + bt + `mysql` + bt + ` / ` + bt + `postgres` + bt + ` / ` + bt + `sqlite` + bt + ` deliberately, then ` + bt + `env_setup` + bt + ` (or just ` + bt + `db_set` + bt + ` alone — it already runs the env step).
+> **Database default:** on a fresh Laravel clone where ` + bt + `.env` + bt + ` still says ` + bt + `DB_CONNECTION=sqlite` + bt + `, ` + bt + `env_setup` + bt + ` leaves the database choice alone. Call ` + bt + `db_set` + bt + ` first to pick ` + bt + `sqlite` + bt + `, a built-in (` + bt + `mysql` + bt + ` / ` + bt + `postgres` + bt + `), or an installed family alternate (` + bt + `mariadb` + bt + `, ` + bt + `postgres-pgvector` + bt + `, …) deliberately, then ` + bt + `env_setup` + bt + ` (or just ` + bt + `db_set` + bt + ` alone — it already runs the env step).
 
 ### ` + bt + `db_set` + bt + `
-Pick the database for a Laravel project. Persists the choice to ` + bt + `.lerd.yaml` + bt + ` (replacing any prior database entry — the choice is exclusive), rewrites the relevant ` + bt + `DB_` + bt + ` keys in ` + bt + `.env` + bt + `, and provisions the backing storage:
-- ` + bt + `sqlite` + bt + ` — sets ` + bt + `DB_CONNECTION=sqlite` + bt + ` and ` + bt + `DB_DATABASE=database/database.sqlite` + bt + `, creates the file if missing. No service is started.
-- ` + bt + `mysql` + bt + ` — sets ` + bt + `DB_CONNECTION=mysql` + bt + ` and the ` + bt + `lerd-mysql` + bt + ` connection vars, starts ` + bt + `lerd-mysql` + bt + ` if needed, creates ` + bt + `<project>` + bt + ` and ` + bt + `<project>_testing` + bt + ` databases.
-- ` + bt + `postgres` + bt + ` — sets ` + bt + `DB_CONNECTION=pgsql` + bt + ` and the ` + bt + `lerd-postgres` + bt + ` connection vars, starts ` + bt + `lerd-postgres` + bt + ` if needed, creates the project databases.
+Pick the database for a Laravel project. Persists the choice to ` + bt + `.lerd.yaml` + bt + ` (replacing any prior DB entry), rewrites ` + bt + `DB_` + bt + ` keys in ` + bt + `.env` + bt + `, and provisions storage. Accepts ` + bt + `sqlite` + bt + `, the built-in ` + bt + `mysql` + bt + ` / ` + bt + `postgres` + bt + `, or any installed family alternate (` + bt + `mariadb` + bt + `, ` + bt + `mysql-5-7` + bt + `, ` + bt + `postgres-pgvector` + bt + `, ` + bt + `postgres-17` + bt + `, …). Alternates must be installed first with ` + bt + `lerd service preset <name>` + bt + `.
 
 Arguments:
-- ` + bt + `path` + bt + ` (optional): absolute path to the Laravel project root — defaults to ` + bt + `LERD_SITE_PATH` + bt + ` / cwd
-- ` + bt + `database` + bt + ` (required): one of ` + bt + `"sqlite"` + bt + `, ` + bt + `"mysql"` + bt + `, ` + bt + `"postgres"` + bt + `
+- ` + bt + `path` + bt + ` (optional): project root, defaults to ` + bt + `LERD_SITE_PATH` + bt + ` / cwd
+- ` + bt + `database` + bt + ` (required): see above
 
 Examples:
 ` + "```" + `
-db_set(database: "mysql")        // fresh Laravel clone, switch to MySQL
-db_set(database: "postgres")     // switch from MySQL → PostgreSQL (removes mysql)
-db_set(database: "sqlite")       // explicitly keep SQLite (and create the file)
+db_set(database: "mysql")
+db_set(database: "postgres-pgvector")
+db_set(database: "sqlite")
 ` + "```" + `
 
 > Use this **before** ` + bt + `env_setup` + bt + ` on a fresh Laravel project so the database lands in ` + bt + `.env` + bt + ` deliberately. Switching databases later via ` + bt + `db_set` + bt + ` removes the previous database entry from ` + bt + `.lerd.yaml` + bt + ` automatically.
+
+### ` + bt + `db_snapshot` + bt + ` / ` + bt + `db_snapshots` + bt + ` / ` + bt + `db_restore` + bt + ` / ` + bt + `db_snapshot_delete` + bt + `
+Named, restorable point-in-time copies of the project database — take one before a risky migration or a destructive experiment, then roll back in a single call. SQL engines only (MySQL, MariaDB, PostgreSQL); snapshots are stored under lerd's data dir, keyed by service and database.
+
+- ` + bt + `db_snapshot` + bt + ` — create a snapshot. ` + bt + `name` + bt + ` is optional (auto-timestamped); ` + bt + `all_databases` + bt + ` snapshots every database in the service.
+- ` + bt + `db_snapshots` + bt + ` — list snapshots as JSON. ` + bt + `all` + bt + ` spans every database on the service.
+- ` + bt + `db_restore` + bt + ` — restore a snapshot by ` + bt + `name` + bt + `. Destructive: a per-database restore drops and recreates the database.
+- ` + bt + `db_snapshot_delete` + bt + ` — delete a stored snapshot.
+
+All four resolve the database from the project ` + bt + `.env` + bt + `; pass ` + bt + `service` + bt + ` and ` + bt + `database` + bt + ` to override.
+
+Example:
+` + "```" + `
+db_snapshot(name: "pre-migration")
+db_restore(name: "pre-migration")
+` + "```" + `
 
 ### Custom ` + bt + `APP_URL` + bt + `
 By default ` + bt + `env_setup` + bt + ` writes ` + bt + `APP_URL=<scheme>://<primary-domain>` + bt + ` (e.g. ` + bt + `http://myapp.test` + bt + `) on every run. Three-tier override chain when you need a different value:
@@ -952,6 +965,15 @@ Capture and inspect ` + bt + `dump()` + bt + ` / ` + bt + `dd()` + bt + ` output
 - ` + bt + `dumps_toggle({ enable: true | false })` + bt + ` flips the global on/off via a sentinel file inside the always-mounted bridge directory. ` + bt + `enable: true` + bt + ` touches the sentinel, ` + bt + `enable: false` + bt + ` removes it. No FPM container is restarted by either path.
 
 Events ship as JSON with ` + bt + `ts` + bt + ` (RFC3339Nano), ` + bt + `ctx` + bt + ` (type, site, request, pid), ` + bt + `src` + bt + ` (file:line of the dump call), ` + bt + `label` + bt + ` (the keyword arg name when present), and ` + bt + `text` + bt + ` (Symfony VarDumper's CliDumper output). Capacity is 500 events; older entries roll off.
+
+### ` + bt + `profiler_toggle` + bt + ` / ` + bt + `profiler_status` + bt + ` / ` + bt + `profiler_clear` + bt + `
+Turn the SPX profiler on or off globally. While on, every HTTP request to every PHP-FPM site is profiled into a flame graph.
+
+- ` + bt + `profiler_toggle({ enable })` + bt + ` turns profiling on (` + bt + `enable: true` + bt + `) or off. It rewrites every FPM site's nginx vhost to inject an SPX cookie and reloads nginx, with no FPM restart.
+- ` + bt + `profiler_status()` + bt + ` reports whether profiling is on and the SPX web UI URL where the flame graphs are viewable.
+- ` + bt + `profiler_clear()` + bt + ` deletes every captured SPX report and returns how many were removed.
+
+After turning it on, reload a site in the browser, then open the dashboard Profiler view or the SPX web UI to read the flame graphs.
 
 ### ` + bt + `queue` + bt + `
 Start or stop a queue worker for a site. Available for any framework that defines a ` + bt + `queue` + bt + ` worker (Laravel has it built-in). Runs the framework-defined command in the FPM container as a systemd service.
@@ -1362,6 +1384,7 @@ The ` + bt + `container.port` + bt + ` field is required. ` + bt + `container.co
 | ` + bt + `node_version` + bt + ` | Node version (e.g. ` + bt + `"22"` + bt + `) |
 | ` + bt + `framework` + bt + ` | Framework name (e.g. ` + bt + `laravel` + bt + `, ` + bt + `symfony` + bt + `, ` + bt + `wordpress` + bt + `) |
 | ` + bt + `secured` + bt + ` | ` + bt + `true` + bt + ` to enable HTTPS |
+| ` + bt + `request_timeout` + bt + ` | nginx request timeout in seconds (default 60). Raises ` + bt + `fastcgi_read/send_timeout` + bt + ` for FPM sites or ` + bt + `proxy_read/send_timeout` + bt + ` for proxy/container sites — for deliberately long-running requests. Overrides the global ` + bt + `nginx.request_timeout` + bt + ` |
 | ` + bt + `services` + bt + ` | Services to start (e.g. ` + bt + `[mysql, redis]` + bt + `) |
 | ` + bt + `workers` + bt + ` | Active worker names (e.g. ` + bt + `[queue, schedule]` + bt + `) — auto-synced by start/stop |
 | ` + bt + `app_url` + bt + ` | Override for APP_URL in ` + bt + `.env` + bt + ` |
@@ -1378,6 +1401,7 @@ The ` + bt + `container.port` + bt + ` field is required. ` + bt + `container.co
 | ` + bt + `custom_workers` + bt + ` | no | | Worker definitions — see below |
 | ` + bt + `domains` + bt + ` | no | | Same as PHP sites |
 | ` + bt + `secured` + bt + ` | no | | Same as PHP sites |
+| ` + bt + `request_timeout` + bt + ` | no | 60 | Same as PHP sites — sets ` + bt + `proxy_read/send_timeout` + bt + ` for the container |
 | ` + bt + `services` + bt + ` | no | | Same as PHP sites |
 
 When ` + bt + `container` + bt + ` is present, ` + bt + `php_version` + bt + `, ` + bt + `framework` + bt + `, and ` + bt + `node_version` + bt + ` are ignored — the container defines its own runtime.
@@ -1453,7 +1477,7 @@ Read ` + bt + `status()` + bt + ` for ` + bt + `dns.tld` + bt + ` and ` + bt + `
 | ` + bt + `vendor_run` + bt + ` | Run a binary from ` + bt + `vendor/bin` + bt + ` (pest, phpunit, pint, phpstan, rector, …) inside the PHP-FPM container |
 | ` + bt + `node` + bt + ` | Install or uninstall a Node.js version via fnm — ` + bt + `action` + bt + `: ` + bt + `install` + bt + ` / ` + bt + `uninstall` + bt + ` (e.g. ` + bt + `"20"` + bt + `, ` + bt + `"lts"` + bt + `) |
 | ` + bt + `env_setup` + bt + ` | Configure ` + bt + `.env` + bt + ` for lerd: detects services, starts them, creates DB, generates APP_KEY (leaves ` + bt + `DB_CONNECTION=sqlite` + bt + ` alone — call ` + bt + `db_set` + bt + ` first); ` + bt + `APP_URL` + bt + ` follows ` + bt + `.lerd.yaml app_url` + bt + ` → ` + bt + `sites.yaml app_url` + bt + ` → default chain |
-| ` + bt + `db_set` + bt + ` | Pick the database for a Laravel project: ` + bt + `sqlite` + bt + ` / ` + bt + `mysql` + bt + ` / ` + bt + `postgres` + bt + `; persists to ` + bt + `.lerd.yaml` + bt + `, rewrites ` + bt + `DB_` + bt + ` keys in ` + bt + `.env` + bt + `, starts the service, creates the database |
+| ` + bt + `db_set` + bt + ` | Pick the database for a Laravel project: ` + bt + `sqlite` + bt + `, a built-in (` + bt + `mysql` + bt + ` / ` + bt + `postgres` + bt + `), or any installed family alternate (` + bt + `mariadb` + bt + `, ` + bt + `postgres-pgvector` + bt + `, ` + bt + `mysql-5-7` + bt + `, …); persists to ` + bt + `.lerd.yaml` + bt + `, rewrites ` + bt + `DB_` + bt + ` keys in ` + bt + `.env` + bt + `, starts the service, creates the database |
 | ` + bt + `env_check` + bt + ` | Compare all ` + bt + `.env` + bt + ` files against ` + bt + `.env.example` + bt + ` — returns structured JSON with per-key sync status |
 | ` + bt + `site_link` + bt + ` | Register a directory as a lerd site — **non-PHP projects** must have a Containerfile (default name ` + bt + `Containerfile.lerd` + bt + `; set ` + bt + `container.containerfile` + bt + ` for a different path, e.g. ` + bt + `Dockerfile` + bt + `) + ` + bt + `.lerd.yaml` + bt + ` with ` + bt + `container: {port: N}` + bt + ` written first, otherwise the site registers as PHP (wrong) |
 | ` + bt + `site_unlink` + bt + ` | Unregister a site and remove its nginx vhost (all domains) |
@@ -1463,6 +1487,7 @@ Read ` + bt + `status()` + bt + ` for ` + bt + `dns.tld` + bt + ` and ` + bt + `
 | ` + bt + `site_tls` + bt + ` | Enable or disable HTTPS for a site (mkcert) — ` + bt + `action` + bt + `: ` + bt + `enable` + bt + ` / ` + bt + `disable` + bt + `; updates APP_URL automatically |
 | ` + bt + `xdebug` + bt + ` | Manage Xdebug for a PHP version (port 9003) — ` + bt + `action` + bt + `: ` + bt + `on` + bt + ` / ` + bt + `off` + bt + ` / ` + bt + `status` + bt + `; optional ` + bt + `mode` + bt + ` on ` + bt + `on` + bt + ` (default ` + bt + `debug` + bt + `; also ` + bt + `coverage` + bt + `, ` + bt + `develop` + bt + `, ` + bt + `profile` + bt + `, ` + bt + `trace` + bt + `, ` + bt + `gcstats` + bt + `, or comma combos) |
 | ` + bt + `dumps_recent` + bt + ` / ` + bt + `dumps_status` + bt + ` / ` + bt + `dumps_clear` + bt + ` / ` + bt + `dumps_toggle` + bt + ` | Inspect / clear / toggle the lerd dump bridge that captures ` + bt + `dump()` + bt + ` / ` + bt + `dd()` + bt + ` calls. Off by default; enable with ` + bt + `dumps_toggle({enable: true})` + bt + ` |
+| ` + bt + `profiler_toggle` + bt + ` / ` + bt + `profiler_status` + bt + ` / ` + bt + `profiler_clear` + bt + ` | Turn the SPX profiler on/off globally so every PHP-FPM site's HTTP requests are profiled into flame graphs, or clear captured reports |
 | ` + bt + `service_control` + bt + ` | Start, stop, pin, or unpin a built-in or custom service — ` + bt + `action` + bt + `: ` + bt + `start` + bt + ` / ` + bt + `stop` + bt + ` / ` + bt + `pin` + bt + ` / ` + bt + `unpin` + bt + ` |
 | ` + bt + `service_add` + bt + ` | Register a new custom OCI service (MongoDB, RabbitMQ, …); supports ` + bt + `depends_on` + bt + ` for service dependencies |
 | ` + bt + `service_preset_list` + bt + ` | List bundled service presets (phpmyadmin, pgadmin, mongo, mongo-express, selenium, stripe-mock, …) with versions and install state |
@@ -1473,6 +1498,7 @@ Read ` + bt + `status()` + bt + ` for ` + bt + `dns.tld` + bt + ` and ` + bt + `
 | ` + bt + `db_export` + bt + ` | Export a database to a SQL dump file — auto-detects service and database; accepts optional ` + bt + `service` + bt + ` override |
 | ` + bt + `db_import` + bt + ` | Import a SQL dump file into the project database — auto-detects service and database; starts the service if needed |
 | ` + bt + `db_create` + bt + ` | Create a database and ` + bt + `_testing` + bt + ` variant — auto-detects service and name; starts the service if needed |
+| ` + bt + `db_snapshot` + bt + ` / ` + bt + `db_snapshots` + bt + ` / ` + bt + `db_restore` + bt + ` / ` + bt + `db_snapshot_delete` + bt + ` | Named, restorable database snapshots — create, list, restore (destructive), delete; ` + bt + `all_databases` + bt + ` covers the whole service |
 | ` + bt + `queue` + bt + ` | Start or stop the queue worker for a site — ` + bt + `action` + bt + `: ` + bt + `start` + bt + ` / ` + bt + `stop` + bt + ` (any framework with a queue worker) |
 | ` + bt + `horizon` + bt + ` | Start or stop Laravel Horizon for a site — ` + bt + `action` + bt + `: ` + bt + `start` + bt + ` / ` + bt + `stop` + bt + ` (use instead of ` + bt + `queue` + bt + ` when laravel/horizon is installed) |
 | ` + bt + `reverb` + bt + ` | Start or stop the Reverb WebSocket server for a site — ` + bt + `action` + bt + `: ` + bt + `start` + bt + ` / ` + bt + `stop` + bt + ` |
@@ -1504,7 +1530,7 @@ Read ` + bt + `status()` + bt + ` for ` + bt + `dns.tld` + bt + ` and ` + bt + `
 - ` + bt + `path` + bt + ` argument is optional on most tools — defaults to the directory the AI assistant was opened in (cwd), then ` + bt + `LERD_SITE_PATH` + bt + ` if set; you can almost always omit it
 - ` + bt + `artisan` + bt + ` is Laravel-only; ` + bt + `console` + bt + ` is the equivalent for non-Laravel frameworks — both take ` + bt + `path` + bt + ` (absolute project root) and ` + bt + `args` + bt + ` (array)
 - ` + bt + `vendor_run` + bt + ` is the right way to invoke project tooling like pest, phpunit, pint, phpstan, rector — call ` + bt + `vendor_bins` + bt + ` first to discover what's installed, then ` + bt + `vendor_run(bin: "<name>", args: [...])` + bt + `; prefer it over ` + bt + `composer(args: ["exec", ...])` + bt + `
-- On a **fresh Laravel clone** (DB_CONNECTION=sqlite in ` + bt + `.env` + bt + `), call ` + bt + `db_set(database: "mysql"|"postgres"|"sqlite")` + bt + ` before ` + bt + `env_setup` + bt + ` to pick a database deliberately. ` + bt + `env_setup` + bt + ` on its own won't switch the database away from sqlite.
+- On a **fresh Laravel clone** (DB_CONNECTION=sqlite in ` + bt + `.env` + bt + `), call ` + bt + `db_set` + bt + ` before ` + bt + `env_setup` + bt + ` to pick a database deliberately — ` + bt + `sqlite` + bt + `, a built-in (` + bt + `mysql` + bt + ` / ` + bt + `postgres` + bt + `), or any installed family alternate (` + bt + `mariadb` + bt + `, ` + bt + `postgres-pgvector` + bt + `, ` + bt + `mysql-5-7` + bt + `, …). ` + bt + `env_setup` + bt + ` on its own won't switch the database away from sqlite.
 - **Domain conflicts on link**: when ` + bt + `lerd link` + bt + ` (or the parked-directory watcher) tries to register a ` + bt + `.lerd.yaml` + bt + ` domain that another site already owns, the conflicting domain is filtered out and a ` + bt + `[WARN] domain "X" already used by site "Y" — skipped` + bt + ` line is printed. The site still gets registered with surviving domains, falling back to ` + bt + `<dirname>.<tld>` + bt + ` if everything was filtered. ` + bt + `.lerd.yaml` + bt + ` is not modified on disk so the conflict is visible in the UI and self-heals on the next link if the owning site is removed. The ` + bt + `site_link` + bt + ` and ` + bt + `site_domain(action: "add", ...)` + bt + ` MCP tools, by contrast, hard-error on conflicts so you can react explicitly — read the error message for the owning site name.
 - **Custom APP_URL**: ` + bt + `env_setup` + bt + ` writes ` + bt + `<scheme>://<primary-domain>` + bt + ` by default. Override by setting ` + bt + `app_url` + bt + ` in ` + bt + `.lerd.yaml` + bt + ` (committed) or in the per-machine ` + bt + `sites.yaml` + bt + ` site entry. No MCP tool sets it — edit the YAML and re-run ` + bt + `env_setup` + bt + `.
 - ` + bt + `tinker` + bt + ` must use ` + bt + `--execute=<code>` + bt + ` for non-interactive use

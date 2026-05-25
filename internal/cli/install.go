@@ -168,12 +168,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// choice, so users can flip the mode without hand-editing config.yaml.
 	// `lerd update` re-execs install with --from-update; in that path the
 	// saved choice is honoured silently so updates are non-interactive.
-	// Oracle fork defaults: lerd-managed DNS off, TLD .localhost. *.localhost
-	// resolves to loopback on every modern OS without dnsmasq or sudo. Existing
-	// installs keep whatever choice they previously saved (read from config below).
-	wantDNS := false
-	prevEnabled := false
-	prevTLD := "localhost"
+	wantDNS := true
+	prevEnabled := true
+	prevTLD := "test"
 	dnsCfg, loadErr := config.LoadGlobal()
 	if loadErr != nil || dnsCfg == nil {
 		if loadErr != nil {
@@ -188,7 +185,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 			wantDNS = prevEnabled
 		} else {
 			wantDNS = confirmInstallPromptDefault(
-				"Let lerd manage DNS for local sites? (default No — use *.localhost, no dnsmasq, no HTTPS, no sudo)",
+				"Let lerd manage DNS for local sites (No: use *.localhost, no dnsmasq, no HTTPS)?",
 				prevEnabled,
 			)
 		}
@@ -280,6 +277,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := nginx.EnsureLerdVhost(); err != nil {
+		return err
+	}
+	if err := nginx.EnsureProfilerVhost(); err != nil {
 		return err
 	}
 	// The lerd-nginx quadlet bind-mounts RunDir so the lerd.localhost vhost
@@ -496,6 +496,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		// where the user hasn't toggled the bridge yet.
 		if err := podman.EnsureDumpAssets(); err != nil {
 			fmt.Printf("  WARN: writing dump bridge assets: %v\n", err)
+		}
+		if err := podman.EnsureProfilerAssets(); err != nil {
+			fmt.Printf("  WARN: writing profiler assets: %v\n", err)
 		}
 	}
 

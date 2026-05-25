@@ -27,6 +27,7 @@ RUN apk update && apk add --no-cache \
         openldap-dev \
         sqlite-dev \
         libxslt-dev \
+        zlib-dev \
     && PHP_ID="$(php -r 'echo PHP_VERSION_ID;')" \
     && if [ "$PHP_ID" -lt 70400 ]; then \
            docker-php-ext-configure gd --with-freetype-dir=/usr --with-jpeg-dir=/usr --with-png-dir=/usr --with-webp-dir=/usr; \
@@ -59,9 +60,7 @@ RUN apk update && apk add --no-cache \
         sysvshm \
         xsl \
     && (docker-php-ext-enable opcache || true) \
-    && if [ "$PHP_ID" -lt 70000 ]; then REDIS_PKG=redis-4.3.0; \
-         elif [ "$PHP_ID" -lt 70400 ]; then REDIS_PKG=redis-5.3.7; \
-         else REDIS_PKG=redis; fi \
+    && if [ "$PHP_ID" -lt 70400 ]; then REDIS_PKG=redis-5.3.7; else REDIS_PKG=redis; fi \
     && { (yes '' | pecl install "$REDIS_PKG" && docker-php-ext-enable redis) \
          || (git clone --depth 1 https://github.com/phpredis/phpredis /tmp/phpredis \
              && cd /tmp/phpredis && phpize && ./configure && make -j$(nproc) && make install \
@@ -77,17 +76,15 @@ RUN apk update && apk add --no-cache \
     && { (yes '' | pecl install igbinary && docker-php-ext-enable igbinary) || true; } \
     && { (yes '' | pecl install mongodb && docker-php-ext-enable mongodb) || true; } \
     && { (yes '' | pecl install pcov && docker-php-ext-enable pcov) || true; } \
-    && { (apk add --no-cache libmemcached-dev zlib-dev \
-          && yes '' | pecl install memcached && docker-php-ext-enable memcached) || true; } \
-    && { (apk add --no-cache rabbitmq-c-dev \
-          && yes '' | pecl install amqp && docker-php-ext-enable amqp) || true; } \
-    && rm -rf /tmp/pear /var/cache/apk/*
+    && { (git clone --depth 1 --branch release/latest https://github.com/NoiseByNorthwest/php-spx /tmp/php-spx \
+          && cd /tmp/php-spx && phpize && ./configure && make -j$(nproc) && make install \
+          && docker-php-ext-enable spx) || true; } \
+    && mkdir -p /usr/local/share/misc/php-spx/assets/web-ui \
+    && rm -rf /tmp/php-spx /tmp/pear /var/cache/apk/*
 
 # Xdebug compiled in the builder too. Legacy PHP needs older xdebug majors.
-# 5.6 stops at xdebug 2.5.5 (last release with 5.x support).
 RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
     && case "$PHPVER" in \
-        5.6) XDEBUG_PKG="xdebug-2.5.5" ;; \
         7.2) XDEBUG_PKG="xdebug-3.1.6" ;; \
         7.4) XDEBUG_PKG="xdebug-3.1.6" ;; \
         8.0) XDEBUG_PKG="xdebug-3.3.2" ;; \
@@ -103,14 +100,13 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
 # the runtime stage via the existing COPY --from=builder block at the bottom;
 # the Instant Client itself is copied separately in the runtime stage below.
 # pecl package is pinned per-PHP-major where the rolling "oci8" tag drops
-# support; PHP 8.2+ tracks the latest.
+# support; PHP 8.4+ tracks the latest.
 RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
     && case "$PHPVER" in \
-        5.6)             OCI8_PKG="oci8-2.0.12" ;; \
-        7.2|7.3|7.4)     OCI8_PKG="oci8-2.2.0" ;; \
-        8.0)             OCI8_PKG="oci8-3.0.1" ;; \
-        8.1|8.2|8.3)     OCI8_PKG="oci8-3.3.0" ;; \
-        *)               OCI8_PKG="oci8" ;; \
+        7.2|7.3|7.4) OCI8_PKG="oci8-2.2.0" ;; \
+        8.0)         OCI8_PKG="oci8-3.0.1" ;; \
+        8.1|8.2|8.3) OCI8_PKG="oci8-3.3.0" ;; \
+        *)           OCI8_PKG="oci8" ;; \
     esac \
     && apk add --no-cache libaio libnsl gcompat libc6-compat libstdc++ unzip \
     && mkdir -p /opt/oracle && cd /opt/oracle \
@@ -156,9 +152,6 @@ RUN apk update && apk add --no-cache \
         libldap \
         sqlite-libs \
         libxslt \
-        libmemcached-libs \
-        rabbitmq-c \
-        openssh-client \
     && rm -rf /var/cache/apk/*
 
 # icu-data-full carries the full CLDR locale set for ext-intl (#332). Alpine
@@ -173,11 +166,6 @@ RUN apk add --no-cache icu-data-full 2>/dev/null || true
 # LD_LIBRARY_PATH so PHP can resolve libclntsh.so at extension load time.
 RUN apk add --no-cache libaio libnsl gcompat libc6-compat libstdc++ \
     && rm -rf /var/cache/apk/*
-# On Alpine 3.8 (PHP 5.6 base) musl doesn't expose libresolv.so.2 separately
-# and Oracle libclntsh.so insists on dlopen'ing it. The shim is harmless on
-# newer Alpine — gcompat already provides resolv.h symbols there, so this
-# symlink is essentially a no-op except on the legacy tier.
-RUN [ -e /lib/libresolv.so.2 ] || ln -sf /lib/libc.musl-x86_64.so.1 /lib/libresolv.so.2
 COPY --from=builder /opt/oracle/instantclient_21_18 /opt/oracle/instantclient_21_18
 RUN ln -sfn /opt/oracle/instantclient_21_18 /opt/oracle/instantclient
 ENV ORACLE_HOME=/opt/oracle/instantclient \
@@ -191,6 +179,10 @@ ENV ORACLE_HOME=/opt/oracle/instantclient \
 # plus xdebug + pecl modules without dragging autoconf/make/g++ across.
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 COPY --from=builder /usr/local/etc/php/conf.d/ /usr/local/etc/php/conf.d/
+
+# SPX profiler web UI assets (shipped as files, not embedded in the .so). The
+# builder's mkdir -p guarantees this path exists even if the SPX build failed.
+COPY --from=builder /usr/local/share/misc/php-spx/ /usr/local/share/misc/php-spx/
 
 # MariaDB client (mysql-client) connecting to lerd MySQL uses self-signed
 # certs; disable SSL verification so CLI tools (mysqldump, schema loading)

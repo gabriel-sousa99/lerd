@@ -64,11 +64,43 @@ type VhostData struct {
 	// with stable identifiers instead of guessing from DOCUMENT_ROOT.
 	LerdSite   string
 	LerdBranch string
+	// Profiling arms the SPX profiler for the site: when true the .php
+	// location injects SPX_ENABLED=1 into HTTP_COOKIE so every request is
+	// profiled. SPX_KEY is injected regardless (gated by the $spx_key map)
+	// so the profiler UI is reachable.
+	Profiling bool
+	// RequestTimeout is the nginx request timeout in seconds rendered into the
+	// fastcgi_*_timeout / proxy_*_timeout directives. Resolved per site by
+	// resolveRequestTimeout (project .lerd.yaml, then global config, then 60s).
+	RequestTimeout int
+}
+
+// resolveRequestTimeout returns the effective request timeout in seconds for
+// the site at sitePath: project .lerd.yaml wins, then global config, then 60s.
+// An empty sitePath skips the project lookup (site-less proxy vhosts).
+func resolveRequestTimeout(sitePath string) int {
+	if sitePath != "" {
+		if pc, err := config.LoadProjectConfig(sitePath); err == nil && pc.RequestTimeout > 0 {
+			return pc.RequestTimeout
+		}
+	}
+	gc, err := config.LoadGlobal()
+	if err != nil {
+		return config.DefaultRequestTimeout
+	}
+	return gc.RequestTimeoutSeconds()
 }
 
 // phpShort converts "8.4" → "84".
 func phpShort(version string) string {
 	return strings.ReplaceAll(version, ".", "")
+}
+
+// profilerEnabled reports the global SPX profiler toggle. Vhosts inject
+// SPX_ENABLED into FPM requests only when this is on.
+func profilerEnabled() bool {
+	cfg, err := config.LoadGlobal()
+	return err == nil && cfg.IsProfilerEnabled()
 }
 
 // resolvePublicDir returns the document root subdirectory for a site.
@@ -129,6 +161,8 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 		ProxyPath:       proxyPath,
 		ProxyPort:       proxyPort,
 		LerdSite:        site.Name,
+		Profiling:       profilerEnabled(),
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -171,6 +205,8 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 		ProxyPath:       proxyPath,
 		ProxyPort:       proxyPort,
 		LerdSite:        site.Name,
+		Profiling:       profilerEnabled(),
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -203,6 +239,7 @@ func GenerateFrankenPHPVhost(site config.Site) error {
 		ServerNames:     serverNamesWithWildcards(site.Domains),
 		CustomContainer: podman.FrankenPHPContainerName(site.Name),
 		CustomPort:      podman.FrankenPHPPort,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -233,6 +270,7 @@ func GenerateFrankenPHPSSLVhost(site config.Site) error {
 		CertDomain:      site.PrimaryDomain(),
 		CustomContainer: podman.FrankenPHPContainerName(site.Name),
 		CustomPort:      podman.FrankenPHPPort,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -266,6 +304,7 @@ func GenerateCustomVhost(site config.Site) error {
 		CustomContainer: podman.CustomContainerName(site.Name),
 		CustomPort:      site.ContainerPort,
 		BackendSSL:      site.ContainerSSL,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -300,6 +339,7 @@ func GenerateCustomSSLVhost(site config.Site) error {
 		CustomContainer: podman.CustomContainerName(site.Name),
 		CustomPort:      site.ContainerPort,
 		BackendSSL:      site.ContainerSSL,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -349,6 +389,8 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 		PublicDir:       "public",
 		LerdSite:        siteName,
 		LerdBranch:      branch,
+		Profiling:       profilerEnabled(),
+		RequestTimeout:  resolveRequestTimeout(path),
 	}
 
 	var buf bytes.Buffer
@@ -386,6 +428,8 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 		PublicDir:       "public",
 		LerdSite:        siteName,
 		LerdBranch:      branch,
+		Profiling:       profilerEnabled(),
+		RequestTimeout:  resolveRequestTimeout(path),
 	}
 
 	var buf bytes.Buffer
@@ -520,9 +564,10 @@ func RemoveVhost(domain string) error {
 
 // proxyVhostData is the template data for vhost-proxy.conf.tmpl.
 type proxyVhostData struct {
-	Domain       string
-	UpstreamHost string
-	UpstreamPort int
+	Domain         string
+	UpstreamHost   string
+	UpstreamPort   int
+	RequestTimeout int
 }
 
 // GenerateProxyVhost renders vhost-proxy.conf.tmpl and writes conf.d/{domain}.conf.
@@ -538,9 +583,10 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int) error {
 	}
 
 	data := proxyVhostData{
-		Domain:       domain,
-		UpstreamHost: upstreamHost,
-		UpstreamPort: upstreamPort,
+		Domain:         domain,
+		UpstreamHost:   upstreamHost,
+		UpstreamPort:   upstreamPort,
+		RequestTimeout: resolveRequestTimeout(""),
 	}
 
 	var buf bytes.Buffer
@@ -886,6 +932,10 @@ func EnsureLerdVhost() error {
         proxy_pass http://host.containers.internal:7073;
     }
 
+    location ^~ /_spx/ {
+        proxy_pass http://host.containers.internal:7073;
+    }
+
     location = /manifest.webmanifest {
         proxy_pass http://host.containers.internal:7073;
     }
@@ -924,6 +974,10 @@ func EnsureLerdVhost() error {
     }
 
     location ^~ /assets/ {
+        proxy_pass http://unix:%[1]s:$request_uri;
+    }
+
+    location ^~ /_spx/ {
         proxy_pass http://unix:%[1]s:$request_uri;
     }
 
@@ -1013,11 +1067,58 @@ func EnsureForwardedConf() error {
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
 		return err
 	}
+	key, err := config.LoadOrGenerateProfilerKey()
+	if err != nil {
+		return err
+	}
+	content := forwardedConf + spxKeyMap(key)
 	return os.WriteFile(
 		filepath.Join(config.NginxConfD(), "_forwarded.conf"),
-		[]byte(forwardedConf),
+		[]byte(content),
 		0644,
 	)
+}
+
+// spxKeyMap resolves $spx_key to the SPX http key for direct local requests
+// and to an empty string when an X-Forwarded-Host header is present, so the
+// SPX profiler stays unreachable through tunnels and LAN shares.
+func spxKeyMap(key string) string {
+	return fmt.Sprintf(`
+map $http_x_forwarded_host $spx_key {
+    default "";
+    ""      %q;
+}
+`, key)
+}
+
+// EnsureProfilerVhost writes the profiler.localhost vhost: a dedicated
+// hostname routed to a PHP-FPM container so SPX serves its report UI for the
+// dashboard's global Profiler entry, independent of any site.
+func EnsureProfilerVhost() error {
+	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
+		return err
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	// SCRIPT_FILENAME just needs a real file to exist; SPX intercepts the
+	// SPX_UI_URI request and serves its UI before dump-bridge.php runs.
+	content := fmt.Sprintf(`server {
+    listen 80;
+    listen [::]:80;
+    server_name profiler.localhost;
+
+    location / {
+        set $fpm "lerd-php%s-fpm";
+        fastcgi_pass $fpm:9000;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /usr/local/etc/lerd/dump-bridge.php;
+        fastcgi_param HTTP_COOKIE "SPX_KEY=$spx_key";
+    }
+}
+`, phpShort(cfg.PHP.DefaultVersion))
+	return os.WriteFile(filepath.Join(config.NginxConfD(), "_profiler.conf"), []byte(content), 0644)
 }
 
 // EnsureCustomD creates the user-override directory. Lerd never writes here
