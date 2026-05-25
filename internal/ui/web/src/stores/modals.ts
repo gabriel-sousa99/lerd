@@ -9,6 +9,7 @@ export type ModalKind =
   | 'lanProgress'
   | 'worktreeAdd'
   | 'worktreeRemove'
+  | 'proxyAdd'
   | null;
 
 export type LANAction = 'expose' | 'unexpose';
@@ -49,6 +50,10 @@ export function openWorktreeAddModal(site: Site) {
 
 export function openWorktreeRemoveModal(site: Site, branch: string) {
   modal.set({ kind: 'worktreeRemove', site, branch });
+}
+
+export function openProxyAddModal() {
+  modal.set({ kind: 'proxyAdd' });
 }
 
 export function closeModal() {
