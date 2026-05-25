@@ -484,6 +484,34 @@ func TestRemoteControlGate_csrfBlocksCrossSitePost(t *testing.T) {
 	}
 }
 
+// The dashboard at http://lerd.localhost POSTs to http://localhost:7073;
+// browsers label that "cross-site" even though both ends are local. Such
+// POSTs only reach the backend after a successful CORS preflight, and
+// the preflight only succeeds when the origin is in allowedCORSOrigins.
+// Presence of the X-Lerd-CSRF header therefore proves the request came
+// from a trusted origin, regardless of Sec-Fetch-Site.
+func TestRemoteControlGate_csrfAllowsCrossSiteWithHeader(t *testing.T) {
+	setupConfigDirRaw(t, "", "", false)
+
+	for _, site := range []string{"cross-site", "same-site"} {
+		t.Run(site, func(t *testing.T) {
+			next := &nextHandler{}
+			gate := withRemoteControlGate(next)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/sites/my-app.test/tinker", nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			req.Header.Set("Sec-Fetch-Site", site)
+			req.Header.Set("X-Lerd-CSRF", "1")
+			rec := httptest.NewRecorder()
+			gate.ServeHTTP(rec, req)
+
+			if !next.called {
+				t.Errorf("Sec-Fetch-Site=%s + X-Lerd-CSRF blocked — dashboard cross-origin POST rejected", site)
+			}
+		})
+	}
+}
+
 // Sec-Fetch-Site: same-origin / none are the legitimate values the
 // dashboard's own JS and the user's direct URL bar visits send. They
 // must pass even on POST.

@@ -105,17 +105,29 @@ func isCSRFExemptPath(path string) bool {
 // this runs. GET/HEAD/OPTIONS skip the check too — those are safe per
 // RFC 9110 and the underlying handlers don't mutate state.
 func passesCSRFCheck(r *http.Request) bool {
-	switch site := r.Header.Get("Sec-Fetch-Site"); site {
+	// X-Lerd-CSRF is the primary proof. A browser can only send this
+	// header cross-origin after a successful CORS preflight, and our
+	// withCORS middleware only ACKs preflights from origins in
+	// allowedCORSOrigins (the dashboard itself: lerd.localhost,
+	// localhost:7073, 127.0.0.1:7073). A page on evil.com triggers a
+	// preflight that we don't ACK, so the browser blocks the actual
+	// request before it ever reaches this code. Presence of the header
+	// here therefore means the request came from a trusted origin —
+	// regardless of what Sec-Fetch-Site says.
+	if r.Header.Get(csrfHeader) != "" {
+		return true
+	}
+	// No custom header: fall back to Sec-Fetch-Site for browsers that
+	// did a simple/no-cors POST (which can't carry custom headers).
+	switch r.Header.Get("Sec-Fetch-Site") {
 	case "same-origin", "none":
 		return true
-	case "cross-site", "same-site":
+	default:
+		// "cross-site", "same-site", or absent. Absent typically means
+		// a non-browser client (curl, internal HTTP); those should set
+		// X-Lerd-CSRF explicitly and have been rejected above.
 		return false
 	}
-	// No Sec-Fetch-Site (older browser, curl, internal HTTP client).
-	// Require the custom header explicitly. Empty string is treated as
-	// absent — a malicious page would have to forge a preflight to send
-	// it cross-origin, which CORS blocks.
-	return r.Header.Get(csrfHeader) != ""
 }
 
 // isMutatingMethod reports whether the HTTP method modifies server state
