@@ -15,6 +15,9 @@ func Remove(name string) error {
 	if err != nil {
 		return err
 	}
+	if p.Managed {
+		_ = RemoveManagedQuadlet(name)
+	}
 	_ = nginx.RemoveVhost(p.PrimaryDomain())
 	if p.Secured {
 		_ = unsecureCertFn(*p)
