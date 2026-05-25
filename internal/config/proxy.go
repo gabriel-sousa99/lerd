@@ -24,8 +24,8 @@ type Proxy struct {
 
 	Managed     bool   `yaml:"managed,omitempty"`
 	NodeVersion string `yaml:"node_version,omitempty"`
-	Cmd         string `yaml:"cmd,omitempty"`
-	AutoStart   bool   `yaml:"autostart,omitempty"`
+	Command     string `yaml:"cmd,omitempty"`
+	AutoStart   bool   `yaml:"auto_start,omitempty"`
 }
 
 // PrimaryDomain returns the first registered domain.
@@ -46,8 +46,8 @@ type proxyYAML struct {
 	Paused       bool     `yaml:"paused,omitempty"`
 	Managed      bool     `yaml:"managed,omitempty"`
 	NodeVersion  string   `yaml:"node_version,omitempty"`
-	Cmd          string   `yaml:"cmd,omitempty"`
-	AutoStart    bool     `yaml:"autostart,omitempty"`
+	Command      string   `yaml:"cmd,omitempty"`
+	AutoStart    bool     `yaml:"auto_start,omitempty"`
 }
 
 func (p Proxy) toYAML() proxyYAML {
@@ -61,7 +61,7 @@ func (p Proxy) toYAML() proxyYAML {
 		Paused:       p.Paused,
 		Managed:      p.Managed,
 		NodeVersion:  p.NodeVersion,
-		Cmd:          p.Cmd,
+		Command:      p.Command,
 		AutoStart:    p.AutoStart,
 	}
 }
@@ -77,7 +77,7 @@ func (py proxyYAML) toProxy() Proxy {
 		Paused:       py.Paused,
 		Managed:      py.Managed,
 		NodeVersion:  py.NodeVersion,
-		Cmd:          py.Cmd,
+		Command:      py.Command,
 		AutoStart:    py.AutoStart,
 	}
 }
@@ -108,7 +108,13 @@ func cloneProxyRegistry(in *ProxyRegistry) *ProxyRegistry {
 		return &ProxyRegistry{}
 	}
 	out := &ProxyRegistry{Proxies: make([]Proxy, len(in.Proxies))}
-	copy(out.Proxies, in.Proxies)
+	for i, p := range in.Proxies {
+		cp := p
+		if p.Domains != nil {
+			cp.Domains = append([]string(nil), p.Domains...)
+		}
+		out.Proxies[i] = cp
+	}
 	return out
 }
 

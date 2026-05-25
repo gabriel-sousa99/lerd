@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -20,7 +19,7 @@ func TestProxyYAMLRoundTrip(t *testing.T) {
 		Secured:      true,
 		Managed:      true,
 		NodeVersion:  "20",
-		Cmd:          "npm run dev",
+		Command:      "npm run dev",
 		AutoStart:    true,
 	}
 
@@ -116,5 +115,4 @@ func TestProxiesFilePath(t *testing.T) {
 	if got := ProxiesFile(); got != want {
 		t.Fatalf("ProxiesFile: got %q want %q", got, want)
 	}
-	_ = os.Remove(want)
 }
