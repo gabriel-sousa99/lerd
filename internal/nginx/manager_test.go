@@ -1,11 +1,13 @@
 package nginx
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"text/template"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
@@ -108,6 +110,43 @@ func TestGetTemplate_missing(t *testing.T) {
 	_, err := GetTemplate("nonexistent.tmpl")
 	if err == nil {
 		t.Error("expected error for missing template")
+	}
+}
+
+func TestProxyTemplatesLoad(t *testing.T) {
+	for _, name := range []string{"vhost-proxy.conf.tmpl", "vhost-proxy-ssl.conf.tmpl"} {
+		data, err := GetTemplate(name)
+		if err != nil {
+			t.Fatalf("GetTemplate(%s): %v", name, err)
+		}
+		if _, err := template.New(name).Parse(string(data)); err != nil {
+			t.Fatalf("Parse(%s): %v", name, err)
+		}
+		if !strings.Contains(string(data), "$connection_upgrade") {
+			t.Fatalf("%s missing $connection_upgrade", name)
+		}
+	}
+}
+
+func TestRenderNginxConfIncludesUpgradeMap(t *testing.T) {
+	tmplData, err := GetTemplate("nginx.conf")
+	if err != nil {
+		t.Fatalf("GetTemplate: %v", err)
+	}
+	tmpl, err := template.New("nginx.conf").Parse(string(tmplData))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, struct{ Resolver string }{"10.0.0.1"}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "map $http_upgrade $connection_upgrade") {
+		t.Fatalf("missing connection_upgrade map:\n%s", out)
+	}
+	if !strings.Contains(out, "default upgrade") {
+		t.Fatalf("missing default upgrade in map:\n%s", out)
 	}
 }
 
@@ -832,5 +871,62 @@ func TestEnsureLerdVhost_darwinProxiesHostContainersInternal(t *testing.T) {
 	}
 	if !strings.Contains(content, "return 444") {
 		t.Errorf("expected catch-all 'return 444' in:\n%s", content)
+	}
+}
+
+func TestGenerateProxyVhostPlain(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	if err := GenerateProxyVhost("spa.localhost", "host.containers.internal", 9000, false); err != nil {
+		t.Fatalf("GenerateProxyVhost: %v", err)
+	}
+	confPath := filepath.Join(config.NginxConfD(), "spa.localhost.conf")
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatalf("read conf: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "proxy_pass http://host.containers.internal:9000") {
+		t.Fatalf("missing proxy_pass:\n%s", content)
+	}
+	if !strings.Contains(content, "$connection_upgrade") {
+		t.Fatalf("missing upgrade header:\n%s", content)
+	}
+	sslPath := filepath.Join(config.NginxConfD(), "spa.localhost-ssl.conf")
+	if _, err := os.Stat(sslPath); !os.IsNotExist(err) {
+		t.Fatalf("ssl vhost should not exist for plain mode")
+	}
+}
+
+func TestGenerateProxyVhostSecured(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	// Pre-create a plain vhost to verify it gets removed on secure flip.
+	confPath := filepath.Join(config.NginxConfD(), "spa.localhost.conf")
+	if err := os.MkdirAll(filepath.Dir(confPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(confPath, []byte("# old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := GenerateProxyVhost("spa.localhost", "host.containers.internal", 9000, true); err != nil {
+		t.Fatalf("GenerateProxyVhost(secured): %v", err)
+	}
+	sslPath := filepath.Join(config.NginxConfD(), "spa.localhost-ssl.conf")
+	data, err := os.ReadFile(sslPath)
+	if err != nil {
+		t.Fatalf("read ssl conf: %v", err)
+	}
+	if !strings.Contains(string(data), "listen 443 ssl") {
+		t.Fatalf("missing listen 443:\n%s", data)
+	}
+	if !strings.Contains(string(data), "ssl_certificate /etc/nginx/certs/spa.localhost.crt") {
+		t.Fatalf("missing cert path:\n%s", data)
+	}
+	if _, err := os.Stat(confPath); !os.IsNotExist(err) {
+		t.Fatalf("plain vhost should be removed when secured=true")
 	}
 }

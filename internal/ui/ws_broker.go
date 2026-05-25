@@ -149,6 +149,11 @@ func runSnapshotInvalidator() {
 				msg.Status = snapshots.Status()
 			case eventbus.KindDumpsStatus:
 				msg.DumpsStatus = buildDumpsStatusJSON()
+			case eventbus.KindProxies:
+				// Proxies não fazem parte do snapshot agregado. A presença da
+				// Kind no broadcast já sinaliza ao front que ele deve re-fetch
+				// /api/proxies via loadProxies(). O case explícito existe para
+				// que o Kind seja contabilizado em msg.Kinds.
 			}
 		}
 		broker.broadcast(msg)

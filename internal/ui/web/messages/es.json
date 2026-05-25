@@ -115,6 +115,7 @@
   "time_day_ago": "hace {n}d",
   "nav_sites": "Sitios",
   "nav_services": "Servicios",
+  "nav_proxies": "Proxies",
   "nav_system": "Sistema",
   "nav_apps": "Apps",
   "nav_documentation": "Documentación",

@@ -29,6 +29,7 @@
 - [Rebuild de imagens PHP](#rebuild-de-imagens-php)
 - [Atualização](#atualização)
 - [Desinstalação](#desinstalação)
+- [Proxies para projetos não-PHP](#proxies-para-projetos-não-php)
 - [Diagnóstico](#diagnóstico)
 - [Recursos exclusivos do dashboard](#recursos-exclusivos-do-dashboard)
 - [Debug e troubleshooting](#debug-e-troubleshooting)
@@ -677,6 +678,46 @@ podman ps -a --filter "name=lerd-" -q | xargs podman rm -f
 podman images --filter "reference=lerd-*" -q | xargs podman rmi -f
 podman images --filter "reference=ghcr.io/gabriel-sousa99/lerd-*" -q | xargs podman rmi -f
 ```
+
+---
+
+## Proxies para projetos não-PHP
+
+Para SPAs/dev servers (Vue, Quasar, Nuxt, Vite, SvelteKit) que rodam fora do PHP, o lerd expõe um conceito de **proxy manual**: um domínio local com HTTPS + WebSocket que faz reverse proxy para uma porta arbitrária do host.
+
+### CLI
+
+```bash
+# Proxy simples para o dev server na porta 9000
+lerd proxy add gestao-clientes.localhost --port 9000
+
+# Com pasta do projeto (opcional)
+lerd proxy add gestao-clientes.localhost --port 9000 \
+  --path ~/projetos/gestao-clientes-spa
+
+# Managed mode: o lerd levanta o dev server como quadlet
+lerd proxy add app.localhost --port 5173 \
+  --path ~/projetos/app \
+  --managed --cmd "npm run dev" --autostart
+
+# Outros comandos
+lerd proxy ls                   # lista
+lerd proxy rm app.localhost     # remove
+lerd proxy unsecure app         # vira HTTP
+lerd proxy start app            # liga managed dev server
+lerd proxy logs app -f          # journalctl -f
+```
+
+### UI
+
+Há uma aba **Proxies** no dashboard com a mesma funcionalidade.
+
+### Como funciona
+
+- `nginx` faz `proxy_pass` para `host.containers.internal:<porta>`
+- HTTPS via `mkcert` (root CA já instalado pelo `lerd setup`)
+- Headers `Upgrade`/`Connection` configurados → Vite HMR, devtools, WS funcionam
+- Em **managed mode**, o dev server roda em container `node:<major>-alpine` com `Network=host` (bind direto na porta declarada)
 
 ---
 

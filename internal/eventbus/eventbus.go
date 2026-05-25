@@ -18,6 +18,10 @@ const (
 	KindServices    = "services"
 	KindStatus      = "status"
 	KindDumpsStatus = "dumps_status"
+	// KindProxies sinaliza mudanças no registry de proxies. Não faz parte
+	// do snapshot agregado: a presença no broadcast só avisa o front a
+	// re-fetch /api/proxies.
+	KindProxies = "proxies"
 )
 
 // Event is broadcast to every Subscriber when a publish fires.

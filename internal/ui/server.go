@@ -210,6 +210,8 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/sites/worktree-add", withCORS(publishAfter(handleSiteWorktreeAdd, eventbus.KindSites)))
 	mux.HandleFunc("/api/browse", withCORS(handleBrowse))
 	mux.HandleFunc("/api/sites/", withCORS(publishAfter(handleSiteAction, eventbus.KindSites, eventbus.KindServices)))
+	mux.HandleFunc("/api/proxies", withCORS(publishAfter(handleProxies, eventbus.KindProxies)))
+	mux.HandleFunc("/api/proxies/", withCORS(publishAfter(handleProxyAction, eventbus.KindProxies)))
 	mux.HandleFunc("/api/logs/", withCORS(handleLogs))
 	mux.HandleFunc("/api/dumps", withCORS(handleDumpsList))
 	mux.HandleFunc("/api/dumps/stream", withCORS(handleDumpsStream))
@@ -348,7 +350,7 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 		origin := r.Header.Get("Origin")
 		if allowedCORSOrigins[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Lerd-CSRF")
 		}
 		if r.Method == http.MethodOptions {

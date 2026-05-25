@@ -17,6 +17,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/proxyops"
 	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/spf13/cobra"
 )
@@ -548,6 +549,16 @@ func runStart(_ *cobra.Command, _ []string) error {
 
 	autoStopUnusedFPMs()
 
+	// Managed proxies marcados como autostart.
+	if reg, err := config.LoadProxies(); err == nil {
+		for _, p := range reg.Proxies {
+			if p.Managed && p.AutoStart && !p.Paused {
+				_ = proxyops.WriteManagedQuadlet(p)
+				_ = proxyops.StartManaged(p.Name)
+			}
+		}
+	}
+
 	// Restart the tray applet, stopping any existing instance first.
 	// Prefer the systemd service when enabled; otherwise launch directly.
 	fmt.Print("  --> lerd-tray ... ")
@@ -966,6 +977,14 @@ func runStop(_ *cobra.Command, _ []string) error {
 		}
 	}
 	RunParallel(jobs) //nolint:errcheck
+
+	if reg, err := config.LoadProxies(); err == nil {
+		for _, p := range reg.Proxies {
+			if p.Managed {
+				_ = proxyops.StopManaged(p.Name)
+			}
+		}
+	}
 	return nil
 }
 

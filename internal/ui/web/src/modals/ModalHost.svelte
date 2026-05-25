@@ -7,6 +7,7 @@
   import LANProgressModal from './LANProgressModal.svelte';
   import AddWorktreeModal from './AddWorktreeModal.svelte';
   import RemoveWorktreeModal from './RemoveWorktreeModal.svelte';
+  import ProxyAddModal from './ProxyAddModal.svelte';
 </script>
 
 {#if $modal.kind === 'domain' && $modal.site}
@@ -23,4 +24,6 @@
   <AddWorktreeModal site={$modal.site} />
 {:else if $modal.kind === 'worktreeRemove' && $modal.site && $modal.branch}
   <RemoveWorktreeModal site={$modal.site} branch={$modal.branch} />
+{:else if $modal.kind === 'proxyAdd'}
+  <ProxyAddModal />
 {/if}

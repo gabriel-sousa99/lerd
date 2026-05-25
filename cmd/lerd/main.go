@@ -78,6 +78,7 @@ func main() {
 	root.AddCommand(cli.NewSitesCmd())
 	root.AddCommand(cli.NewSecureCmd())
 	root.AddCommand(cli.NewUnsecureCmd())
+	root.AddCommand(cli.NewProxyCmd())
 	root.AddCommand(cli.NewUseCmd())
 	root.AddCommand(cli.NewIsolateCmd())
 	root.AddCommand(cli.NewIsolateNodeCmd())
