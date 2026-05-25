@@ -1,11 +1,13 @@
 package nginx
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"text/template"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
@@ -108,6 +110,28 @@ func TestGetTemplate_missing(t *testing.T) {
 	_, err := GetTemplate("nonexistent.tmpl")
 	if err == nil {
 		t.Error("expected error for missing template")
+	}
+}
+
+func TestRenderNginxConfIncludesUpgradeMap(t *testing.T) {
+	tmplData, err := GetTemplate("nginx.conf")
+	if err != nil {
+		t.Fatalf("GetTemplate: %v", err)
+	}
+	tmpl, err := template.New("nginx.conf").Parse(string(tmplData))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, struct{ Resolver string }{"10.0.0.1"}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "map $http_upgrade $connection_upgrade") {
+		t.Fatalf("missing connection_upgrade map:\n%s", out)
+	}
+	if !strings.Contains(out, "default upgrade") {
+		t.Fatalf("missing default upgrade in map:\n%s", out)
 	}
 }
 
