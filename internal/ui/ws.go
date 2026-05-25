@@ -204,6 +204,12 @@ func assembleSnapshot(sites, services, status, unhealthy, dumpsStatus, notificat
 		buf.WriteString("snapshot")
 	}
 	buf.WriteByte('"')
+	if len(kinds) > 0 {
+		if kindsJSON, err := json.Marshal(kinds); err == nil {
+			buf.WriteString(`,"kinds":`)
+			buf.Write(kindsJSON)
+		}
+	}
 	if len(sites) > 0 {
 		buf.WriteString(`,"sites":`)
 		buf.Write(sites)

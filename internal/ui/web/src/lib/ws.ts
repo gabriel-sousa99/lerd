@@ -20,6 +20,7 @@ export interface NotificationEvent {
 
 export interface WsMessage {
   type: string;
+  kinds?: string[];
   sites?: unknown;
   services?: unknown;
   status?: unknown;

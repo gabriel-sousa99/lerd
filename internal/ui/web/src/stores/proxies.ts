@@ -5,16 +5,16 @@ import { wsMessage } from '$lib/ws';
 export interface Proxy {
   name: string;
   domain: string;
-  domains?: string[];
+  domains: string[];
   upstream_port: number;
-  upstream_host?: string;
+  upstream_host: string;
   path?: string;
-  secured?: boolean;
-  paused?: boolean;
-  managed?: boolean;
+  secured: boolean;
+  paused: boolean;
+  managed: boolean;
   node_version?: string;
   cmd?: string;
-  autostart?: boolean;
+  autostart: boolean;
 }
 
 export const proxies = writable<Proxy[]>([]);
@@ -64,11 +64,14 @@ export async function proxyAction(name: string, action: ProxyAction): Promise<vo
   await loadProxies();
 }
 
-// Backend ws_broker emits a frame with type==="proxies" whenever KindProxies
-// is published (proxies are not part of the aggregated snapshot, the frame is
-// only a signal to re-fetch). See internal/ui/ws_broker.go runSnapshotInvalidator.
+// Backend ws_broker emits a frame whenever KindProxies is published. When
+// KindProxies is the only kind in the frame, type==="proxies"; when it
+// coalesces with other kinds (eventbus debounce 150ms), type==="snapshot"
+// and the proxies signal lives in the kinds[] array. Both paths trigger
+// a re-fetch via /api/proxies. See internal/ui/ws_broker.go runSnapshotInvalidator.
 wsMessage.subscribe((msg) => {
-  if (msg?.type === 'proxies') {
+  if (!msg) return;
+  if (msg.type === 'proxies' || msg.kinds?.includes?.('proxies')) {
     void loadProxies();
   }
 });
