@@ -94,6 +94,23 @@ func WorktreeCertDomains(siteDomains []string, worktreeDomains []string) []strin
 	return domains
 }
 
+// SecureProxy issues a mkcert certificate for the proxy's primary domain
+// and writes it under CertsDir(). Mirrors SecureSite without the worktree
+// wildcards (proxies have no worktrees).
+func SecureProxy(p config.Proxy) error {
+	domain := p.PrimaryDomain()
+	return IssueCertForce(domain, []string{domain}, config.CertsDir())
+}
+
+// UnsecureProxy removes the cert/key files for the proxy's primary domain.
+func UnsecureProxy(p config.Proxy) error {
+	domain := p.PrimaryDomain()
+	for _, suf := range []string{".crt", ".key"} {
+		_ = os.Remove(filepath.Join(config.CertsDir(), domain+suf))
+	}
+	return nil
+}
+
 // UnsecureSite regenerates a plain HTTP vhost for the site, removing TLS.
 func UnsecureSite(site config.Site) error {
 	mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
