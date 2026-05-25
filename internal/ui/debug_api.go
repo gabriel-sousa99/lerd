@@ -16,7 +16,7 @@ type debugAction struct {
 	// argv is the command + args. Run from os.Executable() (= the running lerd
 	// binary) so the action mirrors what the CLI would do, no subprocess that
 	// shells out separately.
-	argv    []string
+	argv []string
 	// when useShell is true, argv[0] is interpreted by /bin/sh -c so multi-tool
 	// pipelines (journalctl | tail) work. Default is direct exec.
 	useShell bool

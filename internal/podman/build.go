@@ -685,7 +685,7 @@ func RewriteFPMQuadlets() error {
 		content = strings.ReplaceAll(content, "{{.DumpsDir}}", config.DumpsAssetsDir())
 		content = strings.ReplaceAll(content, "{{.DumpsIniPath}}", config.DumpsIniFile())
 		content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
-	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
+		content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
 		content = applyShellMounts(content, short)
 		content = InjectExtraVolumes(content, extraPaths)
 

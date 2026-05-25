@@ -60,8 +60,8 @@ func hasLaravelArtisan(projectDir string) bool {
 //   - Name:    the artisan signature head (e.g. "app:rebuild-index")
 //   - Label:   same as Name (the dashboard shows it monospace already)
 //   - Command: `php artisan <full signature without arg placeholders>` so
-//              the shell exec runs cleanly. Argument values aren't surfaced
-//              in the UI for v1; if needed the user can edit .lerd.yaml.
+//     the shell exec runs cleanly. Argument values aren't surfaced
+//     in the UI for v1; if needed the user can edit .lerd.yaml.
 //   - Description: the $description property if found, otherwise empty.
 //   - Output:  "text" so output streams to the existing modal.
 //   - Icon:    "play" to visually distinguish custom from framework commands.

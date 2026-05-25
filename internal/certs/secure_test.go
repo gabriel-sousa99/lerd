@@ -124,4 +124,3 @@ printf 'KEY' > "$KEY"
 		}
 	}
 }
-
