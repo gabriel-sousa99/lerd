@@ -20,11 +20,11 @@ func SetSecured(p *config.Proxy, secured bool) error {
 		}
 	}
 	p.Secured = secured
-	if err := config.AddProxy(*p); err != nil {
-		return fmt.Errorf("atualizando registry: %w", err)
-	}
 	if err := RegenerateProxyVhost(*p); err != nil {
 		return fmt.Errorf("gerando vhost: %w", err)
+	}
+	if err := config.AddProxy(*p); err != nil {
+		return fmt.Errorf("atualizando registry: %w", err)
 	}
 	_ = nginxReloadFn()
 	return nil
