@@ -9,12 +9,17 @@
     emptyLabel?: string;
     maxLines?: number;
     highlight?: (line: string) => string | null;
+    // Optional client-side filter. When provided, only lines for which the
+    // predicate returns true are rendered. The stream still buffers everything
+    // — switching back to a no-filter view restores the full history.
+    filter?: (line: string) => boolean;
   }
-  let { path, emptyLabel, maxLines = 500, highlight }: Props = $props();
+  let { path, emptyLabel, maxLines = 500, highlight, filter }: Props = $props();
   const resolvedEmpty = $derived(emptyLabel ?? m.sites_appLogs_waiting());
 
   let current: LogStream | null = null;
   const lines = writable<string[]>([]);
+  const visibleLines = $derived(filter ? $lines.filter(filter) : $lines);
   const connected = writable<boolean>(false);
   let lineUnsub: (() => void) | null = null;
   let connUnsub: (() => void) | null = null;
@@ -96,10 +101,10 @@
     bind:this={scrollEl}
     class="flex-1 overflow-y-auto bg-gray-50 dark:bg-lerd-bg px-4 py-3 font-mono text-[11px] leading-relaxed space-y-0.5"
   >
-    {#if $lines.length === 0}
+    {#if visibleLines.length === 0}
       <div class="text-gray-400 dark:text-gray-700 italic">{resolvedEmpty}</div>
     {:else}
-      {#each $lines as line, i (i + ':' + line.slice(0, 20))}
+      {#each visibleLines as line, i (i + ':' + line.slice(0, 20))}
         <div class="whitespace-pre-wrap break-all {lineClass(line)}">{line}</div>
       {/each}
     {/if}

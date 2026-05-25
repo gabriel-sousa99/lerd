@@ -5,6 +5,7 @@
   import Toggle from '$components/Toggle.svelte';
   import InfoRow from '$components/InfoRow.svelte';
   import LogViewer from '$components/LogViewer.svelte';
+  import DetailTabs, { type TabItem } from '$components/DetailTabs.svelte';
   import Dropdown from '$components/Dropdown.svelte';
   import { status, loadStatus, fpmRunning } from '$stores/status';
   import { setDefaultPhp, startPhp, stopPhp, removePhp } from '$stores/phpVersions';
@@ -128,6 +129,36 @@
   let removeBusy = $state(false);
   let xdebugBusy = $state(false);
   let removeError = $state('');
+
+  // Log section tabs at the bottom of the panel.
+  type LogTab = 'all' | 'errors';
+  let logTab = $state<LogTab>('all');
+  const logTabs: TabItem<LogTab>[] = [
+    { id: 'all', label: m.system_php_logsAll() },
+    { id: 'errors', label: m.system_php_logsErrors() }
+  ];
+
+  // Errors filter: any line that looks like a PHP runtime error / FPM
+  // diagnostic. Matches both user-code errors emitted by the engine
+  // (Fatal/Parse/Warning/Notice/Deprecated) and FPM's own diagnostics
+  // (ERROR/ALERT/WARNING in square brackets, plus the "exception" keyword
+  // Laravel and Monolog drop when forwarding handled exceptions to stderr).
+  const errorLineRegex = /(PHP (Fatal|Parse|Warning|Notice|Deprecated|Recoverable)|\[(?:ERROR|ALERT|EMERGENCY|CRITICAL|WARNING)\]|Uncaught |Stack trace:|exception\s*"|"level":"(?:error|critical|alert|emergency)")/i;
+  function isErrorLine(line: string): boolean {
+    return errorLineRegex.test(line);
+  }
+  function highlightLogLine(line: string): string | null {
+    if (/PHP (Fatal|Parse) error|Uncaught |\[(?:EMERGENCY|ALERT|CRITICAL)\]|"level":"(?:critical|alert|emergency)"/i.test(line)) {
+      return 'text-red-600 dark:text-red-400';
+    }
+    if (/PHP (Warning|Recoverable)|\[ERROR\]|"level":"error"/i.test(line)) {
+      return 'text-orange-600 dark:text-orange-400';
+    }
+    if (/PHP (Notice|Deprecated)|\[WARNING\]/i.test(line)) {
+      return 'text-amber-600 dark:text-amber-400';
+    }
+    return null;
+  }
 
   async function onSetDefault() {
     defaultBusy = true;
@@ -441,6 +472,12 @@
   </div>
 
   {#if running}
-    <LogViewer path={'/api/logs/' + container} />
+    <DetailTabs tabs={logTabs} active={logTab} onchange={(id) => (logTab = id)} />
+    <LogViewer
+      path={'/api/logs/' + container}
+      highlight={highlightLogLine}
+      filter={logTab === 'errors' ? isErrorLine : undefined}
+      emptyLabel={logTab === 'errors' ? m.system_php_logsErrorsEmpty() : undefined}
+    />
   {/if}
 </DetailPanel>
