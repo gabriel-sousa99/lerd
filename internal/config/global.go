@@ -170,7 +170,7 @@ func (c *GlobalConfig) WorkerExecMode() string {
 
 func defaultConfig() *GlobalConfig {
 	cfg := &GlobalConfig{}
-	cfg.PHP.DefaultVersion = "8.5"
+	cfg.PHP.DefaultVersion = "8.4"
 	cfg.Node.DefaultVersion = "22"
 	cfg.Nginx.HTTPPort = 80
 	cfg.Nginx.HTTPSPort = 443
