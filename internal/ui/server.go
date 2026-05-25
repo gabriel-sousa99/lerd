@@ -210,6 +210,8 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/sites/worktree-add", withCORS(publishAfter(handleSiteWorktreeAdd, eventbus.KindSites)))
 	mux.HandleFunc("/api/browse", withCORS(handleBrowse))
 	mux.HandleFunc("/api/sites/", withCORS(publishAfter(handleSiteAction, eventbus.KindSites, eventbus.KindServices)))
+	mux.HandleFunc("/api/proxies", withCORS(publishAfter(handleProxies, eventbus.KindProxies)))
+	mux.HandleFunc("/api/proxies/", withCORS(publishAfter(handleProxyAction, eventbus.KindProxies)))
 	mux.HandleFunc("/api/logs/", withCORS(handleLogs))
 	mux.HandleFunc("/api/dumps", withCORS(handleDumpsList))
 	mux.HandleFunc("/api/dumps/stream", withCORS(handleDumpsStream))
