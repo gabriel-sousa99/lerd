@@ -10,9 +10,8 @@ import (
 )
 
 // proxyDTO is the JSON shape returned by /api/proxies* endpoints. It
-// flattens config.Proxy plus a derived `domain` (PrimaryDomain) and an
-// optional `unit_active` flag so the frontend can decide whether to show
-// "running" without a second roundtrip.
+// flattens config.Proxy plus a derived `domain` (PrimaryDomain) so the
+// frontend can render the proxy list without extra roundtrips.
 type proxyDTO struct {
 	Name         string   `json:"name"`
 	Domain       string   `json:"domain"`
@@ -26,7 +25,6 @@ type proxyDTO struct {
 	NodeVersion  string   `json:"node_version,omitempty"`
 	Command      string   `json:"cmd,omitempty"`
 	AutoStart    bool     `json:"autostart"`
-	UnitActive   bool     `json:"unit_active,omitempty"`
 }
 
 func toProxyDTO(p config.Proxy) proxyDTO {
@@ -122,6 +120,11 @@ func handleProxyAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 

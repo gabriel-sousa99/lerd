@@ -63,3 +63,21 @@ func TestProxyAPICreateAndDelete(t *testing.T) {
 		t.Fatalf("status delete: %d body=%s", delRR.Code, delRR.Body.String())
 	}
 }
+
+func TestProxyAPIActionRequiresPost(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	proxyops.StubForTests()
+	defer proxyops.UnstubForTests()
+
+	if _, err := proxyops.Add(proxyops.AddOptions{Domain: "spa.localhost", Port: 9000, NoSecure: true, Path: dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/proxies/spa/pause", nil)
+	rr := httptest.NewRecorder()
+	handleProxyAction(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status: %d (expected 405)", rr.Code)
+	}
+}
