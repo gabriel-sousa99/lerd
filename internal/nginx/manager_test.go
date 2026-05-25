@@ -113,6 +113,21 @@ func TestGetTemplate_missing(t *testing.T) {
 	}
 }
 
+func TestProxyTemplatesLoad(t *testing.T) {
+	for _, name := range []string{"vhost-proxy.conf.tmpl", "vhost-proxy-ssl.conf.tmpl"} {
+		data, err := GetTemplate(name)
+		if err != nil {
+			t.Fatalf("GetTemplate(%s): %v", name, err)
+		}
+		if _, err := template.New(name).Parse(string(data)); err != nil {
+			t.Fatalf("Parse(%s): %v", name, err)
+		}
+		if !strings.Contains(string(data), "$connection_upgrade") {
+			t.Fatalf("%s missing $connection_upgrade", name)
+		}
+	}
+}
+
 func TestRenderNginxConfIncludesUpgradeMap(t *testing.T) {
 	tmplData, err := GetTemplate("nginx.conf")
 	if err != nil {
