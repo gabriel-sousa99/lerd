@@ -266,3 +266,23 @@ func ContainerExists(name string) (bool, error) {
 	}
 	return true, nil
 }
+
+// ContainerHasMount returns true if the running container exposes the given
+// destination path (the path as seen from inside the container) as a mount.
+// Used to verify that a quadlet-driven restart actually applied an injected
+// bind mount — if the .container file was updated but the running container
+// still lacks the mount, the user will hit `runc chdir failed: no such file
+// or directory` on the next exec and the failure must be surfaced now rather
+// than discovered hours later.
+func ContainerHasMount(container, destination string) (bool, error) {
+	out, err := Run("inspect", "--format={{range .Mounts}}{{.Destination}}\n{{end}}", container)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == destination {
+			return true, nil
+		}
+	}
+	return false, nil
+}

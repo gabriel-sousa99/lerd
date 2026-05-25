@@ -2,6 +2,7 @@ package podman
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -638,10 +639,26 @@ func WriteFPMQuadlet(version string) error {
 		}
 	}
 
-	if _, err := WriteQuadletDiff(unitName, content); err != nil {
+	changed, err := WriteQuadletDiff(unitName, content)
+	if err != nil {
 		return err
 	}
-	return DaemonReloadFn()
+	if err := DaemonReloadFn(); err != nil {
+		return err
+	}
+	// If the container is already running with the OLD quadlet (e.g. user
+	// reinstalled or re-linked a site on the same PHP version), the running
+	// FPM picks up the new mounts only after a restart. Without this, the
+	// next `podman exec -w /new/path ...` fails with `runc chdir failed:
+	// no such file or directory` even though the quadlet on disk is correct.
+	// Skip the restart for brand-new versions whose container hasn't been
+	// started yet — the next `lerd start` will pick up the fresh config.
+	if changed && ContainerRunningQuiet(unitName) {
+		if err := RestartUnit(unitName); err != nil {
+			return fmt.Errorf("restart %s after quadlet update: %w", unitName, err)
+		}
+	}
+	return nil
 }
 
 // RewriteFPMQuadlets regenerates the quadlet files for all installed PHP-FPM
@@ -690,14 +707,24 @@ func RewriteFPMQuadlets() error {
 	}
 
 	if len(changedUnits) > 0 {
-		_ = DaemonReload()
+		var errs []error
+		if err := DaemonReload(); err != nil {
+			errs = append(errs, fmt.Errorf("daemon-reload after quadlet rewrite: %w", err))
+		}
 		for _, unit := range changedUnits {
-			_ = RestartUnit(unit)
+			if err := RestartUnit(unit); err != nil {
+				errs = append(errs, fmt.Errorf("restart %s: %w", unit, err))
+			}
 		}
 		// Nginx may have restarted and received a new IP. Regenerate the
 		// browser-testing hosts file so Selenium resolves .test domains to
 		// the current nginx container address.
-		_ = WriteContainerHosts()
+		if err := WriteContainerHosts(); err != nil {
+			errs = append(errs, fmt.Errorf("write container hosts: %w", err))
+		}
+		if len(errs) > 0 {
+			return errors.Join(errs...)
+		}
 	}
 	return nil
 }
@@ -798,12 +825,29 @@ var ephemeralPathPrefixes = []string{
 // caller (IDE running `php` repeatedly with rotating temp paths, broken
 // shell loop) cannot keep rewriting the FPM quadlet and re-triggering
 // RestartUnit at the cadence required to hit systemd's start rate-limit.
+//
+// The debounce window depends on outcome:
+//   - successful restart  → pathMountSuccessDebounce (long, prevents cascade)
+//   - failed restart       → pathMountFailureDebounce (short, allows retry
+//     once the transient DBus/systemd hiccup clears)
+//
+// Without the failure path the user can hit a 60-second blackhole where a
+// silently-failed restart leaves the container with stale mounts and every
+// subsequent `lerd php` call early-returns without retrying.
 var (
 	pathMountAttemptsMu sync.Mutex
-	pathMountAttempts   = map[string]time.Time{}
+	pathMountAttempts   = map[string]pathMountStamp{}
 )
 
-const pathMountDebounce = 60 * time.Second
+type pathMountStamp struct {
+	when     time.Time
+	debounce time.Duration
+}
+
+const (
+	pathMountSuccessDebounce = 60 * time.Second
+	pathMountFailureDebounce = 5 * time.Second
+)
 
 // EnsurePathMounted checks whether the given path is accessible inside the
 // PHP-FPM and nginx containers. If the path is outside $HOME and not already
@@ -828,11 +872,15 @@ func EnsurePathMounted(path, phpVersion string) {
 	}
 
 	pathMountAttemptsMu.Lock()
-	if last, ok := pathMountAttempts[path]; ok && time.Since(last) < pathMountDebounce {
+	if last, ok := pathMountAttempts[path]; ok && time.Since(last.when) < last.debounce {
 		pathMountAttemptsMu.Unlock()
 		return // already attempted recently; refuse to cascade restart again
 	}
-	pathMountAttempts[path] = time.Now()
+	// Pre-stamp with the success debounce so concurrent calls during the
+	// in-flight reload+restart see a long window and skip — prevents the
+	// cascade. If anything fails below, we overwrite with the short
+	// failure debounce so the next caller retries instead of waiting 60s.
+	pathMountAttempts[path] = pathMountStamp{when: time.Now(), debounce: pathMountSuccessDebounce}
 	pathMountAttemptsMu.Unlock()
 
 	versions, _ := listInstalledPHPVersions()
@@ -866,16 +914,53 @@ func EnsurePathMounted(path, phpVersion string) {
 		if updated == string(existing) {
 			continue
 		}
-		if writeErr := os.WriteFile(q.path, []byte(updated), 0644); writeErr != nil {
+		// Route through WriteQuadletDiff (not os.WriteFile) so the same
+		// transformations every other writer applies — BindForLAN,
+		// PairIPv6Binds, StripInstallSection, PlatformPodmanArgs — and the
+		// platform sync hook (AfterQuadletWriteFn, which keeps the macOS
+		// launchd plist consistent with the .container file) run here too.
+		// Without this, lazy mount injection on macOS used to update the
+		// quadlet without ever syncing the plist that launchd actually runs.
+		changed, writeErr := WriteQuadletDiff(q.unitName, updated)
+		if writeErr != nil {
 			continue
 		}
-		changedUnits = append(changedUnits, q.unitName)
+		if changed {
+			changedUnits = append(changedUnits, q.unitName)
+		}
 	}
 
 	if len(changedUnits) > 0 {
-		_ = DaemonReload()
+		var failed bool
+		if err := DaemonReload(); err != nil {
+			fmt.Fprintf(os.Stderr, "lerd: daemon-reload after mounting %s failed: %v\n", path, err)
+			failed = true
+		}
 		for _, unit := range changedUnits {
-			_ = RestartUnit(unit)
+			if err := RestartUnit(unit); err != nil {
+				fmt.Fprintf(os.Stderr, "lerd: restart %s after mounting %s failed: %v\n", unit, path, err)
+				failed = true
+				continue
+			}
+			// Belt and suspenders: even when reload+restart both report
+			// success, the running container can end up without the new
+			// mount (observed in production — see oracle.X release notes
+			// for the runc chdir-failed incident on /home/unimedvr/...).
+			// Verify the destination is actually present; if not, mark
+			// failed so the debounce shortens and a retry happens fast.
+			if ContainerRunningQuiet(unit) {
+				if has, err := ContainerHasMount(unit, path); err == nil && !has {
+					fmt.Fprintf(os.Stderr, "lerd: %s reload+restart reported success but mount %s is still missing — retry will fire shortly\n", unit, path)
+					failed = true
+				}
+			}
+		}
+		if failed {
+			// Shorten the debounce so the next caller retries instead of
+			// silently early-returning for 60s with a stale-mount container.
+			pathMountAttemptsMu.Lock()
+			pathMountAttempts[path] = pathMountStamp{when: time.Now(), debounce: pathMountFailureDebounce}
+			pathMountAttemptsMu.Unlock()
 		}
 	}
 }

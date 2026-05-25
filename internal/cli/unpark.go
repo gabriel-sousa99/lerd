@@ -91,7 +91,9 @@ func runUnpark(_ *cobra.Command, args []string) error {
 	}
 
 	// Rewrite FPM quadlets to remove volume mounts that are no longer needed.
-	_ = podman.RewriteFPMQuadlets()
+	if err := podman.RewriteFPMQuadlets(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: FPM quadlet rewrite after unpark did not fully apply: %v\n", err)
+	}
 
 	return nil
 }

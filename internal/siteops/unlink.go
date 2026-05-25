@@ -1,6 +1,7 @@
 package siteops
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -64,7 +65,9 @@ func UnlinkSiteCore(site *config.Site, parkedDirs []string) error {
 	}
 
 	_ = podman.WriteContainerHosts()
-	_ = podman.RewriteFPMQuadlets()
+	if err := podman.RewriteFPMQuadlets(); err != nil {
+		return fmt.Errorf("rewriting FPM quadlets after unlink: %w", err)
+	}
 
 	if err := nginx.Reload(); err != nil {
 		return err

@@ -130,7 +130,10 @@ func runPark(_ *cobra.Command, args []string) error {
 	}
 
 	// Rewrite FPM quadlets so volume mounts cover the new parked directory.
-	_ = podman.RewriteFPMQuadlets()
+	if err := podman.RewriteFPMQuadlets(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: FPM quadlet rewrite after park did not fully apply: %v\n", err)
+		fmt.Fprintln(os.Stderr, "  Sites under this directory may not be reachable until `lerd start` is rerun.")
+	}
 
 	return nil
 }

@@ -132,7 +132,9 @@ func FinishLink(site config.Site, phpVersion string) error {
 		_ = podman.DaemonReloadFn()
 	}
 
-	_ = podman.RewriteFPMQuadlets()
+	if err := podman.RewriteFPMQuadlets(); err != nil {
+		return fmt.Errorf("rewriting FPM quadlets after link: %w", err)
+	}
 	_ = podman.WriteContainerHosts()
 
 	if err := nginx.Reload(); err != nil {
