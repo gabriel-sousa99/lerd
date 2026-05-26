@@ -189,7 +189,7 @@ release:
     name: lerd
   name_template: "v{{ .Version }}"
   draft: false
-  prerelease: auto
+  prerelease: false
   replace_existing_artifacts: true
   header: |
     ## Lerd {{ .Version }}
