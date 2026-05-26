@@ -24,6 +24,6 @@
   <AddWorktreeModal site={$modal.site} />
 {:else if $modal.kind === 'worktreeRemove' && $modal.site && $modal.branch}
   <RemoveWorktreeModal site={$modal.site} branch={$modal.branch} />
-{:else if $modal.kind === 'proxyAdd'}
+{:else if $modal.kind === 'proxyAdd' || $modal.kind === 'proxyEdit'}
   <ProxyAddModal />
 {/if}

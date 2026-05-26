@@ -6,6 +6,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // SetSecured flips the proxy's TLS state: issues/removes the certificate,
@@ -55,6 +56,7 @@ func StubForTests() {
 	secureCertFn = func(config.Proxy) error { return nil }
 	unsecureCertFn = func(config.Proxy) error { return nil }
 	nginxReloadFn = func() error { return nil }
+	restartUnitFn = func(string) error { return nil }
 }
 
 // UnstubForTests restores the real implementations.
@@ -62,4 +64,5 @@ func UnstubForTests() {
 	secureCertFn = certs.SecureProxy
 	unsecureCertFn = certs.UnsecureProxy
 	nginxReloadFn = nginx.Reload
+	restartUnitFn = podman.RestartUnit
 }

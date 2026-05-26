@@ -2,6 +2,7 @@
   import type { Proxy } from '$stores/proxies';
   import { deleteProxy, proxyAction } from '$stores/proxies';
   import { goToTab } from '$stores/route';
+  import { openProxyEditModal } from '$stores/modals';
   import DetailButton from '$components/DetailButton.svelte';
   import InfoRow from '$components/InfoRow.svelte';
 
@@ -56,6 +57,9 @@
       </a>
     </div>
     <div class="flex items-center gap-2 shrink-0">
+      <DetailButton onclick={() => openProxyEditModal(proxy)} disabled={busy !== null}>
+        Edit
+      </DetailButton>
       <DetailButton
         onclick={() => run(proxy.secured ? 'unsecure' : 'secure')}
         disabled={busy !== null}

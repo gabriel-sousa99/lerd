@@ -64,6 +64,58 @@ func TestProxyAPICreateAndDelete(t *testing.T) {
 	}
 }
 
+func TestProxyAPIUpdatePartial(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	proxyops.StubForTests()
+	defer proxyops.UnstubForTests()
+
+	if _, err := proxyops.Add(proxyops.AddOptions{Domain: "spa.localhost", Port: 9000, NoSecure: true, Path: dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"port": 9001})
+	req := httptest.NewRequest(http.MethodPut, "/api/proxies/spa", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handleProxyAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if int(got["upstream_port"].(float64)) != 9001 {
+		t.Fatalf("upstream_port: got %v", got["upstream_port"])
+	}
+
+	reg, _ := config.LoadProxies()
+	if reg.Proxies[0].UpstreamPort != 9001 {
+		t.Fatalf("registry not updated: %d", reg.Proxies[0].UpstreamPort)
+	}
+}
+
+func TestProxyAPIUpdateRejectsBadPort(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	proxyops.StubForTests()
+	defer proxyops.UnstubForTests()
+
+	if _, err := proxyops.Add(proxyops.AddOptions{Domain: "spa.localhost", Port: 9000, NoSecure: true, Path: dir}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"port": 70000})
+	req := httptest.NewRequest(http.MethodPut, "/api/proxies/spa", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handleProxyAction(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: %d (expected 400)", rr.Code)
+	}
+}
+
 func TestProxyAPIActionRequiresPost(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)

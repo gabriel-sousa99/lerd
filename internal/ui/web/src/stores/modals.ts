@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import type { Site } from './sites';
+import type { Proxy } from './proxies';
 
 export type ModalKind =
   | 'domain'
@@ -10,6 +11,7 @@ export type ModalKind =
   | 'worktreeAdd'
   | 'worktreeRemove'
   | 'proxyAdd'
+  | 'proxyEdit'
   | null;
 
 export type LANAction = 'expose' | 'unexpose';
@@ -20,6 +22,7 @@ export interface ModalState {
   lanAction?: LANAction;
   onSuccess?: () => void;
   branch?: string;
+  proxy?: Proxy;
 }
 
 export const modal = writable<ModalState>({ kind: null });
@@ -54,6 +57,10 @@ export function openWorktreeRemoveModal(site: Site, branch: string) {
 
 export function openProxyAddModal() {
   modal.set({ kind: 'proxyAdd' });
+}
+
+export function openProxyEditModal(proxy: Proxy) {
+  modal.set({ kind: 'proxyEdit', proxy });
 }
 
 export function closeModal() {

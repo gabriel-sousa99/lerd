@@ -51,6 +51,25 @@ export async function createProxy(input: CreateProxyInput): Promise<Proxy> {
   return created;
 }
 
+export interface UpdateProxyInput {
+  port?: number;
+  path?: string;
+  cmd?: string;
+  node_version?: string;
+  upstream_host?: string;
+  autostart?: boolean;
+}
+
+export async function updateProxy(name: string, input: UpdateProxyInput): Promise<Proxy> {
+  const updated = await apiJson<Proxy>(`/api/proxies/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input)
+  });
+  await loadProxies();
+  return updated;
+}
+
 export async function deleteProxy(name: string): Promise<void> {
   const res = await apiFetch(`/api/proxies/${encodeURIComponent(name)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);

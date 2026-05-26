@@ -20,6 +20,7 @@ func NewProxyCmd() *cobra.Command {
 		Long:  "Registra um domínio local que faz reverse proxy para um dev server arbitrário no host (Vue/Quasar/Nuxt/Vite). HTTPS e WebSocket habilitados por padrão.",
 	}
 	cmd.AddCommand(newProxyAddCmd())
+	cmd.AddCommand(newProxyEditCmd())
 	cmd.AddCommand(newProxyLsCmd())
 	cmd.AddCommand(newProxyRmCmd())
 	cmd.AddCommand(newProxySecureCmd(true))
@@ -72,6 +73,57 @@ func newProxyAddCmd() *cobra.Command {
 	c.Flags().StringVar(&nodeVersion, "node", "", "Major version do Node (ex: '20'); default: 20")
 	c.Flags().BoolVar(&autostart, "autostart", false, "Iniciar com `lerd start`")
 	_ = c.MarkFlagRequired("port")
+	return c
+}
+
+func newProxyEditCmd() *cobra.Command {
+	var port int
+	var path string
+	var cmdStr string
+	var nodeVersion string
+	var upstreamHost string
+	var autostart bool
+
+	c := &cobra.Command{
+		Use:   "edit <nome-ou-domínio>",
+		Short: "Editar campos de um proxy existente (sem trocar domínio/managed)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := resolveProxyName(args[0])
+			opts := proxyops.UpdateOptions{}
+			if cmd.Flags().Changed("port") {
+				opts.Port = &port
+			}
+			if cmd.Flags().Changed("path") {
+				opts.Path = &path
+			}
+			if cmd.Flags().Changed("cmd") {
+				opts.Command = &cmdStr
+			}
+			if cmd.Flags().Changed("node") {
+				opts.NodeVersion = &nodeVersion
+			}
+			if cmd.Flags().Changed("upstream-host") {
+				opts.UpstreamHost = &upstreamHost
+			}
+			if cmd.Flags().Changed("autostart") {
+				opts.AutoStart = &autostart
+			}
+			p, err := proxyops.Update(name, opts)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Proxy %s atualizado: %s → %s:%d\n",
+				p.Name, p.PrimaryDomain(), upstreamForDisplay(*p), p.UpstreamPort)
+			return nil
+		},
+	}
+	c.Flags().IntVar(&port, "port", 0, "Nova porta do upstream")
+	c.Flags().StringVar(&path, "path", "", "Nova pasta do projeto (string vazia limpa)")
+	c.Flags().StringVar(&cmdStr, "cmd", "", "Novo comando do dev server (managed)")
+	c.Flags().StringVar(&nodeVersion, "node", "", "Novo major do Node (managed)")
+	c.Flags().StringVar(&upstreamHost, "upstream-host", "", "Hostname alternativo do upstream (default: host.containers.internal)")
+	c.Flags().BoolVar(&autostart, "autostart", false, "Iniciar com `lerd start` (managed)")
 	return c
 }
 

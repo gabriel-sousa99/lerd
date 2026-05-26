@@ -123,6 +123,35 @@ func handleProxyAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodPut && action == "" {
+		var body struct {
+			Port         *int    `json:"port"`
+			Path         *string `json:"path"`
+			Command      *string `json:"cmd"`
+			NodeVersion  *string `json:"node_version"`
+			UpstreamHost *string `json:"upstream_host"`
+			AutoStart    *bool   `json:"autostart"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		p, err := proxyops.Update(name, proxyops.UpdateOptions{
+			Port:         body.Port,
+			Path:         body.Path,
+			Command:      body.Command,
+			NodeVersion:  body.NodeVersion,
+			UpstreamHost: body.UpstreamHost,
+			AutoStart:    body.AutoStart,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeProxyJSON(w, http.StatusOK, toProxyDTO(*p))
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
