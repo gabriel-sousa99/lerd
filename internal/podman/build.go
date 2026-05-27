@@ -626,6 +626,7 @@ func WriteFPMQuadlet(version string) error {
 	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
 	content = applyShellMounts(content, short)
 	content = InjectExtraVolumes(content, ExtraVolumePaths())
+	content = injectDevServerPorts(content, version)
 
 	// Skip the write and daemon-reload if the quadlet is already up to date.
 	// Unnecessary daemon-reloads cause Podman's quadlet generator to regenerate
@@ -661,6 +662,58 @@ func WriteFPMQuadlet(version string) error {
 	return nil
 }
 
+// devServerPublishPorts returns the host PublishPort specs that expose a PHP
+// container's dev-server ports — artisan serve (8000/8001) and websockets
+// (6001) — so the host (and, under WSL, the Windows browser via localhost
+// forwarding) can reach a server the user starts inside the container.
+//
+// PHP 5.6 is deliberately excluded: it is the legacy tier that commonly runs
+// alongside a modern version, and two FPM containers cannot both publish the
+// same host ports. Leaving 5.6 unbound lets it coexist with (say) 8.4 without
+// a port collision.
+//
+// The 0.0.0.0 form is preserved as-is by BindForLAN (it only rewrites bare and
+// loopback binds), so these dev ports stay reachable on every interface
+// regardless of the global lan:expose toggle, without affecting the loopback
+// data services.
+func devServerPublishPorts(version string) []string {
+	if version == "5.6" {
+		return nil
+	}
+	return []string{
+		"0.0.0.0:8000:8000",
+		"0.0.0.0:8001:8001",
+		"0.0.0.0:6001:6001",
+	}
+}
+
+// injectDevServerPorts inserts the dev-server PublishPort lines into the
+// [Container] section (immediately after the Network= line) of an FPM quadlet
+// for the given PHP version. Returns content unchanged for versions that
+// expose nothing (e.g. 5.6) or when no Network= anchor is present.
+func injectDevServerPorts(content, version string) string {
+	ports := devServerPublishPorts(version)
+	if len(ports) == 0 {
+		return content
+	}
+	portLines := make([]string, len(ports))
+	for i, p := range ports {
+		portLines[i] = "PublishPort=" + p
+	}
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "Network=") {
+			continue
+		}
+		out := make([]string, 0, len(lines)+len(portLines))
+		out = append(out, lines[:i+1]...)
+		out = append(out, portLines...)
+		out = append(out, lines[i+1:]...)
+		return strings.Join(out, "\n")
+	}
+	return content
+}
+
 // RewriteFPMQuadlets regenerates the quadlet files for all installed PHP-FPM
 // versions and the nginx quadlet. Call this when parked directories or site
 // paths change so that extra volume mounts stay in sync.
@@ -688,6 +741,7 @@ func RewriteFPMQuadlets() error {
 		content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
 		content = applyShellMounts(content, short)
 		content = InjectExtraVolumes(content, extraPaths)
+		content = injectDevServerPorts(content, v)
 
 		changed, writeErr := WriteQuadletDiff(unitName, content)
 		if writeErr != nil {
