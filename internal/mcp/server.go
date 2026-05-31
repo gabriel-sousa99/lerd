@@ -18,6 +18,7 @@ import (
 	"github.com/geodro/lerd/internal/envfile"
 	gitpkg "github.com/geodro/lerd/internal/git"
 	"github.com/geodro/lerd/internal/nginx"
+	lerdNode "github.com/geodro/lerd/internal/node"
 	phpDet "github.com/geodro/lerd/internal/php"
 	"github.com/geodro/lerd/internal/podman"
 	"github.com/geodro/lerd/internal/serviceops"
@@ -232,6 +233,20 @@ func toolList() []mcpTool {
 			},
 		},
 		{
+			Name:        "site_nginx",
+			Description: "Read/write/reset a site's custom nginx override. Saving runs nginx -t, backs up the prior file, and reloads. branch=<name> targets a worktree (new worktrees inherit main's override).",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"action":  {Type: "string", Enum: []string{"read", "write", "reset"}},
+					"site":    {Type: "string", Description: "Site name. Defaults to current."},
+					"branch":  {Type: "string", Description: "Optional worktree branch."},
+					"content": {Type: "string", Description: "write: full file contents."},
+				},
+				Required: []string{"action"},
+			},
+		},
+		{
 			Name:        "composer",
 			Description: "Run composer in the PHP-FPM container.",
 			InputSchema: mcpSchema{
@@ -345,6 +360,21 @@ func toolList() []mcpTool {
 						Type:        "string",
 						Description: "Service name (e.g. mysql, redis, mongodb).",
 					},
+				},
+				Required: []string{"name"},
+			},
+		},
+		{
+			Name:        "service_config",
+			Description: "Read/write/restore/reset/list_backups a service's runtime tuning override. Built-in mysql/mariadb/redis; custom services opt in via `tuning:` block in YAML.",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"name":        {Type: "string", Description: "Service name."},
+					"action":      {Type: "string", Description: "read|write|restore|reset|list_backups (default read)."},
+					"content":     {Type: "string", Description: "New contents (write only)."},
+					"backup":      {Type: "boolean", Description: "Stage backup before write (write only)."},
+					"backup_name": {Type: "string", Description: "Backup to restore (restore only). Omit for newest."},
 				},
 				Required: []string{"name"},
 			},
@@ -1095,6 +1125,18 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 	case "sites":
 		return execSites()
 
+	case "site_nginx":
+		switch action {
+		case "read", "":
+			return execSiteNginxRead(args)
+		case "write":
+			return execSiteNginxWrite(args)
+		case "reset":
+			return execSiteNginxReset(args)
+		default:
+			return unknownAction("site_nginx")
+		}
+
 	case "service_control":
 		switch action {
 		case "start":
@@ -1119,6 +1161,28 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 			return execServiceReinstall(args)
 		default:
 			return unknownAction("service_control")
+		}
+
+	case "service_config":
+		// Default to read so the most common operation works without an
+		// explicit action — matches the CLI's `lerd service config --path`
+		// where the bare invocation is also a read.
+		if action == "" {
+			action = "read"
+		}
+		switch action {
+		case "read":
+			return execServiceConfigRead(args)
+		case "write":
+			return execServiceConfigWrite(args)
+		case "list_backups":
+			return execServiceConfigListBackups(args)
+		case "restore":
+			return execServiceConfigRestore(args)
+		case "reset":
+			return execServiceConfigReset(args)
+		default:
+			return unknownAction("service_config")
 		}
 
 	case "queue":
@@ -1636,6 +1700,73 @@ func execServiceRestart(args map[string]any) (any, *rpcError) {
 		return toolErr("restarting " + name + ": " + err.Error()), nil
 	}
 	return toolOK(name + " restarted"), nil
+}
+
+// resolveNginxDomain turns the site/branch args into the domain whose custom
+// nginx override to operate on. site defaults to the current context;
+// branch resolves to that worktree's subdomain like the daemon does.
+func resolveNginxDomain(args map[string]any) (string, error) {
+	siteName := strArg(args, "site")
+	var site *config.Site
+	var err error
+	if siteName != "" {
+		if site, err = config.FindSite(siteName); err != nil {
+			return "", fmt.Errorf("site not found: %s", siteName)
+		}
+	} else if defaultSitePath != "" {
+		if site, err = config.FindSiteByPath(defaultSitePath); err != nil {
+			return "", fmt.Errorf("no site for the current path; pass site=")
+		}
+	} else {
+		return "", fmt.Errorf("site is required")
+	}
+	return siteops.WorktreeDomain(site, strArg(args, "branch"))
+}
+
+func execSiteNginxRead(args map[string]any) (any, *rpcError) {
+	domain, err := resolveNginxDomain(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	got, err := siteops.ReadCustomNginx(domain)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	state := "saved override"
+	if !got.Exists {
+		state = "no override yet — showing the template"
+	}
+	return toolOK(fmt.Sprintf("# %s (%s)\n%s", domain, state, got.Body)), nil
+}
+
+func execSiteNginxWrite(args map[string]any) (any, *rpcError) {
+	domain, err := resolveNginxDomain(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	res, err := siteops.SaveCustomNginx(domain, strArg(args, "content"), true)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	if !res.OK {
+		msg := res.Error
+		if res.ValidationOutput != "" {
+			msg += "\n" + res.ValidationOutput
+		}
+		return toolErr(msg), nil
+	}
+	return toolOK(fmt.Sprintf("Saved nginx override for %s and reloaded nginx.", domain)), nil
+}
+
+func execSiteNginxReset(args map[string]any) (any, *rpcError) {
+	domain, err := resolveNginxDomain(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	if err := siteops.ResetCustomNginx(domain); err != nil {
+		return toolErr(err.Error()), nil
+	}
+	return toolOK(fmt.Sprintf("Reset %s to the bundled nginx defaults.", domain)), nil
 }
 
 func execQueueStart(args map[string]any) (any, *rpcError) {
@@ -2189,30 +2320,14 @@ func execRuntimeVersions() (any, *rpcError) {
 		defaultPHP = cfg.PHP.DefaultVersion
 	}
 
-	// Node.js versions via fnm
-	fnmPath := filepath.Join(config.BinDir(), "fnm")
-	var nodeVersions []string
+	// Node.js versions via fnm. Goes through the shared internal/node
+	// helper so the MCP and the web UI (/api/node-versions) return the
+	// same shape: major-only deduped majors like "20", "18".
 	defaultNode := ""
 	if cfg != nil {
 		defaultNode = cfg.Node.DefaultVersion
 	}
-	if _, err := os.Stat(fnmPath); err == nil {
-		var out bytes.Buffer
-		cmd := exec.Command(fnmPath, "list")
-		cmd.Stdout = &out
-		cmd.Stderr = &out
-		if cmd.Run() == nil {
-			for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
-				line = strings.TrimSpace(line)
-				// fnm list output: "* v20.11.0 default" or "  v18.20.0"
-				line = strings.TrimPrefix(line, "* ")
-				line = strings.TrimPrefix(line, "  ")
-				if line != "" {
-					nodeVersions = append(nodeVersions, line)
-				}
-			}
-		}
-	}
+	nodeVersions := lerdNode.ListInstalled()
 
 	type runtimeEntry struct {
 		Installed      []string `json:"installed"`
@@ -2623,7 +2738,7 @@ func execCheck(args map[string]any) (any, *rpcError) {
 		if svc.Preset != "" {
 			if _, err := config.LoadPreset(svc.Preset); err != nil {
 				add("service_"+svc.Name, "fail", fmt.Sprintf("unknown preset %q", svc.Preset))
-			} else if _, err := config.LoadCustomService(svc.Name); err != nil {
+			} else if !serviceops.ServiceInstalled(svc.Name) {
 				add("service_"+svc.Name, "warn", fmt.Sprintf("preset %q not installed — run: lerd service preset install %s", svc.Preset, svc.Preset))
 			} else {
 				add("service_"+svc.Name, "ok", "preset: "+svc.Preset)
@@ -2634,10 +2749,10 @@ func execCheck(args map[string]any) (any, *rpcError) {
 			add("service_"+svc.Name, "ok", "")
 			continue
 		}
-		if _, err := config.LoadCustomService(svc.Name); err == nil {
+		if serviceops.ServiceInstalled(svc.Name) {
 			add("service_"+svc.Name, "ok", "custom")
 		} else {
-			add("service_"+svc.Name, "fail", "not a built-in and no definition found")
+			add("service_"+svc.Name, "fail", fmt.Sprintf("not installed — run `lerd service preset install %s` (if it's a bundled preset) or `lerd service add --name %s ...`", svc.Name, svc.Name))
 		}
 	}
 
@@ -2682,7 +2797,7 @@ func execCheck(args map[string]any) (any, *rpcError) {
 	if cfg.DB.Service != "" {
 		if isKnownService(cfg.DB.Service) {
 			add("db.service", "ok", cfg.DB.Service)
-		} else if _, err := config.LoadCustomService(cfg.DB.Service); err == nil {
+		} else if serviceops.ServiceInstalled(cfg.DB.Service) {
 			add("db.service", "ok", cfg.DB.Service+" (custom)")
 		} else {
 			add("db.service", "fail", cfg.DB.Service+" is not a known service")
@@ -2742,7 +2857,7 @@ func execServiceAdd(args map[string]any) (any, *rpcError) {
 	if isKnownService(name) {
 		return toolErr(name + " is a built-in service and cannot be redefined"), nil
 	}
-	if _, err := config.LoadCustomService(name); err == nil {
+	if serviceops.ServiceInstalled(name) {
 		return toolErr("custom service " + name + " already exists; remove it first with service_remove"), nil
 	}
 
@@ -2809,6 +2924,154 @@ func execServiceReinstall(args map[string]any) (any, *rpcError) {
 	return toolOK(fmt.Sprintf("Service %q reinstalled (data preserved).", name)), nil
 }
 
+// resolveTunableService returns the resolved service definition + the
+// in-container mount target, or a typed MCP error mapping the sentinel
+// errors from serviceops. Used as the shared preamble of every
+// service_config action so install / family checks stay in sync with
+// the HTTP handlers.
+func resolveTunableService(name string) (*config.CustomService, string, map[string]any) {
+	if name == "" {
+		return nil, "", toolErr("name is required")
+	}
+	if !serviceops.ServiceInstalled(name) {
+		return nil, "", toolErr(fmt.Sprintf("service %q is not installed; run `lerd service preset install %s` first", name, name))
+	}
+	svc, err := config.ResolveServiceForTuning(name)
+	if err != nil {
+		return nil, "", toolErr(fmt.Sprintf("service %q: %v", name, err))
+	}
+	target, ok := config.ServiceTuningMount(svc)
+	if !ok {
+		return nil, "", toolErr(fmt.Sprintf("service %q does not support tuning (family %q). Built-in tunable families: %s. Custom services can opt in via a `tuning:` block in the service YAML.", name, config.FamilyOf(svc), strings.Join(config.TuningFamilies(), ", ")))
+	}
+	return svc, target, nil
+}
+
+func execServiceConfigRead(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	svc, target, errResp := resolveTunableService(name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	if err := config.MaterializeServiceTuning(svc); err != nil {
+		return toolErr("creating tuning file: " + err.Error()), nil
+	}
+	body, err := os.ReadFile(config.ServiceTuningFile(name))
+	exists := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return toolErr("reading tuning file: " + err.Error()), nil
+	}
+	backups, _ := serviceops.ListTuningBackups(name)
+	backupNames := make([]string, 0, len(backups))
+	for _, b := range backups {
+		backupNames = append(backupNames, b.Name)
+	}
+	payload, _ := json.MarshalIndent(map[string]any{
+		"name":    name,
+		"target":  target,
+		"path":    config.ServiceTuningFile(name),
+		"exists":  exists,
+		"content": string(body),
+		"backups": backupNames,
+	}, "", "  ")
+	return toolOK(string(payload)), nil
+}
+
+func execServiceConfigWrite(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	content := strArg(args, "content")
+	backup := boolArg(args, "backup")
+	if _, _, errResp := resolveTunableService(name); errResp != nil {
+		return errResp, nil
+	}
+	res, err := serviceops.SaveTuningOverride(name, content, backup)
+	if err != nil {
+		// The save may have auto-rolled back; surface that distinctly so
+		// callers know the running service is back on its prior bytes
+		// rather than wedged on the broken save.
+		msg := err.Error()
+		if res.RolledBack {
+			msg = "save reverted (prior config restored): " + msg
+		}
+		return toolErr(msg), nil
+	}
+	out := fmt.Sprintf("Saved tuning override for %q. ", name)
+	if res.BackupName != "" {
+		out += "Backup staged as " + res.BackupName + ". "
+	}
+	out += "Service restarted and ready."
+	return toolOK(out), nil
+}
+
+func execServiceConfigListBackups(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	if _, _, errResp := resolveTunableService(name); errResp != nil {
+		return errResp, nil
+	}
+	backups, err := serviceops.ListTuningBackups(name)
+	if err != nil {
+		return toolErr("listing backups: " + err.Error()), nil
+	}
+	if backups == nil {
+		backups = []serviceops.TuningBackup{}
+	}
+	payload, _ := json.MarshalIndent(map[string]any{
+		"name":    name,
+		"backups": backups,
+	}, "", "  ")
+	return toolOK(string(payload)), nil
+}
+
+func execServiceConfigRestore(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	backupName := strArg(args, "backup_name")
+	if _, _, errResp := resolveTunableService(name); errResp != nil {
+		return errResp, nil
+	}
+	// Resolve "newest" server-side so callers that omit backup_name still
+	// hit the same code path as the HTTP handler, and the response can
+	// report exactly which backup was consumed.
+	if backupName == "" {
+		list, err := serviceops.ListTuningBackups(name)
+		if err != nil {
+			return toolErr("listing backups: " + err.Error()), nil
+		}
+		if len(list) == 0 {
+			return toolErr("no backup available for " + name), nil
+		}
+		backupName = list[0].Name
+	}
+	res, err := serviceops.RestoreTuningFromBackup(name, backupName)
+	if err != nil {
+		msg := err.Error()
+		if res.RolledBack {
+			msg = "restore reverted (prior config restored): " + msg
+		}
+		return toolErr(msg), nil
+	}
+	return toolOK(fmt.Sprintf("Restored %q from %s. Service restarted and ready.", name, backupName)), nil
+}
+
+func execServiceConfigReset(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	if _, _, errResp := resolveTunableService(name); errResp != nil {
+		return errResp, nil
+	}
+	res, err := serviceops.ResetTuningOverride(name)
+	if err != nil {
+		msg := err.Error()
+		if res.RolledBack {
+			msg = "reset reverted (prior config restored): " + msg
+		}
+		return toolErr(msg), nil
+	}
+	out := fmt.Sprintf("Reset %q to the bundled template; service restarted.", name)
+	if res.AutoBackupName != "" {
+		out += " Prior config staged as " + res.AutoBackupName + " (use action=restore to recover)."
+	}
+	return toolOK(out), nil
+}
+
 func execServicePresetList(_ map[string]any) (any, *rpcError) {
 	presets, err := config.ListPresets()
 	if err != nil {
@@ -2841,18 +3104,17 @@ func execServicePresetList(_ map[string]any) (any, *rpcError) {
 			DefaultVersion: p.DefaultVersion,
 		}
 		if len(p.Versions) == 0 {
-			if _, err := config.LoadCustomService(p.Name); err == nil {
+			if serviceops.ServiceInstalled(p.Name) {
 				e.Installed = true
 			}
 		} else {
 			anyInstalled := false
 			for _, v := range p.Versions {
-				_, loadErr := config.LoadCustomService(config.PresetVersionServiceName(p.Name, v))
 				vi := versionEntry{
 					Tag:       v.Tag,
 					Label:     v.Label,
 					Image:     v.Image,
-					Installed: loadErr == nil,
+					Installed: serviceops.ServiceInstalled(config.PresetVersionServiceName(p.Name, v)),
 				}
 				if vi.Installed {
 					anyInstalled = true

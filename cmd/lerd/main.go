@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -95,6 +96,7 @@ func main() {
 	root.AddCommand(cli.NewConsoleCmd())
 	root.AddCommand(cli.NewTestCmd())
 	root.AddCommand(cli.NewVendorBinCmd())
+	root.AddCommand(cli.NewNginxCmd())
 	root.AddCommand(cli.NewEnvCmd())
 	root.AddCommand(cli.NewEnvRestoreCmd())
 	root.AddCommand(cli.NewEnvCheckCmd())
@@ -259,37 +261,45 @@ func newDNSCheckCmd() *cobra.Command {
 			}
 
 			diag := dns.Diagnose(cfg.DNS.TLD)
-			if diag.FirstFailure < 0 {
-				fmt.Printf("DNS is working: *.%s resolves to 127.0.0.1\n\n", cfg.DNS.TLD)
-			} else {
-				fmt.Printf("DNS is NOT working for .%s\n\n", cfg.DNS.TLD)
-			}
-			for _, s := range diag.Steps {
-				marker := "  "
-				switch s.Status {
-				case dns.StepOK:
-					marker = "✓ "
-				case dns.StepFail:
-					marker = "✗ "
-				case dns.StepWarn:
-					marker = "! "
-				case dns.StepSkip:
-					marker = "  "
-				}
-				if s.Detail != "" {
-					fmt.Printf("%s%-34s %s\n", marker, s.Name, s.Detail)
-				} else {
-					fmt.Printf("%s%s\n", marker, s.Name)
-				}
-				if s.Status == dns.StepFail && s.Hint != "" {
-					fmt.Printf("    hint: %s\n", s.Hint)
-				}
-			}
+			printDNSDiagnostic(os.Stdout, diag)
 			if diag.FirstFailure >= 0 {
 				os.Exit(1)
 			}
 			return nil
 		},
+	}
+}
+
+// printDNSDiagnostic writes the human-facing dns:check report for one
+// Diagnostic to w. Extracted from newDNSCheckCmd so the renderer (top
+// line, marker prefixes, hint-printing on Fail+Warn) can be exercised
+// in tests without spawning the CLI process.
+func printDNSDiagnostic(w io.Writer, diag dns.Diagnostic) {
+	if diag.FirstFailure < 0 {
+		fmt.Fprintf(w, "DNS is working: *.%s resolves to 127.0.0.1\n\n", diag.TLD)
+	} else {
+		fmt.Fprintf(w, "DNS is NOT working for .%s\n\n", diag.TLD)
+	}
+	for _, s := range diag.Steps {
+		marker := "  "
+		switch s.Status {
+		case dns.StepOK:
+			marker = "✓ "
+		case dns.StepFail:
+			marker = "✗ "
+		case dns.StepWarn:
+			marker = "! "
+		case dns.StepSkip:
+			marker = "  "
+		}
+		if s.Detail != "" {
+			fmt.Fprintf(w, "%s%-34s %s\n", marker, s.Name, s.Detail)
+		} else {
+			fmt.Fprintf(w, "%s%s\n", marker, s.Name)
+		}
+		if (s.Status == dns.StepFail || s.Status == dns.StepWarn) && s.Hint != "" {
+			fmt.Fprintf(w, "    hint: %s\n", s.Hint)
+		}
 	}
 }
 
@@ -635,6 +645,10 @@ func scanWorktrees() bool {
 				fmt.Printf("[WARN] worktree vhost for %s: %v\n", wt.Domain, vhostErr)
 				continue
 			}
+			// Inheritance is intentionally NOT run on the boot rescan: it only
+			// fires on genuine creation (the "added" watcher event in
+			// syncWorktree). Re-seeding here would resurrect an override the
+			// user deliberately reset, on every daemon restart.
 			fmt.Printf("Worktree vhost: %s -> %s\n", wt.Branch, wt.Domain)
 			generated = true
 
@@ -718,6 +732,12 @@ func syncWorktree(sitePath, worktreeName, action string, pruneStale bool) bool {
 			fmt.Printf("[WARN] worktree vhost for %s: %v\n", wt.Domain, vhostErr)
 			return false
 		}
+		// Seed the worktree's override from the main branch's, but only on
+		// genuine creation ("added"). On "changed" (a commit/checkout in the
+		// worktree) re-seeding would undo a deliberate reset of the override.
+		if shouldInheritNginxOnSync(action) {
+			_ = siteops.InheritCustomNginxConfig(site.PrimaryDomain(), wt.Domain)
+		}
 		fmt.Printf("Worktree %s: %s -> %s\n", action, wt.Branch, wt.Domain)
 
 		if shouldAutoStartWorkersOnSync(action) {
@@ -736,12 +756,40 @@ func shouldAutoStartWorkersOnSync(action string) bool {
 	return action == "added"
 }
 
+// shouldInheritNginxOnSync gates one-time inheritance of the main branch's
+// nginx override to genuine worktree creation. On "changed" (or the boot
+// rescan) the worktree override may have been deliberately reset, so re-seeding
+// it would silently resurrect config the user removed.
+func shouldInheritNginxOnSync(action string) bool {
+	return action == "added"
+}
+
 // cleanupWorktreeVhosts removes all subdomain vhosts for the given site's
 // domain, then re-generates for worktrees still on disk. Survivors keep their
 // .env; deps and APP_URL are handled by syncWorktree on add/rename, not here.
 func cleanupWorktreeVhosts(site *config.Site) bool {
-	changed := removeWorktreeVhosts(site)
+	removed := removeWorktreeVhosts(site)
 	worktrees, _ := gitpkg.DetectWorktrees(site.Path, site.PrimaryDomain())
+	// Drop the custom nginx override + backups for worktrees that are truly
+	// gone. removeWorktreeVhosts wipes every worktree vhost, so a survivor is
+	// any worktree still detected on disk; only the rest are pruned.
+	survivors := map[string]bool{}
+	for _, wt := range worktrees {
+		survivors[wt.Domain] = true
+	}
+	for _, domain := range removed {
+		if survivors[domain] {
+			continue
+		}
+		// Guard against a separately-registered site whose primary happens to
+		// be a subdomain of this one (e.g. app.test + admin.app.test): its
+		// vhost matches the suffix scan, but its override must not be deleted.
+		if _, err := config.FindSiteByDomain(domain); err == nil {
+			continue
+		}
+		_ = siteops.RemoveCustomNginxConfig(domain)
+	}
+	changed := len(removed) > 0
 	// Shrink the cert SAN list to just the surviving worktrees so removed
 	// branches drop their wildcard SAN.
 	if site.Secured {
@@ -787,21 +835,23 @@ func removeStaleWorktreeVhosts(site *config.Site, worktrees []gitpkg.Worktree) b
 	return changed
 }
 
-func removeWorktreeVhosts(site *config.Site) bool {
+// removeWorktreeVhosts removes every worktree subdomain vhost for the site and
+// returns the domains it removed (each vhost filename minus ".conf").
+func removeWorktreeVhosts(site *config.Site) []string {
 	confD := config.NginxConfD()
 	entries, err := os.ReadDir(confD)
 	if err != nil {
-		return false
+		return nil
 	}
 	suffix := "." + site.PrimaryDomain() + ".conf"
-	changed := false
+	var removed []string
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), suffix) {
 			_ = os.Remove(filepath.Join(confD, e.Name()))
-			changed = true
+			removed = append(removed, strings.TrimSuffix(e.Name(), ".conf"))
 		}
 	}
-	return changed
+	return removed
 }
 
 // removeStale removes registered sites whose paths no longer exist on disk.
