@@ -86,6 +86,56 @@ func ValidateProxyRoutes(routes []Route) error {
 	return nil
 }
 
+// Validate checks structural invariants of a whole proxy (no I/O — site
+// existence is verified at the write path, not here). A simple proxy needs a
+// valid base port and no base Site. A fullstack proxy (Site set or Routes
+// present) needs exactly one base target and valid routes.
+func (p Proxy) Validate() error {
+	if !p.IsFullstack() {
+		if p.Site != "" {
+			return fmt.Errorf("proxy simples não pode ter site na base")
+		}
+		if p.UpstreamPort <= 0 || p.UpstreamPort > 65535 {
+			return fmt.Errorf("porta inválida: %d", p.UpstreamPort)
+		}
+		return nil
+	}
+	hasSite := p.Site != ""
+	hasPort := p.UpstreamPort != 0
+	if hasSite == hasPort {
+		return fmt.Errorf("base do fullstack precisa de exatamente um target (porta OU site)")
+	}
+	if hasPort && (p.UpstreamPort <= 0 || p.UpstreamPort > 65535) {
+		return fmt.Errorf("porta inválida: %d", p.UpstreamPort)
+	}
+	return ValidateProxyRoutes(p.Routes)
+}
+
+// FindFullstackProxyForSite returns the fullstack proxy whose base Site or any
+// route Site equals siteName, if any.
+func FindFullstackProxyForSite(siteName string) (*Proxy, bool) {
+	reg, err := LoadProxies()
+	if err != nil {
+		return nil, false
+	}
+	return findFullstackProxyForSiteIn(reg, siteName)
+}
+
+func findFullstackProxyForSiteIn(reg *ProxyRegistry, siteName string) (*Proxy, bool) {
+	for i := range reg.Proxies {
+		p := &reg.Proxies[i]
+		if p.Site == siteName && siteName != "" {
+			return p, true
+		}
+		for _, r := range p.Routes {
+			if r.Site == siteName && siteName != "" {
+				return p, true
+			}
+		}
+	}
+	return nil, false
+}
+
 type proxyYAML struct {
 	Name         string   `yaml:"name"`
 	Domains      []string `yaml:"domains"`
@@ -219,6 +269,11 @@ func LoadProxies() (*ProxyRegistry, error) {
 }
 
 func SaveProxies(reg *ProxyRegistry) error {
+	for _, p := range reg.Proxies {
+		if err := p.Validate(); err != nil {
+			return fmt.Errorf("proxy %q inválido: %w", p.Name, err)
+		}
+	}
 	raw := proxyRegistryYAML{Proxies: make([]proxyYAML, 0, len(reg.Proxies))}
 	for _, p := range reg.Proxies {
 		raw.Proxies = append(raw.Proxies, p.toYAML())
