@@ -12,6 +12,54 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func defaultAPIPaths() []string {
+	return []string{"/api", "/sanctum", "/broadcasting", "/storage"}
+}
+
+// buildAPIRoutes turns the opinionated CLI flags into config.Route entries.
+// Exactly one of apiSite/apiPort may be set. When neither is set it returns
+// (nil, nil) — a simple proxy. Paths default to defaultAPIPaths().
+func buildAPIRoutes(apiSite string, apiPort int, apiPaths []string) ([]config.Route, error) {
+	hasSite := apiSite != ""
+	hasPort := apiPort != 0
+	if !hasSite && !hasPort {
+		if len(apiPaths) > 0 {
+			return nil, fmt.Errorf("--api-path requer --api-site ou --api-port")
+		}
+		return nil, nil
+	}
+	if hasSite && hasPort {
+		return nil, fmt.Errorf("use --api-site OU --api-port, não os dois")
+	}
+	paths := apiPaths
+	if len(paths) == 0 {
+		paths = defaultAPIPaths()
+	}
+	var routes []config.Route
+	for _, p := range paths {
+		r := config.Route{Path: p}
+		if hasSite {
+			r.Site = apiSite
+		} else {
+			r.UpstreamPort = apiPort
+		}
+		routes = append(routes, r)
+	}
+	return routes, nil
+}
+
+// fullstackHint returns an advisory message printed after creating/editing a
+// fullstack proxy so the user knows the API site's .env was pointed at the
+// unified domain.
+func fullstackHint(domain string, secured bool) string {
+	scheme := "http"
+	if secured {
+		scheme = "https"
+	}
+	return fmt.Sprintf("dica: o .env do site de API foi apontado para %s://%s "+
+		"(APP_URL / SANCTUM_STATEFUL_DOMAINS, se presentes). Ajuste manualmente se necessário.", scheme, domain)
+}
+
 // NewProxyCmd is the root of `lerd proxy …`.
 func NewProxyCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -41,12 +89,19 @@ func newProxyAddCmd() *cobra.Command {
 	var cmdStr string
 	var nodeVersion string
 	var autostart bool
+	var apiSite string
+	var apiPort int
+	var apiPaths []string
 
 	c := &cobra.Command{
 		Use:   "add <domínio>",
 		Short: "Registrar um novo proxy",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			routes, rerr := buildAPIRoutes(apiSite, apiPort, apiPaths)
+			if rerr != nil {
+				return rerr
+			}
 			p, err := proxyops.Add(proxyops.AddOptions{
 				Domain:      strings.ToLower(args[0]),
 				Port:        port,
@@ -56,12 +111,16 @@ func newProxyAddCmd() *cobra.Command {
 				Command:     cmdStr,
 				NodeVersion: nodeVersion,
 				AutoStart:   autostart,
+				Routes:      routes,
 			})
 			if err != nil {
 				return err
 			}
 			fmt.Printf("Proxy criado: %s → %s:%d (secured=%v, managed=%v)\n",
 				p.PrimaryDomain(), upstreamForDisplay(p), p.UpstreamPort, p.Secured, p.Managed)
+			if len(routes) > 0 {
+				fmt.Println(fullstackHint(p.PrimaryDomain(), p.Secured))
+			}
 			return nil
 		},
 	}
@@ -72,6 +131,9 @@ func newProxyAddCmd() *cobra.Command {
 	c.Flags().StringVar(&cmdStr, "cmd", "", "Comando para iniciar o dev server (ex: 'npm run dev')")
 	c.Flags().StringVar(&nodeVersion, "node", "", "Major version do Node (ex: '20'); default: 20")
 	c.Flags().BoolVar(&autostart, "autostart", false, "Iniciar com `lerd start`")
+	c.Flags().StringVar(&apiSite, "api-site", "", "Site do lerd que serve a API (fullstack)")
+	c.Flags().IntVar(&apiPort, "api-port", 0, "Porta da API em dev server externo (fullstack)")
+	c.Flags().StringArrayVar(&apiPaths, "api-path", nil, "Path roteado para a API (repetível; default: /api /sanctum /broadcasting /storage)")
 	_ = c.MarkFlagRequired("port")
 	return c
 }
@@ -83,6 +145,9 @@ func newProxyEditCmd() *cobra.Command {
 	var nodeVersion string
 	var upstreamHost string
 	var autostart bool
+	var apiSite string
+	var apiPort int
+	var apiPaths []string
 
 	c := &cobra.Command{
 		Use:   "edit <nome-ou-domínio>",
@@ -109,6 +174,13 @@ func newProxyEditCmd() *cobra.Command {
 			if cmd.Flags().Changed("autostart") {
 				opts.AutoStart = &autostart
 			}
+			if cmd.Flags().Changed("api-site") || cmd.Flags().Changed("api-port") || cmd.Flags().Changed("api-path") {
+				routes, rerr := buildAPIRoutes(apiSite, apiPort, apiPaths)
+				if rerr != nil {
+					return rerr
+				}
+				opts.Routes = &routes
+			}
 			p, err := proxyops.Update(name, opts)
 			if err != nil {
 				return err
@@ -124,6 +196,9 @@ func newProxyEditCmd() *cobra.Command {
 	c.Flags().StringVar(&nodeVersion, "node", "", "Novo major do Node (managed)")
 	c.Flags().StringVar(&upstreamHost, "upstream-host", "", "Hostname alternativo do upstream (default: host.containers.internal)")
 	c.Flags().BoolVar(&autostart, "autostart", false, "Iniciar com `lerd start` (managed)")
+	c.Flags().StringVar(&apiSite, "api-site", "", "Site do lerd que serve a API (fullstack)")
+	c.Flags().IntVar(&apiPort, "api-port", 0, "Porta da API em dev server externo (fullstack)")
+	c.Flags().StringArrayVar(&apiPaths, "api-path", nil, "Path roteado para a API (repetível; default: /api /sanctum /broadcasting /storage)")
 	return c
 }
 
