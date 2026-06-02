@@ -135,8 +135,13 @@ faz o Laravel enxergar `retencao.localhost` (o host pelo qual foi acessado), ent
 cookie de sessão é emitido para o domínio unificado — first-party, same-origin. Não é
 preciso `SANCTUM_STATEFUL_DOMAINS` cross-host nem CORS.
 
-**Versão do PHP:** vem do site selecionado (`lerd-php<versão>-fpm`). Targets de API com
-sites de versões diferentes geram named locations distintos — suportado.
+**Versão do PHP:** vem do site selecionado (`lerd-php<versão>-fpm`), reusando o mesmo
+`fastcgi_pass` do vhost standalone do site — **nenhuma lógica nova dependente de versão**
+(`phpShort()` em `internal/nginx/manager.go`). Suporta **toda versão que o lerd serve
+como site**: tier buildável `7.4, 8.0–8.5` (`SupportedPHPVersions` em `internal/cli/fetch.go`;
+7.4/8.0 são tier legado congelado). PHP 7.0–7.3 e 5.6 não são servidos pelo lerd, logo
+ficam fora — não é limitação do fullstack. Targets de API com sites de versões diferentes
+geram named locations distintos — suportado.
 
 **Templates:** `vhost-proxy.conf.tmpl` e `vhost-proxy-ssl.conf.tmpl` passam a iterar
 `Routes` (porta → bloco proxy; site → named location front-controller) antes do
