@@ -23,6 +23,11 @@ type AddOptions struct {
 	Command     string
 	NodeVersion string
 	AutoStart   bool
+
+	// Fullstack: Site routes the base (/) to a lerd site; Routes maps path
+	// prefixes to their own targets. Empty Routes+Site == simple proxy.
+	Site   string
+	Routes []config.Route
 }
 
 // Test hooks — production wires to the real packages.
@@ -38,7 +43,8 @@ func Add(opts AddOptions) (config.Proxy, error) {
 	if opts.Domain == "" {
 		return config.Proxy{}, fmt.Errorf("domínio é obrigatório")
 	}
-	if opts.Port <= 0 || opts.Port > 65535 {
+	// Porta da base é obrigatória só quando a base NÃO é um site.
+	if opts.Site == "" && (opts.Port <= 0 || opts.Port > 65535) {
 		return config.Proxy{}, fmt.Errorf("porta inválida: %d", opts.Port)
 	}
 	if opts.Managed && opts.Path == "" {
@@ -71,6 +77,12 @@ func Add(opts AddOptions) (config.Proxy, error) {
 		Command:      opts.Command,
 		NodeVersion:  opts.NodeVersion,
 		AutoStart:    opts.AutoStart,
+		Site:         opts.Site,
+		Routes:       opts.Routes,
+	}
+
+	if err := p.Validate(); err != nil {
+		return config.Proxy{}, err
 	}
 
 	if p.Secured {
@@ -86,5 +98,8 @@ func Add(opts AddOptions) (config.Proxy, error) {
 	}
 	// Reload é best-effort: em testes / antes do nginx subir é normal falhar.
 	_ = nginxReloadFn()
+	if p.IsFullstack() {
+		_ = syncProxyEnv(p)
+	}
 	return p, nil
 }
