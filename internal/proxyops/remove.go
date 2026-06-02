@@ -15,6 +15,7 @@ func Remove(name string) error {
 	if err != nil {
 		return err
 	}
+	sites := boundSites(*p)
 	if p.Managed {
 		_ = RemoveManagedQuadlet(name)
 	}
@@ -26,5 +27,6 @@ func Remove(name string) error {
 		return err
 	}
 	_ = nginxReloadFn()
+	unbindSitesEnv(sites)
 	return nil
 }
