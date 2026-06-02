@@ -187,6 +187,9 @@ func newProxyEditCmd() *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Proxy %s atualizado: %s → %s:%d\n",
 				p.Name, p.PrimaryDomain(), upstreamForDisplay(*p), p.UpstreamPort)
+			if opts.Routes != nil && len(*opts.Routes) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), fullstackHint(p.PrimaryDomain(), p.Secured))
+			}
 			return nil
 		},
 	}

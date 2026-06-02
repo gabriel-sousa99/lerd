@@ -45,3 +45,9 @@ func TestBuildAPIRoutes_NoneIsEmpty(t *testing.T) {
 		t.Errorf("sem api target deve retornar nil,nil; got %+v err=%v", routes, err)
 	}
 }
+
+func TestBuildAPIRoutes_PathsWithoutTargetErr(t *testing.T) {
+	if _, err := buildAPIRoutes("", 0, []string{"/api"}); err == nil {
+		t.Error("esperava erro quando --api-path é dado sem --api-site/--api-port")
+	}
+}
