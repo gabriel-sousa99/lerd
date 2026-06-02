@@ -16,6 +16,12 @@ export type ModalKind =
 
 export type LANAction = 'expose' | 'unexpose';
 
+export interface ProxyAddPrefill {
+  domain?: string;
+  fullstack?: boolean;
+  apiSite?: string;
+}
+
 export interface ModalState {
   kind: ModalKind;
   site?: Site;
@@ -23,6 +29,7 @@ export interface ModalState {
   onSuccess?: () => void;
   branch?: string;
   proxy?: Proxy;
+  prefill?: ProxyAddPrefill;
 }
 
 export const modal = writable<ModalState>({ kind: null });
@@ -55,8 +62,8 @@ export function openWorktreeRemoveModal(site: Site, branch: string) {
   modal.set({ kind: 'worktreeRemove', site, branch });
 }
 
-export function openProxyAddModal() {
-  modal.set({ kind: 'proxyAdd' });
+export function openProxyAddModal(prefill?: ProxyAddPrefill) {
+  modal.set({ kind: 'proxyAdd', prefill });
 }
 
 export function openProxyEditModal(proxy: Proxy) {
