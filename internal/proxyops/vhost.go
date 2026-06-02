@@ -17,7 +17,17 @@ func upstreamHost(p config.Proxy) string {
 	return defaultUpstreamHost
 }
 
-// RegenerateProxyVhost writes the nginx config for p based on Secured.
+// RegenerateProxyVhost writes the nginx config for p based on Secured. For
+// fullstack proxies (p.IsFullstack()) it resolves the route spec and renders
+// the fullstack template; otherwise it keeps the simple single-upstream path
+// (byte-identical to before).
 func RegenerateProxyVhost(p config.Proxy) error {
+	if p.IsFullstack() {
+		spec, err := resolveProxySpec(p)
+		if err != nil {
+			return err
+		}
+		return nginx.GenerateFullstackProxyVhost(spec)
+	}
 	return nginx.GenerateProxyVhost(p.PrimaryDomain(), upstreamHost(p), p.UpstreamPort, p.Secured)
 }
