@@ -260,4 +260,45 @@ A store de proxies ganha um helper para achar o proxy cujo `routes[].site == <si
 - **Conflito de porta** do SPA: validar/avisar; não fixar `9000`.
 - **Coexistência:** o site `retencao-api.localhost` standalone continua funcionando para
   testar a API diretamente; o fullstack só adiciona o ponto de entrada unificado.
+
+## 11. Decisões do grill-me (2026-06-01) — guiam Planos 2 e 3
+
+1. **Validação de proxy inteiro (Plano 2).** Adicionar `Proxy.Validate()`:
+   - simples: base precisa de `UpstreamPort` válido, `Site` vazio (comportamento atual);
+   - fullstack: base com **exatamente um** de `UpstreamPort`(1..65535) ou `Site`; `ValidateProxyRoutes` passa.
+   - **Estrutural** (xor base, faixa de porta, formato de path, sem I/O) é chamada em
+     `config.SaveProxies` (blinda qualquer caller). **Existência de site** fica no write
+     path (`Add`/`Update`/`resolveProxySpec`) para erro cedo e amigável.
+
+2. **CLI opinativa (Plano 2).** `proxy add` expõe só o caso comum: base SPA via `--port`;
+   API via **exatamente um** de `--api-site <nome>` ou `--api-port <n>`; `--api-path`
+   repetível com default `/api /sanctum /broadcasting /storage`. Rotas arbitrárias e
+   base-como-site **não** entram na CLI (disponíveis via API/UI/yaml).
+
+3. **API HTTP (Plano 2).** POST aceita `routes` inteiro + base (`port` e/ou `site`). PUT
+   trata `routes` como **substituição integral** (chave presente = troca a lista; ausente
+   = inalterado); `UpdateOptions` ganha `Routes *[]config.Route` e `Site *string`. Escalares
+   seguem esparsos. **Conversão simples↔fullstack via edição é permitida** (mesmos nomes de
+   arquivo de vhost → sem stale); sempre regenera e valida.
+
+4. **Sync mínimo de `.env` — coerência automática (Planos 2/3).** Ao criar/editar/regenerar
+   um fullstack cujo target de API é um **site**, sincronizar o `.env` do site para o
+   **domínio unificado** reusando `internal/envfile` (`DomainScopedKeys`/`ApplyUpdates`:
+   `APP_URL`, `ASSET_URL`, `VITE_APP_URL`, `APP_DOMAIN`, `SESSION_DOMAIN`,
+   `SANCTUM_STATEFUL_DOMAINS`, …), **só chaves existentes**, idempotente, best-effort se não
+   houver `.env`. O lerd **não cria** chaves nem mexe em mais nada. Emitir **hint advisory**
+   na CLI e no dashboard.
+   - Novo helper `config.FindFullstackProxyForSite(nome) (*Proxy, bool)` (base `Site` ou
+     qualquer `route.Site` == site).
+   - Os pontos de sync de domínio do site (`link`/`secure`/`domain`/`env`) computam o
+     **domínio efetivo**: unificado se vinculado a fullstack, próprio caso contrário.
+
+5. **Desvínculo simétrico (Plano 2).** Em `proxy rm` de um fullstack — e em `edit` que
+   remove a última rota apontando para um site — re-sincronizar o `.env` daquele site de
+   volta ao seu **domínio próprio** (`SyncPrimaryDomain(site, site.PrimaryDomain(), site.Secured)`).
+   Quando vários sites são API do mesmo fullstack, o sync (nos dois sentidos) **itera todos
+   os sites distintos** das rotas.
+
+6. **Status ao vivo das rotas: adiado.** O painel de detalhes (Plano 3) mostra as rotas
+   **estaticamente** (`path → target` com tag SPA/API); sem polling de porta no v1.
 ```
