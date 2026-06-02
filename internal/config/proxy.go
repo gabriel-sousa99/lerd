@@ -52,8 +52,10 @@ func (p Proxy) PrimaryDomain() string {
 	return ""
 }
 
-// IsFullstack reports whether this proxy uses path-based routing.
-func (p Proxy) IsFullstack() bool { return len(p.Routes) > 0 }
+// IsFullstack reports whether this proxy needs path-based / site routing
+// (base served by a PHP site, or any extra path routes). A plain proxy
+// (port base, no routes) returns false and keeps the simple vhost template.
+func (p Proxy) IsFullstack() bool { return p.Site != "" || len(p.Routes) > 0 }
 
 // ValidateProxyRoutes checks route paths and targets. Each path must start
 // with "/", differ from "/", be unique, and carry exactly one target

@@ -11,6 +11,7 @@ func TestProxyRoutesYAMLRoundTrip(t *testing.T) {
 		Name:         "retencao",
 		Domains:      []string{"retencao.localhost"},
 		UpstreamPort: 9000,
+		Site:         "spa-built",
 		Secured:      true,
 		Routes: []Route{
 			{Path: "/api", Site: "retencao-api"},
@@ -40,6 +41,9 @@ func TestProxyRoutesYAMLRoundTrip(t *testing.T) {
 	if got.Routes[2].UpstreamPort != 8001 || got.Routes[2].UpstreamHost != "127.0.0.1" {
 		t.Errorf("route[2] = %+v", got.Routes[2])
 	}
+	if got.Site != "spa-built" {
+		t.Errorf("Site = %q, want spa-built", got.Site)
+	}
 	if !got.IsFullstack() {
 		t.Error("IsFullstack() = false, want true")
 	}
@@ -59,6 +63,7 @@ func TestValidateProxyRoutes(t *testing.T) {
 		wantErr bool
 	}{
 		{"ok", []Route{{Path: "/api", Site: "x"}}, false},
+		{"ok port target", []Route{{Path: "/api", UpstreamPort: 8080}}, false},
 		{"no leading slash", []Route{{Path: "api", Site: "x"}}, true},
 		{"root path", []Route{{Path: "/", Site: "x"}}, true},
 		{"duplicate", []Route{{Path: "/api", Site: "x"}, {Path: "/api", UpstreamPort: 9}}, true},
