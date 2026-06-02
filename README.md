@@ -719,6 +719,56 @@ Há uma aba **Proxies** no dashboard com a mesma funcionalidade.
 - Headers `Upgrade`/`Connection` configurados → Vite HMR, devtools, WS funcionam
 - Em **managed mode**, o dev server roda em container `node:<major>-alpine` com `Network=host` (bind direto na porta declarada)
 
+### Fullstack (SPA + API na mesma origem)
+
+O par **SPA + API** normalmente vira dois domínios (`app-spa.localhost` e
+`app-api.localhost`). Como são **origens diferentes** e `.localhost` é tratado
+como public-suffix, o cookie de sessão não atravessa os dois hosts → sessão,
+CSRF e **Sanctum quebram**. O modo **fullstack** resolve isso servindo SPA e API
+sob **uma única origem**, separados por **path**: o cookie vira first-party, sem
+CORS e sem `changeOrigin`.
+
+```bash
+# API servida por um site do lerd (sem porta — fastcgi via PHP-FPM):
+lerd proxy add retencao.localhost --port 9000 --api-site retencao-api
+
+# ...ou API num dev server externo numa porta:
+lerd proxy add retencao.localhost --port 9000 --api-port 8000
+
+# paths roteados para a API (default: /api /sanctum /broadcasting /storage):
+lerd proxy add retencao.localhost --port 9000 --api-site retencao-api \
+  --api-path /api --api-path /sanctum --api-path /login --api-path /logout
+```
+
+Resolve para:
+
+```
+retencao.localhost/             → SPA  (dev server na porta, com HMR)
+retencao.localhost/api          → API  (site do lerd via fastcgi, ou porta)
+retencao.localhost/sanctum      → API
+retencao.localhost/broadcasting → API
+retencao.localhost/storage      → API
+```
+
+- Cada lado (SPA na base `/` e a API) pode apontar para um **site do lerd**
+  (fastcgi, sem porta) **ou** uma **porta** (dev server externo). Defaults da CLI:
+  SPA=porta, API=site.
+- O fastcgi injeta `HTTP_HOST = <domínio unificado>`, então o Laravel emite o
+  cookie no domínio unificado (first-party). Sem strip de prefixo: `/api/x` chega
+  ao backend como `/api/x`.
+- **Sync mínimo de `.env`**: ao vincular um site como API, o lerd aponta as chaves
+  domain-scoped (`APP_URL`, `SESSION_DOMAIN`, `SANCTUM_STATEFUL_DOMAINS`, …) ao
+  domínio unificado — só as chaves que já existem, idempotente. Ao desvincular,
+  reverte ao domínio próprio.
+- **Sanctum SPA por sessão**: as rotas web de login (`/login`, `/logout`, e
+  `/register` etc. se usar Fortify) precisam estar entre os `--api-path` — senão
+  caem no SPA em vez da API.
+
+No **dashboard**: o modal de adicionar proxy tem um toggle **Simples | Fullstack
+(SPA + API)** com pickers de site/porta, paths editáveis, mapa de rotas ao vivo e
+detecção do sufixo `-api`; o painel de detalhes mostra o roteamento; e cada site
+ganha um bloco **"Proxy fullstack"** para criar/editar direto dali.
+
 ---
 
 ## Diagnóstico

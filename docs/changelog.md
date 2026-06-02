@@ -7,6 +7,37 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.21.2-oracle.25] — 2026-06-02
+
+Fork (Oracle Edition).
+
+### Added
+
+- **Proxy fullstack (SPA + API na mesma origem).** Um proxy pode rotear path
+  prefixes (`/api`, `/sanctum`, `/broadcasting`, `/storage`, …) para um **site do
+  lerd** (fastcgi via PHP-FPM, sem porta) ou uma **porta**, enquanto a base `/`
+  serve o SPA. Resolve o problema de cookie/sessão/CSRF entre SPA e API ao colocá-los
+  na mesma origem (cookie first-party, sem CORS). O fastcgi injeta
+  `HTTP_HOST = <domínio unificado>`.
+- CLI: `lerd proxy add/edit` com `--api-site`, `--api-port` e `--api-path`
+  (repetível; default `/api /sanctum /broadcasting /storage`).
+- API HTTP: `POST`/`PUT /api/proxies` aceitam `routes`/`site`; o DTO expõe
+  `routes`/`site`/`fullstack`.
+- Dashboard: modo **Fullstack (SPA + API)** no modal (pickers site/porta, paths,
+  mapa de rotas ao vivo, detecção do sufixo `-api`), roteamento no painel de
+  detalhes, e bloco **"Proxy fullstack"** em cada site.
+- **Sync de `.env` ciente de fullstack**: ao vincular/desvincular um site como API,
+  o lerd aponta (e reverte) as chaves domain-scoped (`APP_URL`, `SESSION_DOMAIN`,
+  `SANCTUM_STATEFUL_DOMAINS`, …) ao domínio unificado — só chaves existentes,
+  idempotente.
+
+### Fixed
+
+- `config.Route` agora serializa em snake_case (`json` tags), corrigindo o
+  round-trip de rotas entre a API e o dashboard.
+
+---
+
 ## [1.21.2] — 2026-05-22
 
 A hotfix for three issues a user hit while migrating an Ubuntu development stack to Lerd: a spurious MySQL readiness warning printed in front of every PHP command, a fatal parse error from the dump bridge on legacy PHP, and a failed PHP 7.2 image build.
