@@ -21,6 +21,12 @@ type UpdateOptions struct {
 	NodeVersion  *string
 	UpstreamHost *string
 	AutoStart    *bool
+
+	// Fullstack edits. Routes is a WHOLE-LIST replacement when non-nil
+	// (nil = leave unchanged, &[]Route{} = clear → back to simple). Site
+	// sets/clears the base site target.
+	Routes *[]config.Route
+	Site   *string
 }
 
 // Test hook so unit tests can avoid hitting systemd. Production wires to
@@ -85,6 +91,20 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 		managedRuntimeDirty = true
 	}
 
+	oldSites := boundSites(*existing)
+
+	if opts.Site != nil && *opts.Site != updated.Site {
+		updated.Site = *opts.Site
+		vhostDirty = true
+	}
+	if opts.Routes != nil {
+		updated.Routes = *opts.Routes
+		vhostDirty = true
+	}
+	if err := updated.Validate(); err != nil {
+		return nil, err
+	}
+
 	if err := config.AddProxy(updated); err != nil {
 		return nil, fmt.Errorf("salvando registry: %w", err)
 	}
@@ -95,6 +115,23 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 		}
 		_ = nginxReloadFn()
 	}
+
+	// Reconcilia o .env: sites ainda vinculados → domínio unificado; sites
+	// que saíram → de volta ao próprio domínio.
+	newSites := map[string]bool{}
+	for _, s := range boundSites(updated) {
+		newSites[s] = true
+	}
+	if updated.IsFullstack() {
+		_ = syncProxyEnv(updated)
+	}
+	var removed []string
+	for _, s := range oldSites {
+		if !newSites[s] {
+			removed = append(removed, s)
+		}
+	}
+	unbindSitesEnv(removed)
 
 	if updated.Managed && managedRuntimeDirty {
 		// Rewrite the quadlet file with the new fields. If the unit is
