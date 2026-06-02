@@ -1,0 +1,84 @@
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{.Domain}};
+    return 302 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name {{.Domain}};
+
+    ssl_certificate /etc/nginx/certs/{{.Domain}}.crt;
+    ssl_certificate_key /etc/nginx/certs/{{.Domain}}.key;
+{{if .Base.IsSite}}
+    root {{.Base.DocRoot}};
+    index index.php index.html;
+{{end}}
+{{range .Routes}}
+    location ^~ {{.Path}} {
+{{if .Target.IsSite}}        root {{.Target.DocRoot}};
+        try_files $uri @{{.Target.LocationName}};
+{{else}}        proxy_pass http://{{.Target.UpstreamHost}}:{{.Target.UpstreamPort}};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 86400;
+        proxy_buffering off;
+{{end}}    }
+{{end}}
+{{range siteLocations}}
+    location @{{.LocationName}} {
+        root {{.DocRoot}};
+        set $fpm "lerd-php{{.PHPShort}}-fpm";
+        fastcgi_pass $fpm:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root/index.php;
+        fastcgi_param SCRIPT_NAME /index.php;
+        fastcgi_param HTTPS on;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+        include fastcgi_params;
+        fastcgi_param HTTP_HOST $real_forwarded_host;
+        fastcgi_param SERVER_NAME $real_forwarded_host;
+        fastcgi_param HTTP_X_FORWARDED_HOST $real_forwarded_host;
+        fastcgi_param HTTP_X_FORWARDED_PROTO $real_forwarded_proto;
+        fastcgi_param HTTP_X_FORWARDED_PORT $real_forwarded_port;
+        fastcgi_param HTTP_X_REAL_IP $remote_addr;
+        fastcgi_param HTTP_X_FORWARDED_FOR $remote_addr;
+        fastcgi_param LERD_SITE {{.SiteName}};
+    }
+{{end}}
+    location / {
+{{if .Base.IsSite}}        try_files $uri $uri/ /index.php?$query_string;
+{{else}}        proxy_pass http://{{.Base.UpstreamHost}}:{{.Base.UpstreamPort}};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 86400;
+        proxy_connect_timeout 5s;
+        proxy_buffering off;
+{{end}}    }
+{{if .Base.IsSite}}
+    location ~ \.php$ {
+        set $fpm "lerd-php{{.Base.PHPShort}}-fpm";
+        fastcgi_pass $fpm:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        fastcgi_param HTTPS on;
+        include fastcgi_params;
+        fastcgi_param HTTP_HOST $real_forwarded_host;
+        fastcgi_param SERVER_NAME $real_forwarded_host;
+        fastcgi_param HTTP_X_FORWARDED_PROTO $real_forwarded_proto;
+    }
+{{end}}
+}
