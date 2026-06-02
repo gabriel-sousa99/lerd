@@ -13,10 +13,10 @@ import (
 // Site (fastcgi to a lerd PHP site) or UpstreamPort (proxy_pass to host:port)
 // must be set.
 type Route struct {
-	Path         string `yaml:"path"`
-	Site         string `yaml:"site,omitempty"`
-	UpstreamPort int    `yaml:"upstream_port,omitempty"`
-	UpstreamHost string `yaml:"upstream_host,omitempty"`
+	Path         string `json:"path" yaml:"path"`
+	Site         string `json:"site,omitempty" yaml:"site,omitempty"`
+	UpstreamPort int    `json:"upstream_port,omitempty" yaml:"upstream_port,omitempty"`
+	UpstreamHost string `json:"upstream_host,omitempty" yaml:"upstream_host,omitempty"`
 }
 
 // Proxy represents a manual reverse-proxy entry: a domain that nginx
