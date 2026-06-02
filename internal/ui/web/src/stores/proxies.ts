@@ -2,6 +2,13 @@ import { writable } from 'svelte/store';
 import { apiJson, apiFetch } from '$lib/api';
 import { wsMessage } from '$lib/ws';
 
+export interface Route {
+  path: string;
+  site?: string;
+  upstream_port?: number;
+  upstream_host?: string;
+}
+
 export interface Proxy {
   name: string;
   domain: string;
@@ -15,6 +22,9 @@ export interface Proxy {
   node_version?: string;
   cmd?: string;
   autostart: boolean;
+  site?: string;
+  routes?: Route[];
+  fullstack?: boolean;
 }
 
 export const proxies = writable<Proxy[]>([]);
@@ -39,6 +49,8 @@ export interface CreateProxyInput {
   cmd?: string;
   node_version?: string;
   autostart?: boolean;
+  site?: string;
+  routes?: Route[];
 }
 
 export async function createProxy(input: CreateProxyInput): Promise<Proxy> {
@@ -58,6 +70,8 @@ export interface UpdateProxyInput {
   node_version?: string;
   upstream_host?: string;
   autostart?: boolean;
+  site?: string;
+  routes?: Route[];
 }
 
 export async function updateProxy(name: string, input: UpdateProxyInput): Promise<Proxy> {
