@@ -9,6 +9,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Route is one path-prefixed upstream of a fullstack proxy. Exactly one of
+// Site (fastcgi to a lerd PHP site) or UpstreamPort (proxy_pass to host:port)
+// must be set.
+type Route struct {
+	Path         string `yaml:"path"`
+	Site         string `yaml:"site,omitempty"`
+	UpstreamPort int    `yaml:"upstream_port,omitempty"`
+	UpstreamHost string `yaml:"upstream_host,omitempty"`
+}
+
 // Proxy represents a manual reverse-proxy entry: a domain that nginx
 // forwards to an arbitrary upstream (typically a SPA dev server on the
 // host). Independent of `Site` (PHP) — different lifecycle, no framework,
@@ -26,6 +36,12 @@ type Proxy struct {
 	NodeVersion string `yaml:"node_version,omitempty"`
 	Command     string `yaml:"cmd,omitempty"`
 	AutoStart   bool   `yaml:"auto_start,omitempty"`
+
+	// Fullstack: Site routes the base (/) to a lerd PHP site instead of a
+	// port; Routes maps extra path prefixes to their own upstreams. Empty
+	// Routes == a plain single-upstream proxy (unchanged behaviour).
+	Site   string  `yaml:"-"`
+	Routes []Route `yaml:"-"`
 }
 
 // PrimaryDomain returns the first registered domain.
@@ -34,6 +50,38 @@ func (p Proxy) PrimaryDomain() string {
 		return p.Domains[0]
 	}
 	return ""
+}
+
+// IsFullstack reports whether this proxy uses path-based routing.
+func (p Proxy) IsFullstack() bool { return len(p.Routes) > 0 }
+
+// ValidateProxyRoutes checks route paths and targets. Each path must start
+// with "/", differ from "/", be unique, and carry exactly one target
+// (Site xor UpstreamPort).
+func ValidateProxyRoutes(routes []Route) error {
+	seen := make(map[string]bool, len(routes))
+	for _, r := range routes {
+		if len(r.Path) == 0 || r.Path[0] != '/' {
+			return fmt.Errorf("path da rota deve começar com /: %q", r.Path)
+		}
+		if r.Path == "/" {
+			return fmt.Errorf("path da rota não pode ser / (reservado para a base)")
+		}
+		if seen[r.Path] {
+			return fmt.Errorf("path de rota duplicado: %q", r.Path)
+		}
+		seen[r.Path] = true
+
+		hasSite := r.Site != ""
+		hasPort := r.UpstreamPort != 0
+		if hasSite == hasPort {
+			return fmt.Errorf("rota %q precisa de exatamente um target (site OU upstream_port)", r.Path)
+		}
+		if hasPort && (r.UpstreamPort <= 0 || r.UpstreamPort > 65535) {
+			return fmt.Errorf("rota %q: porta inválida %d", r.Path, r.UpstreamPort)
+		}
+	}
+	return nil
 }
 
 type proxyYAML struct {
@@ -48,6 +96,8 @@ type proxyYAML struct {
 	NodeVersion  string   `yaml:"node_version,omitempty"`
 	Command      string   `yaml:"cmd,omitempty"`
 	AutoStart    bool     `yaml:"auto_start,omitempty"`
+	Site         string   `yaml:"site,omitempty"`
+	Routes       []Route  `yaml:"routes,omitempty"`
 }
 
 func (p Proxy) toYAML() proxyYAML {
@@ -63,6 +113,8 @@ func (p Proxy) toYAML() proxyYAML {
 		NodeVersion:  p.NodeVersion,
 		Command:      p.Command,
 		AutoStart:    p.AutoStart,
+		Site:         p.Site,
+		Routes:       p.Routes,
 	}
 }
 
@@ -79,6 +131,8 @@ func (py proxyYAML) toProxy() Proxy {
 		NodeVersion:  py.NodeVersion,
 		Command:      py.Command,
 		AutoStart:    py.AutoStart,
+		Site:         py.Site,
+		Routes:       py.Routes,
 	}
 }
 
@@ -112,6 +166,9 @@ func cloneProxyRegistry(in *ProxyRegistry) *ProxyRegistry {
 		cp := p
 		if p.Domains != nil {
 			cp.Domains = append([]string(nil), p.Domains...)
+		}
+		if p.Routes != nil {
+			cp.Routes = append([]Route(nil), p.Routes...)
 		}
 		out.Proxies[i] = cp
 	}
