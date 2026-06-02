@@ -6,7 +6,11 @@
   import SiteTinkerTab from './SiteTinkerTab.svelte';
   import SiteEnvTab from './SiteEnvTab.svelte';
   import DumpsTab from '$tabs/DumpsTab.svelte';
+  import DetailButton from '$components/DetailButton.svelte';
   import { resumeSite, loadSites, type Site } from '$stores/sites';
+  import { proxies } from '$stores/proxies';
+  import { openProxyAddModal, openProxyEditModal } from '$stores/modals';
+  import { suggestUnifiedDomain } from '$lib/fullstack';
   import { routeRest } from '$stores/route';
   import { m } from '../../paraglide/messages.js';
 
@@ -40,6 +44,11 @@
   let activeWorktreeBranch = $state<string>('');
   const canTinker = $derived(Boolean(site.php_version));
   const canEnv = $derived(Boolean(site.has_env));
+
+  const siteName = $derived(site.name ?? site.domain.replace(/\.localhost$/, ''));
+  const boundProxy = $derived(
+    $proxies.find((p) => p.site === siteName || (p.routes ?? []).some((r) => r.site === siteName))
+  );
 
   // The route can deep-link a sub-tab (e.g. dump notifications go to
   // #sites/<domain>/dumps). When the second segment names a tab, honour it
@@ -117,6 +126,24 @@
     </div>
   {:else if active === 'overview'}
     <SiteControls {site} {activeWorktreeBranch} />
+    <section class="px-6 py-4 space-y-2 border-b border-gray-100 dark:border-lerd-border">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">Proxy fullstack</h2>
+      {#if boundProxy}
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-xs text-gray-600 dark:text-gray-300">
+            API em
+            <a href={`${boundProxy.secured ? 'https' : 'http'}://${boundProxy.domain}`} target="_blank" rel="noopener" class="font-mono text-lerd-red hover:underline">↗ {boundProxy.domain}</a>
+            <span class="text-gray-400">· {(boundProxy.routes ?? []).map((r) => r.path).join(' ')}</span>
+          </span>
+          <DetailButton onclick={() => openProxyEditModal(boundProxy)}>Editar</DetailButton>
+        </div>
+      {:else}
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-xs text-gray-500">Servir este site como API sob um domínio único com seu SPA.</span>
+          <DetailButton tone="primary" onclick={() => openProxyAddModal({ fullstack: true, apiSite: siteName, domain: suggestUnifiedDomain(siteName) })}>+ Criar proxy fullstack</DetailButton>
+        </div>
+      {/if}
+    </section>
     <SiteLogs {site} {activeWorktreeBranch} />
   {:else if active === 'env'}
     {#key site.domain + '@' + activeWorktreeBranch}
