@@ -46,7 +46,12 @@
 <div class="flex-1 overflow-y-auto">
   <header class="px-6 py-4 border-b border-gray-100 dark:border-lerd-border flex items-start justify-between gap-4">
     <div class="min-w-0">
-      <h1 class="text-lg font-semibold text-gray-900 dark:text-white truncate">{proxy.domain}</h1>
+      <h1 class="text-lg font-semibold text-gray-900 dark:text-white truncate">
+        {proxy.domain}
+        {#if proxy.fullstack}
+          <span class="ml-2 align-middle text-[10px] uppercase tracking-wide bg-lerd-red/15 text-lerd-red border border-lerd-red/30 rounded px-1.5 py-0.5">fullstack</span>
+        {/if}
+      </h1>
       <a
         href={url}
         target="_blank"
@@ -102,6 +107,28 @@
       <InfoRow label="Domínios" value={proxy.domains.join(', ')} />
     {/if}
   </section>
+
+  {#if proxy.fullstack}
+    <section class="px-6 py-4 space-y-2 border-b border-gray-100 dark:border-lerd-border">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+        Roteamento (origem única)
+      </h2>
+      {#each (proxy.routes ?? []) as r (r.path)}
+        <div class="flex items-center gap-2 text-xs font-mono mt-1.5">
+          <span class="text-sky-500 min-w-[110px]">{r.path}</span>
+          <span class="text-gray-400">→</span>
+          <span class="text-gray-600 dark:text-gray-300">{r.site ? `site ${r.site}` : `:${r.upstream_port}`}</span>
+          <span class="ml-auto text-[10px] uppercase tracking-wide bg-rose-500/10 text-rose-500 rounded px-1.5 py-0.5">API</span>
+        </div>
+      {/each}
+      <div class="flex items-center gap-2 text-xs font-mono mt-1.5">
+        <span class="text-emerald-500 min-w-[110px]">/ (resto)</span>
+        <span class="text-gray-400">→</span>
+        <span class="text-gray-600 dark:text-gray-300">{proxy.site ? `site ${proxy.site}` : `:${proxy.upstream_port}`}</span>
+        <span class="ml-auto text-[10px] uppercase tracking-wide bg-emerald-500/10 text-emerald-500 rounded px-1.5 py-0.5">SPA</span>
+      </div>
+    </section>
+  {/if}
 
   {#if proxy.managed}
     <section class="px-6 py-4 space-y-2">
