@@ -46,10 +46,10 @@
 <div class="flex-1 overflow-y-auto">
   <header class="px-6 py-4 border-b border-gray-100 dark:border-lerd-border flex items-start justify-between gap-4">
     <div class="min-w-0">
-      <h1 class="text-lg font-semibold text-gray-900 dark:text-white truncate">
-        {proxy.domain}
+      <h1 class="text-lg font-semibold text-gray-900 dark:text-white flex items-center min-w-0">
+        <span class="truncate">{proxy.domain}</span>
         {#if proxy.fullstack}
-          <span class="ml-2 align-middle text-[10px] uppercase tracking-wide bg-lerd-red/15 text-lerd-red border border-lerd-red/30 rounded px-1.5 py-0.5">fullstack</span>
+          <span class="ml-2 align-middle shrink-0 text-[10px] uppercase tracking-wide bg-lerd-red/15 text-lerd-red border border-lerd-red/30 rounded px-1.5 py-0.5">fullstack</span>
         {/if}
       </h1>
       <a
