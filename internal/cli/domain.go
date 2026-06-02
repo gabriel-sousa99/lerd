@@ -7,7 +7,6 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
@@ -127,7 +126,7 @@ func runDomainAdd(_ *cobra.Command, args []string) error {
 	nginx.ReloadOrWarn("")
 
 	if site.PrimaryDomain() != oldPrimary {
-		if err := envfile.SyncPrimaryDomain(site.Path, site.PrimaryDomain(), site.Secured); err != nil {
+		if err := siteops.SyncSiteEnv(*site); err != nil {
 			fmt.Printf("[WARN] syncing .env to new primary domain: %v\n", err)
 		}
 	}
@@ -197,7 +196,7 @@ func runDomainRemove(_ *cobra.Command, args []string) error {
 	nginx.ReloadOrWarn("")
 
 	if site.PrimaryDomain() != oldPrimary {
-		if err := envfile.SyncPrimaryDomain(site.Path, site.PrimaryDomain(), site.Secured); err != nil {
+		if err := siteops.SyncSiteEnv(*site); err != nil {
 			fmt.Printf("[WARN] syncing .env to new primary domain: %v\n", err)
 		}
 	}

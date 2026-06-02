@@ -19,6 +19,7 @@ import (
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	"github.com/spf13/cobra"
 )
 
@@ -138,7 +139,7 @@ func runEnvDomainOnly(cwd string) error {
 
 	// Refresh URL/domain-scoped keys only — anything else (DB, redis, mail,
 	// credentials) stays exactly as the developer wrote it.
-	if err := envfile.SyncPrimaryDomain(cwd, site.PrimaryDomain(), site.Secured); err != nil {
+	if err := siteops.SyncSiteEnv(config.Site{Name: site.Name, Path: cwd, Domains: site.Domains, Secured: site.Secured}); err != nil {
 		return fmt.Errorf("syncing domain in %s: %w", envRelPath, err)
 	}
 	fmt.Printf("  Synced URL/domain keys for %s\n", site.PrimaryDomain())

@@ -6,7 +6,6 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 )
 
@@ -71,7 +70,7 @@ func SetSecured(site *config.Site, secured bool) error {
 	if err := config.AddSite(*site); err != nil {
 		return fmt.Errorf("updating site registry: %w", err)
 	}
-	_ = envfile.SyncPrimaryDomain(site.Path, site.PrimaryDomain(), secured)
+	_ = SyncSiteEnv(config.Site{Name: site.Name, Path: site.Path, Domains: site.Domains, Secured: secured})
 	_ = config.SetProjectSecured(site.Path, secured)
 	if err := nginxReloadFn(); err != nil {
 		return fmt.Errorf("reloading nginx: %w", err)
