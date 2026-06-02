@@ -13,18 +13,21 @@ import (
 // flattens config.Proxy plus a derived `domain` (PrimaryDomain) so the
 // frontend can render the proxy list without extra roundtrips.
 type proxyDTO struct {
-	Name         string   `json:"name"`
-	Domain       string   `json:"domain"`
-	Domains      []string `json:"domains"`
-	UpstreamPort int      `json:"upstream_port"`
-	UpstreamHost string   `json:"upstream_host"`
-	Path         string   `json:"path,omitempty"`
-	Secured      bool     `json:"secured"`
-	Paused       bool     `json:"paused"`
-	Managed      bool     `json:"managed"`
-	NodeVersion  string   `json:"node_version,omitempty"`
-	Command      string   `json:"cmd,omitempty"`
-	AutoStart    bool     `json:"autostart"`
+	Name         string         `json:"name"`
+	Domain       string         `json:"domain"`
+	Domains      []string       `json:"domains"`
+	UpstreamPort int            `json:"upstream_port"`
+	UpstreamHost string         `json:"upstream_host"`
+	Path         string         `json:"path,omitempty"`
+	Secured      bool           `json:"secured"`
+	Paused       bool           `json:"paused"`
+	Managed      bool           `json:"managed"`
+	NodeVersion  string         `json:"node_version,omitempty"`
+	Command      string         `json:"cmd,omitempty"`
+	AutoStart    bool           `json:"autostart"`
+	Site         string         `json:"site,omitempty"`
+	Routes       []config.Route `json:"routes,omitempty"`
+	Fullstack    bool           `json:"fullstack"`
 }
 
 func toProxyDTO(p config.Proxy) proxyDTO {
@@ -45,6 +48,9 @@ func toProxyDTO(p config.Proxy) proxyDTO {
 		NodeVersion:  p.NodeVersion,
 		Command:      p.Command,
 		AutoStart:    p.AutoStart,
+		Site:         p.Site,
+		Routes:       p.Routes,
+		Fullstack:    p.IsFullstack(),
 	}
 }
 
@@ -64,14 +70,16 @@ func handleProxies(w http.ResponseWriter, r *http.Request) {
 		writeProxyJSON(w, http.StatusOK, out)
 	case http.MethodPost:
 		var body struct {
-			Domain      string `json:"domain"`
-			Port        int    `json:"port"`
-			Path        string `json:"path"`
-			NoSecure    bool   `json:"no_secure"`
-			Managed     bool   `json:"managed"`
-			Command     string `json:"cmd"`
-			NodeVersion string `json:"node_version"`
-			AutoStart   bool   `json:"autostart"`
+			Domain      string         `json:"domain"`
+			Port        int            `json:"port"`
+			Path        string         `json:"path"`
+			NoSecure    bool           `json:"no_secure"`
+			Managed     bool           `json:"managed"`
+			Command     string         `json:"cmd"`
+			NodeVersion string         `json:"node_version"`
+			AutoStart   bool           `json:"autostart"`
+			Site        string         `json:"site"`
+			Routes      []config.Route `json:"routes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -86,6 +94,8 @@ func handleProxies(w http.ResponseWriter, r *http.Request) {
 			Command:     body.Command,
 			NodeVersion: body.NodeVersion,
 			AutoStart:   body.AutoStart,
+			Site:        body.Site,
+			Routes:      body.Routes,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -125,12 +135,14 @@ func handleProxyAction(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPut && action == "" {
 		var body struct {
-			Port         *int    `json:"port"`
-			Path         *string `json:"path"`
-			Command      *string `json:"cmd"`
-			NodeVersion  *string `json:"node_version"`
-			UpstreamHost *string `json:"upstream_host"`
-			AutoStart    *bool   `json:"autostart"`
+			Port         *int            `json:"port"`
+			Path         *string         `json:"path"`
+			Command      *string         `json:"cmd"`
+			NodeVersion  *string         `json:"node_version"`
+			UpstreamHost *string         `json:"upstream_host"`
+			AutoStart    *bool           `json:"autostart"`
+			Routes       *[]config.Route `json:"routes"`
+			Site         *string         `json:"site"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -143,6 +155,8 @@ func handleProxyAction(w http.ResponseWriter, r *http.Request) {
 			NodeVersion:  body.NodeVersion,
 			UpstreamHost: body.UpstreamHost,
 			AutoStart:    body.AutoStart,
+			Routes:       body.Routes,
+			Site:         body.Site,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
