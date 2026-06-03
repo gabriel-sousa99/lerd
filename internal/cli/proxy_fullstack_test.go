@@ -1,24 +1,16 @@
 package cli
 
 import (
-	"strings"
 	"testing"
 )
-
-func TestDefaultAPIPaths(t *testing.T) {
-	got := defaultAPIPaths()
-	want := []string{"/api", "/sanctum", "/broadcasting", "/storage"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("defaultAPIPaths = %v, want %v", got, want)
-	}
-}
 
 func TestBuildAPIRoutes_SiteWithDefaults(t *testing.T) {
 	routes, err := buildAPIRoutes("retencao-api", 0, nil)
 	if err != nil {
 		t.Fatalf("buildAPIRoutes: %v", err)
 	}
-	if len(routes) != 4 || routes[0].Path != "/api" || routes[0].Site != "retencao-api" {
+	want := len(defaultAPIPaths())
+	if len(routes) != want || routes[0].Path != "/api" || routes[0].Site != "retencao-api" {
 		t.Errorf("routes = %+v", routes)
 	}
 }

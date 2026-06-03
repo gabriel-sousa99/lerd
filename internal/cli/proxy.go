@@ -13,7 +13,12 @@ import (
 )
 
 func defaultAPIPaths() []string {
-	return []string{"/api", "/sanctum", "/broadcasting", "/storage"}
+	return []string{
+		"/api", "/sanctum", "/broadcasting", "/storage",
+		"/redirect",     // Core/Routes/web.php GET /redirect/{profile?} → entrypoint SSO (alvo do 401 da SPA)
+		"/authenticate", // Core/Routes/web.php GET /authenticate/{profile?} + api.php POST → callback SSO
+		"/login", "/logout", "/up", // convenções Laravel/Breeze + healthcheck
+	}
 }
 
 // buildAPIRoutes turns the opinionated CLI flags into config.Route entries.
