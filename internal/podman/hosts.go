@@ -275,9 +275,37 @@ func nginxContainerIP() string {
 	return ip
 }
 
+// lanIface is a testable projection of a network interface: the flags pickLANIP
+// cares about plus its addresses. Built from net.Interface in primaryLANIP.
+type lanIface struct {
+	up       bool
+	loopback bool
+	addrs    []net.Addr
+}
+
+// pickLANIP returns the first non-loopback IPv4 address belonging to an
+// interface that is up and not loopback. Pure (no syscalls) so the loopback /
+// down / absent-eth0 cases are unit-testable. Returns "" when nothing matches.
+func pickLANIP(ifaces []lanIface) string {
+	for _, iface := range ifaces {
+		if !iface.up || iface.loopback {
+			continue
+		}
+		for _, addr := range iface.addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				if v4 := ipnet.IP.To4(); v4 != nil && !v4.IsLoopback() {
+					return v4.String()
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // primaryLANIP returns the local IPv4 address that the kernel would use to
 // reach a public destination. Duplicates internal/dns/setup_common.go's
-// helper because importing dns from podman would create a cycle.
+// helper because importing dns from podman would create a cycle. Falls back to
+// scanning interfaces (via pickLANIP) when the UDP dial trick is unavailable.
 func primaryLANIP() string {
 	conn, err := net.Dial("udp4", "1.1.1.1:80")
 	if err == nil {
@@ -288,18 +316,14 @@ func primaryLANIP() string {
 	if ifErr != nil {
 		return ""
 	}
+	projected := make([]lanIface, 0, len(ifaces))
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
 		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok {
-				if v4 := ipnet.IP.To4(); v4 != nil && !v4.IsLoopback() {
-					return v4.String()
-				}
-			}
-		}
+		projected = append(projected, lanIface{
+			up:       iface.Flags&net.FlagUp != 0,
+			loopback: iface.Flags&net.FlagLoopback != 0,
+			addrs:    addrs,
+		})
 	}
-	return ""
+	return pickLANIP(projected)
 }
