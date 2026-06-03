@@ -58,3 +58,40 @@ func TestSyncProxyEnv_NoFrontendWhenPathEmpty(t *testing.T) {
 		t.Error("syncFrontendFn não deveria ser chamado sem p.Path")
 	}
 }
+
+func TestRemove_RevertsFrontend(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	origFind, origSync, origReload, origUnsec := findSiteFn, syncEnvFn, nginxReloadFn, unsecureCertFn
+	origFront, origRevert, origSecure := syncFrontendFn, revertFrontendFn, secureCertFn
+	defer func() {
+		findSiteFn, syncEnvFn, nginxReloadFn, unsecureCertFn = origFind, origSync, origReload, origUnsec
+		syncFrontendFn, revertFrontendFn, secureCertFn = origFront, origRevert, origSecure
+	}()
+	findSiteFn = func(name string) (*config.Site, error) {
+		return &config.Site{Name: name, Path: "/srv/" + name, Domains: []string{name + ".localhost"}}, nil
+	}
+	syncEnvFn = func(path, domain string, secured bool) error { return nil }
+	syncFrontendFn = func(path, domain string, secured bool) error { return nil }
+	nginxReloadFn = func() error { return nil }
+	unsecureCertFn = func(p config.Proxy) error { return nil }
+	secureCertFn = func(p config.Proxy) error { return nil }
+
+	var reverted string
+	revertFrontendFn = func(path string) error { reverted = path; return nil }
+
+	spaDir := t.TempDir()
+	p, err := Add(AddOptions{
+		Domain: "gc.localhost", Port: 9000, Path: spaDir,
+		Routes: []config.Route{{Path: "/api", Site: "gc-api"}},
+	})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := Remove(p.Name); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if reverted != p.Path {
+		t.Errorf("reverted = %q, want %q", reverted, p.Path)
+	}
+}
