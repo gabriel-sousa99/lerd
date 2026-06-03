@@ -1,25 +1,25 @@
 package cli
 
 import (
-	"strings"
 	"testing"
 )
-
-func TestDefaultAPIPaths(t *testing.T) {
-	got := defaultAPIPaths()
-	want := []string{"/api", "/sanctum", "/broadcasting", "/storage"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("defaultAPIPaths = %v, want %v", got, want)
-	}
-}
 
 func TestBuildAPIRoutes_SiteWithDefaults(t *testing.T) {
 	routes, err := buildAPIRoutes("retencao-api", 0, nil)
 	if err != nil {
 		t.Fatalf("buildAPIRoutes: %v", err)
 	}
-	if len(routes) != 4 || routes[0].Path != "/api" || routes[0].Site != "retencao-api" {
-		t.Errorf("routes = %+v", routes)
+	// buildAPIRoutes deve mapear 1:1 cada path de defaultAPIPaths() para uma
+	// Route com aquele Path e o site dado — verifica o mapeamento inteiro, não
+	// só a contagem (a lista canônica é fixada em proxy_paths_test.go).
+	want := defaultAPIPaths()
+	if len(routes) != len(want) {
+		t.Fatalf("len(routes) = %d, want %d: %+v", len(routes), len(want), routes)
+	}
+	for i, r := range routes {
+		if r.Path != want[i] || r.Site != "retencao-api" || r.UpstreamPort != 0 {
+			t.Errorf("routes[%d] = %+v, want Path=%q Site=retencao-api", i, r, want[i])
+		}
 	}
 }
 

@@ -92,6 +92,7 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 	}
 
 	oldSites := boundSites(*existing)
+	oldPath := existing.Path
 
 	if opts.Site != nil && *opts.Site != updated.Site {
 		updated.Site = *opts.Site
@@ -132,6 +133,14 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 		}
 	}
 	unbindSitesEnv(removed)
+
+	// Frontend: reverte a API-base do path antigo quando ele deixa de estar
+	// sincronizado — path trocado/limpo, ou o proxy deixou de ser fullstack
+	// (a origem unificada não serve mais a API). O path novo, se ainda
+	// fullstack, já foi sincronizado por syncProxyEnv acima.
+	if oldPath != "" && (oldPath != updated.Path || !updated.IsFullstack()) {
+		_ = revertFrontendFn(oldPath)
+	}
 
 	if updated.Managed && managedRuntimeDirty {
 		// Rewrite the quadlet file with the new fields. If the unit is

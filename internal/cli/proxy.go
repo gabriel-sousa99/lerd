@@ -13,7 +13,12 @@ import (
 )
 
 func defaultAPIPaths() []string {
-	return []string{"/api", "/sanctum", "/broadcasting", "/storage"}
+	return []string{
+		"/api", "/sanctum", "/broadcasting", "/storage",
+		"/redirect",     // Core/Routes/web.php GET /redirect/{profile?} → entrypoint SSO (alvo do 401 da SPA)
+		"/authenticate", // Core/Routes/web.php GET /authenticate/{profile?} + api.php POST → callback SSO
+		"/login", "/logout", "/up", // convenções Laravel/Breeze + healthcheck
+	}
 }
 
 // buildAPIRoutes turns the opinionated CLI flags into config.Route entries.
@@ -49,15 +54,16 @@ func buildAPIRoutes(apiSite string, apiPort int, apiPaths []string) ([]config.Ro
 }
 
 // fullstackHint returns an advisory message printed after creating/editing a
-// fullstack proxy so the user knows the API site's .env was pointed at the
-// unified domain.
+// fullstack proxy so the user knows the API site's .env (and, when --path is
+// set, the SPA's API-base key) was pointed at the unified domain.
 func fullstackHint(domain string, secured bool) string {
 	scheme := "http"
 	if secured {
 		scheme = "https"
 	}
-	return fmt.Sprintf("dica: o .env do site de API foi apontado para %s://%s "+
-		"(APP_URL / SANCTUM_STATEFUL_DOMAINS, se presentes). Ajuste manualmente se necessário.", scheme, domain)
+	return fmt.Sprintf("dica: os .env do site de API (APP_URL/SANCTUM_STATEFUL_DOMAINS) e da SPA "+
+		"(URL_API/VITE_API_URL, se presentes) foram apontados para %s://%s. "+
+		"Para HMR atrás do proxy, ajuste devServer.hmr no quasar.config.js/vite.config (veja docs).", scheme, domain)
 }
 
 // NewProxyCmd is the root of `lerd proxy …`.
@@ -125,7 +131,7 @@ func newProxyAddCmd() *cobra.Command {
 		},
 	}
 	c.Flags().IntVar(&port, "port", 0, "Porta do upstream (obrigatória)")
-	c.Flags().StringVar(&path, "path", "", "Pasta do projeto (obrigatória se --managed)")
+	c.Flags().StringVar(&path, "path", "", "Pasta do projeto frontend (SPA). Obrigatória com --managed. Em proxy fullstack (com --api-site/--api-port), sincroniza o .env da SPA para a origem unificada")
 	c.Flags().BoolVar(&noSecure, "no-secure", false, "Cria como HTTP em vez de HTTPS")
 	c.Flags().BoolVar(&managed, "managed", false, "lerd gerencia o dev server via quadlet")
 	c.Flags().StringVar(&cmdStr, "cmd", "", "Comando para iniciar o dev server (ex: 'npm run dev')")
@@ -194,7 +200,7 @@ func newProxyEditCmd() *cobra.Command {
 		},
 	}
 	c.Flags().IntVar(&port, "port", 0, "Nova porta do upstream")
-	c.Flags().StringVar(&path, "path", "", "Nova pasta do projeto (string vazia limpa)")
+	c.Flags().StringVar(&path, "path", "", "Nova pasta do projeto frontend (string vazia limpa e reverte o .env da SPA)")
 	c.Flags().StringVar(&cmdStr, "cmd", "", "Novo comando do dev server (managed)")
 	c.Flags().StringVar(&nodeVersion, "node", "", "Novo major do Node (managed)")
 	c.Flags().StringVar(&upstreamHost, "upstream-host", "", "Hostname alternativo do upstream (default: host.containers.internal)")

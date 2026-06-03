@@ -28,5 +28,8 @@ func Remove(name string) error {
 	}
 	_ = nginxReloadFn()
 	unbindSitesEnv(sites)
+	if p.Path != "" {
+		_ = revertFrontendFn(p.Path)
+	}
 	return nil
 }

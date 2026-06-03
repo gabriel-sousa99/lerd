@@ -1,7 +1,21 @@
 import type { Route } from '$stores/proxies';
 
+// defaultApiPaths espelha defaultAPIPaths() do backend (internal/cli/proxy.go):
+// convenções Laravel + rotas de auth do unimedvr/core (/redirect, /authenticate
+// são as rotas web no root do fluxo SSO 401 → /redirect → /authenticate). Manter
+// em sincronia com o Go — divergir faz o dashboard criar proxies sem as rotas SSO.
 export function defaultApiPaths(): string[] {
-  return ['/api', '/sanctum', '/broadcasting', '/storage'];
+  return [
+    '/api',
+    '/sanctum',
+    '/broadcasting',
+    '/storage',
+    '/redirect',
+    '/authenticate',
+    '/login',
+    '/logout',
+    '/up',
+  ];
 }
 
 export interface ApiTargetInput {

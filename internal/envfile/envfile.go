@@ -280,3 +280,81 @@ func SyncPrimaryDomain(projectPath, domain string, secured bool) error {
 	}
 	return ApplyUpdates(envPath, updates)
 }
+
+// FrontendAPIBaseKeys lista as chaves de .env que apontam a base da API num
+// projeto frontend (SPA). Só são reescritas se já existirem — mesma semântica
+// e garantia de escopo de DomainScopedKeys. Nada fora deste set é tocado.
+//
+// Exportado para que callers (testes, auditorias) possam provar que o escopo
+// é bounded. Projetos com outra convenção de chave devem adicioná-la aqui.
+var FrontendAPIBaseKeys = []string{
+	"URL_API",          // Quasar (gestao-clientes-spa)
+	"VITE_API_URL",     // Vite genérico
+	"VITE_APP_API_URL", // Vite/Vue convenção comum
+}
+
+// SyncFrontendAPIBase reescreve as chaves de FrontendAPIBaseKeys presentes no
+// .env do projeto frontend para a origem unificada (scheme://domain, SEM /api —
+// a SPA concatena seus próprios prefixos). Só toca chaves existentes,
+// idempotente, best-effort se não houver .env.
+func SyncFrontendAPIBase(projectPath, domain string, secured bool) error {
+	envPath := filepath.Join(projectPath, ".env")
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	keys, err := ReadKeys(envPath)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		present[k] = true
+	}
+
+	scheme := "http"
+	if secured {
+		scheme = "https"
+	}
+	origin := scheme + "://" + domain
+
+	updates := map[string]string{}
+	for _, k := range FrontendAPIBaseKeys {
+		if present[k] {
+			updates[k] = origin
+		}
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return ApplyUpdates(envPath, updates)
+}
+
+// RevertFrontendAPIBase grava string vazia nas chaves de FrontendAPIBaseKeys
+// presentes no .env do frontend, desfazendo o sync para a origem unificada.
+// O lerd não conhece a URL de dev original, então um valor vazio (relativo,
+// neutro) é o reset seguro. Só toca chaves existentes; no-op sem .env.
+func RevertFrontendAPIBase(projectPath string) error {
+	envPath := filepath.Join(projectPath, ".env")
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		return nil
+	}
+	keys, err := ReadKeys(envPath)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		present[k] = true
+	}
+	updates := map[string]string{}
+	for _, k := range FrontendAPIBaseKeys {
+		if present[k] {
+			updates[k] = ""
+		}
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return ApplyUpdates(envPath, updates)
+}

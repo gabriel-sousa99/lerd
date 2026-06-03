@@ -7,6 +7,43 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.21.2-oracle.26] — 2026-06-03
+
+Fork (Oracle Edition). O **frontend** do proxy fullstack vira cidadão de 1ª classe:
+ao passar `--path`, o lerd sincroniza a API-base do `.env` da SPA para a origem
+unificada, fechando o gap que mantinha a SPA chamando uma API cross-origin (CORS,
+cookie de terceiro, Sanctum quebrado).
+
+### Added
+
+- **Sync de `.env` do frontend.** `--path <pasta-da-spa>` aponta as chaves de
+  API-base da SPA (`URL_API`, `VITE_API_URL`, `VITE_APP_API_URL` — só se presentes)
+  para a origem unificada (`https://<domínio>`, sem `/api`), espelhando a máquina
+  dos sites de API. Idempotente, escopo bounded (`FrontendAPIBaseKeys`).
+- Defaults de rota mais ricos: `/redirect`, `/authenticate`, `/login`, `/logout`,
+  `/up` — cobrem o fluxo SSO do `unimedvr/core` (`401 → /redirect → /authenticate`).
+  Alinhado também no dashboard: o builder de rotas client-side (`fullstack.ts`)
+  usa os mesmos defaults, então proxies fullstack criados pela UI também trazem
+  as rotas SSO (antes só o caminho CLI/backend as incluía).
+- `--path` aceito standalone (sem `--managed`) para habilitar o sync do `.env` da
+  SPA quando o dev roda `quasar dev` manualmente.
+- Doc `docs/features/proxy-fullstack-frontend.md` (HMR, TrustProxies, rotas custom,
+  reversão).
+
+### Changed
+
+- `fullstackHint` agora cita o `.env` da SPA e o snippet de HMR; help de `--path`
+  esclarece o modo standalone.
+- Reversão: `proxy rm` e `proxy edit --path ""` zeram a API-base da SPA (valor
+  neutro vazio, já que o lerd não conhece a URL de dev original).
+
+### Fixed
+
+- Hardening da detecção do gateway WSL: seleção de LAN IP extraída para a função
+  pura `pickLANIP` (testável — cobre iface só-loopback, ifaces down e eth0 ausente).
+
+---
+
 ## [1.21.2-oracle.25] — 2026-06-02
 
 Fork (Oracle Edition).

@@ -8,6 +8,12 @@ import (
 // syncEnvFn is injectable for tests. Production wires to envfile.SyncPrimaryDomain.
 var syncEnvFn = envfile.SyncPrimaryDomain
 
+// Frontend env-sync hooks, injectable for tests.
+var (
+	syncFrontendFn   = envfile.SyncFrontendAPIBase
+	revertFrontendFn = envfile.RevertFrontendAPIBase
+)
+
 // boundSites returns the distinct site names a proxy targets (base + routes).
 func boundSites(p config.Proxy) []string {
 	seen := map[string]bool{}
@@ -26,7 +32,9 @@ func boundSites(p config.Proxy) []string {
 }
 
 // syncProxyEnv points the .env of every site bound to p at the unified domain
-// (p's primary domain), so sessions/cookies are first-party. Best-effort: a
+// (p's primary domain), so sessions/cookies are first-party. When p.Path is
+// set (the frontend project folder), its API-base keys are pointed at the same
+// unified origin so the SPA stops calling a cross-origin API. Best-effort: a
 // missing site or .env is skipped without failing the proxy operation.
 func syncProxyEnv(p config.Proxy) error {
 	domain := p.PrimaryDomain()
@@ -36,6 +44,9 @@ func syncProxyEnv(p config.Proxy) error {
 			continue
 		}
 		_ = syncEnvFn(s.Path, domain, p.Secured)
+	}
+	if p.Path != "" {
+		_ = syncFrontendFn(p.Path, domain, p.Secured)
 	}
 	return nil
 }
