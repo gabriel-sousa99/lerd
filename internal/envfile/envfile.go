@@ -329,3 +329,32 @@ func SyncFrontendAPIBase(projectPath, domain string, secured bool) error {
 	}
 	return ApplyUpdates(envPath, updates)
 }
+
+// RevertFrontendAPIBase grava string vazia nas chaves de FrontendAPIBaseKeys
+// presentes no .env do frontend, desfazendo o sync para a origem unificada.
+// O lerd não conhece a URL de dev original, então um valor vazio (relativo,
+// neutro) é o reset seguro. Só toca chaves existentes; no-op sem .env.
+func RevertFrontendAPIBase(projectPath string) error {
+	envPath := filepath.Join(projectPath, ".env")
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		return nil
+	}
+	keys, err := ReadKeys(envPath)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		present[k] = true
+	}
+	updates := map[string]string{}
+	for _, k := range FrontendAPIBaseKeys {
+		if present[k] {
+			updates[k] = ""
+		}
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return ApplyUpdates(envPath, updates)
+}

@@ -71,3 +71,24 @@ func TestSyncFrontendAPIBase_AbsentKeyNotAdded(t *testing.T) {
 		t.Errorf("URL_API criado indevidamente: %q", got)
 	}
 }
+
+func TestRevertFrontendAPIBase_BlanksPresentKeys(t *testing.T) {
+	envPath := writeEnv(t, "URL_API=https://app.localhost\nDB_HOST=oracle\n")
+	dir := filepath.Dir(envPath)
+	if err := RevertFrontendAPIBase(dir); err != nil {
+		t.Fatalf("RevertFrontendAPIBase: %v", err)
+	}
+	if got := ReadKey(envPath, "URL_API"); got != "" {
+		t.Errorf("URL_API = %q, want vazio", got)
+	}
+	if got := ReadKey(envPath, "DB_HOST"); got != "oracle" {
+		t.Errorf("DB_HOST mexido: %q", got)
+	}
+}
+
+func TestRevertFrontendAPIBase_NoEnvIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	if err := RevertFrontendAPIBase(dir); err != nil {
+		t.Errorf("esperado no-op, veio erro: %v", err)
+	}
+}
