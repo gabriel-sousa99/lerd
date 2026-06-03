@@ -7,6 +7,19 @@ describe('buildApiRoutes', () => {
     expect(routes.map((r) => r.path)).toEqual(defaultApiPaths());
     expect(routes[0]).toEqual({ path: '/api', site: 'retencao-api' });
   });
+  it('default paths cover the SSO routes (em sincronia com o backend Go)', () => {
+    expect(defaultApiPaths()).toEqual([
+      '/api',
+      '/sanctum',
+      '/broadcasting',
+      '/storage',
+      '/redirect',
+      '/authenticate',
+      '/login',
+      '/logout',
+      '/up',
+    ]);
+  });
   it('port target with custom paths', () => {
     const routes = buildApiRoutes({ mode: 'port', site: '', port: 8000, paths: ['/api'] });
     expect(routes).toEqual([{ path: '/api', upstream_port: 8000 }]);

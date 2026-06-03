@@ -22,6 +22,9 @@ cookie de terceiro, Sanctum quebrado).
   dos sites de API. Idempotente, escopo bounded (`FrontendAPIBaseKeys`).
 - Defaults de rota mais ricos: `/redirect`, `/authenticate`, `/login`, `/logout`,
   `/up` — cobrem o fluxo SSO do `unimedvr/core` (`401 → /redirect → /authenticate`).
+  Alinhado também no dashboard: o builder de rotas client-side (`fullstack.ts`)
+  usa os mesmos defaults, então proxies fullstack criados pela UI também trazem
+  as rotas SSO (antes só o caminho CLI/backend as incluía).
 - `--path` aceito standalone (sem `--managed`) para habilitar o sync do `.env` da
   SPA quando o dev roda `quasar dev` manualmente.
 - Doc `docs/features/proxy-fullstack-frontend.md` (HMR, TrustProxies, rotas custom,
