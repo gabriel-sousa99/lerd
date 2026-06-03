@@ -92,6 +92,7 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 	}
 
 	oldSites := boundSites(*existing)
+	oldPath := existing.Path
 
 	if opts.Site != nil && *opts.Site != updated.Site {
 		updated.Site = *opts.Site
@@ -132,6 +133,13 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 		}
 	}
 	unbindSitesEnv(removed)
+
+	// Frontend: se o path mudou ou foi limpo, reverte a API-base do path
+	// antigo. O path novo (se houver e ainda fullstack) já foi sincronizado
+	// por syncProxyEnv acima.
+	if oldPath != "" && oldPath != updated.Path {
+		_ = revertFrontendFn(oldPath)
+	}
 
 	if updated.Managed && managedRuntimeDirty {
 		// Rewrite the quadlet file with the new fields. If the unit is
