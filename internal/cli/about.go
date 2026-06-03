@@ -24,7 +24,7 @@ func runAbout(_ *cobra.Command, _ []string) error {
 	fmt.Printf("  Built    %s\n", version.Date)
 	fmt.Println()
 	fmt.Println("  Fork     https://github.com/gabriel-sousa99/lerd (Oracle Instant Client 21.18 + oci8)")
-	fmt.Println("  Upstream https://github.com/gabriel-sousa99/lerd")
+	fmt.Println("  Upstream https://github.com/geodro/lerd")
 	fmt.Println()
 	fmt.Println("  Oracle additions by Gabriel Sousa — built on lerd by George Dumitrescu")
 	return nil
