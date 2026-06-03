@@ -18,7 +18,7 @@ func cidr(t *testing.T, s string) net.Addr {
 func TestPickLANIP_SkipsLoopbackAndDown(t *testing.T) {
 	ifaces := []lanIface{
 		{up: true, loopback: true, addrs: []net.Addr{cidr(t, "127.0.0.1/8")}},
-		{up: false, loopback: false, addrs: []net.Addr{cidr(t, "10.0.0.5/24")}}, // down
+		{up: false, loopback: false, addrs: []net.Addr{cidr(t, "10.0.0.5/24")}},  // down
 		{up: true, loopback: false, addrs: []net.Addr{cidr(t, "172.20.0.3/20")}}, // eth0 WSL
 	}
 	if got := pickLANIP(ifaces); got != "172.20.0.3" {
