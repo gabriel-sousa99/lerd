@@ -316,12 +316,12 @@ func SyncFrontendAPIBase(projectPath, domain string, secured bool) error {
 	if secured {
 		scheme = "https"
 	}
-	url := scheme + "://" + domain
+	origin := scheme + "://" + domain
 
 	updates := map[string]string{}
 	for _, k := range FrontendAPIBaseKeys {
 		if present[k] {
-			updates[k] = url
+			updates[k] = origin
 		}
 	}
 	if len(updates) == 0 {

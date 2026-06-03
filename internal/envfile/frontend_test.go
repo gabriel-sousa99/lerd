@@ -41,6 +41,19 @@ func TestSyncFrontendAPIBase_OnlyTouchesKeysInSet(t *testing.T) {
 	}
 }
 
+func TestSyncFrontendAPIBase_RewritesAllKeysInSet(t *testing.T) {
+	envPath := writeEnv(t, "URL_API=a\nVITE_API_URL=b\nVITE_APP_API_URL=c\n")
+	dir := filepath.Dir(envPath)
+	if err := SyncFrontendAPIBase(dir, "app.localhost", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"URL_API", "VITE_API_URL", "VITE_APP_API_URL"} {
+		if got := ReadKey(envPath, k); got != "https://app.localhost" {
+			t.Errorf("%s = %q, want https://app.localhost", k, got)
+		}
+	}
+}
+
 func TestSyncFrontendAPIBase_NoEnvIsNoop(t *testing.T) {
 	dir := t.TempDir() // sem .env
 	if err := SyncFrontendAPIBase(dir, "x.localhost", true); err != nil {
