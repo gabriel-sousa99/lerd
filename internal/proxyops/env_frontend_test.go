@@ -133,3 +133,44 @@ func TestUpdate_RevertsFrontendOnPathClear(t *testing.T) {
 		t.Errorf("reverted = %q, want %q", reverted, spaDir)
 	}
 }
+
+func TestUpdate_RevertsFrontendOnFullstackDowngrade(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	origFind, origSync, origReload := findSiteFn, syncEnvFn, nginxReloadFn
+	origFront, origRevert, origSecure := syncFrontendFn, revertFrontendFn, secureCertFn
+	defer func() {
+		findSiteFn, syncEnvFn, nginxReloadFn = origFind, origSync, origReload
+		syncFrontendFn, revertFrontendFn, secureCertFn = origFront, origRevert, origSecure
+	}()
+	findSiteFn = func(name string) (*config.Site, error) {
+		return &config.Site{Name: name, Path: "/srv/" + name, Domains: []string{name + ".localhost"}}, nil
+	}
+	syncEnvFn = func(path, domain string, secured bool) error { return nil }
+	syncFrontendFn = func(path, domain string, secured bool) error { return nil }
+	nginxReloadFn = func() error { return nil }
+	secureCertFn = func(p config.Proxy) error { return nil }
+
+	var reverted string
+	revertFrontendFn = func(path string) error { reverted = path; return nil }
+
+	spaDir := t.TempDir()
+	p, err := Add(AddOptions{
+		Domain: "gc.localhost", Port: 9000, Path: spaDir,
+		Routes: []config.Route{{Path: "/api", Site: "gc-api"}},
+	})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Downgrade para proxy simples (limpa rotas) mantendo o mesmo --path: a
+	// origem unificada não serve mais a API, então o .env da SPA deve reverter
+	// mesmo com o path inalterado.
+	noRoutes := []config.Route{}
+	if _, err := Update(p.Name, UpdateOptions{Routes: &noRoutes}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if reverted != spaDir {
+		t.Errorf("reverted = %q, want %q (downgrade fullstack→simples deve reverter)", reverted, spaDir)
+	}
+}

@@ -131,7 +131,7 @@ func newProxyAddCmd() *cobra.Command {
 		},
 	}
 	c.Flags().IntVar(&port, "port", 0, "Porta do upstream (obrigatória)")
-	c.Flags().StringVar(&path, "path", "", "Pasta do projeto frontend (SPA). Obrigatória com --managed; standalone habilita o sync do .env da SPA")
+	c.Flags().StringVar(&path, "path", "", "Pasta do projeto frontend (SPA). Obrigatória com --managed. Em proxy fullstack (com --api-site/--api-port), sincroniza o .env da SPA para a origem unificada")
 	c.Flags().BoolVar(&noSecure, "no-secure", false, "Cria como HTTP em vez de HTTPS")
 	c.Flags().BoolVar(&managed, "managed", false, "lerd gerencia o dev server via quadlet")
 	c.Flags().StringVar(&cmdStr, "cmd", "", "Comando para iniciar o dev server (ex: 'npm run dev')")

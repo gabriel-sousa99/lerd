@@ -134,10 +134,11 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 	}
 	unbindSitesEnv(removed)
 
-	// Frontend: se o path mudou ou foi limpo, reverte a API-base do path
-	// antigo. O path novo (se houver e ainda fullstack) já foi sincronizado
-	// por syncProxyEnv acima.
-	if oldPath != "" && oldPath != updated.Path {
+	// Frontend: reverte a API-base do path antigo quando ele deixa de estar
+	// sincronizado — path trocado/limpo, ou o proxy deixou de ser fullstack
+	// (a origem unificada não serve mais a API). O path novo, se ainda
+	// fullstack, já foi sincronizado por syncProxyEnv acima.
+	if oldPath != "" && (oldPath != updated.Path || !updated.IsFullstack()) {
 		_ = revertFrontendFn(oldPath)
 	}
 
