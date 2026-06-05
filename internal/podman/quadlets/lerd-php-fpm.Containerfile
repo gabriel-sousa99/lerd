@@ -60,6 +60,7 @@ RUN apk update && apk add --no-cache \
         sysvshm \
         xsl \
     && (docker-php-ext-enable opcache || true) \
+    && (pecl channel-update pecl.php.net || true) \
     && if [ "$PHP_ID" -lt 70000 ]; then REDIS_PKG=redis-4.3.0; \
          elif [ "$PHP_ID" -lt 70400 ]; then REDIS_PKG=redis-5.3.7; \
          else REDIS_PKG=redis; fi \
@@ -98,6 +99,7 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
         8.0) XDEBUG_PKG="xdebug-3.3.2" ;; \
         *)   XDEBUG_PKG="xdebug" ;; \
     esac \
+    && pecl channel-update pecl.php.net \
     && yes '' | pecl install "$XDEBUG_PKG" && docker-php-ext-enable xdebug \
     && rm -rf /tmp/pear /var/cache/apk/*
 
@@ -115,6 +117,7 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
         7.2|7.3|7.4)     OCI8_PKG="oci8-2.2.0" ;; \
         8.0)             OCI8_PKG="oci8-3.0.1" ;; \
         8.1|8.2|8.3)     OCI8_PKG="oci8-3.3.0" ;; \
+        8.4)             OCI8_PKG="oci8-3.4.1" ;; \
         *)               OCI8_PKG="oci8" ;; \
     esac \
     && apk add --no-cache libaio libnsl gcompat libc6-compat libstdc++ unzip \
@@ -125,6 +128,7 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
     && unzip -qo instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip \
     && rm -f /opt/oracle/*.zip \
     && ln -sfn /opt/oracle/instantclient_21_18 /opt/oracle/instantclient \
+    && pecl channel-update pecl.php.net \
     && echo "instantclient,/opt/oracle/instantclient" | pecl install "$OCI8_PKG" \
     && docker-php-ext-enable oci8 \
     && rm -rf /opt/oracle/instantclient_21_18/sdk /tmp/pear /var/cache/apk/*

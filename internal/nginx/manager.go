@@ -1251,7 +1251,13 @@ func EnsureProfilerVhost() error {
 		return err
 	}
 	// SCRIPT_FILENAME just needs a real file to exist; SPX intercepts the
-	// SPX_UI_URI request and serves its UI before dump-bridge.php runs.
+	// SPX_UI_URI request and serves its UI. It must point at the dedicated
+	// spx-entry.php, NOT at dump-bridge.php: the latter is the
+	// auto_prepend_file, so naming it here makes PHP compile it twice per
+	// request (prepend + main script). Its top-level functions are early-bound
+	// at compile time, so the second compile fatals with "Cannot redeclare ..."
+	// → HTTP 500 before SPX renders. spx-entry.php declares nothing, so the
+	// prepend runs once and the main script is a clean no-op.
 	content := fmt.Sprintf(`server {
     listen 80;
     listen [::]:80;
@@ -1261,7 +1267,7 @@ func EnsureProfilerVhost() error {
         set $fpm "lerd-php%s-fpm";
         fastcgi_pass $fpm:9000;
         include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME /usr/local/etc/lerd/dump-bridge.php;
+        fastcgi_param SCRIPT_FILENAME /usr/local/etc/lerd/spx-entry.php;
         fastcgi_param HTTP_COOKIE "SPX_KEY=$spx_key";
     }
 }

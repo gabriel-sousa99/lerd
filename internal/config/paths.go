@@ -208,6 +208,15 @@ func LaravelAdapterFile() string {
 	return filepath.Join(DumpsAssetsDir(), "laravel-adapter.php")
 }
 
+// SpxEntryFile is the host path for spx-entry.php, the declaration-free entry
+// script the profiler.localhost vhost points SCRIPT_FILENAME at. It must be a
+// separate file from the auto_prepend_file (dump-bridge.php) so PHP doesn't
+// compile that file twice per request and fatal on redeclared functions.
+// Lives in the dumps assets dir, bind-mounted into FPM at /usr/local/etc/lerd.
+func SpxEntryFile() string {
+	return filepath.Join(DumpsAssetsDir(), "spx-entry.php")
+}
+
 // DumpsSocketPath is the Unix socket lerd-ui binds for dump payloads. Kept
 // in RunDir so it sits alongside the UI socket and so the existing %h:%h
 // volume in every FPM container surfaces it at the same path inside.

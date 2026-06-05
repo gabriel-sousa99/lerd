@@ -82,6 +82,10 @@ func WriteDumpBridgeAssets() error {
 	if err != nil {
 		return fmt.Errorf("devtools collector embed: %w", err)
 	}
+	spxEntryContent, err := dumpBridgeFS.ReadFile("dumpbridge/spx-entry.php")
+	if err != nil {
+		return fmt.Errorf("spx entry embed: %w", err)
+	}
 
 	for _, asset := range []struct {
 		path    string
@@ -91,6 +95,7 @@ func WriteDumpBridgeAssets() error {
 		{config.DumpsIniFile(), iniContent},
 		{config.LaravelAdapterFile(), string(adapterContent)},
 		{config.DevtoolsCollectorFile(), string(collectorContent)},
+		{config.SpxEntryFile(), string(spxEntryContent)},
 	} {
 		if info, err := os.Stat(asset.path); err == nil {
 			if info.IsDir() {
@@ -118,6 +123,7 @@ func RemoveDumpAssets() error {
 		config.DumpsIniFile(),
 		config.LaravelAdapterFile(),
 		config.DevtoolsCollectorFile(),
+		config.SpxEntryFile(),
 		config.DumpsEnabledFlagFile(),
 		config.DevtoolsWorkersFlagFile(),
 		// Legacy: the devtools collector used to have its own enable sentinel
@@ -143,7 +149,7 @@ func RemoveDumpAssets() error {
 // regardless of Dumps.Enabled because the FPM quadlet always mounts these
 // paths; the bridge's runtime sentinel check controls active behaviour.
 func EnsureDumpAssets() error {
-	for _, p := range []string{config.DumpsBridgeFile(), config.DumpsIniFile(), config.LaravelAdapterFile(), config.DevtoolsCollectorFile()} {
+	for _, p := range []string{config.DumpsBridgeFile(), config.DumpsIniFile(), config.LaravelAdapterFile(), config.DevtoolsCollectorFile(), config.SpxEntryFile()} {
 		if info, err := os.Stat(p); err == nil && info.IsDir() {
 			if rmErr := os.RemoveAll(p); rmErr != nil {
 				return fmt.Errorf("removing stale dump asset directory %s: %w", p, rmErr)

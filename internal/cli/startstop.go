@@ -503,6 +503,13 @@ func runStart(_ *cobra.Command, _ []string) error {
 	if err := nginx.EnsureLerdVhost(); err != nil {
 		fmt.Printf("  WARN: lerd vhost: %v\n", err)
 	}
+	// The profiler vhost points SCRIPT_FILENAME at spx-entry.php in the mounted
+	// dumps dir; ensure that file (and the rest of the bridge assets) exist
+	// first so a binary upgrade without an image rebuild can't leave the vhost
+	// referencing a missing script.
+	if err := podman.EnsureDumpAssets(); err != nil {
+		fmt.Printf("  WARN: dump assets: %v\n", err)
+	}
 	if err := nginx.EnsureProfilerVhost(); err != nil {
 		fmt.Printf("  WARN: profiler vhost: %v\n", err)
 	}

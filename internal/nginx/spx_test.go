@@ -77,4 +77,15 @@ func TestEnsureProfilerVhost_WritesVhost(t *testing.T) {
 			t.Errorf("profiler vhost missing %q in:\n%s", want, content)
 		}
 	}
+	// SCRIPT_FILENAME must NOT be the auto_prepend_file (dump-bridge.php):
+	// PHP would compile that file twice per request (once as the prepend, once
+	// as the main script) and its early-bound top-level functions would
+	// redeclare → fatal 500 before SPX serves its UI. It must point at a
+	// dedicated, declaration-free entry file instead.
+	if strings.Contains(content, "SCRIPT_FILENAME /usr/local/etc/lerd/dump-bridge.php") {
+		t.Errorf("profiler SCRIPT_FILENAME must not be the auto_prepend_file dump-bridge.php (double-compile fatal) in:\n%s", content)
+	}
+	if !strings.Contains(content, "SCRIPT_FILENAME /usr/local/etc/lerd/spx-entry.php") {
+		t.Errorf("profiler SCRIPT_FILENAME should be the dedicated spx-entry.php in:\n%s", content)
+	}
 }
