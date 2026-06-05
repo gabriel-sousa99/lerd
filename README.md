@@ -39,24 +39,24 @@
 
 > Recursos herdados do upstream (`geodro/lerd`), todos presentes nesta fork:
 >
-> - 🌐 **Automatic `.test` domains** with one-command TLS, or [opt out of lerd-managed DNS](https://geodro.github.io/lerd/features/dns/) and use `*.localhost` (no dnsmasq, no system resolver tweak, no sudo for the DNS bits), with VPN-aware DNS that re-syncs container resolvers within a second when a tunnel connects or disconnects
-> - 🐘 **Per-project PHP version** (8.1–8.5, plus a frozen 7.4 / 8.0 legacy tier for hosted-on-the-old-stack projects), switch with one click
-> - ⚡ **FrankenPHP runtime** per site as an alternative to shared PHP-FPM, with Laravel Octane and Symfony Runtime worker mode
-> - 📦 **Node.js isolation** per project (Node 22, 24)
-> - 🖥️ **Built-in Web UI** with a dashboard root, live widgets, a global Cmd+K command palette, install/remove of PHP and Node versions from the System page, and seven dashboard languages (English, German, Spanish, French, Indonesian, Dutch, Portuguese)
-> - ✏️ **Edit config in the browser** — per-site and global nginx, per-version `php.ini`, `.env` files, and database/service runtime tuning, each validated (`nginx -t` where it applies), with timestamped backups and one-click restore
-> - 🧪 **Tinker tab** - in-browser PHP REPL per site with autocomplete (project models, composer helpers, PHP built-ins), live `php -l` syntax checking, and a collapsible tree view for `dump()` output. Works on Laravel (`artisan tinker`), Symfony, and any composer-based PHP project
-> - 🛰️ **Debug window** that intercepts every `dump()` / `dd()` and streams it to the dashboard, TUI (`D` key), MCP, and `lerd dump tail`, scoped per site and per worktree branch, with the original response left clean unless you flip passthrough on. The same window captures SQL queries with N+1 and slow-query detection, plus outgoing mail, rendered views, dispatched events, queued jobs, and outgoing HTTP, across both Laravel and Symfony, with optional opt-in capture of queue-worker activity
-> - 🔥 **SPX profiler** with one-click on/off, every PHP-FPM request becomes a flame graph viewable in a same-origin Profiler view in the dashboard. No FPM restart, no code changes, and `lerd profile run` profiles a one-shot artisan or CLI command
-> - 💻 **Terminal dashboard** (`lerd tui`) - btop-style TUI with live status, site detail pane, inline domain and version editing, shell drop-in, log tailing, and filter/sort — the same operations surface as the web UI, for tmux and SSH workflows
-> - 🗄️ **One-click services**: MySQL, PostgreSQL, Redis, Meilisearch, RustFS, Mailpit, Gotenberg, Stripe Mock, Reverb and more. Every default service is a YAML preset you can update, migrate, rollback, or reinstall in place, including a reset-data reinstall that auto-recreates linked sites' databases and buckets, plus on-demand database snapshots (create / list / restore / delete) from CLI, dashboard, and MCP
-> - 🌳 **First-class git worktrees** with auto-detected branch domains, per-worktree PHP/Node versions, optional per-worktree database isolation (clone from main or empty), a per-worktree LAN-share proxy, `env_overrides` templating in `.lerd.yaml` for multi-tenant apps, automatic wildcard cert SANs for `*.branch.site.test`, a built-in Vite dev server worker that runs on the host per branch, and a dashboard modal for adding and removing worktrees without touching the CLI
-> - ⚒️ **Worker self-heal**, failed queue, schedule, horizon, reverb, and stripe workers are surfaced everywhere (CLI, dashboard banner, TUI, MCP) and recovered with one click or `lerd worker heal`, with opt-in Horizon `horizon:listen` auto-reload so dev picks up code changes without a manual restart (toggleable from the dashboard)
-> - 📋 **Live logs** for PHP-FPM, Queue, Schedule, Reverb, per site
-> - 🔒 **Rootless & daemonless** - Podman-native, no Docker required, dual-stack IPv4 + IPv6
-> - 🤖 **MCP server** - let AI assistants (Claude Code, Windsurf, Junie) manage your environment directly
-> - 🧩 **Framework store** - community definitions for Laravel, Symfony, WordPress, Drupal, CakePHP, Statamic with versioned auto-detection
-> - ⚡ **Framework-agnostic** workers, env setup, and nginx proxy — driven by YAML definitions, not hardcoded
+> - 🌐 **Domínios `.test` automáticos** com TLS em um comando, ou [desative o DNS gerenciado pelo lerd](https://geodro.github.io/lerd/features/dns/) e use `*.localhost` (sem dnsmasq, sem mexer no resolver do sistema, sem sudo na parte de DNS); o DNS é ciente de VPN e re-sincroniza os resolvers dos containers em menos de um segundo quando um túnel conecta/desconecta
+> - 🐘 **Versão de PHP por projeto** (8.1–8.5, mais uma faixa legacy congelada 7.4 / 8.0 para projetos em stack antigo), troca com um clique
+> - ⚡ **Runtime FrankenPHP** por site como alternativa ao PHP-FPM compartilhado, com modo worker do Laravel Octane e Symfony Runtime
+> - 📦 **Isolamento de Node.js** por projeto (Node 22, 24)
+> - 🖥️ **Web UI embutida** com dashboard raiz, widgets ao vivo, command palette global (Cmd+K), instalar/remover versões de PHP e Node pela página System, e sete idiomas de dashboard (inglês, alemão, espanhol, francês, indonésio, holandês, português)
+> - ✏️ **Edição de config no navegador** — nginx por site e global, `php.ini` por versão, arquivos `.env` e tuning de runtime de banco/serviço, cada um validado (`nginx -t` onde se aplica), com backups timestampados e restauração em um clique
+> - 🧪 **Aba Tinker** — REPL PHP no navegador por site com autocomplete (models do projeto, helpers do composer, built-ins do PHP), checagem de sintaxe ao vivo (`php -l`) e árvore colapsável para a saída de `dump()`. Funciona em Laravel (`artisan tinker`), Symfony e qualquer projeto PHP baseado em composer
+> - 🛰️ **Janela de Debug** que intercepta todo `dump()` / `dd()` e transmite para o dashboard, TUI (tecla `D`), MCP e `lerd dump tail`, escopado por site e por branch de worktree, deixando a resposta original limpa a menos que você ligue o passthrough. A mesma janela captura queries SQL com detecção de N+1 e slow-query, além de e-mails enviados, views renderizadas, eventos disparados, jobs enfileirados e HTTP de saída, tanto em Laravel quanto Symfony, com captura opcional (opt-in) da atividade dos workers de fila
+> - 🔥 **Profiler SPX** com liga/desliga em um clique: toda requisição PHP-FPM vira um flame graph visível numa view Profiler same-origin no dashboard. Sem restart do FPM, sem mudar código, e `lerd profile run` perfila um comando artisan ou CLI pontual
+> - 💻 **Dashboard no terminal** (`lerd tui`) — TUI estilo btop com status ao vivo, painel de detalhe do site, edição inline de domínio e versão, drop-in de shell, tail de logs e filtro/ordenação — a mesma superfície de operações da web UI, para fluxos com tmux e SSH
+> - 🗄️ **Serviços em um clique**: MySQL, PostgreSQL, Redis, Meilisearch, RustFS, Mailpit, Gotenberg, Stripe Mock, Reverb e mais. Todo serviço padrão é um preset YAML que você pode atualizar, migrar, reverter ou reinstalar no lugar, incluindo um reinstall com reset de dados que recria automaticamente os bancos e buckets dos sites vinculados, além de snapshots de banco sob demanda (criar / listar / restaurar / apagar) via CLI, dashboard e MCP
+> - 🌳 **Git worktrees de primeira classe** com domínios de branch auto-detectados, versões PHP/Node por worktree, isolamento opcional de banco por worktree (clone do main ou vazio), proxy LAN-share por worktree, templating de `env_overrides` no `.lerd.yaml` para apps multi-tenant, SANs de certificado wildcard automáticos para `*.branch.site.test`, um worker de dev server Vite embutido que roda no host por branch, e um modal no dashboard para adicionar e remover worktrees sem tocar na CLI
+> - ⚒️ **Auto-recuperação de workers**: workers de queue, schedule, horizon, reverb e stripe que falharam aparecem em todo lugar (CLI, banner do dashboard, TUI, MCP) e são recuperados com um clique ou `lerd worker heal`, com auto-reload opt-in do Horizon (`horizon:listen`) para o dev pegar mudanças de código sem restart manual (alternável pelo dashboard)
+> - 📋 **Logs ao vivo** de PHP-FPM, Queue, Schedule, Reverb, por site
+> - 🔒 **Rootless & daemonless** — Podman-native, sem Docker, dual-stack IPv4 + IPv6
+> - 🤖 **Servidor MCP** — deixe assistentes de IA (Claude Code, Windsurf, Junie) gerenciarem seu ambiente diretamente
+> - 🧩 **Framework store** — definições da comunidade para Laravel, Symfony, WordPress, Drupal, CakePHP, Statamic com auto-detecção versionada
+> - ⚡ **Agnóstico de framework**: workers, setup de env e proxy nginx — guiados por definições YAML, não hardcoded
 > - 🪟 **Windows via WSL2 (beta)** — `lerd wsl:setup` provisiona systemd, networking mirrored e os pré-requisitos; guia completo em [docs/wsl2.md](docs/wsl2.md)
 > - 🧰 **`lerd init` semeia a partir de Herd, DDEV e Lando** e suporta um `.env.lerd_override` pessoal por projeto, para overrides que nunca tocam o `.env` versionado
 
@@ -160,19 +160,19 @@ Detalhes em **[docs/dashboard.md](docs/dashboard.md)**.
 
 ## Comparação
 
-|                    | Lerd | DDEV | Lando | Laravel Herd |
-|--------------------|------|------|-------|--------------|
-| Podman-native      | ✅   | 🟡   | ❌    | ❌           |
-| Rootless           | ✅   | ❌   | ❌    | ✅           |
-| Web UI             | ✅   | ❌   | ❌    | ✅           |
-| Terminal dashboard | ✅   | ❌   | ❌    | ❌           |
-| Linux              | ✅   | ✅   | ✅    | ❌           |
-| macOS              | ✅   | ✅   | ✅    | ✅           |
-| Windows (WSL2)     | 🧪   | ✅   | ✅    | ✅           |
-| MCP server         | ✅   | ❌   | ❌    | ✅           |
-| Free & open source | ✅   | ✅   | ✅    | ❌           |
+|                      | Lerd | DDEV | Lando | Laravel Herd |
+|----------------------|------|------|-------|--------------|
+| Podman-native        | ✅   | 🟡   | ❌    | ❌           |
+| Rootless             | ✅   | ❌   | ❌    | ✅           |
+| Web UI               | ✅   | ❌   | ❌    | ✅           |
+| Dashboard no terminal| ✅   | ❌   | ❌    | ❌           |
+| Linux                | ✅   | ✅   | ✅    | ❌           |
+| macOS                | ✅   | ✅   | ✅    | ✅           |
+| Windows (WSL2)       | 🧪   | ✅   | ✅    | ✅           |
+| Servidor MCP         | ✅   | ❌   | ❌    | ✅           |
+| Livre & open source  | ✅   | ✅   | ✅    | ❌           |
 
-🟡 DDEV runs on Docker by default and can also use Podman as an alternative runtime; Lerd is built exclusively for rootless Podman.
+🟡 O DDEV roda sobre Docker por padrão e também pode usar Podman como runtime alternativo; o Lerd é feito exclusivamente para Podman rootless.
 
 ---
 
