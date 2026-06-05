@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/composer"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
@@ -194,6 +195,18 @@ func siteFramework() (*config.Framework, bool) {
 		return nil, false
 	}
 	return config.GetFrameworkForDir(site.Framework, site.Path)
+}
+
+// ToolNames returns the names of every registered MCP tool. Exported so
+// documentation drift tests in other packages can assert each tool is covered
+// by the injected skill and guidelines files.
+func ToolNames() []string {
+	tools := toolList()
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	return names
 }
 
 func toolList() []mcpTool {
@@ -448,6 +461,17 @@ func toolList() []mcpTool {
 				Type: "object",
 				Properties: map[string]mcpProp{
 					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
+				},
+			},
+		},
+		{
+			Name:        "env_override",
+			Description: "Manage the personal, gitignored .env.lerd_override; its KEY=VALUE pairs win over lerd's defaults on env_setup. LERD_EXTERNAL_SERVICES=<svc,svc> marks services lerd writes vars for but won't start. No 'set' scaffolds and shows the file.",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
+					"set":  {Type: "array", Description: "KEY=VALUE entries to write, e.g. DB_USERNAME=postgres or LERD_EXTERNAL_SERVICES=postgres. Quote values with spaces."},
 				},
 			},
 		},
@@ -1314,6 +1338,8 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 		return execDbSet(args)
 	case "env_check":
 		return execEnvCheck(args)
+	case "env_override":
+		return execEnvOverride(args)
 	case "site_link":
 		return execSiteLink(args)
 	case "site_unlink":
@@ -1434,6 +1460,8 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 		return execDumpsClear(args)
 	case "dumps_toggle":
 		return execDumpsToggle(args)
+	case "analyze_queries":
+		return execAnalyzeQueries(args)
 
 	case "profiler_toggle":
 		return execProfilerToggle(args)
@@ -2183,7 +2211,7 @@ func execComposer(args map[string]any) (any, *rpcError) {
 	short := strings.ReplaceAll(phpVersion, ".", "")
 	container := "lerd-php" + short + "-fpm"
 
-	cmdArgs := []string{"exec", "-w", projectPath, container, "composer"}
+	cmdArgs := []string{"exec", "-w", projectPath, "--env", composer.ProcessTimeoutEnv(), container, "composer"}
 	cmdArgs = append(cmdArgs, composerArgs...)
 
 	var out bytes.Buffer
@@ -3375,6 +3403,38 @@ func execEnvSetup(args map[string]any) (any, *rpcError) {
 		return toolErr(fmt.Sprintf("env setup failed (%v):\n%s", err, stripANSI(out.String()))), nil
 	}
 	return toolOK(stripANSI(strings.TrimSpace(out.String()))), nil
+}
+
+// execEnvOverride scaffolds/seeds the personal .env.lerd_override file by
+// shelling out to `lerd env:override` (same path as the CLI), then returns the
+// resulting file contents so the agent can see the current overrides.
+func execEnvOverride(args map[string]any) (any, *rpcError) {
+	projectPath := resolvedPath(args)
+	if projectPath == "" {
+		return toolErr("path is required — pass a path argument or open Claude in the project directory"), nil
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return toolErr("could not resolve lerd executable: " + err.Error()), nil
+	}
+
+	cmdArgs := append([]string{"env:override"}, strSliceArg(args, "set")...)
+	var out bytes.Buffer
+	cmd := exec.Command(self, cmdArgs...)
+	cmd.Dir = projectPath
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return toolErr(fmt.Sprintf("env:override failed (%v):\n%s", err, stripANSI(out.String()))), nil
+	}
+
+	body, _ := os.ReadFile(filepath.Join(projectPath, ".env.lerd_override"))
+	msg := stripANSI(strings.TrimSpace(out.String()))
+	if len(body) > 0 {
+		msg += "\n\n--- .env.lerd_override ---\n" + strings.TrimSpace(string(body))
+	}
+	return toolOK(msg), nil
 }
 
 // execDbSet sets the database for a Laravel project: persists the choice to
@@ -4959,7 +5019,7 @@ func runComposerInstallIfNeeded(projectPath string, out *bytes.Buffer) error {
 	container := "lerd-php" + strings.ReplaceAll(phpVersion, ".", "") + "-fpm"
 
 	out.WriteString("\n\n--- composer install ---\n")
-	cmd := podman.Cmd("exec", "-w", projectPath, container, "composer", "install", "--no-interaction")
+	cmd := podman.Cmd("exec", "-w", projectPath, "--env", composer.ProcessTimeoutEnv(), container, "composer", "install", "--no-interaction")
 	cmd.Stdout = out
 	cmd.Stderr = out
 	return cmd.Run()

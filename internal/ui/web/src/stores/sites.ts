@@ -58,6 +58,8 @@ export interface Site {
   queue_failing?: boolean;
   horizon_running?: boolean;
   horizon_failing?: boolean;
+  horizon_reload?: boolean;
+  horizon_reload_ready?: boolean;
   stripe_running?: boolean;
   stripe_secret_set?: boolean;
   schedule_running?: boolean;
@@ -229,10 +231,15 @@ export interface RestoreEnvResult {
 export async function restoreSiteEnv(
   domain: string,
   branch: string = '',
-  file: string = '.env'
+  file: string = '.env',
+  name: string = ''
 ): Promise<RestoreEnvResult> {
   try {
-    const res = await apiFetch(site(domain, 'env') + '/restore' + envQS(branch, file), { method: 'POST' });
+    const res = await apiFetch(site(domain, 'env') + '/restore' + envQS(branch, file), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
     const data = (await res.json()) as { ok?: boolean; error?: string; restored?: string; content?: string };
     return { ok: Boolean(data.ok), error: data.error, restored: data.restored, content: data.content };
   } catch (e) {
@@ -422,6 +429,10 @@ export const toggleQueue = (s: Site) =>
   postAction(site(s.domain, s.queue_running ? 'queue:stop' : 'queue:start'));
 export const toggleHorizon = (s: Site) =>
   postAction(site(s.domain, s.horizon_running ? 'horizon:stop' : 'horizon:start'));
+export const setHorizonReload = (s: Site, enabled: boolean) =>
+  postAction(site(s.domain, 'horizon:reload') + `?enabled=${enabled ? 'true' : 'false'}`);
+export const installHorizonReloadWatcher = (s: Site) =>
+  postAction(site(s.domain, 'horizon:install-watcher'));
 export const toggleSchedule = (s: Site) =>
   postAction(site(s.domain, s.schedule_running ? 'schedule:stop' : 'schedule:start'));
 export const toggleReverb = (s: Site) =>

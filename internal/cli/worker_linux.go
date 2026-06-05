@@ -44,8 +44,8 @@ BindsTo=%s.service
 
 [Service]
 Type=oneshot
-ExecStart=%s exec -w %s %s %s
-`, label, siteName, fpmUnit, fpmUnit, podman.PodmanBin(), sitePath, container, command)
+ExecStart=%s exec -w %s --env=LERD_SITE=%s %s %s
+`, label, siteName, fpmUnit, fpmUnit, podman.PodmanBin(), sitePath, siteName, container, command)
 
 		timerUnit := fmt.Sprintf(`[Unit]
 Description=Lerd %s timer (%s)
@@ -80,11 +80,11 @@ Type=simple
 Restart=%s
 RestartSec=5
 SuccessExitStatus=1 130 143
-ExecStart=%s exec -w %s %s %s
+ExecStart=%s exec -w %s --env=LERD_SITE=%s %s %s
 
 [Install]
 WantedBy=default.target
-`, label, siteName, fpmUnit, fpmUnit, restart, podman.PodmanBin(), sitePath, container, command)
+`, label, siteName, fpmUnit, fpmUnit, restart, podman.PodmanBin(), sitePath, siteName, container, command)
 
 	// A previous run may have written a sibling .timer for this unit
 	// (e.g. before the framework yaml dropped its `schedule:` field).
@@ -159,7 +159,10 @@ func workerLogHint(unitName string, host bool) string {
 // other infra containers are up. Starting here would race against container
 // readiness and cause errors like "lerd-redis: name does not resolve".
 func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.FrameworkWorker) {
-	command := w.Command
+	// Resolve the same way WorkerStartForSite does so a project opted into
+	// auto-reload keeps its reload command across lerd start and reboots,
+	// instead of silently coming back in standard mode.
+	command := resolveWorkerCommand(sitePath, workerName, w)
 	if w.Proxy != nil && w.Proxy.PortEnvKey != "" {
 		envPath := filepath.Join(sitePath, ".env")
 		port := envfile.ReadKey(envPath, w.Proxy.PortEnvKey)
