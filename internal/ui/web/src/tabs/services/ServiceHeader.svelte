@@ -1,21 +1,19 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { onDestroy, type Snippet } from 'svelte';
   import StatusPill from '$components/StatusPill.svelte';
   import ButtonMenu, { type ButtonMenuAction } from '$components/ButtonMenu.svelte';
-  import ParentSiteBadge from './ParentSiteBadge.svelte';
   import ServiceDependencies from './ServiceDependencies.svelte';
   import ServiceDeleteModal from './ServiceDeleteModal.svelte';
   import ServiceReinstallModal from './ServiceReinstallModal.svelte';
-  import { goToTab } from '$stores/route';
   import {
     type Service,
     services as allServices,
     serviceLabel,
     detailLabel,
     isServiceWorker,
-    parentSiteDomain,
     serviceAction,
     streamServiceAction,
+    checkServiceUpdates,
     updateProgress,
     loadServices
   } from '$stores/services';
@@ -53,7 +51,6 @@
 
   const isWorker = $derived(isServiceWorker(svc));
   const active = $derived(svc.status === 'active');
-  const parent = $derived(parentSiteDomain(svc));
   const portConflicts = $derived(
     !active && svc.port_conflicts && svc.port_conflicts.length > 0 ? svc.port_conflicts : []
   );
@@ -66,8 +63,40 @@
   let localBusy = $state(false);
   let deleteOpen = $state(false);
   let reinstallOpen = $state(false);
+  let checking = $state(false);
+  let checkMessage = $state<{ text: string; tone: 'ok' | 'info' | 'error' } | null>(null);
+  let checkMessageTimer: ReturnType<typeof setTimeout> | null = null;
   const updating = $derived($updateProgress[svc.name]);
-  const busy = $derived(localBusy || Boolean(updating));
+  const busy = $derived(localBusy || checking || Boolean(updating));
+
+  function setCheckMessage(text: string, tone: 'ok' | 'info' | 'error') {
+    if (checkMessageTimer) clearTimeout(checkMessageTimer);
+    checkMessage = { text, tone };
+    checkMessageTimer = setTimeout(() => (checkMessage = null), 4000);
+  }
+
+  onDestroy(() => {
+    if (checkMessageTimer) clearTimeout(checkMessageTimer);
+  });
+
+  async function runCheckUpdates() {
+    checking = true;
+    try {
+      const res = await checkServiceUpdates(svc.name);
+      if (!res.ok) {
+        setCheckMessage(m.services_checkUpdatesFailed(), 'error');
+        return;
+      }
+      const tag = res.avail?.latest_tag || res.avail?.upgrade_tag || '';
+      if (res.avail?.available && tag) {
+        setCheckMessage(m.services_checkUpdatesFound({ tag }), 'info');
+      } else {
+        setCheckMessage(m.services_checkUpdatesUpToDate(), 'ok');
+      }
+    } finally {
+      checking = false;
+    }
+  }
 
   async function run(action: Parameters<typeof serviceAction>[1]) {
     localBusy = true;
@@ -107,10 +136,6 @@
     return at > 0 ? image.slice(at + 1) : image;
   }
 
-  function openSite(domain: string) {
-    goToTab('sites', domain);
-  }
-
   function buildActions(icons: {
     external: Snippet;
     start: Snippet;
@@ -122,6 +147,7 @@
     rollback: Snippet;
     pin: Snippet;
     trash: Snippet;
+    checkUpdates: Snippet;
   }): ButtonMenuAction[] {
     const lifecycle: ButtonMenuAction[] = [];
     const rest: ButtonMenuAction[] = [];
@@ -232,6 +258,17 @@
 
     if (!isWorker && !updating) {
       rest.push({
+        id: 'check-updates',
+        tone: 'secondary',
+        icon: icons.checkUpdates,
+        label: checking ? m.services_checkUpdatesChecking() : m.services_checkUpdates(),
+        title: m.services_checkUpdatesTitle(),
+        onclick: runCheckUpdates
+      });
+    }
+
+    if (!isWorker && !updating) {
+      rest.push({
         id: 'reinstall',
         tone: 'secondary',
         icon: icons.restart,
@@ -270,7 +307,7 @@
 </script>
 
 <div
-  class="flex flex-wrap items-center justify-between gap-y-2 px-3 sm:px-5 py-4 border-b border-gray-100 dark:border-lerd-border shrink-0"
+  class="flex flex-wrap items-center justify-between gap-y-2 px-3 py-2.5 border-b border-gray-100 dark:border-lerd-border shrink-0"
 >
   <div class="flex items-center gap-3">
     <div>
@@ -296,24 +333,6 @@
           </span>
         {/if}
       </div>
-
-      {#if parent}
-        <ParentSiteBadge domain={parent} />
-      {/if}
-
-      {#if !isWorker && svc.site_domains && svc.site_domains.length > 0}
-        <div class="flex flex-wrap gap-1 mt-1">
-          {#each svc.site_domains as d (d)}
-            <button
-              onclick={() => openSite(d)}
-              class="inline-flex items-center gap-1.5 text-xs font-medium bg-gray-100 dark:bg-white/5 hover:bg-gray-200 dark:hover:bg-white/10 border border-gray-200 dark:border-lerd-border text-gray-700 dark:text-gray-300 rounded-full px-2 py-0.5 transition-colors"
-            >
-              <span class="w-1.5 h-1.5 rounded-full shrink-0 bg-gray-400"></span>
-              {d}
-            </button>
-          {/each}
-        </div>
-      {/if}
 
       {#if svc.depends_on && svc.depends_on.length > 0}
         <ServiceDependencies names={svc.depends_on} />
@@ -384,6 +403,20 @@
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
     </svg>
   {/snippet}
+  {#snippet checkUpdatesIcon()}
+    <svg
+      class={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`}
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      viewBox="0 0 24 24"
+    >
+      <path d="M21 12a9 9 0 1 1-3-6.7"/>
+      <polyline points="21 4 21 10 15 10"/>
+    </svg>
+  {/snippet}
 
   <div class="flex flex-col items-end gap-1.5">
     <ButtonMenu
@@ -397,7 +430,8 @@
         migrate: migrateIcon,
         rollback: rollbackIcon,
         pin: pinIcon,
-        trash: trashIcon
+        trash: trashIcon,
+        checkUpdates: checkUpdatesIcon
       })}
       {busy}
     />
@@ -406,6 +440,17 @@
         class="text-[11px] text-gray-500 dark:text-gray-400 truncate max-w-[32ch]"
         title={updating.message}
       >{updating.message}</span>
+    {:else if checkMessage}
+      <span
+        class={'text-[11px] truncate max-w-[32ch] ' + (
+          checkMessage.tone === 'error'
+            ? 'text-rose-600 dark:text-rose-400'
+            : checkMessage.tone === 'info'
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : 'text-gray-500 dark:text-gray-400'
+        )}
+        title={checkMessage.text}
+      >{checkMessage.text}</span>
     {:else if svc.update_available && svc.latest_version}
       <span class="text-[11px] text-emerald-600 dark:text-emerald-400 truncate max-w-[32ch]">
         {m.system_lerd_available({ version: svc.latest_version })}

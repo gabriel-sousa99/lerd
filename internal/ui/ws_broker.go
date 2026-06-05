@@ -58,6 +58,7 @@ type wsMessage struct {
 	Status           []byte
 	UnhealthyWorkers []byte
 	DumpsStatus      []byte
+	ProfilerStatus   []byte
 	Notification     []byte
 }
 
@@ -149,6 +150,8 @@ func runSnapshotInvalidator() {
 				msg.Status = snapshots.Status()
 			case eventbus.KindDumpsStatus:
 				msg.DumpsStatus = buildDumpsStatusJSON()
+			case eventbus.KindProfilerStatus:
+				msg.ProfilerStatus = buildProfilerStatusJSON()
 			case eventbus.KindProxies:
 				// Proxies não fazem parte do snapshot agregado. A presença da
 				// Kind no broadcast já sinaliza ao front que ele deve re-fetch

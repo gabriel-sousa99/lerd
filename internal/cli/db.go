@@ -24,6 +24,10 @@ func NewDbCmd() *cobra.Command {
 	cmd.AddCommand(newDbExportCmd("export"))
 	cmd.AddCommand(newDbCreateCmd("create"))
 	cmd.AddCommand(newDbShellCmd("shell"))
+	cmd.AddCommand(newDbSnapshotCmd("snapshot"))
+	cmd.AddCommand(newDbSnapshotsCmd("snapshots"))
+	cmd.AddCommand(newDbRestoreCmd("restore"))
+	cmd.AddCommand(newDbSnapshotRmCmd("snapshot:rm"))
 	return cmd
 }
 
@@ -504,7 +508,7 @@ func runDbShell(flagService, flagDatabase string) error {
 func databaseExists(svc, name string) (bool, error) {
 	container := "lerd-" + svc
 	family := svc
-	if inferred := config.InferFamily(svc); inferred != "" {
+	if inferred := config.FamilyOfName(svc); inferred != "" {
 		family = inferred
 	}
 	switch family {

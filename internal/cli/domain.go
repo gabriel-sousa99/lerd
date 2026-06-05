@@ -125,6 +125,10 @@ func runDomainAdd(_ *cobra.Command, args []string) error {
 
 	nginx.ReloadOrWarn("")
 
+	// Fork: SyncSiteEnv rewrites the parent .env using the fullstack-aware
+	// effective domain (the unified proxy domain when this site is bound to a
+	// fullstack proxy), preserving the fork's proxy customization. It is a
+	// superset of upstream's plain SyncEnvIfPrimaryChanged parent write.
 	if site.PrimaryDomain() != oldPrimary {
 		if err := siteops.SyncSiteEnv(*site); err != nil {
 			fmt.Printf("[WARN] syncing .env to new primary domain: %v\n", err)
@@ -195,6 +199,7 @@ func runDomainRemove(_ *cobra.Command, args []string) error {
 
 	nginx.ReloadOrWarn("")
 
+	// Fork: fullstack-aware parent .env sync (see runDomainAdd above).
 	if site.PrimaryDomain() != oldPrimary {
 		if err := siteops.SyncSiteEnv(*site); err != nil {
 			fmt.Printf("[WARN] syncing .env to new primary domain: %v\n", err)

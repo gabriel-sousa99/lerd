@@ -58,15 +58,15 @@ Otherwise, the fastest way to find the broken rung is `lerd doctor`. The DNS sec
 
 The chain in order:
 
-| Rung                             | What it checks                                                                          | If it fails                                                                                                                                                               |
-| -------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lerd-dns container`             | The dnsmasq container is running.                                                       | `lerd start` (or `podman logs lerd-dns` to see why it crashed).                                                                                                           |
-| `dnsmasq config`                 | `~/.local/share/lerd/dnsmasq/lerd.conf` exists with `port=5300` and `address=/.<tld>/`. | `lerd start` regenerates the config from your registered TLD.                                                                                                             |
-| `port 5300 listening`            | TCP/UDP 5300 is reachable on 127.0.0.1.                                                 | Another process owns the port. Find it with `ss -tlnp sport = :5300` on Linux, or `lsof -nP -iTCP:5300 -sTCP:LISTEN` on macOS.                                            |
-| `dig @127.0.0.1 -p 5300`         | A direct query at port 5300 returns 127.0.0.1 for `lerd-probe.<tld>`.                   | dnsmasq is up but its config drifted. `systemctl --user restart lerd-dns`.                                                                                                |
-| `resolver hookup`                | The NetworkManager dispatcher script or systemd-resolved drop-in is installed.          | Rerun `lerd install`.                                                                                                                                                     |
-| `interface routes .test to 5300` | `resolvectl status` shows `127.0.0.1:5300` and `~<tld>` on the active interface.        | `sudo systemctl restart NetworkManager`, or set the routing manually with `sudo resolvectl domain <iface> ~test ~.`.                                                      |
-| `system DNS lookup`              | `host lerd-probe.test` (the system resolver) returns 127.0.0.1.                         | The drop-in is installed but resolved isn't honouring it. Check whether cloud-init or another tool wrote a higher-priority resolver config. Common on EC2 / cloud images. |
+| Rung                             | What it checks                                                                          | If it fails                                                                                                                                                                                                                                                          |
+| -------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lerd-dns container`             | The dnsmasq container is running.                                                       | `lerd start` (or `podman logs lerd-dns` to see why it crashed).                                                                                                                                                                                                      |
+| `dnsmasq config`                 | `~/.local/share/lerd/dnsmasq/lerd.conf` exists with `port=5300` and `address=/.<tld>/`. | `lerd start` regenerates the config from your registered TLD.                                                                                                                                                                                                        |
+| `port 5300 listening`            | TCP/UDP 5300 is reachable on 127.0.0.1.                                                 | Another process owns the port. Find it with `ss -tlnp sport = :5300` on Linux, or `lsof -nP -iTCP:5300 -sTCP:LISTEN` on macOS.                                                                                                                                       |
+| `dig @127.0.0.1 -p 5300`         | A direct query at port 5300 returns 127.0.0.1 for `lerd-probe.<tld>`.                   | dnsmasq is up but its config drifted. `systemctl --user restart lerd-dns`.                                                                                                                                                                                           |
+| `resolver hookup`                | The NetworkManager dispatcher script or systemd-resolved drop-in is installed.          | Rerun `lerd install`.                                                                                                                                                                                                                                                |
+| `interface routes .test to 5300` | `resolvectl status` shows `127.0.0.1:5300` and `~<tld>` on the active interface.        | `sudo systemctl restart NetworkManager`, or set the routing manually with `sudo resolvectl domain <iface> ~test ~.`.                                                                                                                                                 |
+| `system DNS lookup`              | `host lerd-probe.test` (the system resolver) returns 127.0.0.1.                         | The drop-in is installed but resolved isn't honouring it. Check whether cloud-init or another tool wrote a higher-priority resolver config. Common on EC2 / cloud images. With a VPN connected this rung is reported as a warning rather than a failure, see the VPN section below. |
 
 You can also call this programmatically over MCP via the `dns_diagnose` tool, useful for AI-driven troubleshooting:
 
@@ -75,6 +75,20 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dns_diagno
 ```
 
 The response includes a `steps` array with a `status` (`ok` / `fail` / `warn` / `skip`) and `hint` per rung, plus a `first_failure` index so an LLM can jump straight to the broken layer.
+:::
+
+::: details DNS shows "Degraded" while connected to a VPN
+VPN clients such as Cisco AnyConnect, ProtonVPN, Mullvad, and WireGuard take over the system resolver when they connect, rewriting systemd-resolved so `.test` no longer routes to lerd-dns through the normal path. lerd-dns itself keeps running and answering, so the dashboard shows a yellow **Degraded** pill rather than a red **Failed** one, and `lerd doctor` reports the `system DNS lookup` rung as a warning instead of a failure. Sites still resolve, because lerd-dns answers directly on `127.0.0.1:5300`.
+
+The watcher subscribes to kernel rtnetlink link and address events on Linux, so it reacts to a VPN connect or disconnect within a second of the interface coming up or going down (a poll every 30 seconds covers the rare case of a missed kernel event). When the host resolver environment changes, it re-points the lerd network's aardvark-dns at the current host resolvers and reloads the network so containers pick them up with a fresh cache. This is what previously required a manual `lerd restart` after connecting the VPN before PHP could reach VPN-internal API endpoints. The re-sync briefly (about a second) interrupts DNS for lerd containers while aardvark-dns restarts.
+
+If you want the system resolver path itself restored while the VPN is up, so the pill goes back to green, move `resolve` after `dns` in the `hosts:` line of `/etc/nsswitch.conf`:
+
+```text
+hosts: mymachines mdns_minimal [NOTFOUND=return] files myhostname dns resolve
+```
+
+This makes glibc consult the plain `dns` module before systemd-resolved's `nss-resolve`, which the VPN client no longer shadows.
 :::
 
 ::: details Nginx not serving a site
@@ -275,6 +289,14 @@ To ensure a clean switch and recreate the networks with the new backend, reset t
 podman system reset
 ```
 
+:::
+
+::: details Error: unknown flag: --dns (during `lerd install`)
+Symptom: `lerd install` aborts at the `podman network create` step with `Error: unknown flag: --dns`.
+
+Cause: your podman is older than 4.5. The `--dns` flag on `podman network create` was added in podman 4.5 (April 2023), and lerd needs it to write upstream DNS servers into netavark's per-network JSON atomically (otherwise the post-create `network update --dns-add` path crashes on Ubuntu 24.04's netavark <1.11). Distributions that ship podman older than 4.5: Ubuntu 22.04 / Zorin 17 (3.4.4), Debian 12 (4.3.1), Debian 11 (3.0.1).
+
+Fix: upgrade podman to 4.5 or newer. On Ubuntu 22.04 and Zorin 17 the main archive doesn't ship a new enough podman, but the [Kubic libcontainers OBS repo](https://podman.io/docs/installation#ubuntu-2204-2104-2010-2004) does (it's the path podman's own docs recommend). On Debian 12 enable bookworm-backports and run `sudo apt install -t bookworm-backports podman`. See the [requirements page](getting-started/requirements.md#podman-4-5-minimum) for the full distro/version table.
 :::
 
 ::: details Error: unable to parse ip fe80::...%18 specified in AddDNSServer: invalid argument

@@ -197,7 +197,7 @@ func IPv6DisabledMarkerPath(name string) string {
 // torn down and recreated as v4-only. Returns the actual dual-stack state.
 func createNetworkWithProbe(name string, dualStack bool, dns []string) (bool, error) {
 	if err := RunSilent(networkCreateArgs(name, dualStack, dns)...); err != nil {
-		return dualStack, err
+		return dualStack, friendlyNetworkCreateError(err)
 	}
 
 	if dualStack {
@@ -380,6 +380,18 @@ func RecreateNetwork(name string, dns []string) ([]string, bool, error) {
 	return attached, actualV6, nil
 }
 
+// ReloadNetworks re-runs network setup for every running container via
+// `podman network reload`. aardvark-dns is killed first so the reload
+// respawns it with an empty cache: after a VPN connects, a hostname that
+// resolved to NXDOMAIN before the tunnel came up would otherwise stay
+// stuck on the cached negative answer. This is how lerd recovers
+// container DNS when the host's resolvers change without restarting the
+// containers themselves.
+func ReloadNetworks() error {
+	_ = exec.Command("pkill", "-f", "aardvark-dns").Run()
+	return RunSilent("network", "reload", "--all")
+}
+
 // EnsureNetworkDNS syncs the DNS servers on the named network to the provided list.
 // It drops servers no longer present and adds new ones. This sets the upstream
 // forwarders that aardvark-dns uses, which is necessary on systems where
@@ -425,4 +437,24 @@ func EnsureNetworkDNS(name string, servers []string) error {
 	}
 
 	return nil
+}
+
+// friendlyNetworkCreateError detects the `unknown flag: --dns` signature from
+// pre-4.5 podman (Ubuntu 22.04 / Zorin 17 / Debian 12 all ship older builds)
+// and replaces the raw cobra error with an upgrade hint pointing at the
+// minimum supported version. The trailing `\n` anchors the match to bare --dns
+// so flag names that merely start with --dns (--dns-add, --dns-search, …)
+// don't trip the rewrite.
+func friendlyNetworkCreateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(err.Error(), "unknown flag: --dns\n") {
+		return err
+	}
+	const prose = "podman is too old: `podman network create` does not support --dns " +
+		"(added in podman 4.5). Upgrade podman to 4.5 or newer; several distro " +
+		"releases (Ubuntu 22.04, Zorin 17, Debian 11/12) still ship older builds, see " +
+		"https://geodro.github.io/lerd/getting-started/requirements for options"
+	return fmt.Errorf("%s: %w", prose, err)
 }

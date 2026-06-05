@@ -11,6 +11,11 @@
 > aponta o auto-update para **este** repositório. Releases seguem o
 > esquema `v1.21.2-oracle.N`.
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)]()
+[![Docs](https://img.shields.io/badge/docs-geodro.github.io%2Flerd-blue)](https://geodro.github.io/lerd/)
+[![Reddit](https://img.shields.io/badge/Reddit-r%2Flerd-ff2d20?logo=reddit)](https://reddit.com/r/lerd)
+
 [![Fork base](https://img.shields.io/badge/forked%20from-geodro%2Flerd%20v1.21.2-blue)](https://github.com/geodro/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
 [![PHP](https://img.shields.io/badge/PHP-5.6%20%E2%80%93%208.5-777BB4)]()
@@ -31,6 +36,28 @@
 ---
 
 ## O que muda em relação ao upstream
+
+> Recursos herdados do upstream (`geodro/lerd`), todos presentes nesta fork:
+>
+> - 🌐 **Automatic `.test` domains** with one-command TLS, or [opt out of lerd-managed DNS](https://geodro.github.io/lerd/features/dns/) and use `*.localhost` (no dnsmasq, no system resolver tweak, no sudo for the DNS bits)
+> - 🐘 **Per-project PHP version** (8.1–8.5, plus a frozen 7.4 / 8.0 legacy tier for hosted-on-the-old-stack projects), switch with one click
+> - ⚡ **FrankenPHP runtime** per site as an alternative to shared PHP-FPM, with Laravel Octane and Symfony Runtime worker mode
+> - 📦 **Node.js isolation** per project (Node 22, 24)
+> - 🖥️ **Built-in Web UI** with a dashboard root, live widgets, a global Cmd+K command palette, and seven dashboard languages (English, German, Spanish, French, Indonesian, Dutch, Portuguese)
+> - 🧪 **Tinker tab** - in-browser PHP REPL per site with autocomplete (project models, composer helpers, PHP built-ins), live `php -l` syntax checking, and a collapsible tree view for `dump()` output. Works on Laravel (`artisan tinker`), Symfony, and any composer-based PHP project
+> - 🛰️ **Live dump() / dd() viewer** that intercepts every `dump()` and `dd()` call from your running app and streams it to the dashboard, TUI (`D` key), MCP, and `lerd dump tail`, scoped per site and per worktree branch, with the original response left clean unless you flip passthrough on
+> - 🔥 **SPX profiler** with one-click on/off, every PHP-FPM request becomes a flame graph viewable in a same-origin Profiler view in the dashboard. No FPM restart, no code changes, and `lerd profile run` profiles a one-shot artisan or CLI command
+> - 💻 **Terminal dashboard** (`lerd tui`) - btop-style TUI with live status, site detail pane, inline domain and version editing, shell drop-in, log tailing, and filter/sort — the same operations surface as the web UI, for tmux and SSH workflows
+> - 🗄️ **One-click services**: MySQL, PostgreSQL, Redis, Meilisearch, RustFS, Mailpit, Gotenberg, Stripe Mock, Reverb and more. Every default service is a YAML preset you can update, migrate, rollback, or reinstall in place, including a reset-data reinstall that auto-recreates linked sites' databases and buckets
+> - 🌳 **First-class git worktrees** with auto-detected branch domains, per-worktree PHP/Node versions, optional per-worktree database isolation (clone from main or empty), a per-worktree LAN-share proxy, `env_overrides` templating in `.lerd.yaml` for multi-tenant apps, automatic wildcard cert SANs for `*.branch.site.test`, a built-in Vite dev server worker that runs on the host per branch, and a dashboard modal for adding and removing worktrees without touching the CLI
+> - ⚒️ **Worker self-heal**, failed queue, schedule, horizon, reverb, and stripe workers are surfaced everywhere (CLI, dashboard banner, TUI, MCP) and recovered with one click or `lerd worker heal`
+> - 📋 **Live logs** for PHP-FPM, Queue, Schedule, Reverb, per site
+> - 🔒 **Rootless & daemonless** - Podman-native, no Docker required, dual-stack IPv4 + IPv6
+> - 🤖 **MCP server** - let AI assistants (Claude Code, Windsurf, Junie) manage your environment directly
+> - 🧩 **Framework store** - community definitions for Laravel, Symfony, WordPress, Drupal, CakePHP, Statamic with versioned auto-detection
+> - ⚡ **Framework-agnostic** workers, env setup, and nginx proxy — driven by YAML definitions, not hardcoded
+
+Esta fork adiciona, por cima de tudo isso:
 
 | Recurso                            | Upstream (geodro/lerd)       | Esta fork (gabriel-sousa99/lerd)                                    |
 | ---------------------------------- | ---------------------------- | ------------------------------------------------------------------- |
@@ -128,10 +155,29 @@ Detalhes em **[docs/dashboard.md](docs/dashboard.md)**.
 
 ---
 
+## Comparação
+
+|                    | Lerd | DDEV | Lando | Laravel Herd |
+|--------------------|------|------|-------|--------------|
+| Podman-native      | ✅   | 🟡   | ❌    | ❌           |
+| Rootless           | ✅   | ❌   | ❌    | ✅           |
+| Web UI             | ✅   | ❌   | ❌    | ✅           |
+| Terminal dashboard | ✅   | ❌   | ❌    | ❌           |
+| Linux              | ✅   | ✅   | ✅    | ❌           |
+| macOS              | ✅   | ✅   | ✅    | ✅           |
+| MCP server         | ✅   | ❌   | ❌    | ✅           |
+| Free & open source | ✅   | ✅   | ✅    | ❌           |
+
+🟡 DDEV runs on Docker by default and can also use Podman as an alternative runtime; Lerd is built exclusively for rootless Podman.
+
+---
+
 ## Instalação
 
 **Pré-requisitos:** Linux (Arch, Fedora/Nobara, Debian/Ubuntu, openSUSE) ou
 macOS · **Podman 4+** (rootless, sem Docker) · `git`, `curl`/`wget`.
+
+### Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash

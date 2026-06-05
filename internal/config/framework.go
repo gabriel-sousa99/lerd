@@ -1289,10 +1289,41 @@ func GetConsoleCommand(projectDir string) (string, error) {
 	return fw.Console, nil
 }
 
+// frameworkIdentRe matches a safe framework name or version identifier. It
+// deliberately forbids path separators, "..", and NUL so that values taken from
+// untrusted remote YAML cannot be used for path traversal when building a
+// filename. Examples accepted: "laravel", "symfony", "11", "10.x".
+var frameworkIdentRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// ValidFrameworkName reports whether s is a safe framework name identifier.
+// It must be non-empty and contain no path separators or traversal sequences.
+func ValidFrameworkName(s string) bool {
+	if strings.Contains(s, "/") || strings.Contains(s, "..") || strings.ContainsRune(s, 0) {
+		return false
+	}
+	return frameworkIdentRe.MatchString(s)
+}
+
+// ValidFrameworkVersion reports whether s is a safe framework version
+// identifier. An empty version is allowed (unversioned framework); a non-empty
+// version must satisfy the same constraints as a name.
+func ValidFrameworkVersion(s string) bool {
+	if s == "" {
+		return true
+	}
+	return ValidFrameworkName(s)
+}
+
 // SaveStoreFramework writes a store-installed framework definition to StoreFrameworksDir().
 // If the framework has a Version field, the file is named <name>@<version>.yaml.
 // Otherwise it is named <name>.yaml (backwards compatible).
 func SaveStoreFramework(fw *Framework) error {
+	if !ValidFrameworkName(fw.Name) {
+		return fmt.Errorf("invalid framework name %q", fw.Name)
+	}
+	if !ValidFrameworkVersion(fw.Version) {
+		return fmt.Errorf("invalid framework version %q", fw.Version)
+	}
 	dir := StoreFrameworksDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -1305,7 +1336,14 @@ func SaveStoreFramework(fw *Framework) error {
 	if fw.Version != "" {
 		filename = fw.Name + "@" + fw.Version + ".yaml"
 	}
-	return os.WriteFile(filepath.Join(dir, filename), data, 0644)
+	dest := filepath.Join(dir, filename)
+	// Defense in depth: ensure the resolved path stays under dir even if the
+	// identifier validation above is ever weakened.
+	rel, err := filepath.Rel(dir, dest)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("refusing to write framework outside store dir: %q", filename)
+	}
+	return os.WriteFile(dest, data, 0644)
 }
 
 // RemoveUserFramework silently removes a user-defined framework YAML if it exists.

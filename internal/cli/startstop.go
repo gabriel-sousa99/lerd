@@ -403,9 +403,13 @@ func checkPortConflicts(units []string) {
 }
 
 func runStart(_ *cobra.Command, _ []string) error {
-	// On macOS, ensure Podman Machine is up and migrate any stale plists.
+	// Pre-ensure LastUp lets healMachineRestartIfNeeded distinguish an
+	// external podman-machine restart (which orphans gvproxy port forwards)
+	// from a stop+start the ensure itself performs. No-op on Linux.
+	preEnsureLastUp := currentMachineLastUp()
 	ensurePodmanMachineRunning()
 	migrateExecWorkerPlists()
+	healMachineRestartIfNeeded(preEnsureLastUp)
 
 	// Ensure the lerd bridge network exists. On macOS the network is stored
 	// inside the Podman Machine VM; it may be absent after a fresh machine
@@ -441,6 +445,9 @@ func runStart(_ *cobra.Command, _ []string) error {
 	if err := nginx.EnsureLerdVhost(); err != nil {
 		fmt.Printf("  WARN: lerd vhost: %v\n", err)
 	}
+	if err := nginx.EnsureProfilerVhost(); err != nil {
+		fmt.Printf("  WARN: profiler vhost: %v\n", err)
+	}
 	// The lerd-nginx quadlet bind-mounts RunDir so the lerd.localhost vhost
 	// can reach lerd-ui over a unix socket. The directory must exist before
 	// the container starts or podman will create it root-owned.
@@ -470,6 +477,12 @@ func runStart(_ *cobra.Command, _ []string) error {
 				fmt.Printf("  WARN: removed orphan SSL vhost for %s\n", r.Domain)
 			}
 		}
+	}
+
+	// Reload nginx if it is already running so regenerated base vhosts (the
+	// dashboard and profiler vhosts) take effect without a full restart.
+	if running, _ := podman.ContainerRunning("lerd-nginx"); running {
+		_ = nginx.Reload()
 	}
 
 	// Phase 1: start all infrastructure (containers, FPM, custom containers,

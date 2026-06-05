@@ -138,6 +138,56 @@ func TestUserPickedDBFromYAML(t *testing.T) {
 	}
 }
 
+func TestUserPickedDBFromYAML_CustomFamilyMember(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, "lerd", "services"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	yaml := `name: postgres-pgvector
+family: postgres
+image: docker.io/pgvector/pgvector:pg18
+`
+	if err := os.WriteFile(filepath.Join(tmp, "lerd", "services", "postgres-pgvector.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write fake service: %v", err)
+	}
+	if !userPickedDBFromYAML(map[string]bool{"postgres-pgvector": true}) {
+		t.Errorf("userPickedDBFromYAML should count postgres-pgvector as a picked DB via Family=postgres")
+	}
+}
+
+func TestBuildDatabaseOptions_IncludesInstalledFamilyAlternates(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, "lerd", "services"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	yaml := `name: postgres-pgvector
+family: postgres
+image: docker.io/pgvector/pgvector:pg18
+`
+	if err := os.WriteFile(filepath.Join(tmp, "lerd", "services", "postgres-pgvector.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write fake service: %v", err)
+	}
+	options, nameSet := buildDatabaseOptions()
+	if !nameSet["sqlite"] || !nameSet["mysql"] || !nameSet["postgres"] {
+		t.Errorf("buildDatabaseOptions must always include the built-in trio, got %v", nameSet)
+	}
+	if !nameSet["postgres-pgvector"] {
+		t.Errorf("buildDatabaseOptions must surface installed postgres-family alternate, got %v", nameSet)
+	}
+	foundPgvector := false
+	for _, opt := range options {
+		if opt.Value == "postgres-pgvector" {
+			foundPgvector = true
+			break
+		}
+	}
+	if !foundPgvector {
+		t.Errorf("buildDatabaseOptions must offer postgres-pgvector as a selectable option")
+	}
+}
+
 func TestShouldApplyService(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -145,37 +195,45 @@ func TestShouldApplyService(t *testing.T) {
 		detected     bool
 		picked       bool
 		userPickedDB bool
+		valkeyPicked bool
 		want         bool
 	}{
 		// Regression: fresh Laravel project, user picks mysql in `lerd init`.
 		// Existing .env still says DB_CONNECTION=sqlite, so detection misses.
 		// The .lerd.yaml pick must still cause mysql vars to be applied.
-		{"mysql picked, not detected", "mysql", false, true, true, true},
+		{"mysql picked, not detected", "mysql", false, true, true, false, true},
 
 		// Detection-driven application keeps working when the user did not
 		// pre-pick a DB (e.g. an imported Sail project where .env already
 		// references mysql).
-		{"mysql detected, no yaml", "mysql", true, false, false, true},
+		{"mysql detected, no yaml", "mysql", true, false, false, false, true},
 
 		// User picked postgres but .env mentions mysql — don't reapply mysql
 		// on top of postgres, otherwise switching DBs via the wizard silently
 		// keeps the old credentials.
-		{"mysql detected, postgres picked", "mysql", true, false, true, false},
+		{"mysql detected, postgres picked", "mysql", true, false, true, false, false},
 
 		// Non-DB services aren't affected by the userPickedDB guard.
-		{"redis detected", "redis", true, false, true, true},
-		{"redis picked", "redis", false, true, false, true},
-		{"redis neither", "redis", false, false, false, false},
+		{"redis detected", "redis", true, false, true, false, true},
+		{"redis picked", "redis", false, true, false, false, true},
+		{"redis neither", "redis", false, false, false, false, false},
 
 		// Postgres mirror of the mysql cases.
-		{"postgres picked, not detected", "postgres", false, true, true, true},
-		{"postgres detected, mysql picked", "postgres", true, false, true, false},
+		{"postgres picked, not detected", "postgres", false, true, true, false, true},
+		{"postgres detected, mysql picked", "postgres", true, false, true, false, false},
+
+		// Valkey is a redis replacement: a redis-shaped .env must not reapply
+		// the built-in redis when the project picked valkey.
+		{"redis detected, valkey picked", "redis", true, false, false, true, false},
+
+		// ...unless redis itself is also explicitly picked alongside valkey.
+		{"redis picked, valkey picked", "redis", false, true, false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldApplyService(tc.svc, tc.detected, tc.picked, tc.userPickedDB)
+			got := shouldApplyService(tc.svc, tc.detected, tc.picked, tc.userPickedDB, tc.valkeyPicked)
 			if got != tc.want {
-				t.Errorf("shouldApplyService(%q, det=%v, picked=%v, userPickedDB=%v) = %v, want %v",
-					tc.svc, tc.detected, tc.picked, tc.userPickedDB, got, tc.want)
+				t.Errorf("shouldApplyService(%q, det=%v, picked=%v, userPickedDB=%v, valkeyPicked=%v) = %v, want %v",
+					tc.svc, tc.detected, tc.picked, tc.userPickedDB, tc.valkeyPicked, got, tc.want)
 			}
 		})
 	}

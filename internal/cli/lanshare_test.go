@@ -84,7 +84,8 @@ func TestRewriteLANShareBody_collapsesHTTPSToHTTP(t *testing.T) {
 <script src="https://laravel.test/build/app.js"></script>
 <a href="http://laravel.test/login">Login</a>`)
 
-	got := string(rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100"))
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	got := string(out)
 
 	want := `<link href="http://192.168.1.42:9100/build/app.css">
 <script src="http://192.168.1.42:9100/build/app.js"></script>
@@ -101,7 +102,8 @@ func TestRewriteLANShareBody_downgradesAlreadyRewrittenHTTPS(t *testing.T) {
 	in := []byte(`<link href="https://192.168.1.42:9100/build/app.css">
 <script src="https://192.168.1.42:9100/build/app.js"></script>`)
 
-	got := string(rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100"))
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	got := string(out)
 
 	want := `<link href="http://192.168.1.42:9100/build/app.css">
 <script src="http://192.168.1.42:9100/build/app.js"></script>`
@@ -114,7 +116,7 @@ func TestRewriteLANShareBody_downgradesAlreadyRewrittenHTTPS(t *testing.T) {
 func TestRewriteLANShareBody_leavesUnrelatedURLsAlone(t *testing.T) {
 	in := []byte(`<img src="https://cdn.example.com/logo.png">
 <a href="https://other.test/foo">other</a>`)
-	got := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	got, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
 	if string(got) != string(in) {
 		t.Errorf("expected URLs for other domains untouched:\nGOT:\n%s", got)
 	}
@@ -129,7 +131,8 @@ func TestRewriteLANShareBody_rewritesViteLoopback(t *testing.T) {
 <link rel="stylesheet" href="http://127.0.0.1:5173/resources/css/app.css">
 <script type="module" src="http://localhost:5173/main.js"></script>`)
 
-	got := string(rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100"))
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	got := string(out)
 
 	want := `<script src="http://192.168.1.42:9100/__lerd_vite__/5173/@vite/client"></script>
 <script src="http://192.168.1.42:9100/__lerd_vite__/5173/resources/js/app.js"></script>
@@ -149,7 +152,8 @@ func TestRewriteLoopbackViteURLs_rewritesCSSUrlFunction(t *testing.T) {
 foo: url('http://127.0.0.1:5173/x.png');
 bar: url("http://localhost:5173/y.png");`)
 
-	got := string(rewriteLoopbackViteURLs(in, "192.168.1.42:9100"))
+	out, _ := rewriteLoopbackViteURLs(in, "192.168.1.42:9100")
+	got := string(out)
 
 	want := `background: url(http://192.168.1.42:9100/__lerd_vite__/5173/images/bg.png);
 foo: url('http://192.168.1.42:9100/__lerd_vite__/5173/x.png');
@@ -168,7 +172,8 @@ func TestRewriteLoopbackViteURLs_rewritesJSONEscapedSlashes(t *testing.T) {
 	// escaped pass must catch them and emit the same JSON-escape style.
 	in := []byte(`<div id="app" data-page='{"props":{"avatar_url":"http:\/\/localhost:9000\/astrolov\/avatars\/1\/foo.jpg","other":"http:\/\/127.0.0.1:9000\/bucket"}}'></div>`)
 
-	got := string(rewriteLoopbackViteURLs(in, "192.168.1.42:9100"))
+	out, _ := rewriteLoopbackViteURLs(in, "192.168.1.42:9100")
+	got := string(out)
 
 	want := `<div id="app" data-page='{"props":{"avatar_url":"http:\/\/192.168.1.42:9100\/__lerd_vite__\/9000\/astrolov\/avatars\/1\/foo.jpg","other":"http:\/\/192.168.1.42:9100\/__lerd_vite__\/9000\/bucket"}}'></div>`
 
@@ -181,7 +186,7 @@ func TestRewriteLoopbackViteURLs_skipsShareSelfPort(t *testing.T) {
 	// A loopback ref to the share port itself must not loop back through the
 	// proxy — leave it alone.
 	in := []byte(`<a href="http://localhost:9100/admin">admin</a>`)
-	got := rewriteLoopbackViteURLs(in, "192.168.1.42:9100")
+	got, _ := rewriteLoopbackViteURLs(in, "192.168.1.42:9100")
 	if string(got) != string(in) {
 		t.Errorf("expected share-port loopback untouched:\nGOT:\n%s", got)
 	}
@@ -232,6 +237,7 @@ func TestLANShareHandler_routesViteRequests(t *testing.T) {
 	})
 
 	h := newLANShareHandler(main)
+	h.allowVitePorts([]int{vitePort}) // proxy would have advertised it via body rewrite
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -284,6 +290,7 @@ func TestLANShareHandler_nonVitePrefixPathDoesNotPoisonActivePort(t *testing.T) 
 	})
 
 	h := newLANShareHandler(main)
+	h.allowVitePorts([]int{vitePort, rustfsPort}) // both advertised by body rewrite
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -415,6 +422,7 @@ func TestLANShareHandler_viteInternalPathUsesActivePort(t *testing.T) {
 	})
 
 	h := newLANShareHandler(main)
+	h.allowVitePorts([]int{vitePort}) // proxy would have advertised it via body rewrite
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -597,6 +605,107 @@ func TestLANShareHandler_routesMainRequests(t *testing.T) {
 	}
 }
 
+func TestRewriteLoopbackViteURLs_reportsAdvertisedPorts(t *testing.T) {
+	// The ports the rewriter advertises through the prefix are exactly the
+	// ones the SSRF allowlist must later honor. Distinct loopback ports must
+	// be reported; the share's own port must not be.
+	in := []byte(`<script src="http://localhost:5173/@vite/client"></script>
+<img src="http://127.0.0.1:9000/bucket/x.jpg">
+<a href="http://localhost:9100/self">self</a>`)
+	_, ports := rewriteLoopbackViteURLs(in, "192.168.1.42:9100")
+
+	got := map[int]bool{}
+	for _, p := range ports {
+		got[p] = true
+	}
+	if !got[5173] || !got[9000] {
+		t.Errorf("advertised ports = %v, want 5173 and 9000 present", ports)
+	}
+	if got[9100] {
+		t.Errorf("share self-port 9100 must not be advertised, got %v", ports)
+	}
+}
+
+func TestLANShareHandler_rejectsUnadvertisedVitePort(t *testing.T) {
+	// SSRF guard: a LAN device requesting /__lerd_vite__/<port>/ for a port the
+	// proxy never advertised (e.g. 7073 = lerd-ui dashboard, or any loopback
+	// DB/MinIO/admin panel) must be refused with 403 — never forwarded.
+	loopbackHit := 0
+	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		loopbackHit++
+		fmt.Fprint(w, "secret-dashboard")
+	}))
+	defer loopback.Close()
+	secretPort := mustExtractPort(t, loopback.URL)
+
+	mainCalls := 0
+	main := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mainCalls++
+		fmt.Fprint(w, "main")
+	})
+
+	h := newLANShareHandler(main)
+	// Note: secretPort is NEVER added to the allowlist.
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + fmt.Sprintf("/__lerd_vite__/%d/", secretPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for un-advertised port", resp.StatusCode)
+	}
+	if loopbackHit != 0 {
+		t.Errorf("loopback service was reached %d times (SSRF), want 0", loopbackHit)
+	}
+	if mainCalls != 0 {
+		t.Errorf("main proxy called %d times, want 0", mainCalls)
+	}
+}
+
+func TestLANShareHandler_forwardsAdvertisedVitePort(t *testing.T) {
+	// Counterpart to the rejection test: once a port has been advertised
+	// (the proxy rewrote a leaked dev-server URL for it), requests through the
+	// prefix are forwarded as before — HMR/Vite keeps working.
+	viteHits := 0
+	vite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		viteHits++
+		fmt.Fprint(w, "vite-ok")
+	}))
+	defer vite.Close()
+	vitePort := mustExtractPort(t, vite.URL)
+
+	main := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("main proxy should not be called for an advertised Vite port")
+	})
+
+	h := newLANShareHandler(main)
+	// Simulate the body rewriter having advertised this port to the client.
+	h.allowVitePorts([]int{vitePort})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + fmt.Sprintf("/__lerd_vite__/%d/@vite/client", vitePort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 for advertised port", resp.StatusCode)
+	}
+	if string(body) != "vite-ok" {
+		t.Errorf("body = %q, want vite-ok", body)
+	}
+	if viteHits != 1 {
+		t.Errorf("vite hits = %d, want 1", viteHits)
+	}
+}
+
 func mustExtractPort(t *testing.T, rawURL string) int {
 	t.Helper()
 	u, err := url.Parse(rawURL)
@@ -618,7 +727,8 @@ func TestRewriteLANShareBody_fixesLANIPWithWrongPort(t *testing.T) {
 <script src="https://192.168.1.42:443/build/app.js"></script>
 <img src="http://192.168.1.42/logo.png">`)
 
-	got := string(rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100"))
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	got := string(out)
 
 	want := `<link rel="manifest" href="http://192.168.1.42:9100/manifest.json">
 <script src="http://192.168.1.42:9100/build/app.js"></script>

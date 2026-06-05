@@ -2,13 +2,19 @@ package nginx
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
@@ -64,11 +70,43 @@ type VhostData struct {
 	// with stable identifiers instead of guessing from DOCUMENT_ROOT.
 	LerdSite   string
 	LerdBranch string
+	// Profiling arms the SPX profiler for the site: when true the .php
+	// location injects SPX_ENABLED=1 into HTTP_COOKIE so every request is
+	// profiled. SPX_KEY is injected regardless (gated by the $spx_key map)
+	// so the profiler UI is reachable.
+	Profiling bool
+	// RequestTimeout is the nginx request timeout in seconds rendered into the
+	// fastcgi_*_timeout / proxy_*_timeout directives. Resolved per site by
+	// resolveRequestTimeout (project .lerd.yaml, then global config, then 60s).
+	RequestTimeout int
+}
+
+// resolveRequestTimeout returns the effective request timeout in seconds for
+// the site at sitePath: project .lerd.yaml wins, then global config, then 60s.
+// An empty sitePath skips the project lookup (site-less proxy vhosts).
+func resolveRequestTimeout(sitePath string) int {
+	if sitePath != "" {
+		if pc, err := config.LoadProjectConfig(sitePath); err == nil && pc.RequestTimeout > 0 {
+			return pc.RequestTimeout
+		}
+	}
+	gc, err := config.LoadGlobal()
+	if err != nil {
+		return config.DefaultRequestTimeout
+	}
+	return gc.RequestTimeoutSeconds()
 }
 
 // phpShort converts "8.4" → "84".
 func phpShort(version string) string {
 	return strings.ReplaceAll(version, ".", "")
+}
+
+// profilerEnabled reports the global SPX profiler toggle. Vhosts inject
+// SPX_ENABLED into FPM requests only when this is on.
+func profilerEnabled() bool {
+	cfg, err := config.LoadGlobal()
+	return err == nil && cfg.IsProfilerEnabled()
 }
 
 // resolvePublicDir returns the document root subdirectory for a site.
@@ -129,6 +167,8 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 		ProxyPath:       proxyPath,
 		ProxyPort:       proxyPort,
 		LerdSite:        site.Name,
+		Profiling:       profilerEnabled(),
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -171,6 +211,8 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 		ProxyPath:       proxyPath,
 		ProxyPort:       proxyPort,
 		LerdSite:        site.Name,
+		Profiling:       profilerEnabled(),
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -203,6 +245,7 @@ func GenerateFrankenPHPVhost(site config.Site) error {
 		ServerNames:     serverNamesWithWildcards(site.Domains),
 		CustomContainer: podman.FrankenPHPContainerName(site.Name),
 		CustomPort:      podman.FrankenPHPPort,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -233,6 +276,7 @@ func GenerateFrankenPHPSSLVhost(site config.Site) error {
 		CertDomain:      site.PrimaryDomain(),
 		CustomContainer: podman.FrankenPHPContainerName(site.Name),
 		CustomPort:      podman.FrankenPHPPort,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -266,6 +310,7 @@ func GenerateCustomVhost(site config.Site) error {
 		CustomContainer: podman.CustomContainerName(site.Name),
 		CustomPort:      site.ContainerPort,
 		BackendSSL:      site.ContainerSSL,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -300,6 +345,7 @@ func GenerateCustomSSLVhost(site config.Site) error {
 		CustomContainer: podman.CustomContainerName(site.Name),
 		CustomPort:      site.ContainerPort,
 		BackendSSL:      site.ContainerSSL,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
 	var buf bytes.Buffer
@@ -349,6 +395,8 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 		PublicDir:       "public",
 		LerdSite:        siteName,
 		LerdBranch:      branch,
+		Profiling:       profilerEnabled(),
+		RequestTimeout:  resolveRequestTimeout(path),
 	}
 
 	var buf bytes.Buffer
@@ -386,6 +434,8 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 		PublicDir:       "public",
 		LerdSite:        siteName,
 		LerdBranch:      branch,
+		Profiling:       profilerEnabled(),
+		RequestTimeout:  resolveRequestTimeout(path),
 	}
 
 	var buf bytes.Buffer
@@ -520,9 +570,10 @@ func RemoveVhost(domain string) error {
 
 // proxyVhostData is the template data for vhost-proxy*.conf.tmpl.
 type proxyVhostData struct {
-	Domain       string
-	UpstreamHost string
-	UpstreamPort int
+	Domain         string
+	UpstreamHost   string
+	UpstreamPort   int
+	RequestTimeout int
 }
 
 // GenerateProxyVhost renders the proxy vhost for domain. When secured is
@@ -546,9 +597,10 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured b
 		return err
 	}
 	data := proxyVhostData{
-		Domain:       domain,
-		UpstreamHost: upstreamHost,
-		UpstreamPort: upstreamPort,
+		Domain:         domain,
+		UpstreamHost:   upstreamHost,
+		UpstreamPort:   upstreamPort,
+		RequestTimeout: resolveRequestTimeout(""),
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
@@ -575,6 +627,32 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured b
 func Reload() error {
 	_, err := podman.Run("exec", "lerd-nginx", "nginx", "-s", "reload")
 	return err
+}
+
+// Test runs `nginx -t` inside the lerd-nginx container and returns the
+// combined stdout+stderr output along with the exit error. nginx writes its
+// per-directive validation diagnostics to stderr, so the output is the
+// useful payload regardless of success or failure, and callers should
+// surface it as-is.
+//
+// The exec is bounded by a 10 second context so a paused/stuck container
+// cannot wedge the calling HTTP handler indefinitely; nginx -t against a
+// healthy container completes in well under a second. On timeout the
+// returned error wraps context.DeadlineExceeded and the buffer carries
+// whatever podman managed to emit before the deadline fired.
+func Test() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, podman.PodmanBin(), "exec", "lerd-nginx", "nginx", "-t")
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	out := strings.TrimSpace(buf.String())
+	if ctx.Err() == context.DeadlineExceeded {
+		return out, fmt.Errorf("nginx -t timed out after 10s: %w", ctx.Err())
+	}
+	return out, err
 }
 
 // VhostRepair describes a single vhost that was repaired during pre-flight.
@@ -688,6 +766,12 @@ func hasMissingCert(content, certsDir string) bool {
 	return false
 }
 
+// defaultVhostManagedHashSuffix is appended to the conf filename to form
+// a sentinel that records the sha256 of what lerd last wrote. nginx
+// ignores files that don't match its `*.conf` include glob, so the
+// sentinel stays out of the way.
+const defaultVhostManagedHashSuffix = ".lerd-managed-hash"
+
 // EnsureDefaultVhost writes a catch-all default server that shows a branded
 // error page for any HTTP request that doesn't match a registered site. For
 // HTTPS we cannot serve a real catch-all because browsers (Chrome especially)
@@ -695,18 +779,104 @@ func hasMissingCert(content, certsDir string) bool {
 // ERR_CERT_COMMON_NAME_INVALID, and we can't issue per-domain certs ahead of
 // time. ssl_reject_handshake produces a clean connection error
 // (ERR_SSL_UNRECOGNIZED_NAME_ALERT) which is the best UX available.
+//
+// The file is left alone when the user has manually edited it: lerd
+// stores a sentinel hash of what it last wrote, and skips rewriting when
+// the on-disk content no longer matches that hash. Removing the file (or
+// the sentinel) restores lerd's automatic management.
 func EnsureDefaultVhost() error {
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
 		return err
 	}
-
-	// Write the error page HTML.
 	if err := writeErrorPages(); err != nil {
 		return fmt.Errorf("writing error pages: %w", err)
 	}
 
+	canonical := renderDefaultVhost()
+	path := filepath.Join(config.NginxConfD(), "_default.conf")
+	sentinelPath := path + defaultVhostManagedHashSuffix
+
+	canonicalHash := contentHashHex(canonical)
+
+	onDisk, readErr := os.ReadFile(path)
+	if errors.Is(readErr, os.ErrNotExist) {
+		if err := WriteFileAtomic(path, canonical, 0644); err != nil {
+			return err
+		}
+		return WriteFileAtomic(sentinelPath, []byte(canonicalHash), 0644)
+	}
+	if readErr != nil {
+		return readErr
+	}
+
+	onDiskHash := contentHashHex(onDisk)
+	lastWritten := strings.TrimSpace(readFileOrEmpty(sentinelPath))
+	if lastWritten == "" {
+		// Sentinel missing: sentinel-write crash (reclaim if hashes match),
+		// pre-sentinel binary upgrade, or hand edit. The last two are
+		// indistinguishable, so preserve and tell the user how to opt back in.
+		if onDiskHash == canonicalHash {
+			return WriteFileAtomic(sentinelPath, []byte(canonicalHash), 0644)
+		}
+		fmt.Printf("  [INFO] %s has no lerd sentinel; preserving on-disk content. If this is from a lerd upgrade and you haven't edited it, run: rm %s\n", path, path)
+		return nil
+	}
+	if lastWritten != onDiskHash {
+		fmt.Printf("  [INFO] %s differs from lerd's recorded last-write; preserving your edits. Remove the file to restore lerd's catch-all.\n", path)
+		return nil
+	}
+	if onDiskHash == canonicalHash {
+		return nil
+	}
+	// On-disk matches what lerd last wrote, but the template moved on.
+	if err := WriteFileAtomic(path, canonical, 0644); err != nil {
+		return err
+	}
+	return WriteFileAtomic(sentinelPath, []byte(canonicalHash), 0644)
+}
+
+// readFileOrEmpty returns the file's contents as a string, or "" on any
+// error. Used for the sentinel read so a missing file and an unreadable
+// file collapse to the same "no recorded last-write" state.
+func readFileOrEmpty(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// WriteFileAtomic writes data to path via a sibling .tmp file followed by
+// a rename, so a crash mid-write can never leave nginx pointing at a
+// half-written conf. Preserves the destination file's mode if it already
+// existed so an out-of-band chmod survives the rewrite; uses the caller's
+// mode only when creating from scratch. Temp file is removed on any error.
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	effective := mode
+	if info, err := os.Stat(path); err == nil {
+		effective = info.Mode().Perm()
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, effective); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, effective); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// renderDefaultVhost returns the canonical _default.conf content.
+// Separate from the writer so callers (and tests) can compute the same
+// bytes lerd would write without touching disk.
+func renderDefaultVhost() []byte {
 	errorDir := config.ErrorPagesDir()
-	content := fmt.Sprintf(`server {
+	return []byte(fmt.Sprintf(`server {
     listen 80 default_server;
     listen [::]:80 default_server;
     root %s;
@@ -720,8 +890,13 @@ server {
     listen [::]:443 default_server ssl;
     ssl_reject_handshake on;
 }
-`, errorDir)
-	return os.WriteFile(filepath.Join(config.NginxConfD(), "_default.conf"), []byte(content), 0644)
+`, errorDir))
+}
+
+// contentHashHex is sha256 → hex, used as the managed-file sentinel value.
+func contentHashHex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 const errorPageHTML = `<!DOCTYPE html>
@@ -902,6 +1077,10 @@ func EnsureLerdVhost() error {
         proxy_pass http://host.containers.internal:7073;
     }
 
+    location ^~ /_spx/ {
+        proxy_pass http://host.containers.internal:7073;
+    }
+
     location = /manifest.webmanifest {
         proxy_pass http://host.containers.internal:7073;
     }
@@ -943,6 +1122,10 @@ func EnsureLerdVhost() error {
         proxy_pass http://unix:%[1]s:$request_uri;
     }
 
+    location ^~ /_spx/ {
+        proxy_pass http://unix:%[1]s:$request_uri;
+    }
+
     location = /manifest.webmanifest {
         proxy_pass http://unix:%[1]s:$request_uri;
     }
@@ -974,6 +1157,9 @@ func EnsureNginxConfig() error {
 		return err
 	}
 	if err := EnsureCustomD(); err != nil {
+		return err
+	}
+	if err := EnsureHttpD(); err != nil {
 		return err
 	}
 	if err := EnsureForwardedConf(); err != nil {
@@ -1029,15 +1215,85 @@ func EnsureForwardedConf() error {
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
 		return err
 	}
+	key, err := config.LoadOrGenerateProfilerKey()
+	if err != nil {
+		return err
+	}
+	content := forwardedConf + spxKeyMap(key)
 	return os.WriteFile(
 		filepath.Join(config.NginxConfD(), "_forwarded.conf"),
-		[]byte(forwardedConf),
+		[]byte(content),
 		0644,
 	)
+}
+
+// spxKeyMap resolves $spx_key to the SPX http key for direct local requests
+// and to an empty string when an X-Forwarded-Host header is present, so the
+// SPX profiler stays unreachable through tunnels and LAN shares.
+func spxKeyMap(key string) string {
+	return fmt.Sprintf(`
+map $http_x_forwarded_host $spx_key {
+    default "";
+    ""      %q;
+}
+`, key)
+}
+
+// EnsureProfilerVhost writes the profiler.localhost vhost: a dedicated
+// hostname routed to a PHP-FPM container so SPX serves its report UI for the
+// dashboard's global Profiler entry, independent of any site.
+func EnsureProfilerVhost() error {
+	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
+		return err
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	// SCRIPT_FILENAME just needs a real file to exist; SPX intercepts the
+	// SPX_UI_URI request and serves its UI before dump-bridge.php runs.
+	content := fmt.Sprintf(`server {
+    listen 80;
+    listen [::]:80;
+    server_name profiler.localhost;
+
+    location / {
+        set $fpm "lerd-php%s-fpm";
+        fastcgi_pass $fpm:9000;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /usr/local/etc/lerd/dump-bridge.php;
+        fastcgi_param HTTP_COOKIE "SPX_KEY=$spx_key";
+    }
+}
+`, phpShort(cfg.PHP.DefaultVersion))
+	return os.WriteFile(filepath.Join(config.NginxConfD(), "_profiler.conf"), []byte(content), 0644)
 }
 
 // EnsureCustomD creates the user-override directory. Lerd never writes here
 // after creation, so user snippets survive `lerd update`.
 func EnsureCustomD() error {
 	return os.MkdirAll(config.NginxCustomD(), 0755)
+}
+
+// EnsureHttpD creates the http.d directory for user http-level overrides so the
+// nginx.conf `include /etc/nginx/http.d/*.conf;` always resolves, even before
+// the user has added any override.
+func EnsureHttpD() error {
+	return os.MkdirAll(config.NginxHttpD(), 0755)
+}
+
+// RewriteNginxQuadlet rewrites lerd-nginx.container from the bundled template
+// and reports whether the on-disk quadlet actually changed. Callers use this
+// to bring installs that pre-date a template change (e.g. the new http.d
+// mount) up to current shape on demand, instead of waiting for the next
+// `lerd start` / `lerd update`. The http config editor calls it before
+// writing the user override so the freshly written file is actually mounted
+// into the running nginx container — without this heal, the file would be
+// orphaned on disk and silently ignored.
+func RewriteNginxQuadlet() (changed bool, err error) {
+	content, err := podman.GetQuadletTemplate("lerd-nginx.container")
+	if err != nil {
+		return false, fmt.Errorf("reading bundled nginx quadlet template: %w", err)
+	}
+	return podman.WriteQuadletDiff("lerd-nginx", content)
 }

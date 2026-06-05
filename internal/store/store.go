@@ -106,6 +106,14 @@ func (c *Client) FetchFramework(name, version string) (*config.Framework, error)
 	if fw.Name == "" {
 		return nil, fmt.Errorf("invalid framework definition for %s@%s: missing name", name, version)
 	}
+	// Validate identifiers taken from untrusted remote YAML before they are ever
+	// used to build a filesystem path (guards against path traversal).
+	if !config.ValidFrameworkName(fw.Name) {
+		return nil, fmt.Errorf("invalid framework definition for %s@%s: unsafe name %q", name, version, fw.Name)
+	}
+	if !config.ValidFrameworkVersion(fw.Version) {
+		return nil, fmt.Errorf("invalid framework definition for %s@%s: unsafe version %q", name, version, fw.Version)
+	}
 
 	return &fw, nil
 }

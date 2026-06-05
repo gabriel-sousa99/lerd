@@ -6,7 +6,7 @@
   import WatcherDetail from './system/WatcherDetail.svelte';
   import DumpBridgeDetail from './system/DumpBridgeDetail.svelte';
   import NotificationsDetail from './system/NotificationsDetail.svelte';
-  import PhpDetail from './system/PhpDetail.svelte';
+  import PhpPage from './system/PhpPage.svelte';
   import PhpInstallDetail from './system/PhpInstallDetail.svelte';
   import DebugDetail from './system/DebugDetail.svelte';
   import NodePage from './system/NodePage.svelte';
@@ -15,6 +15,7 @@
 
   const selected = $derived($routeRest || 'lerd');
   const phpVersion = $derived(selected.startsWith('php-') ? selected.slice(4) : '');
+  const showPhp = $derived(selected === 'php' || selected.startsWith('php-'));
   const dnsHidden = $derived($status.dns?.enabled === false);
 </script>
 
@@ -30,8 +31,8 @@
   <NotificationsDetail />
 {:else if selected === 'php-install'}
   <PhpInstallDetail />
-{:else if phpVersion}
-  <PhpDetail version={phpVersion} />
+{:else if showPhp}
+  <PhpPage initialVersion={phpVersion} />
 {:else if selected === 'debug'}
   <DebugDetail />
 {:else if selected === 'node' || selected === 'node-install' || selected.startsWith('node-')}

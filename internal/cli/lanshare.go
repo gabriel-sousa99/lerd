@@ -445,6 +445,8 @@ func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bo
 		req.Header.Set("Accept-Encoding", "identity")
 	}
 
+	handler := newLANShareHandler(proxy)
+
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		lanHost := resp.Request.Header.Get("X-Forwarded-Host")
 		if lanHost == "" {
@@ -491,7 +493,9 @@ func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bo
 			return nil // unknown encoding, leave untouched
 		}
 
-		body = rewriteLANShareBody(body, domain, lanHost)
+		var advertised []int
+		body, advertised = rewriteLANShareBody(body, domain, lanHost)
+		handler.allowVitePorts(advertised)
 
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		resp.ContentLength = int64(len(body))
@@ -504,7 +508,6 @@ func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bo
 		return nil, fmt.Errorf("binding port %d: %w", port, err)
 	}
 
-	handler := newLANShareHandler(proxy)
 	srv := &http.Server{Handler: handler}
 	go srv.Serve(ln) //nolint:errcheck
 	return srv, nil
@@ -523,14 +526,55 @@ type lanShareHandler struct {
 	mu             sync.Mutex
 	viteProxies    map[int]*httputil.ReverseProxy
 	activeVitePort int
+	// allowedVitePorts is the SSRF allowlist: only loopback ports the proxy
+	// itself advertised to the client (by rewriting a leaked loopback URL into
+	// the /__lerd_vite__/<port>/ form) may be forwarded. A LAN device cannot
+	// coax the proxy into dialing an arbitrary loopback service (dashboard,
+	// DBs, MinIO, admin panels) it never saw the dev server emit.
+	allowedVitePorts map[int]bool
 }
 
 func newLANShareHandler(main http.Handler) *lanShareHandler {
-	return &lanShareHandler{main: main, viteProxies: map[int]*httputil.ReverseProxy{}}
+	return &lanShareHandler{
+		main:             main,
+		viteProxies:      map[int]*httputil.ReverseProxy{},
+		allowedVitePorts: map[int]bool{},
+	}
+}
+
+// allowVitePorts records ports the proxy advertised to clients (via body
+// rewriting) so subsequent /__lerd_vite__/<port>/ requests for them are
+// honored. Ports never advertised are rejected as SSRF.
+func (h *lanShareHandler) allowVitePorts(ports []int) {
+	if len(ports) == 0 {
+		return
+	}
+	h.mu.Lock()
+	for _, p := range ports {
+		h.allowedVitePorts[p] = true
+	}
+	h.mu.Unlock()
+}
+
+// vitePortAllowed reports whether port is on the SSRF allowlist.
+func (h *lanShareHandler) vitePortAllowed(port int) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.allowedVitePorts[port]
 }
 
 func (h *lanShareHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if port, rest, ok := parseVitePrefixPath(r.URL.Path); ok {
+		// SSRF guard: only forward to loopback ports the proxy itself
+		// advertised by rewriting a leaked dev-server URL into this prefix.
+		// A LAN device requesting an arbitrary port (lerd-ui dashboard, DBs,
+		// MinIO, admin panels) it never saw advertised is refused — the share
+		// binds to 0.0.0.0 with no auth, so unchecked forwarding would defeat
+		// those services' loopback-only binding.
+		if !h.vitePortAllowed(port) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		r.URL.Path = rest
 		r.URL.RawPath = "" // force re-encode from Path
 		// The loopback body rewriter also catches non-Vite services running
@@ -734,7 +778,9 @@ func (h *lanShareHandler) viteProxy(port int) *httputil.ReverseProxy {
 		if err != nil || body == nil {
 			return err
 		}
-		body = rewriteLoopbackViteURLs(body, lanHost)
+		var advertised []int
+		body, advertised = rewriteLoopbackViteURLs(body, lanHost)
+		h.allowVitePorts(advertised)
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		resp.ContentLength = int64(len(body))
 		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
@@ -843,7 +889,7 @@ func PrintLANShareQR(rawURL string) {
 // (e.g. http://<ip>:443/foo when the framework used SERVER_PORT from nginx).
 // The final pass redirects loopback dev-server URLs (Vite on [::1]:5173 etc.)
 // through the share proxy's Vite prefix so LAN devices can reach them.
-func rewriteLANShareBody(body []byte, domain, lanHost string) []byte {
+func rewriteLANShareBody(body []byte, domain, lanHost string) ([]byte, []int) {
 	body = bytes.ReplaceAll(body, []byte("https://"+domain), []byte("http://"+lanHost))
 	body = bytes.ReplaceAll(body, []byte("http://"+domain), []byte("http://"+lanHost))
 	body = bytes.ReplaceAll(body, []byte("https://"+lanHost), []byte("http://"+lanHost))
@@ -853,8 +899,7 @@ func rewriteLANShareBody(body []byte, domain, lanHost string) []byte {
 		re := regexp.MustCompile(`https?://` + regexp.QuoteMeta(lanIP) + `(?::\d+)?([/"'<>?#;)\s])`)
 		body = re.ReplaceAll(body, []byte("http://"+lanHost+"$1"))
 	}
-	body = rewriteLoopbackViteURLs(body, lanHost)
-	return body
+	return rewriteLoopbackViteURLs(body, lanHost)
 }
 
 // loopbackViteURLRe matches http(s)://<loopback>:<port> URLs that leaked into
@@ -878,10 +923,19 @@ var loopbackViteURLEscRe = regexp.MustCompile(`https?:\\/\\/(?:localhost|127\.0\
 // URLs targeting the share port itself are left alone so we don't loop.
 // Handles both the plain `http://` form and the JSON-escaped `http:\/\/`
 // form that appears in Inertia.js data-page payloads.
-func rewriteLoopbackViteURLs(body []byte, lanHost string) []byte {
+// It also returns the distinct loopback ports it advertised through the
+// prefix, so the caller can add them to the SSRF allowlist (only ports the
+// proxy emitted to the client may later be forwarded back to loopback).
+func rewriteLoopbackViteURLs(body []byte, lanHost string) ([]byte, []int) {
 	_, lanPort, err := net.SplitHostPort(lanHost)
 	if err != nil {
-		return body
+		return body, nil
+	}
+	advertised := map[int]bool{}
+	noteAdvertised := func(port string) {
+		if p, err := strconv.Atoi(port); err == nil && p > 0 && p <= 65535 {
+			advertised[p] = true
+		}
 	}
 	body = loopbackViteURLRe.ReplaceAllFunc(body, func(match []byte) []byte {
 		sub := loopbackViteURLRe.FindSubmatch(match)
@@ -889,6 +943,7 @@ func rewriteLoopbackViteURLs(body []byte, lanHost string) []byte {
 		if port == lanPort {
 			return match
 		}
+		noteAdvertised(port)
 		out := make([]byte, 0, len(lanHost)+len(vitePrefix)+len(port)+1+len(term)+len("http://"))
 		out = append(out, "http://"...)
 		out = append(out, lanHost...)
@@ -903,6 +958,7 @@ func rewriteLoopbackViteURLs(body []byte, lanHost string) []byte {
 		if port == lanPort {
 			return match
 		}
+		noteAdvertised(port)
 		// Build http:\/\/<lanHost>\/__lerd_vite__\/<port> keeping JSON
 		// slash escaping consistent with the surrounding payload.
 		out := []byte(`http:\/\/`)
@@ -913,7 +969,14 @@ func rewriteLoopbackViteURLs(body []byte, lanHost string) []byte {
 		out = append(out, term...)
 		return out
 	})
-	return body
+	if len(advertised) == 0 {
+		return body, nil
+	}
+	ports := make([]int, 0, len(advertised))
+	for p := range advertised {
+		ports = append(ports, p)
+	}
+	return body, ports
 }
 
 func LANShareURL(lanPort int) string {
