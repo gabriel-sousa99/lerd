@@ -39,6 +39,7 @@ var loopbackOnlyRoutes = []string{
 var loopbackOnlySiteSubactions = []string{
 	"/terminal", // opens an interactive shell on the host
 	"/env",      // raw .env content + backups + restore (APP_KEY, DB creds, tokens)
+	"/tinker",   // evaluates arbitrary PHP in the site's container (full env: DB creds, secrets) — host RCE, same risk class as /terminal
 }
 
 // fromHost reports whether r's source IP belongs to one of the host's

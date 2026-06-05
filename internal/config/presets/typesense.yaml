@@ -1,5 +1,4 @@
 name: typesense
-default: true
 # Typesense bumps via minor on regular cadence. Patch keeps existing users
 # stable; track_latest lands fresh installs on current upstream.
 update_strategy: patch

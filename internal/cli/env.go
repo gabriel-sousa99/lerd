@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -784,10 +785,27 @@ func frameworkServiceDetected(def config.FrameworkServiceDef, envMap map[string]
 // outside the cli package (e.g. the worktree DB-isolation flow).
 func CreateDatabase(svc, name string) (bool, error) { return serviceops.CreateDatabase(svc, name) }
 
+// dbNameRe matches a strictly safe database identifier: 1..64 chars of
+// [A-Za-z0-9_]. Used to reject names that could break out of a shell command
+// (backticks, $(), pipes, semicolons, whitespace, quotes, etc.).
+var dbNameRe = regexp.MustCompile(`^[A-Za-z0-9_]{1,64}$`)
+
+// validDBName reports whether name is a safe database identifier to interpolate
+// into a shell command. Only [A-Za-z0-9_] of length 1..64 is allowed.
+func validDBName(name string) bool {
+	return dbNameRe.MatchString(name)
+}
+
 // CloneDatabase copies the schema and data from src into dst inside the same
 // service container. dst must already exist. Returns an error if the family
 // has no clone strategy or the dump/restore fails.
 func CloneDatabase(svc, src, dst string) error {
+	if !validDBName(src) {
+		return fmt.Errorf("nome de banco inválido para clone: %q", src)
+	}
+	if !validDBName(dst) {
+		return fmt.Errorf("nome de banco inválido para clone: %q", dst)
+	}
 	container := "lerd-" + svc
 	family := svc
 	if inferred := config.FamilyOfName(svc); inferred != "" {

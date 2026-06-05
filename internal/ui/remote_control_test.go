@@ -246,6 +246,11 @@ func TestIsLoopbackOnlyPath(t *testing.T) {
 		{"/api/sites/myapp.test/env/backups/.env.bkp.20260528-103045", true},
 		{"/api/sites/myapp.test/env/restore", true},
 		{"/api/sites/myapp.test/terminal/anything", true},
+		{"/api/sites/myapp.test/tinker", true},          // arbitrary PHP exec — host RCE
+		{"/api/sites/foo.bar.test/tinker", true},        // domain-agnostic
+		{"/api/sites/myapp.test/tinker/anything", true}, // nested subtree stays gated
+		{"/api/sites/myapp.test/tinker:lint", false},    // php -l syntax check only, no exec
+		{"/api/sites/myapp.test/tinker:symbols", false}, // symbol collection only, no exec
 		{"/api/sites", false},
 		{"/api/sites/myapp.test", false},
 		{"/api/sites/myapp.test/secure", false},
@@ -274,6 +279,7 @@ func TestRemoteControlGate_loopbackOnlyRoutesBlockedFromLAN(t *testing.T) {
 		"/api/sites/link",
 		"/api/sites/myapp.test/terminal",
 		"/api/sites/myapp.test/env",
+		"/api/sites/myapp.test/tinker", // arbitrary PHP exec must be loopback-only even with valid auth
 		"/api/browse",
 		"/api/push/test",
 	}
@@ -298,7 +304,7 @@ func TestRemoteControlGate_loopbackOnlyRoutesAllowedFromLoopback(t *testing.T) {
 	next := &nextHandler{}
 	gate := withRemoteControlGate(next)
 
-	for _, path := range []string{"/api/lerd/stop", "/api/sites/link", "/api/sites/myapp.test/terminal"} {
+	for _, path := range []string{"/api/lerd/stop", "/api/sites/link", "/api/sites/myapp.test/terminal", "/api/sites/myapp.test/tinker"} {
 		t.Run(path, func(t *testing.T) {
 			next.called = false
 			req := httptest.NewRequest(http.MethodPost, path, nil)
