@@ -12,7 +12,7 @@
 > esquema `v1.21.2-oracle.N`.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)]()
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL2%20(beta)-lightgrey)]()
 [![Docs](https://img.shields.io/badge/docs-geodro.github.io%2Flerd-blue)](https://geodro.github.io/lerd/)
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Flerd-ff2d20?logo=reddit)](https://reddit.com/r/lerd)
 
@@ -43,9 +43,10 @@
 > - 🐘 **Per-project PHP version** (8.1–8.5, plus a frozen 7.4 / 8.0 legacy tier for hosted-on-the-old-stack projects), switch with one click
 > - ⚡ **FrankenPHP runtime** per site as an alternative to shared PHP-FPM, with Laravel Octane and Symfony Runtime worker mode
 > - 📦 **Node.js isolation** per project (Node 22, 24)
-> - 🖥️ **Built-in Web UI** with a dashboard root, live widgets, a global Cmd+K command palette, and seven dashboard languages (English, German, Spanish, French, Indonesian, Dutch, Portuguese)
+> - 🖥️ **Built-in Web UI** with a dashboard root, live widgets, a global Cmd+K command palette, install/remove of PHP and Node versions from the System page, and seven dashboard languages (English, German, Spanish, French, Indonesian, Dutch, Portuguese)
+> - ✏️ **Edit config in the browser** — per-site and global nginx, per-version `php.ini`, `.env` files, and database/service runtime tuning, each validated (`nginx -t` where it applies), with timestamped backups and one-click restore
 > - 🧪 **Tinker tab** - in-browser PHP REPL per site with autocomplete (project models, composer helpers, PHP built-ins), live `php -l` syntax checking, and a collapsible tree view for `dump()` output. Works on Laravel (`artisan tinker`), Symfony, and any composer-based PHP project
-> - 🛰️ **Live dump() / dd() viewer** that intercepts every `dump()` and `dd()` call from your running app and streams it to the dashboard, TUI (`D` key), MCP, and `lerd dump tail`, scoped per site and per worktree branch, with the original response left clean unless you flip passthrough on
+> - 🛰️ **Debug window** that intercepts every `dump()` / `dd()` and streams it to the dashboard, TUI (`D` key), MCP, and `lerd dump tail`, scoped per site and per worktree branch, with the original response left clean unless you flip passthrough on. The same window captures SQL queries with N+1 and slow-query detection, plus outgoing mail, rendered views, dispatched events, queued jobs, and outgoing HTTP, across both Laravel and Symfony, with optional opt-in capture of queue-worker activity
 > - 🔥 **SPX profiler** with one-click on/off, every PHP-FPM request becomes a flame graph viewable in a same-origin Profiler view in the dashboard. No FPM restart, no code changes, and `lerd profile run` profiles a one-shot artisan or CLI command
 > - 💻 **Terminal dashboard** (`lerd tui`) - btop-style TUI with live status, site detail pane, inline domain and version editing, shell drop-in, log tailing, and filter/sort — the same operations surface as the web UI, for tmux and SSH workflows
 > - 🗄️ **One-click services**: MySQL, PostgreSQL, Redis, Meilisearch, RustFS, Mailpit, Gotenberg, Stripe Mock, Reverb and more. Every default service is a YAML preset you can update, migrate, rollback, or reinstall in place, including a reset-data reinstall that auto-recreates linked sites' databases and buckets
@@ -165,6 +166,7 @@ Detalhes em **[docs/dashboard.md](docs/dashboard.md)**.
 | Terminal dashboard | ✅   | ❌   | ❌    | ❌           |
 | Linux              | ✅   | ✅   | ✅    | ❌           |
 | macOS              | ✅   | ✅   | ✅    | ✅           |
+| Windows (WSL2)     | 🧪   | ✅   | ✅    | ✅           |
 | MCP server         | ✅   | ❌   | ❌    | ✅           |
 | Free & open source | ✅   | ✅   | ✅    | ❌           |
 

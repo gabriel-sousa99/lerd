@@ -68,6 +68,7 @@ Setup steps include common tasks (composer install, npm install, lerd env) plus 
 | `lerd rebuild [name]` | Rebuild the custom container image from Containerfile and restart |
 | `lerd env` | Configure `.env` for the current project with lerd service connection settings; backs up the original as `.env.before_lerd` on first run (skipped if lerd has already written to the file) |
 | `lerd env:restore` | Restore `.env` from the pre-lerd backup (`.env.before_lerd`) |
+| `lerd env:override [KEY=VALUE ...]` | Create/seed a personal, gitignored `.env.lerd_override` whose values win over lerd's defaults on `lerd env`; `LERD_EXTERNAL_SERVICES=` marks services lerd should not start or provision |
 | `lerd env:check` | Compare all `.env` files against `.env.example` and flag missing or extra keys |
 
 ## LAN
@@ -111,8 +112,8 @@ Supported PHP versions: **8.5**, **8.4**, **8.3**, **8.2**, **8.1**, and the fro
 | `lerd php:ext remove <ext> [version]` | Remove a custom PHP extension and rebuild |
 | `lerd php:ext list [version]` | List custom extensions for a PHP version |
 | `lerd php:ini [version]` | Open the user php.ini for a PHP version in `$EDITOR` |
-| `lerd dump on` | Enable the dump bridge so `dump()` / `dd()` calls ship to the lerd dashboard, TUI, and MCP tools |
-| `lerd dump off` | Disable the dump bridge and restore FPM containers to their default state |
+| `lerd dump on` | Enable the debug bridge so `dump()` / `dd()` calls ship to the lerd dashboard, TUI, and MCP tools |
+| `lerd dump off` | Disable the debug bridge and restore FPM containers to their default state |
 | `lerd dump status` | Show whether the bridge is enabled and how many events are buffered |
 | `lerd dump tail [--site X] [--ctx fpm\|cli]` | Stream captured dumps to the terminal until Ctrl-C |
 | `lerd dump clear` | Clear the in-memory dump ring without disabling the bridge |

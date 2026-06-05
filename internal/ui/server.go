@@ -153,7 +153,7 @@ func Start(currentVersion string) error {
 	// the freshly rebuilt bytes to every connected browser.
 	go runSnapshotInvalidator()
 
-	// Loopback receiver for the PHP dump bridge. Bound unconditionally
+	// Loopback receiver for the PHP debug bridge. Bound unconditionally
 	// because the listener is essentially free and lets the dashboard
 	// pick up dumps the moment `lerd dump on` runs without a UI restart.
 	startDumpsServer()
@@ -223,12 +223,16 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/proxies/", withCORS(publishAfter(handleProxyAction, eventbus.KindProxies)))
 	mux.HandleFunc("/api/logs/", withCORS(handleLogs))
 	mux.HandleFunc("/api/dumps", withCORS(handleDumpsList))
+	mux.HandleFunc("/api/queries/analyze", withCORS(handleQueriesAnalyze))
 	mux.HandleFunc("/api/dumps/stream", withCORS(handleDumpsStream))
 	mux.HandleFunc("/api/dumps/status", withCORS(handleDumpsStatus))
 	mux.HandleFunc("/api/dumps/clear", withCORS(handleDumpsClear))
 	mux.HandleFunc("/api/dumps/toggle", withCORS(publishAfter(handleDumpsToggle, eventbus.KindDumpsStatus)))
 	mux.HandleFunc("/api/dumps/passthrough", withCORS(publishAfter(handleDumpsPassthrough, eventbus.KindDumpsStatus)))
 	mux.HandleFunc("/api/dumps/notify-changed", withCORS(handleDumpsNotifyChanged))
+	mux.HandleFunc("/api/devtools/status", withCORS(handleDevtoolsStatus))
+	mux.HandleFunc("/api/devtools/workers", withCORS(publishAfter(handleDevtoolsWorkers, eventbus.KindDevtoolsStatus)))
+	mux.HandleFunc("/api/open-editor", withCORS(handleOpenEditor))
 	mux.HandleFunc("/api/profiler/toggle", withCORS(publishAfter(handleProfilerToggle, eventbus.KindProfilerStatus)))
 	mux.HandleFunc("/api/profiler/status", withCORS(handleProfilerStatus))
 	mux.HandleFunc("/api/profiler/clear", withCORS(handleProfilerClear))
@@ -748,6 +752,8 @@ type SiteResponse struct {
 	HasHorizon         bool                `json:"has_horizon"`
 	HorizonRunning     bool                `json:"horizon_running"`
 	HorizonFailing     bool                `json:"horizon_failing,omitempty"`
+	HorizonReload      bool                `json:"horizon_reload,omitempty"`       // horizon runs via horizon:listen (auto-reload)
+	HorizonReloadReady bool                `json:"horizon_reload_ready,omitempty"` // chokidar present, so auto-reload can be enabled without installing it
 	HasQueueWorker     bool                `json:"has_queue_worker"`
 	HasScheduleWorker  bool                `json:"has_schedule_worker"`
 	FrameworkWorkers   []WorkerStatus      `json:"framework_workers,omitempty"`
@@ -869,6 +875,8 @@ func buildSites() []SiteResponse {
 			HasHorizon:         e.HasHorizon,
 			HorizonRunning:     e.HorizonRunning,
 			HorizonFailing:     e.HorizonFailing,
+			HorizonReload:      e.HasHorizon && config.ProjectReloadsWorker(e.Path, "horizon"),
+			HorizonReloadReady: e.HasHorizon && cli.ProjectHasChokidar(e.Path),
 			HasQueueWorker:     e.HasQueueWorker,
 			HasScheduleWorker:  e.HasScheduleWorker,
 			FrameworkWorkers:   fwWorkers,
@@ -2575,6 +2583,12 @@ func handleSiteEnvFiles(w http.ResponseWriter, r *http.Request, site *config.Sit
 	writeJSON(w, files)
 }
 
+// SiteEnvRestoreRequest carries the previewed backup name so the restore
+// applies the exact bytes the user saw, not whatever is newest at accept time.
+type SiteEnvRestoreRequest struct {
+	Name string `json:"name"`
+}
+
 // SiteEnvRestoreResponse is the JSON body returned by POST /env/restore.
 type SiteEnvRestoreResponse struct {
 	OK       bool   `json:"ok"`
@@ -2600,7 +2614,16 @@ func handleSiteEnvRestore(w http.ResponseWriter, r *http.Request, site *config.S
 		http.NotFound(w, r)
 		return
 	}
-	res, err := envCfgFile(dir, envFile).Restore("", nil)
+	// Always attempt the decode: an empty body parses as the zero value via
+	// io.EOF, which Restore treats as "restore newest". A previewed name is
+	// validated against the live backup list inside Restore.
+	var req SiteEnvRestoreRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	if err := dec.Decode(&req); err != nil && err != io.EOF {
+		writeJSON(w, SiteEnvRestoreResponse{OK: false, Error: "invalid body: " + err.Error()})
+		return
+	}
+	res, err := envCfgFile(dir, envFile).Restore(req.Name, nil)
 	if err != nil {
 		writeJSON(w, SiteEnvRestoreResponse{OK: false, Error: err.Error()})
 		return
@@ -3125,6 +3148,25 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		}
 		if !site.Paused {
 			_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "horizon:reload":
+		enabled := r.URL.Query().Get("enabled") == "true"
+		phpVersion := site.PHPVersion
+		if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
+			phpVersion = detected
+		}
+		if err := cli.ApplyHorizonReload(site.Name, site.Path, phpVersion, enabled); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "horizon:install-watcher":
+		if err := cli.InstallChokidar(site.Path); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return

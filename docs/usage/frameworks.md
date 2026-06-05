@@ -141,12 +141,12 @@ Laravel has a built-in definition compiled into the binary as a fallback. When a
 
 Default workers:
 
-| Worker     | Label            | Command                                                         | Check             | Extra                               |
-| ---------- | ---------------- | --------------------------------------------------------------- | ----------------- | ----------------------------------- |
-| `queue`    | Queue Worker     | `php artisan queue:work --queue=default --tries=3 --timeout=60` | -                 | -                                   |
-| `schedule` | Task Scheduler   | `php artisan schedule:work`                                     | -                 | -                                   |
-| `reverb`   | Reverb WebSocket | `php artisan reverb:start`                                      | `laravel/reverb`  | proxy at `/app`, auto-assigned port |
-| `horizon`  | Horizon          | `php artisan horizon`                                           | `laravel/horizon` | conflicts with `queue`              |
+| Worker     | Label            | Command                                                         | Check             | Extra                                                                                            |
+| ---------- | ---------------- | --------------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------- |
+| `queue`    | Queue Worker     | `php artisan queue:work --queue=default --tries=3 --timeout=60` | -                 | -                                                                                               |
+| `schedule` | Task Scheduler   | `php artisan schedule:work`                                     | -                 | -                                                                                               |
+| `reverb`   | Reverb WebSocket | `php artisan reverb:start`                                      | `laravel/reverb`  | proxy at `/app`, auto-assigned port                                                             |
+| `horizon`  | Horizon          | `php artisan horizon`                                           | `laravel/horizon` | conflicts with `queue`; auto-reload via `horizon:listen` (see [queue workers](queue-workers.md)) |
 
 ### Adding workers to Laravel
 

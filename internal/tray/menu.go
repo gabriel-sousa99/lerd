@@ -85,7 +85,7 @@ func buildMenu() *menuState {
 	if runtime.GOOS != "darwin" {
 		m.mLAN = systray.AddMenuItem("Expose to LAN: Off", "Toggle whether lerd is reachable from other devices on the local network")
 	}
-	m.mDumps = systray.AddMenuItem("Dump bridge: Off", "Capture dump() / dd() into the lerd dashboard")
+	m.mDumps = systray.AddMenuItem("Debug bridge: Off", "Capture dump() / dd() into the lerd dashboard")
 	m.mNotifications = systray.AddMenuItem("Notifications: On", "Globally enable or disable lerd notifications")
 	m.mDebugGuide = systray.AddMenuItem("Debug & Oracle help…", "Abre os guias de troubleshoot da fork Oracle Edition no navegador")
 	m.mUpdate = systray.AddMenuItem("Check for update...", "Check for a newer version of Lerd")
@@ -194,9 +194,9 @@ func (m *menuState) apply(snap *Snapshot) {
 	}
 
 	if snap.DumpsEnabled {
-		m.mDumps.SetTitle("Dump bridge: ✔ On")
+		m.mDumps.SetTitle("Debug bridge: ✔ On")
 	} else {
-		m.mDumps.SetTitle("Dump bridge: Off")
+		m.mDumps.SetTitle("Debug bridge: Off")
 	}
 	if snap.NotificationsEnabled {
 		m.mNotifications.SetTitle("Notifications: ✔ On")

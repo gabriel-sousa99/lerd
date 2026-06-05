@@ -115,7 +115,8 @@ func ensureImages() {
 			jobs = append(jobs, BuildJob{
 				Label: "Pulling " + label,
 				Run: func(w io.Writer) error {
-					cmd := podman.Cmd("pull", label)
+					args := append(append([]string{"pull"}, podman.PlatformPullArgs(label)...), label)
+					cmd := podman.Cmd(args...)
 					cmd.Stdout = w
 					cmd.Stderr = w
 					return cmd.Run()
@@ -384,11 +385,7 @@ func checkPortConflicts(units []string) {
 
 	var conflicts []string
 	for _, c := range checks {
-		running, _ := podman.ContainerRunning(c.Container)
-		if running {
-			continue
-		}
-		if PortInUseIn(c.Port, ss) {
+		if isPortConflict(c, ss, podmanContainerRunning, lerdDNSAnswering) {
 			conflicts = append(conflicts,
 				fmt.Sprintf("  WARN: port %s (%s) already in use, may fail to start (check: %s)", c.Port, c.Label, FindListenerCmd(c.Port)))
 		}
@@ -400,6 +397,67 @@ func checkPortConflicts(units []string) {
 		}
 		fmt.Println()
 	}
+}
+
+// isPortConflict reports whether a port check is a genuine clash with a foreign
+// process. A lerd service that already owns its port is never a conflict, in
+// three ways: a running container owns it directly; lerd-dns owns it when its
+// own dnsmasq is already answering; and on macOS the podman machine's gvproxy
+// owns any published port by forwarding it into the VM.
+//
+// The dnsmasq case matters because on macOS lerd-dns runs as a launchd-managed
+// dnsmasq process, not a podman container, so containerRunning is always false
+// for it; without the dnsAnswering guard the still-listening dnsmasq from the
+// previous session looks like a foreign conflict and mis-fires the "port 5300
+// already in use" warning on every `lerd start`. The gvproxy case matters
+// because lerd's service containers never bind host ports directly on macOS
+// (no -p in their plists); host reachability comes from gvproxy forwarding into
+// the VM, so a gvproxy-held service port is lerd's own forward from a prior
+// session, not a foreign process. The func seams keep this pure and unit-testable.
+func isPortConflict(c PortCheck, portList string, containerRunning func(string) bool, dnsAnswering func() bool) bool {
+	if containerRunning(c.Container) {
+		return false
+	}
+	if c.Container == "lerd-dns" && dnsAnswering() {
+		return false
+	}
+	if !PortInUseIn(c.Port, portList) {
+		return false
+	}
+	return !portOwnedByMachineProxy(c.Port, portList)
+}
+
+// portOwnedByMachineProxy reports whether the listener on the given port is the
+// podman machine's gvproxy. On macOS that proxy owns every published host port
+// (lerd's containers themselves carry no -p), so a gvproxy-held port is a
+// lerd/podman forward into the VM rather than a foreign blocker. On Linux there
+// is no gvproxy, so this never matches and the check is a harmless no-op.
+func portOwnedByMachineProxy(port, portList string) bool {
+	for _, line := range strings.Split(portList, "\n") {
+		if strings.HasPrefix(line, "gvproxy") && strings.Contains(line, ":"+port+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// podmanContainerRunning adapts podman.ContainerRunning to the bool-only seam
+// isPortConflict expects, treating a probe error as "not running".
+func podmanContainerRunning(name string) bool {
+	running, _ := podman.ContainerRunning(name)
+	return running
+}
+
+// lerdDNSAnswering reports whether lerd's own dnsmasq is currently answering for
+// the configured TLD, which means a listener on the DNS port is lerd-dns itself
+// rather than a foreign process.
+func lerdDNSAnswering() bool {
+	cfg, _ := config.LoadGlobal()
+	tld := "test"
+	if cfg != nil && cfg.DNS.TLD != "" {
+		tld = cfg.DNS.TLD
+	}
+	return dns.CheckStatus(tld) != dns.StatusDown
 }
 
 func runStart(_ *cobra.Command, _ []string) error {
@@ -625,7 +683,8 @@ func startRestoredServices() {
 		pullJobs = append(pullJobs, BuildJob{
 			Label: "Pulling " + img,
 			Run: func(w io.Writer) error {
-				cmd := podman.Cmd("pull", img)
+				args := append(append([]string{"pull"}, podman.PlatformPullArgs(img)...), img)
+				cmd := podman.Cmd(args...)
 				cmd.Stdout = w
 				cmd.Stderr = w
 				return cmd.Run()

@@ -18,6 +18,7 @@ const (
 	KindServices       = "services"
 	KindStatus         = "status"
 	KindDumpsStatus    = "dumps_status"
+	KindDevtoolsStatus = "devtools_status"
 	KindProfilerStatus = "profiler_status"
 	// KindProxies sinaliza mudanças no registry de proxies. Não faz parte
 	// do snapshot agregado: a presença no broadcast só avisa o front a

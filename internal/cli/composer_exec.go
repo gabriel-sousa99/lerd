@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gabriel-sousa99/lerd/internal/composer"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -34,7 +35,7 @@ func runComposer(args []string) error {
 	}
 	composerPhar := filepath.Join(config.BinDir(), "composer.phar")
 	phpArgs := append([]string{composerPhar}, args...)
-	code, runErr := RunPHPCapture(cwd, phpArgs)
+	code, runErr := RunPHPCaptureEnv(cwd, phpArgs, []string{composer.ProcessTimeoutEnv()})
 
 	// Sync regardless of composer exit status, so a `composer global remove`
 	// that fails partway still cleans up wrappers whose source bin is gone.
