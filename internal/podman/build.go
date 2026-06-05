@@ -145,20 +145,91 @@ func ContainerfileHash() (string, error) {
 	return fmt.Sprintf("%x", sum), nil
 }
 
-// NeedsFPMRebuild returns true if the stored Containerfile hash differs from the
-// current embedded Containerfile, meaning images should be rebuilt.
-func NeedsFPMRebuild() bool {
-	current, err := ContainerfileHash()
-	if err != nil {
-		return false
-	}
-	stored, err := os.ReadFile(config.PHPImageHashFile())
-	if err != nil {
-		// No stored hash yet — treat as needing rebuild only if images exist
-		return false
-	}
-	return strings.TrimSpace(string(stored)) != current
+// fpmContainerfileHashLabel is stamped on every PHP-FPM image so
+// NeedsFPMRebuild can detect drift even when the cache file lies (lerd
+// < v1.22.0 advanced the cache without actually rebuilding).
+const fpmContainerfileHashLabel = "dev.lerd.fpm.containerfile-hash"
+
+// Seams for NeedsFPMRebuild so tests can fake the podman shell-outs.
+var (
+	imageLabelFn        = imageLabel
+	containerfileHashFn = ContainerfileHash
+)
+
+// FPMImageName returns the local image tag for a PHP version, e.g.
+// "lerd-php83-fpm:local" for "8.3". Centralised so callers and the
+// rebuild-detection logic agree on the naming convention.
+func FPMImageName(version string) string {
+	return "lerd-php" + strings.ReplaceAll(version, ".", "") + "-fpm:local"
 }
+
+// NeedsFPMRebuild returns true when the embedded Containerfile differs
+// from the cache file OR from any active version's image label (catches
+// the pre-v1.22.0 poisoned-cache state). Scoped to activeVersions so
+// orphaned legacy images for versions the user has since removed don't
+// trigger a perpetual rebuild loop. False on a fresh install.
+func NeedsFPMRebuild(activeVersions []string) bool {
+	current, err := containerfileHashFn()
+	if err != nil {
+		// Hash unreadable means we cannot prove the image is current; force
+		// a rebuild rather than silently treat it as up to date.
+		return true
+	}
+	if stored, err := os.ReadFile(config.PHPImageHashFile()); err == nil {
+		if strings.TrimSpace(string(stored)) != current {
+			return true
+		}
+	}
+	// Cache file says we're up to date; verify against the label on each
+	// active version's image so a poisoned cache from older lerd binaries
+	// still triggers a rebuild, while ignoring orphan legacy images.
+	for _, v := range activeVersions {
+		if imageLabelFn(FPMImageName(v), fpmContainerfileHashLabel) != current {
+			return true
+		}
+	}
+	return false
+}
+
+// imageLabel reads a single label from a local image. Returns "" on any
+// error (image missing, podman unreachable, label absent) so callers
+// treat that as "doesn't match" and fall back to a rebuild.
+func imageLabel(image, key string) string {
+	out, err := exec.Command(PodmanBin(), "inspect",
+		"--format", "{{index .Config.Labels \""+key+"\"}}",
+		image,
+	).Output()
+	if err != nil {
+		return ""
+	}
+	v := strings.TrimSpace(string(out))
+	if v == "<no value>" {
+		return ""
+	}
+	return v
+}
+
+// fpmBuildArgs returns the `podman build` flags shared by both build
+// paths in buildFPMImage, before either appends the `-f <ctx>` tail.
+// Extracted so the load-bearing `--label` arg has unit-test coverage.
+func fpmBuildArgs(imageName, containerfileHash string, force bool) []string {
+	args := []string{
+		"build",
+		"-t", imageName,
+		"--label", fpmContainerfileHashLabel + "=" + containerfileHash,
+	}
+	if force {
+		// Bypass layer cache so changes are fully applied. The old image
+		// stays tagged and the container keeps running until we restart
+		// the unit.
+		args = append(args, "--no-cache")
+	}
+	return args
+}
+
+// fpmHashMu serializes StoreFPMHash so the per-version buildFPMImage calls
+// fired in parallel by php:rebuild can't truncate-and-write each other.
+var fpmHashMu sync.Mutex
 
 // StoreFPMHash writes the current Containerfile hash to disk.
 func StoreFPMHash() error {
@@ -166,6 +237,8 @@ func StoreFPMHash() error {
 	if err != nil {
 		return err
 	}
+	fpmHashMu.Lock()
+	defer fpmHashMu.Unlock()
 	return os.WriteFile(config.PHPImageHashFile(), []byte(hash), 0644)
 }
 
@@ -263,8 +336,7 @@ func tryPullBaseImage(version string, w io.Writer) string {
 }
 
 func buildFPMImage(version string, force, local bool, customExts []string, extDeps map[string][]string, w io.Writer) error {
-	short := strings.ReplaceAll(version, ".", "")
-	imageName := "lerd-php" + short + "-fpm:local"
+	imageName := FPMImageName(version)
 
 	if !force {
 		// Skip if image already exists
@@ -281,8 +353,16 @@ func buildFPMImage(version string, force, local bool, customExts []string, extDe
 	}
 	defer os.RemoveAll(tmp)
 
+	// Stamp the Containerfile hash as an image label so NeedsFPMRebuild
+	// can detect drift even when the on-disk cache file is stale (the
+	// pre-v1.22.0 poisoning bug). Both build paths inherit the same args.
+	canonicalHash, hashErr := ContainerfileHash()
+	if hashErr != nil {
+		return fmt.Errorf("computing Containerfile hash for label: %w", hashErr)
+	}
+
 	var containerfile string
-	buildArgs := []string{"build", "-t", imageName}
+	buildArgs := fpmBuildArgs(imageName, canonicalHash, force)
 
 	// Fast path: pull pre-built base and layer just mkcert CA + custom extensions on top.
 	if !local {
@@ -291,9 +371,6 @@ func buildFPMImage(version string, force, local bool, customExts []string, extDe
 				"RUN mkdir -p /etc/my.cnf.d && printf '[client]\\nssl=0\\n' > /etc/my.cnf.d/lerd-no-ssl.cnf\n" +
 				buildCustomExtBlock(customExts, extDeps) +
 				mkcertCABlock(tmp)
-			if force {
-				buildArgs = append(buildArgs, "--no-cache")
-			}
 			goto build
 		}
 	}
@@ -308,11 +385,6 @@ func buildFPMImage(version string, force, local bool, customExts []string, extDe
 		containerfile = strings.ReplaceAll(containerfile, "{{.CustomExtensions}}", buildCustomExtBlock(customExts, extDeps))
 		containerfile = strings.ReplaceAll(containerfile, "{{.CustomExtensionsRuntime}}", buildCustomExtRuntimeDeps(customExts, extDeps))
 		containerfile = strings.ReplaceAll(containerfile, "{{.MkcertCA}}", mkcertCABlock(tmp))
-		if force {
-			// Bypass layer cache so changes are fully applied. The old image stays
-			// tagged and the container keeps running until we restart the unit.
-			buildArgs = append(buildArgs, "--no-cache")
-		}
 	}
 
 build:
@@ -327,6 +399,13 @@ build:
 	cmd.Stderr = w
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("building PHP %s image: %w", version, err)
+	}
+
+	// Stamp the hash only after a real build — callers that no-op when the
+	// image already exists must not advance the hash, otherwise a later
+	// install would skip rebuilds for a template that never hit disk.
+	if err := StoreFPMHash(); err != nil {
+		fmt.Fprintf(w, "  WARN: storing PHP-FPM image hash: %v\n", err)
 	}
 
 	fmt.Fprintf(w, "  PHP %s image built successfully.\n", version)
@@ -450,8 +529,7 @@ func phpExtensionLoaded(moduleOutput, ext string) bool {
 // it isn't loaded (the PECL build failed and was swallowed by the "|| true" guard
 // in the custom-extension RUN block).
 func VerifyExtensionLoaded(version, ext string) error {
-	short := strings.ReplaceAll(version, ".", "")
-	imageName := "lerd-php" + short + "-fpm:local"
+	imageName := FPMImageName(version)
 	out, err := exec.Command(PodmanBin(), "run", "--rm", imageName, "php", "-m").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("inspecting extensions in %s: %w\n%s", imageName, err, out)
@@ -607,6 +685,9 @@ func WriteFPMQuadlet(version string) error {
 	if err := EnsureDumpAssets(); err != nil {
 		return fmt.Errorf("ensuring dump assets: %w", err)
 	}
+	if err := EnsureProfilerAssets(); err != nil {
+		return fmt.Errorf("ensuring profiler assets: %w", err)
+	}
 
 	if err := ensureFPMHostsFile(); err != nil {
 		return err
@@ -622,6 +703,8 @@ func WriteFPMQuadlet(version string) error {
 	content = strings.ReplaceAll(content, "{{.UserIniPath}}", config.PHPUserIniFile(version))
 	content = strings.ReplaceAll(content, "{{.DumpsDir}}", config.DumpsAssetsDir())
 	content = strings.ReplaceAll(content, "{{.DumpsIniPath}}", config.DumpsIniFile())
+	content = strings.ReplaceAll(content, "{{.SpxIniPath}}", config.SpxIniFile())
+	content = strings.ReplaceAll(content, "{{.SpxDataDir}}", config.SpxDataDir())
 	content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
 	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
 	content = applyShellMounts(content, short)
@@ -684,6 +767,8 @@ func RewriteFPMQuadlets() error {
 		content = strings.ReplaceAll(content, "{{.UserIniPath}}", config.PHPUserIniFile(v))
 		content = strings.ReplaceAll(content, "{{.DumpsDir}}", config.DumpsAssetsDir())
 		content = strings.ReplaceAll(content, "{{.DumpsIniPath}}", config.DumpsIniFile())
+		content = strings.ReplaceAll(content, "{{.SpxIniPath}}", config.SpxIniFile())
+		content = strings.ReplaceAll(content, "{{.SpxDataDir}}", config.SpxDataDir())
 		content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
 		content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
 		content = applyShellMounts(content, short)

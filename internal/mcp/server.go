@@ -18,6 +18,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	lerdNode "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
@@ -232,6 +233,20 @@ func toolList() []mcpTool {
 			},
 		},
 		{
+			Name:        "site_nginx",
+			Description: "Read/write/reset a site's custom nginx override. Saving runs nginx -t, backs up the prior file, and reloads. branch=<name> targets a worktree (new worktrees inherit main's override).",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"action":  {Type: "string", Enum: []string{"read", "write", "reset"}},
+					"site":    {Type: "string", Description: "Site name. Defaults to current."},
+					"branch":  {Type: "string", Description: "Optional worktree branch."},
+					"content": {Type: "string", Description: "write: full file contents."},
+				},
+				Required: []string{"action"},
+			},
+		},
+		{
 			Name:        "composer",
 			Description: "Run composer in the PHP-FPM container.",
 			InputSchema: mcpSchema{
@@ -350,6 +365,21 @@ func toolList() []mcpTool {
 			},
 		},
 		{
+			Name:        "service_config",
+			Description: "Read/write/restore/reset/list_backups a service's runtime tuning override. Built-in mysql/mariadb/redis; custom services opt in via `tuning:` block in YAML.",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"name":        {Type: "string", Description: "Service name."},
+					"action":      {Type: "string", Description: "read|write|restore|reset|list_backups (default read)."},
+					"content":     {Type: "string", Description: "New contents (write only)."},
+					"backup":      {Type: "boolean", Description: "Stage backup before write (write only)."},
+					"backup_name": {Type: "string", Description: "Backup to restore (restore only). Omit for newest."},
+				},
+				Required: []string{"name"},
+			},
+		},
+		{
 			Name:        "service_preset_list",
 			Description: "List bundled service presets (name, description, versions, installed state). Call before service_preset_install.",
 			InputSchema: mcpSchema{
@@ -401,12 +431,12 @@ func toolList() []mcpTool {
 		},
 		{
 			Name:        "db_set",
-			Description: "Pick the project database. Persists to .lerd.yaml, rewrites DB_ keys in .env, starts service, creates DB + _testing. Call before env_setup on fresh clones.",
+			Description: "Pick the project database: sqlite, mysql, postgres, or an installed family alternate (mariadb, postgres-pgvector, …). Persists to .lerd.yaml, rewrites DB_ keys, starts service, creates DB + _testing.",
 			InputSchema: mcpSchema{
 				Type: "object",
 				Properties: map[string]mcpProp{
 					"path":     {Type: "string", Description: "Project root."},
-					"database": {Type: "string", Enum: []string{"sqlite", "mysql", "postgres"}},
+					"database": {Type: "string"},
 				},
 				Required: []string{"database"},
 			},
@@ -517,6 +547,63 @@ func toolList() []mcpTool {
 						Description: "Database name (defaults to DB_DATABASE, then project dir name).",
 					},
 				},
+			},
+		},
+		{
+			Name:        "db_snapshot",
+			Description: "Snapshot the project database (named, restorable). MySQL/MariaDB/PostgreSQL only.",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"path":          {Type: "string", Description: "Project root. Defaults to cwd."},
+					"service":       {Type: "string", Description: "Lerd DB service override (e.g. mysql, postgres)."},
+					"database":      {Type: "string", Description: "Database name. Defaults to DB_DATABASE."},
+					"name":          {Type: "string", Description: "Snapshot name. Auto-timestamped when omitted."},
+					"all_databases": {Type: "boolean", Description: "Snapshot every database in the service."},
+				},
+			},
+		},
+		{
+			Name:        "db_snapshots",
+			Description: "List stored database snapshots.",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"path":     {Type: "string", Description: "Project root. Defaults to cwd."},
+					"service":  {Type: "string", Description: "Lerd DB service override."},
+					"database": {Type: "string", Description: "Database name. Defaults to DB_DATABASE."},
+					"all":      {Type: "boolean", Description: "List across every database on the service."},
+				},
+			},
+		},
+		{
+			Name:        "db_restore",
+			Description: "Restore the project database from a snapshot. Destructive: drops and recreates the database.",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"path":          {Type: "string", Description: "Project root. Defaults to cwd."},
+					"service":       {Type: "string", Description: "Lerd DB service override."},
+					"database":      {Type: "string", Description: "Database name. Defaults to DB_DATABASE."},
+					"name":          {Type: "string", Description: "Snapshot name to restore."},
+					"all_databases": {Type: "boolean", Description: "Restore an all-databases snapshot."},
+				},
+				Required: []string{"name"},
+			},
+		},
+		{
+			Name:        "db_snapshot_delete",
+			Description: "Delete a stored database snapshot.",
+			InputSchema: mcpSchema{
+				Type: "object",
+				Properties: map[string]mcpProp{
+					"path":          {Type: "string", Description: "Project root. Defaults to cwd."},
+					"service":       {Type: "string", Description: "Lerd DB service override."},
+					"database":      {Type: "string", Description: "Database name. Defaults to DB_DATABASE."},
+					"name":          {Type: "string", Description: "Snapshot name to delete."},
+					"all_databases": {Type: "boolean", Description: "Target an all-databases snapshot."},
+				},
+				Required: []string{"name"},
 			},
 		},
 		{
@@ -999,6 +1086,7 @@ func toolList() []mcpTool {
 		dnsDiagnoseTool(),
 	)
 	tools = append(tools, dumpToolDefs()...)
+	tools = append(tools, profilerToolDefs()...)
 
 	return tools
 }
@@ -1037,6 +1125,18 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 	case "sites":
 		return execSites()
 
+	case "site_nginx":
+		switch action {
+		case "read", "":
+			return execSiteNginxRead(args)
+		case "write":
+			return execSiteNginxWrite(args)
+		case "reset":
+			return execSiteNginxReset(args)
+		default:
+			return unknownAction("site_nginx")
+		}
+
 	case "service_control":
 		switch action {
 		case "start":
@@ -1061,6 +1161,28 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 			return execServiceReinstall(args)
 		default:
 			return unknownAction("service_control")
+		}
+
+	case "service_config":
+		// Default to read so the most common operation works without an
+		// explicit action — matches the CLI's `lerd service config --path`
+		// where the bare invocation is also a read.
+		if action == "" {
+			action = "read"
+		}
+		switch action {
+		case "read":
+			return execServiceConfigRead(args)
+		case "write":
+			return execServiceConfigWrite(args)
+		case "list_backups":
+			return execServiceConfigListBackups(args)
+		case "restore":
+			return execServiceConfigRestore(args)
+		case "reset":
+			return execServiceConfigReset(args)
+		default:
+			return unknownAction("service_config")
 		}
 
 	case "queue":
@@ -1276,6 +1398,14 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 		return execDBImport(args)
 	case "db_create":
 		return execDBCreate(args)
+	case "db_snapshot":
+		return execDBSnapshot(args)
+	case "db_snapshots":
+		return execDBSnapshots(args)
+	case "db_restore":
+		return execDBRestore(args)
+	case "db_snapshot_delete":
+		return execDBSnapshotDelete(args)
 	case "php_list":
 		return execPHPList()
 
@@ -1304,6 +1434,13 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 		return execDumpsClear(args)
 	case "dumps_toggle":
 		return execDumpsToggle(args)
+
+	case "profiler_toggle":
+		return execProfilerToggle(args)
+	case "profiler_status":
+		return execProfilerStatus(args)
+	case "profiler_clear":
+		return execProfilerClear(args)
 
 	default:
 		return toolErr("unknown tool: " + p.Name), nil
@@ -1563,6 +1700,73 @@ func execServiceRestart(args map[string]any) (any, *rpcError) {
 		return toolErr("restarting " + name + ": " + err.Error()), nil
 	}
 	return toolOK(name + " restarted"), nil
+}
+
+// resolveNginxDomain turns the site/branch args into the domain whose custom
+// nginx override to operate on. site defaults to the current context;
+// branch resolves to that worktree's subdomain like the daemon does.
+func resolveNginxDomain(args map[string]any) (string, error) {
+	siteName := strArg(args, "site")
+	var site *config.Site
+	var err error
+	if siteName != "" {
+		if site, err = config.FindSite(siteName); err != nil {
+			return "", fmt.Errorf("site not found: %s", siteName)
+		}
+	} else if defaultSitePath != "" {
+		if site, err = config.FindSiteByPath(defaultSitePath); err != nil {
+			return "", fmt.Errorf("no site for the current path; pass site=")
+		}
+	} else {
+		return "", fmt.Errorf("site is required")
+	}
+	return siteops.WorktreeDomain(site, strArg(args, "branch"))
+}
+
+func execSiteNginxRead(args map[string]any) (any, *rpcError) {
+	domain, err := resolveNginxDomain(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	got, err := siteops.ReadCustomNginx(domain)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	state := "saved override"
+	if !got.Exists {
+		state = "no override yet — showing the template"
+	}
+	return toolOK(fmt.Sprintf("# %s (%s)\n%s", domain, state, got.Body)), nil
+}
+
+func execSiteNginxWrite(args map[string]any) (any, *rpcError) {
+	domain, err := resolveNginxDomain(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	res, err := siteops.SaveCustomNginx(domain, strArg(args, "content"), true)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	if !res.OK {
+		msg := res.Error
+		if res.ValidationOutput != "" {
+			msg += "\n" + res.ValidationOutput
+		}
+		return toolErr(msg), nil
+	}
+	return toolOK(fmt.Sprintf("Saved nginx override for %s and reloaded nginx.", domain)), nil
+}
+
+func execSiteNginxReset(args map[string]any) (any, *rpcError) {
+	domain, err := resolveNginxDomain(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	if err := siteops.ResetCustomNginx(domain); err != nil {
+		return toolErr(err.Error()), nil
+	}
+	return toolOK(fmt.Sprintf("Reset %s to the bundled nginx defaults.", domain)), nil
 }
 
 func execQueueStart(args map[string]any) (any, *rpcError) {
@@ -2116,30 +2320,14 @@ func execRuntimeVersions() (any, *rpcError) {
 		defaultPHP = cfg.PHP.DefaultVersion
 	}
 
-	// Node.js versions via fnm
-	fnmPath := filepath.Join(config.BinDir(), "fnm")
-	var nodeVersions []string
+	// Node.js versions via fnm. Goes through the shared internal/node
+	// helper so the MCP and the web UI (/api/node-versions) return the
+	// same shape: major-only deduped majors like "20", "18".
 	defaultNode := ""
 	if cfg != nil {
 		defaultNode = cfg.Node.DefaultVersion
 	}
-	if _, err := os.Stat(fnmPath); err == nil {
-		var out bytes.Buffer
-		cmd := exec.Command(fnmPath, "list")
-		cmd.Stdout = &out
-		cmd.Stderr = &out
-		if cmd.Run() == nil {
-			for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
-				line = strings.TrimSpace(line)
-				// fnm list output: "* v20.11.0 default" or "  v18.20.0"
-				line = strings.TrimPrefix(line, "* ")
-				line = strings.TrimPrefix(line, "  ")
-				if line != "" {
-					nodeVersions = append(nodeVersions, line)
-				}
-			}
-		}
-	}
+	nodeVersions := lerdNode.ListInstalled()
 
 	type runtimeEntry struct {
 		Installed      []string `json:"installed"`
@@ -2447,6 +2635,15 @@ func execCheck(args map[string]any) (any, *rpcError) {
 		add("node_version", "ok", cfg.NodeVersion)
 	}
 
+	// Request timeout
+	if cfg.RequestTimeout != 0 {
+		if cfg.RequestTimeout < 0 {
+			add("request_timeout", "fail", fmt.Sprintf("%d — must be a positive number of seconds", cfg.RequestTimeout))
+		} else {
+			add("request_timeout", "ok", fmt.Sprintf("%ds", cfg.RequestTimeout))
+		}
+	}
+
 	// Framework
 	if cfg.Framework != "" {
 		if cfg.FrameworkDef != nil {
@@ -2541,7 +2738,7 @@ func execCheck(args map[string]any) (any, *rpcError) {
 		if svc.Preset != "" {
 			if _, err := config.LoadPreset(svc.Preset); err != nil {
 				add("service_"+svc.Name, "fail", fmt.Sprintf("unknown preset %q", svc.Preset))
-			} else if _, err := config.LoadCustomService(svc.Name); err != nil {
+			} else if !serviceops.ServiceInstalled(svc.Name) {
 				add("service_"+svc.Name, "warn", fmt.Sprintf("preset %q not installed — run: lerd service preset install %s", svc.Preset, svc.Preset))
 			} else {
 				add("service_"+svc.Name, "ok", "preset: "+svc.Preset)
@@ -2552,10 +2749,10 @@ func execCheck(args map[string]any) (any, *rpcError) {
 			add("service_"+svc.Name, "ok", "")
 			continue
 		}
-		if _, err := config.LoadCustomService(svc.Name); err == nil {
+		if serviceops.ServiceInstalled(svc.Name) {
 			add("service_"+svc.Name, "ok", "custom")
 		} else {
-			add("service_"+svc.Name, "fail", "not a built-in and no definition found")
+			add("service_"+svc.Name, "fail", fmt.Sprintf("not installed — run `lerd service preset install %s` (if it's a bundled preset) or `lerd service add --name %s ...`", svc.Name, svc.Name))
 		}
 	}
 
@@ -2600,7 +2797,7 @@ func execCheck(args map[string]any) (any, *rpcError) {
 	if cfg.DB.Service != "" {
 		if isKnownService(cfg.DB.Service) {
 			add("db.service", "ok", cfg.DB.Service)
-		} else if _, err := config.LoadCustomService(cfg.DB.Service); err == nil {
+		} else if serviceops.ServiceInstalled(cfg.DB.Service) {
 			add("db.service", "ok", cfg.DB.Service+" (custom)")
 		} else {
 			add("db.service", "fail", cfg.DB.Service+" is not a known service")
@@ -2660,7 +2857,7 @@ func execServiceAdd(args map[string]any) (any, *rpcError) {
 	if isKnownService(name) {
 		return toolErr(name + " is a built-in service and cannot be redefined"), nil
 	}
-	if _, err := config.LoadCustomService(name); err == nil {
+	if serviceops.ServiceInstalled(name) {
 		return toolErr("custom service " + name + " already exists; remove it first with service_remove"), nil
 	}
 
@@ -2727,6 +2924,154 @@ func execServiceReinstall(args map[string]any) (any, *rpcError) {
 	return toolOK(fmt.Sprintf("Service %q reinstalled (data preserved).", name)), nil
 }
 
+// resolveTunableService returns the resolved service definition + the
+// in-container mount target, or a typed MCP error mapping the sentinel
+// errors from serviceops. Used as the shared preamble of every
+// service_config action so install / family checks stay in sync with
+// the HTTP handlers.
+func resolveTunableService(name string) (*config.CustomService, string, map[string]any) {
+	if name == "" {
+		return nil, "", toolErr("name is required")
+	}
+	if !serviceops.ServiceInstalled(name) {
+		return nil, "", toolErr(fmt.Sprintf("service %q is not installed; run `lerd service preset install %s` first", name, name))
+	}
+	svc, err := config.ResolveServiceForTuning(name)
+	if err != nil {
+		return nil, "", toolErr(fmt.Sprintf("service %q: %v", name, err))
+	}
+	target, ok := config.ServiceTuningMount(svc)
+	if !ok {
+		return nil, "", toolErr(fmt.Sprintf("service %q does not support tuning (family %q). Built-in tunable families: %s. Custom services can opt in via a `tuning:` block in the service YAML.", name, config.FamilyOf(svc), strings.Join(config.TuningFamilies(), ", ")))
+	}
+	return svc, target, nil
+}
+
+func execServiceConfigRead(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	svc, target, errResp := resolveTunableService(name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	if err := config.MaterializeServiceTuning(svc); err != nil {
+		return toolErr("creating tuning file: " + err.Error()), nil
+	}
+	body, err := os.ReadFile(config.ServiceTuningFile(name))
+	exists := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return toolErr("reading tuning file: " + err.Error()), nil
+	}
+	backups, _ := serviceops.ListTuningBackups(name)
+	backupNames := make([]string, 0, len(backups))
+	for _, b := range backups {
+		backupNames = append(backupNames, b.Name)
+	}
+	payload, _ := json.MarshalIndent(map[string]any{
+		"name":    name,
+		"target":  target,
+		"path":    config.ServiceTuningFile(name),
+		"exists":  exists,
+		"content": string(body),
+		"backups": backupNames,
+	}, "", "  ")
+	return toolOK(string(payload)), nil
+}
+
+func execServiceConfigWrite(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	content := strArg(args, "content")
+	backup := boolArg(args, "backup")
+	if _, _, errResp := resolveTunableService(name); errResp != nil {
+		return errResp, nil
+	}
+	res, err := serviceops.SaveTuningOverride(name, content, backup)
+	if err != nil {
+		// The save may have auto-rolled back; surface that distinctly so
+		// callers know the running service is back on its prior bytes
+		// rather than wedged on the broken save.
+		msg := err.Error()
+		if res.RolledBack {
+			msg = "save reverted (prior config restored): " + msg
+		}
+		return toolErr(msg), nil
+	}
+	out := fmt.Sprintf("Saved tuning override for %q. ", name)
+	if res.BackupName != "" {
+		out += "Backup staged as " + res.BackupName + ". "
+	}
+	out += "Service restarted and ready."
+	return toolOK(out), nil
+}
+
+func execServiceConfigListBackups(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	if _, _, errResp := resolveTunableService(name); errResp != nil {
+		return errResp, nil
+	}
+	backups, err := serviceops.ListTuningBackups(name)
+	if err != nil {
+		return toolErr("listing backups: " + err.Error()), nil
+	}
+	if backups == nil {
+		backups = []serviceops.TuningBackup{}
+	}
+	payload, _ := json.MarshalIndent(map[string]any{
+		"name":    name,
+		"backups": backups,
+	}, "", "  ")
+	return toolOK(string(payload)), nil
+}
+
+func execServiceConfigRestore(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	backupName := strArg(args, "backup_name")
+	if _, _, errResp := resolveTunableService(name); errResp != nil {
+		return errResp, nil
+	}
+	// Resolve "newest" server-side so callers that omit backup_name still
+	// hit the same code path as the HTTP handler, and the response can
+	// report exactly which backup was consumed.
+	if backupName == "" {
+		list, err := serviceops.ListTuningBackups(name)
+		if err != nil {
+			return toolErr("listing backups: " + err.Error()), nil
+		}
+		if len(list) == 0 {
+			return toolErr("no backup available for " + name), nil
+		}
+		backupName = list[0].Name
+	}
+	res, err := serviceops.RestoreTuningFromBackup(name, backupName)
+	if err != nil {
+		msg := err.Error()
+		if res.RolledBack {
+			msg = "restore reverted (prior config restored): " + msg
+		}
+		return toolErr(msg), nil
+	}
+	return toolOK(fmt.Sprintf("Restored %q from %s. Service restarted and ready.", name, backupName)), nil
+}
+
+func execServiceConfigReset(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	if _, _, errResp := resolveTunableService(name); errResp != nil {
+		return errResp, nil
+	}
+	res, err := serviceops.ResetTuningOverride(name)
+	if err != nil {
+		msg := err.Error()
+		if res.RolledBack {
+			msg = "reset reverted (prior config restored): " + msg
+		}
+		return toolErr(msg), nil
+	}
+	out := fmt.Sprintf("Reset %q to the bundled template; service restarted.", name)
+	if res.AutoBackupName != "" {
+		out += " Prior config staged as " + res.AutoBackupName + " (use action=restore to recover)."
+	}
+	return toolOK(out), nil
+}
+
 func execServicePresetList(_ map[string]any) (any, *rpcError) {
 	presets, err := config.ListPresets()
 	if err != nil {
@@ -2759,19 +3104,17 @@ func execServicePresetList(_ map[string]any) (any, *rpcError) {
 			DefaultVersion: p.DefaultVersion,
 		}
 		if len(p.Versions) == 0 {
-			if _, err := config.LoadCustomService(p.Name); err == nil {
+			if serviceops.ServiceInstalled(p.Name) {
 				e.Installed = true
 			}
 		} else {
 			anyInstalled := false
 			for _, v := range p.Versions {
-				name := p.Name + "-" + config.SanitizeImageTag(v.Tag)
-				_, loadErr := config.LoadCustomService(name)
 				vi := versionEntry{
 					Tag:       v.Tag,
 					Label:     v.Label,
 					Image:     v.Image,
-					Installed: loadErr == nil,
+					Installed: serviceops.ServiceInstalled(config.PresetVersionServiceName(p.Name, v)),
 				}
 				if vi.Installed {
 					anyInstalled = true
@@ -2889,9 +3232,9 @@ func execServiceMigrate(args map[string]any) (any, *rpcError) {
 	if err != nil || avail.CurrentImage == "" {
 		return toolErr("could not resolve current image for " + name), nil
 	}
-	target := avail.CurrentImage
-	if at := strings.LastIndex(target, ":"); at > 0 {
-		target = target[:at] + ":" + tag
+	target, err := serviceops.ResolveMigrateTarget(name, avail.CurrentImage, tag)
+	if err != nil {
+		return toolErr(err.Error()), nil
 	}
 	var lastImage string
 	emit := func(ev serviceops.PhaseEvent) {
@@ -3044,20 +3387,18 @@ func execDbSet(args map[string]any) (any, *rpcError) {
 		return toolErr("path is required — pass a path argument or open Claude in the project directory"), nil
 	}
 	choice := strings.ToLower(strings.TrimSpace(strArg(args, "database")))
-	switch choice {
-	case "sqlite", "mysql", "postgres":
-	case "":
-		return toolErr("database is required — must be one of: sqlite, mysql, postgres"), nil
-	default:
-		return toolErr(fmt.Sprintf("invalid database %q — must be one of: sqlite, mysql, postgres", choice)), nil
+	if choice == "" {
+		return toolErr("database is required — pass sqlite, a built-in (mysql/postgres), or an installed family alternate (e.g. mariadb, postgres-pgvector, mysql-5-7)"), nil
+	}
+	if !config.IsDBServiceName(choice) {
+		return toolErr(fmt.Sprintf("invalid database %q — must be sqlite or a service in the mysql/mariadb/postgres/mongo families (install the preset with `lerd service preset %s` first if needed)", choice, choice)), nil
 	}
 
 	// Check existing DB for the summary message.
 	previous := ""
 	if proj, _ := config.LoadProjectConfig(projectPath); proj != nil {
-		dbNames := map[string]bool{"sqlite": true, "mysql": true, "postgres": true}
 		for _, svc := range proj.Services {
-			if dbNames[svc.Name] {
+			if config.IsDBServiceName(svc.Name) {
 				previous = svc.Name
 				break
 			}
@@ -5002,6 +5343,120 @@ func execDBImport(args map[string]any) (any, *rpcError) {
 		return toolErr(fmt.Sprintf("import failed (%v):\n%s", err, stripANSI(stderr.String()))), nil
 	}
 	return toolOK(fmt.Sprintf("Imported %s into %s (%s)", file, env.database, env.connection)), nil
+}
+
+// mcpSnapshotTarget resolves a snapshot target from MCP args. It honours an
+// explicit service override, then the project's .lerd.yaml db block (what
+// db_set persists), then falls back to .env — the same priority the CLI uses.
+func mcpSnapshotTarget(args map[string]any) (serviceops.SnapshotTarget, error) {
+	all := boolArg(args, "all_databases")
+	dbOverride := strArg(args, "database")
+	build := func(service, database string) serviceops.SnapshotTarget {
+		family := config.FamilyOfName(service)
+		if family == "" {
+			family = service
+		}
+		if dbOverride != "" {
+			database = dbOverride
+		}
+		return serviceops.SnapshotTarget{Service: service, Family: family, Database: database, AllDatabases: all}
+	}
+
+	if svc := strArg(args, "service"); svc != "" {
+		return build(svc, ""), nil
+	}
+	projectPath := resolvedPath(args)
+	if projectPath == "" {
+		return serviceops.SnapshotTarget{}, fmt.Errorf("pass a path argument (project root) or a service argument")
+	}
+	if pc, err := config.LoadProjectConfig(projectPath); err == nil && pc.DB.Service != "" {
+		return build(pc.DB.Service, pc.DB.Database), nil
+	}
+	env, err := readDBEnvLenient(projectPath)
+	if err != nil || env == nil {
+		return serviceops.SnapshotTarget{}, fmt.Errorf("no .lerd.yaml db block or .env found in %s — pass a service argument", projectPath)
+	}
+	service := "mysql"
+	switch strings.ToLower(env.connection) {
+	case "pgsql", "postgres", "postgresql":
+		service = "postgres"
+	}
+	return build(service, env.database), nil
+}
+
+func execDBSnapshot(args map[string]any) (any, *rpcError) {
+	target, err := mcpSnapshotTarget(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	if !serviceops.SnapshotFamilySupported(target.Family) {
+		return toolErr("snapshots support only MySQL, MariaDB and PostgreSQL"), nil
+	}
+	if !target.AllDatabases && target.Database == "" {
+		return toolErr("database is required — pass database, or all_databases:true"), nil
+	}
+	snap, err := serviceops.CreateSnapshot(target, strArg(args, "name"), serviceops.SnapshotMeta{}, nil)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	scope := snap.Database
+	if snap.AllDatabases {
+		scope = "all databases"
+	}
+	return toolOK(fmt.Sprintf("Created snapshot %q for %s (%d bytes) on %s", snap.Name, scope, snap.SizeBytes, snap.Service)), nil
+}
+
+func execDBSnapshots(args map[string]any) (any, *rpcError) {
+	target, err := mcpSnapshotTarget(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	database := target.Database
+	if boolArg(args, "all") {
+		database = ""
+	}
+	snaps, err := serviceops.ListSnapshots(target.Service, database, true)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	data, _ := json.MarshalIndent(snaps, "", "  ")
+	return toolOK(string(data)), nil
+}
+
+func execDBRestore(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	if name == "" {
+		return toolErr("name is required"), nil
+	}
+	target, err := mcpSnapshotTarget(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	if !serviceops.SnapshotFamilySupported(target.Family) {
+		return toolErr("snapshots support only MySQL, MariaDB and PostgreSQL"), nil
+	}
+	if !target.AllDatabases && target.Database == "" {
+		return toolErr("database is required — pass database, or all_databases:true"), nil
+	}
+	if err := serviceops.RestoreSnapshot(target, name, nil); err != nil {
+		return toolErr(err.Error()), nil
+	}
+	return toolOK(fmt.Sprintf("Restored snapshot %q", name)), nil
+}
+
+func execDBSnapshotDelete(args map[string]any) (any, *rpcError) {
+	name := strArg(args, "name")
+	if name == "" {
+		return toolErr("name is required"), nil
+	}
+	target, err := mcpSnapshotTarget(args)
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	if err := serviceops.DeleteSnapshot(target.Service, target.Database, name, target.AllDatabases); err != nil {
+		return toolErr(err.Error()), nil
+	}
+	return toolOK(fmt.Sprintf("Deleted snapshot %q", name)), nil
 }
 
 func execDBCreate(args map[string]any) (any, *rpcError) {

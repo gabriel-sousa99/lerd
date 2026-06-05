@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,6 +38,7 @@ type Snapshot struct {
 	Running              bool
 	NginxRunning         bool
 	DNSOK                bool
+	DNSDegraded          bool // lerd-dns healthy but the system resolver is bypassed, typically a VPN
 	DNSDisabled          bool // explicit dns.enabled=false from API; zero value falls through to ok/error
 	PHPVersions          []phpInfo
 	PHPDefault           string
@@ -64,6 +67,48 @@ type serviceInfo struct {
 }
 
 const daemonEnv = "LERD_TRAY_DAEMON"
+
+// lerdBin resolves the absolute path to the `lerd` binary. The tray often
+// runs under launchd, whose environment has no PATH covering Homebrew or
+// ~/.local/bin, so a bare `exec.Command("lerd", …)` silently fails.
+// Resolved on every call so reinstalls don't strand on a cached path.
+func lerdBin() string {
+	if p, err := lerdBinLookPath("lerd"); err == nil {
+		return p
+	}
+	for _, c := range lerdBinCandidates() {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	lerdBinFallbackWarn.Do(func() {
+		fmt.Fprintln(lerdBinWarnW, "lerd-tray: could not locate the lerd binary on PATH or in known install dirs; menu actions will fail with 'executable file not found'")
+	})
+	return "lerd"
+}
+
+func defaultLerdBinCandidates() []string {
+	cands := []string{"/opt/homebrew/bin/lerd", "/usr/local/bin/lerd"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		cands = append(cands, filepath.Join(home, ".local", "bin", "lerd"))
+	}
+	return cands
+}
+
+// Seams for tests so the fallback path can be exercised without depending
+// on what happens to be installed on the host running the tests.
+var (
+	lerdBinCandidates             = defaultLerdBinCandidates
+	lerdBinLookPath               = exec.LookPath
+	lerdBinWarnW        io.Writer = os.Stderr
+	lerdBinFallbackWarn sync.Once
+)
+
+// lerdCmd is a thin wrapper around exec.Command that uses the resolved
+// `lerd` binary path so handlers work under launchd's empty PATH.
+func lerdCmd(args ...string) *exec.Cmd {
+	return exec.Command(lerdBin(), args...)
+}
 
 // Run starts the system tray applet.
 // Unless already running as a daemon (or under launchd), it re-execs itself
@@ -235,8 +280,9 @@ func fetchSnapshot() *Snapshot {
 			Running bool `json:"running"`
 		} `json:"nginx"`
 		DNS struct {
-			OK      bool `json:"ok"`
-			Enabled bool `json:"enabled"`
+			OK      bool   `json:"ok"`
+			Status  string `json:"status"`
+			Enabled bool   `json:"enabled"`
 		} `json:"dns"`
 		PHPFPMs []struct {
 			Version string `json:"version"`
@@ -249,6 +295,7 @@ func fetchSnapshot() *Snapshot {
 			snap.Running = sr.Nginx.Running
 			snap.NginxRunning = sr.Nginx.Running
 			snap.DNSOK = sr.DNS.OK
+			snap.DNSDegraded = sr.DNS.Status == "degraded"
 			snap.DNSDisabled = !sr.DNS.Enabled
 			snap.PHPDefault = sr.PHPDefault
 			for _, p := range sr.PHPFPMs {
@@ -338,7 +385,7 @@ func handleToggle(item *systray.MenuItem, refresh func()) {
 			} else {
 				arg = "start"
 			}
-			runAndRefresh(exec.Command("lerd", arg), refresh)
+			runAndRefresh(lerdCmd(arg), refresh)
 		}()
 	}
 }
@@ -358,7 +405,7 @@ func handleServices(menu *menuState, refresh func()) {
 				if status == "active" {
 					arg = "stop"
 				}
-				runAndRefresh(exec.Command("lerd", "service", arg, name), refresh)
+				runAndRefresh(lerdCmd("service", arg, name), refresh)
 			}
 		}(i)
 	}
@@ -374,7 +421,7 @@ func handlePHP(menu *menuState, refresh func()) {
 				if version == "" {
 					continue
 				}
-				runAndRefresh(exec.Command("lerd", "use", version), refresh)
+				runAndRefresh(lerdCmd("use", version), refresh)
 			}
 		}(i)
 	}
@@ -386,7 +433,7 @@ func handleAutostart(item *systray.MenuItem, refresh func()) {
 		if lerdSystemd.IsAutostartEnabled() {
 			arg = "disable"
 		}
-		runAndRefresh(exec.Command("lerd", "autostart", arg), refresh)
+		runAndRefresh(lerdCmd("autostart", arg), refresh)
 	}
 }
 
@@ -403,7 +450,7 @@ func handleLAN(item *systray.MenuItem, refresh func()) {
 		if exposed {
 			arg = "unexpose"
 		}
-		runAndRefresh(exec.Command("lerd", "lan", arg), refresh)
+		runAndRefresh(lerdCmd("lan", arg), refresh)
 	}
 }
 
@@ -413,7 +460,7 @@ func handleDumps(item *systray.MenuItem, refresh func()) {
 		if cfg, err := config.LoadGlobal(); err == nil && cfg != nil {
 			enabled = cfg.IsDumpsEnabled()
 		}
-		runAndRefresh(exec.Command("lerd", "dump", offOn(enabled)), refresh)
+		runAndRefresh(lerdCmd("dump", offOn(enabled)), refresh)
 	}
 }
 
@@ -423,7 +470,7 @@ func handleNotifications(item *systray.MenuItem, refresh func()) {
 		if cfg, err := config.LoadGlobal(); err == nil && cfg != nil {
 			enabled = cfg.IsNotificationsEnabled()
 		}
-		runAndRefresh(exec.Command("lerd", "notify", offOn(enabled)), refresh)
+		runAndRefresh(lerdCmd("notify", offOn(enabled)), refresh)
 	}
 }
 
@@ -485,7 +532,7 @@ func openUpdateTerminal(latestVer string) {
 func handleQuit(item *systray.MenuItem, cancel context.CancelFunc) {
 	<-item.ClickedCh
 	cancel()
-	_ = exec.Command("lerd", "quit").Run()
+	_ = lerdCmd("quit").Run()
 	systray.Quit()
 }
 

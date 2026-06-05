@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
 )
 
 func isolateConfig(t *testing.T) {
@@ -142,9 +145,122 @@ func TestCleanupWorktreeVhosts_doesNotTouchSurvivorEnv(t *testing.T) {
 	}
 }
 
+// A removed worktree must lose its custom nginx override and backups, while a
+// surviving worktree keeps its own.
+func TestCleanupWorktreeVhosts_prunesRemovedWorktreeOverride(t *testing.T) {
+	isolateConfig(t)
+
+	mainSite := filepath.Join(t.TempDir(), "myapp")
+	survivor := filepath.Join(t.TempDir(), "myapp-feat")
+	for _, d := range []string{filepath.Join(mainSite, ".git", "worktrees", "feat"), survivor} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wtMeta := filepath.Join(mainSite, ".git", "worktrees", "feat")
+	if err := os.WriteFile(filepath.Join(wtMeta, "HEAD"), []byte("ref: refs/heads/feat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtMeta, "gitdir"), []byte(filepath.Join(survivor, ".git")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both worktree vhosts exist in conf.d, but only "feat" still has a
+	// worktree on disk; "gone" was removed.
+	confD := config.NginxConfD()
+	if err := os.MkdirAll(confD, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"feat.myapp.test", "gone.myapp.test"} {
+		if err := os.WriteFile(filepath.Join(confD, d+".conf"), []byte("server {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	customD := config.NginxCustomD()
+	bkpD := config.NginxCustomDBkp()
+	for _, d := range []string{customD, bkpD} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	survivorOverride := filepath.Join(customD, "feat.myapp.test.conf")
+	goneOverride := filepath.Join(customD, "gone.myapp.test.conf")
+	goneBackup := filepath.Join(bkpD, "gone.myapp.test.conf.bkp.20260101-101010")
+	for _, p := range []string{survivorOverride, goneOverride, goneBackup} {
+		if err := os.WriteFile(p, []byte("# x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	site := &config.Site{Name: "myapp", Domains: []string{"myapp.test"}, Path: mainSite, PHPVersion: "8.3"}
+	cleanupWorktreeVhosts(site)
+
+	if _, err := os.Stat(goneOverride); !os.IsNotExist(err) {
+		t.Error("removed worktree's override should be pruned")
+	}
+	if _, err := os.Stat(goneBackup); !os.IsNotExist(err) {
+		t.Error("removed worktree's backup should be pruned")
+	}
+	if _, err := os.Stat(survivorOverride); err != nil {
+		t.Errorf("surviving worktree's override must be kept: %v", err)
+	}
+}
+
 // HEAD writes (commit, checkout, rebase, rename) fire "changed" via
 // fsnotify. Resurrecting host workers on every HEAD write resurrected
 // user stops on every commit — issue #375 (Bruno's Vite).
+// cleanupWorktreeVhosts must not delete the custom override of a separately
+// registered site whose primary is a subdomain of the cleaned site.
+func TestCleanupWorktreeVhosts_keepsSiblingSubdomainSiteOverride(t *testing.T) {
+	isolateConfig(t)
+
+	mainSite := filepath.Join(t.TempDir(), "app")
+	if err := os.MkdirAll(filepath.Join(mainSite, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.AddSite(config.Site{Name: "app", Domains: []string{"app.test"}, Path: mainSite, PHPVersion: "8.3"}); err != nil {
+		t.Fatal(err)
+	}
+	// A real second site whose primary is admin.app.test.
+	if err := config.AddSite(config.Site{Name: "admin", Domains: []string{"admin.app.test"}, Path: t.TempDir(), PHPVersion: "8.3"}); err != nil {
+		t.Fatal(err)
+	}
+
+	confD := config.NginxConfD()
+	customD := config.NginxCustomD()
+	for _, d := range []string{confD, customD} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// admin.app.test has a vhost (matches app's suffix scan) and an override.
+	if err := os.WriteFile(filepath.Join(confD, "admin.app.test.conf"), []byte("server {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	siblingOverride := filepath.Join(customD, "admin.app.test.conf")
+	if err := os.WriteFile(siblingOverride, []byte("# sibling\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupWorktreeVhosts(&config.Site{Name: "app", Domains: []string{"app.test"}, Path: mainSite, PHPVersion: "8.3"})
+
+	if _, err := os.Stat(siblingOverride); err != nil {
+		t.Errorf("sibling site's override must survive cleanup of app: %v", err)
+	}
+}
+
+// Inheritance of the main override must fire only on genuine creation; on a
+// "changed" event (commit/checkout) re-seeding would resurrect an override the
+// user deliberately reset.
+func TestShouldInheritNginxOnSync(t *testing.T) {
+	cases := map[string]bool{"added": true, "changed": false, "": false, "removed": false}
+	for action, want := range cases {
+		if got := shouldInheritNginxOnSync(action); got != want {
+			t.Errorf("shouldInheritNginxOnSync(%q) = %v, want %v", action, got, want)
+		}
+	}
+}
+
 func TestShouldAutoStartWorkersOnSync(t *testing.T) {
 	cases := map[string]bool{
 		"added":   true,
@@ -156,5 +272,77 @@ func TestShouldAutoStartWorkersOnSync(t *testing.T) {
 		if got := shouldAutoStartWorkersOnSync(action); got != want {
 			t.Errorf("shouldAutoStartWorkersOnSync(%q) = %v, want %v", action, got, want)
 		}
+	}
+}
+
+func TestPrintDNSDiagnostic_WarnStepShowsHint(t *testing.T) {
+	// Regression for the field-report scenario: the legacy-host-resolver
+	// path emits a WARN step whose Hint explains how to switch back to
+	// lerd-managed DNS. The renderer used to print hints only on FAIL
+	// steps, silently swallowing this guidance.
+	diag := dns.Diagnostic{
+		TLD:          "test",
+		FirstFailure: -1,
+		Steps: []dns.Step{{
+			Name:   "lerd-dns container",
+			Status: dns.StepWarn,
+			Detail: "not running; a host-side resolver on :5300 is answering .test with 127.0.0.1",
+			Hint:   "lerd is not managing DNS here. Stop your host resolver and run `lerd start` to switch.",
+		}},
+	}
+	var buf bytes.Buffer
+	printDNSDiagnostic(&buf, diag)
+	out := buf.String()
+
+	for _, want := range []string{
+		"DNS is working",
+		"! lerd-dns container",
+		"host-side resolver on :5300",
+		"hint:",
+		"Stop your host resolver",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintDNSDiagnostic_FailStepShowsHint(t *testing.T) {
+	diag := dns.Diagnostic{
+		TLD:          "test",
+		FirstFailure: 0,
+		Steps: []dns.Step{{
+			Name:   "lerd-dns container",
+			Status: dns.StepFail,
+			Detail: "not running",
+			Hint:   "lerd start  (or check podman logs lerd-dns)",
+		}},
+	}
+	var buf bytes.Buffer
+	printDNSDiagnostic(&buf, diag)
+	out := buf.String()
+	for _, want := range []string{"DNS is NOT working", "✗ lerd-dns container", "hint: lerd start"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintDNSDiagnostic_OKStepHasNoHintLine(t *testing.T) {
+	diag := dns.Diagnostic{
+		TLD:          "test",
+		FirstFailure: -1,
+		Steps: []dns.Step{{
+			Name:   "lerd-dns container",
+			Status: dns.StepOK,
+			Detail: "running",
+			Hint:   "this hint should be ignored on OK steps",
+		}},
+	}
+	var buf bytes.Buffer
+	printDNSDiagnostic(&buf, diag)
+	out := buf.String()
+	if strings.Contains(out, "hint:") {
+		t.Errorf("OK step should not print a hint line, got:\n%s", out)
 	}
 }

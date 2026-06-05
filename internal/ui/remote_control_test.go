@@ -240,9 +240,16 @@ func TestIsLoopbackOnlyPath(t *testing.T) {
 		{"/api/browse", true},
 		{"/api/sites/myapp.test/terminal", true},
 		{"/api/sites/foo.bar.test/terminal", true},
+		{"/api/sites/myapp.test/env", true},
+		{"/api/sites/myapp.test/env/files", true},
+		{"/api/sites/myapp.test/env/backups", true},
+		{"/api/sites/myapp.test/env/backups/.env.bkp.20260528-103045", true},
+		{"/api/sites/myapp.test/env/restore", true},
+		{"/api/sites/myapp.test/terminal/anything", true},
 		{"/api/sites", false},
 		{"/api/sites/myapp.test", false},
 		{"/api/sites/myapp.test/secure", false},
+		{"/api/sites/myapp.test/envoy", false},
 		{"/api/lerd/start", false},
 		{"/api/version", false},
 		{"/", false},
@@ -275,6 +282,7 @@ func TestRemoteControlGate_loopbackOnlyRoutesBlockedFromLAN(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, path, nil)
 			req.RemoteAddr = "192.168.1.42:54321"
 			req.SetBasicAuth("alice", "s3cret") // valid creds present
+			req.Header.Set("X-Lerd-CSRF", "1")  // clear the CSRF gate so we exercise the loopback-only check
 			rec := httptest.NewRecorder()
 			gate.ServeHTTP(rec, req)
 			if rec.Code != http.StatusForbidden {
@@ -295,11 +303,7 @@ func TestRemoteControlGate_loopbackOnlyRoutesAllowedFromLoopback(t *testing.T) {
 			next.called = false
 			req := httptest.NewRequest(http.MethodPost, path, nil)
 			req.RemoteAddr = "127.0.0.1:54321"
-			// CSRF gate now blocks unauthenticated cross-origin POSTs
-			// from loopback; the legitimate CLI caller sets X-Lerd-CSRF
-			// and the dashboard JS sets Sec-Fetch-Site: same-origin. Pick
-			// the header path here.
-			req.Header.Set("X-Lerd-CSRF", "1")
+			req.Header.Set("X-Lerd-CSRF", "1") // the real dashboard always sends this
 			rec := httptest.NewRecorder()
 			gate.ServeHTTP(rec, req)
 			if !next.called {
@@ -454,225 +458,148 @@ func TestFromHost_acceptsZonedIPv6Source(t *testing.T) {
 	}
 }
 
-// TestRemoteControlGate_csrfBlocksCrossSitePost is the regression test
-// for the CSRF→RCE primitive that let any browser-visited page POST to
-// loopback endpoints like /api/sites/{d}/tinker (arbitrary PHP exec) by
-// sending a no-cors simple-form request. The gate must reject any
-// mutating method whose Sec-Fetch-Site says it came from a different
-// origin, even when the source IP is loopback.
-func TestRemoteControlGate_csrfBlocksCrossSitePost(t *testing.T) {
-	setupConfigDirRaw(t, "", "", false)
+// TestRemoteControlGate_csrf covers the cross-origin gate that guards every
+// state-changing request, loopback included. The RCE vector is a malicious
+// page in the developer's own browser POSTing to 127.0.0.1:7073, so a
+// loopback source IP is no longer a free pass for unsafe methods: the request
+// must also prove it came from lerd's own dashboard.
+func TestRemoteControlGate_csrf(t *testing.T) {
+	const tinker = "/api/sites/myapp.test/tinker"
 
-	for _, site := range []string{"cross-site", "same-site"} {
-		t.Run(site, func(t *testing.T) {
-			next := &nextHandler{}
-			gate := withRemoteControlGate(next)
-
-			req := httptest.NewRequest(http.MethodPost, "/api/sites/my-app.test/tinker", nil)
-			req.RemoteAddr = "127.0.0.1:54321"
-			req.Header.Set("Sec-Fetch-Site", site)
-			rec := httptest.NewRecorder()
-			gate.ServeHTTP(rec, req)
-
-			if next.called {
-				t.Errorf("Sec-Fetch-Site=%s reached handler — CSRF check failed open", site)
-			}
-			if rec.Code != http.StatusForbidden {
-				t.Errorf("status = %d, want 403", rec.Code)
-			}
-		})
-	}
-}
-
-// The dashboard at http://lerd.localhost POSTs to http://localhost:7073;
-// browsers label that "cross-site" even though both ends are local. Such
-// POSTs only reach the backend after a successful CORS preflight, and
-// the preflight only succeeds when the origin is in allowedCORSOrigins.
-// Presence of the X-Lerd-CSRF header therefore proves the request came
-// from a trusted origin, regardless of Sec-Fetch-Site.
-func TestRemoteControlGate_csrfAllowsCrossSiteWithHeader(t *testing.T) {
-	setupConfigDirRaw(t, "", "", false)
-
-	for _, site := range []string{"cross-site", "same-site"} {
-		t.Run(site, func(t *testing.T) {
-			next := &nextHandler{}
-			gate := withRemoteControlGate(next)
-
-			req := httptest.NewRequest(http.MethodPost, "/api/sites/my-app.test/tinker", nil)
-			req.RemoteAddr = "127.0.0.1:54321"
-			req.Header.Set("Sec-Fetch-Site", site)
-			req.Header.Set("X-Lerd-CSRF", "1")
-			rec := httptest.NewRecorder()
-			gate.ServeHTTP(rec, req)
-
-			if !next.called {
-				t.Errorf("Sec-Fetch-Site=%s + X-Lerd-CSRF blocked — dashboard cross-origin POST rejected", site)
-			}
-		})
-	}
-}
-
-// Sec-Fetch-Site: same-origin / none are the legitimate values the
-// dashboard's own JS and the user's direct URL bar visits send. They
-// must pass even on POST.
-func TestRemoteControlGate_csrfAllowsSameOriginPost(t *testing.T) {
-	setupConfigDirRaw(t, "", "", false)
-
-	for _, site := range []string{"same-origin", "none"} {
-		t.Run(site, func(t *testing.T) {
-			next := &nextHandler{}
-			gate := withRemoteControlGate(next)
-
-			req := httptest.NewRequest(http.MethodPost, "/api/sites/my-app.test/tinker", nil)
-			req.RemoteAddr = "127.0.0.1:54321"
-			req.Header.Set("Sec-Fetch-Site", site)
-			rec := httptest.NewRecorder()
-			gate.ServeHTTP(rec, req)
-
-			if !next.called {
-				t.Errorf("Sec-Fetch-Site=%s blocked — legitimate same-origin call rejected", site)
-			}
-		})
-	}
-}
-
-// Curl and older browsers without Sec-Fetch-* must opt in explicitly
-// via X-Lerd-CSRF. A POST with neither header gets a 403.
-func TestRemoteControlGate_csrfRequiresHeaderWithoutSecFetch(t *testing.T) {
-	setupConfigDirRaw(t, "", "", false)
-
-	t.Run("no headers → 403", func(t *testing.T) {
+	t.Run("cross-site POST blocked", func(t *testing.T) {
 		next := &nextHandler{}
 		gate := withRemoteControlGate(next)
-
-		req := httptest.NewRequest(http.MethodPost, "/api/sites/my-app.test/tinker", nil)
+		req := httptest.NewRequest(http.MethodPost, tinker, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Origin", "http://evil.example")
 		rec := httptest.NewRecorder()
 		gate.ServeHTTP(rec, req)
-
 		if next.called {
-			t.Error("POST without Sec-Fetch-Site and without X-Lerd-CSRF reached handler")
+			t.Error("cross-site POST reached handler — CSRF/RCE vector open")
 		}
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("status = %d, want 403", rec.Code)
 		}
 	})
 
-	t.Run("X-Lerd-CSRF set → passes", func(t *testing.T) {
+	t.Run("same-origin POST allowed", func(t *testing.T) {
 		next := &nextHandler{}
 		gate := withRemoteControlGate(next)
-
-		req := httptest.NewRequest(http.MethodPost, "/api/sites/my-app.test/tinker", nil)
+		req := httptest.NewRequest(http.MethodPost, tinker, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
-		req.Header.Set("X-Lerd-CSRF", "1")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
 		rec := httptest.NewRecorder()
 		gate.ServeHTTP(rec, req)
-
 		if !next.called {
-			t.Error("POST with X-Lerd-CSRF header blocked")
+			t.Errorf("same-origin POST blocked, status=%d", rec.Code)
 		}
 	})
-}
 
-// GET / HEAD must pass the CSRF check unconditionally — they're
-// non-mutating per RFC 9110 and the dashboard polls them constantly
-// without setting any custom header. Note Sec-Fetch-Site: cross-site
-// would still be rejected by CORS for any response the page wanted to
-// read, but the gate itself doesn't block read-only methods.
-func TestRemoteControlGate_csrfSkipsReadOnlyMethods(t *testing.T) {
-	setupConfigDirRaw(t, "", "", false)
+	// lerd.localhost hitting localhost:7073 (apiBase rewrite) is labelled
+	// cross-site by the browser, but the Origin is one of lerd's own, so the
+	// dashboard's own requests must still pass.
+	t.Run("split-origin dashboard allowed via Origin allowlist", func(t *testing.T) {
+		next := &nextHandler{}
+		gate := withRemoteControlGate(next)
+		req := httptest.NewRequest(http.MethodPost, tinker, nil)
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Origin", "http://lerd.localhost")
+		rec := httptest.NewRecorder()
+		gate.ServeHTTP(rec, req)
+		if !next.called {
+			t.Errorf("split-origin dashboard POST blocked, status=%d", rec.Code)
+		}
+	})
 
-	for _, m := range []string{http.MethodGet, http.MethodHead} {
-		t.Run(m, func(t *testing.T) {
+	t.Run("no Sec-Fetch requires CSRF header", func(t *testing.T) {
+		next := &nextHandler{}
+		gate := withRemoteControlGate(next)
+		req := httptest.NewRequest(http.MethodPost, tinker, nil)
+		req.RemoteAddr = "127.0.0.1:54321" // no Sec-Fetch, no X-Lerd-CSRF
+		rec := httptest.NewRecorder()
+		gate.ServeHTTP(rec, req)
+		if next.called || rec.Code != http.StatusForbidden {
+			t.Errorf("POST without Sec-Fetch or CSRF header allowed, status=%d", rec.Code)
+		}
+
+		next2 := &nextHandler{}
+		gate2 := withRemoteControlGate(next2)
+		req2 := httptest.NewRequest(http.MethodPost, tinker, nil)
+		req2.RemoteAddr = "127.0.0.1:54321"
+		req2.Header.Set("X-Lerd-CSRF", "1")
+		rec2 := httptest.NewRecorder()
+		gate2.ServeHTTP(rec2, req2)
+		if !next2.called {
+			t.Errorf("POST with X-Lerd-CSRF blocked, status=%d", rec2.Code)
+		}
+	})
+
+	t.Run("safe methods bypass the gate", func(t *testing.T) {
+		for _, m := range []string{http.MethodGet, http.MethodHead} {
 			next := &nextHandler{}
 			gate := withRemoteControlGate(next)
-
 			req := httptest.NewRequest(m, "/api/sites", nil)
 			req.RemoteAddr = "127.0.0.1:54321"
 			req.Header.Set("Sec-Fetch-Site", "cross-site")
+			req.Header.Set("Origin", "http://evil.example")
 			rec := httptest.NewRecorder()
 			gate.ServeHTTP(rec, req)
-
 			if !next.called {
-				t.Errorf("%s with cross-site origin blocked by CSRF gate — should be read-only safe", m)
+				t.Errorf("%s blocked by CSRF gate, status=%d", m, rec.Code)
 			}
-		})
-	}
-}
+		}
+	})
 
-// Unix-socket connections (the lerd.localhost nginx vhost) arrive with
-// no Sec-Fetch-* headers and no CSRF token, but must pass — only host
-// processes with filesystem access to the socket can reach this path.
-func TestRemoteControlGate_csrfSkippedForUnixSocket(t *testing.T) {
-	setupConfigDirRaw(t, "", "", false)
+	t.Run("unix socket exempt", func(t *testing.T) {
+		next := &nextHandler{}
+		gate := withRemoteControlGate(next)
+		req := httptest.NewRequest(http.MethodPost, tinker, nil)
+		req.RemoteAddr = "@" // no Sec-Fetch, no header — trusted via the socket
+		req = req.WithContext(context.WithValue(req.Context(), ctxKeyUnixSocket{}, true))
+		rec := httptest.NewRecorder()
+		gate.ServeHTTP(rec, req)
+		if !next.called {
+			t.Errorf("unix socket POST blocked, status=%d", rec.Code)
+		}
+	})
 
-	next := &nextHandler{}
-	gate := withRemoteControlGate(next)
+	// These endpoints are reached by non-browser clients (or cross-origin
+	// pages we can't control) that can't carry the header, and each keeps its
+	// own source gate: unpause from the paused-site holding page, the internal
+	// notify bridge POSTed by out-of-process CLI/MCP commands over loopback.
+	t.Run("exempt paths bypass the gate", func(t *testing.T) {
+		for _, path := range []string{"/api/sites/myapp.test/unpause", "/api/internal/notify"} {
+			t.Run(path, func(t *testing.T) {
+				next := &nextHandler{}
+				gate := withRemoteControlGate(next)
+				req := httptest.NewRequest(http.MethodPost, path, nil)
+				req.RemoteAddr = "127.0.0.1:54321" // no Sec-Fetch, no X-Lerd-CSRF
+				rec := httptest.NewRecorder()
+				gate.ServeHTTP(rec, req)
+				if !next.called {
+					t.Errorf("%s blocked by CSRF gate, status=%d", path, rec.Code)
+				}
+			})
+		}
+	})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/sites/my-app.test/tinker", nil)
-	req.RemoteAddr = "@"
-	ctx := context.WithValue(req.Context(), ctxKeyUnixSocket{}, true)
-	req = req.WithContext(ctx)
-	rec := httptest.NewRecorder()
-	gate.ServeHTTP(rec, req)
-
-	if !next.called {
-		t.Error("unix-socket POST blocked by CSRF gate — vhost will 403")
-	}
-}
-
-// The CLI notifier (/api/internal/notify) is loopback-only and called
-// without any browser context; it must skip CSRF or every CLI command
-// would have to learn about the header.
-func TestRemoteControlGate_csrfExemptInternalEndpoints(t *testing.T) {
-	setupConfigDirRaw(t, "", "", false)
-
-	exempt := []string{
-		"/api/internal/notify",
-		"/api/remote-setup",
-		"/api/sites/my-app.test/unpause",
-	}
-	for _, path := range exempt {
-		t.Run(path, func(t *testing.T) {
-			next := &nextHandler{}
-			gate := withRemoteControlGate(next)
-
-			req := httptest.NewRequest(http.MethodPost, path, nil)
-			req.RemoteAddr = "127.0.0.1:54321"
-			// Deliberately omit Sec-Fetch-Site and X-Lerd-CSRF — the path
-			// is exempt either way.
-			rec := httptest.NewRecorder()
-			gate.ServeHTTP(rec, req)
-
-			if !next.called {
-				t.Errorf("exempt path %s blocked by CSRF gate, status=%d", path, rec.Code)
-			}
-		})
-	}
-}
-
-// LAN clients with valid Basic auth also need to pass CSRF on POST.
-// The malicious-page-on-the-victim's-LAN scenario is real even when
-// remote-control is enabled.
-func TestRemoteControlGate_csrfEnforcedOnAuthenticatedLanPost(t *testing.T) {
-	setupConfigDir(t, "alice", "s3cret")
-
-	next := &nextHandler{}
-	gate := withRemoteControlGate(next)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/sites/my-app.test/tinker", nil)
-	req.RemoteAddr = "192.168.1.42:54321"
-	req.SetBasicAuth("alice", "s3cret")
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	rec := httptest.NewRecorder()
-	gate.ServeHTTP(rec, req)
-
-	if next.called {
-		t.Error("authenticated LAN POST with cross-site origin reached handler — CSRF check missed LAN path")
-	}
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
-	}
+	t.Run("LAN cross-site rejected even with valid auth", func(t *testing.T) {
+		setupConfigDir(t, "alice", "s3cret")
+		next := &nextHandler{}
+		gate := withRemoteControlGate(next)
+		req := httptest.NewRequest(http.MethodPost, tinker, nil)
+		req.RemoteAddr = "192.168.1.42:54321"
+		req.SetBasicAuth("alice", "s3cret")
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Origin", "http://evil.example")
+		rec := httptest.NewRecorder()
+		gate.ServeHTTP(rec, req)
+		if next.called || rec.Code != http.StatusForbidden {
+			t.Errorf("LAN cross-site POST allowed, status=%d", rec.Code)
+		}
+	})
 }
 
 // silence unused-import lint when config is only used transitively.

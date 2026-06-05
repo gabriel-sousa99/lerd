@@ -250,13 +250,13 @@ func newLANUnshareCmd() *cobra.Command {
 // X-Lerd-CSRF header satisfies the dashboard's CSRF gate — without it
 // the daemon would 403 this loopback POST the same as a malicious page.
 func notifyDaemon(domain, action string) error {
-	req, err := http.NewRequest(http.MethodPost,
-		fmt.Sprintf("http://127.0.0.1:7073/api/sites/%s/%s", domain, action),
-		nil)
+	url := fmt.Sprintf("http://127.0.0.1:7073/api/sites/%s/%s", domain, action)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Clear the daemon's cross-origin gate for this trusted local POST.
 	req.Header.Set("X-Lerd-CSRF", "1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

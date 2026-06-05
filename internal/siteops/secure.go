@@ -24,13 +24,14 @@ var (
 // supervised anyway, so silently skipping the notification is correct.
 // X-Lerd-CSRF satisfies the dashboard's CSRF gate for loopback POSTs.
 func defaultNotifyDaemon(domain, action string) error {
-	req, err := http.NewRequest(http.MethodPost,
-		fmt.Sprintf("http://127.0.0.1:7073/api/sites/%s/%s", domain, action),
-		nil)
+	url := fmt.Sprintf("http://127.0.0.1:7073/api/sites/%s/%s", domain, action)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// The daemon's cross-origin gate blocks unsafe methods that can't prove
+	// they came from a trusted local client; this header clears it.
 	req.Header.Set("X-Lerd-CSRF", "1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

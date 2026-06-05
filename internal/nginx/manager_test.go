@@ -12,11 +12,14 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
-// setupConfD points NginxConfD() at a temp dir via XDG_DATA_HOME and returns the conf.d path.
+// setupConfD points NginxConfD() at a temp dir via XDG_DATA_HOME and returns the
+// conf.d path. XDG_CONFIG_HOME is redirected too so resolveRequestTimeout reads
+// a hermetic (empty) global config instead of the developer's real one.
 func setupConfD(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
 	return filepath.Join(tmp, "lerd", "nginx", "conf.d")
 }
 
@@ -64,6 +67,113 @@ func TestGenerateVhost_honoursSitePublicDir(t *testing.T) {
 	content := readConf(t, filepath.Join(confD, "myapp.test.conf"))
 	if !strings.Contains(content, "root /srv/myapp/public_html") {
 		t.Errorf("expected custom public_html doc root in:\n%s", content)
+	}
+}
+
+// ── resolveRequestTimeout ─────────────────────────────────────────────────────
+
+func TestResolveRequestTimeout_DefaultsTo60(t *testing.T) {
+	setupConfD(t)
+	if got := resolveRequestTimeout("/srv/nonexistent"); got != 60 {
+		t.Errorf("resolveRequestTimeout = %d, want 60 (nginx default)", got)
+	}
+}
+
+func TestResolveRequestTimeout_GlobalConfigWins(t *testing.T) {
+	setupConfD(t)
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	cfg.Nginx.RequestTimeout = 120
+	if err := config.SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	if got := resolveRequestTimeout("/srv/nonexistent"); got != 120 {
+		t.Errorf("resolveRequestTimeout = %d, want 120 (global config)", got)
+	}
+}
+
+func TestResolveRequestTimeout_ProjectOverrideWins(t *testing.T) {
+	setupConfD(t)
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	cfg.Nginx.RequestTimeout = 120
+	if err := config.SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	projectDir := t.TempDir()
+	if err := config.SaveProjectConfig(projectDir, &config.ProjectConfig{RequestTimeout: 300}); err != nil {
+		t.Fatalf("SaveProjectConfig: %v", err)
+	}
+	if got := resolveRequestTimeout(projectDir); got != 300 {
+		t.Errorf("resolveRequestTimeout = %d, want 300 (.lerd.yaml override)", got)
+	}
+}
+
+// ── request timeout rendering ─────────────────────────────────────────────────
+
+func TestGenerateVhost_rendersDefaultRequestTimeout(t *testing.T) {
+	confD := setupConfD(t)
+	site := config.Site{Name: "app", Domains: []string{"app.test"}, Path: "/srv/app"}
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	for _, want := range []string{"fastcgi_read_timeout 60s;", "fastcgi_send_timeout 60s;"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("expected %q in:\n%s", want, content)
+		}
+	}
+}
+
+func TestGenerateVhost_honoursProjectRequestTimeout(t *testing.T) {
+	confD := setupConfD(t)
+	projectDir := t.TempDir()
+	if err := config.SaveProjectConfig(projectDir, &config.ProjectConfig{RequestTimeout: 300}); err != nil {
+		t.Fatalf("SaveProjectConfig: %v", err)
+	}
+	site := config.Site{Name: "app", Domains: []string{"app.test"}, Path: projectDir}
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	if !strings.Contains(content, "fastcgi_read_timeout 300s;") {
+		t.Errorf("expected fastcgi_read_timeout 300s in:\n%s", content)
+	}
+}
+
+func TestGenerateSSLVhost_honoursProjectRequestTimeout(t *testing.T) {
+	confD := setupConfD(t)
+	projectDir := t.TempDir()
+	if err := config.SaveProjectConfig(projectDir, &config.ProjectConfig{RequestTimeout: 240}); err != nil {
+		t.Fatalf("SaveProjectConfig: %v", err)
+	}
+	site := config.Site{Name: "app", Domains: []string{"app.test"}, Path: projectDir}
+	if err := GenerateSSLVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateSSLVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test-ssl.conf"))
+	if !strings.Contains(content, "fastcgi_read_timeout 240s;") {
+		t.Errorf("expected fastcgi_read_timeout 240s in:\n%s", content)
+	}
+}
+
+func TestGenerateCustomVhost_honoursProjectRequestTimeout(t *testing.T) {
+	confD := setupConfD(t)
+	projectDir := t.TempDir()
+	if err := config.SaveProjectConfig(projectDir, &config.ProjectConfig{RequestTimeout: 180}); err != nil {
+		t.Fatalf("SaveProjectConfig: %v", err)
+	}
+	site := config.Site{Name: "nestapp", Domains: []string{"nestapp.test"}, Path: projectDir, ContainerPort: 3000}
+	if err := GenerateCustomVhost(site); err != nil {
+		t.Fatalf("GenerateCustomVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "nestapp.test.conf"))
+	if !strings.Contains(content, "proxy_read_timeout 180s;") {
+		t.Errorf("expected proxy_read_timeout 180s in:\n%s", content)
 	}
 }
 
@@ -656,6 +766,197 @@ func TestEnsureDefaultVhost_writesDefaultConf(t *testing.T) {
 	if _, err := os.Stat(errorPage); err != nil {
 		t.Errorf("expected error page at %s", errorPage)
 	}
+	// Sentinel hash must be written alongside so subsequent runs can
+	// distinguish lerd-managed content from a user edit.
+	sentinel := filepath.Join(confD, "_default.conf"+defaultVhostManagedHashSuffix)
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("expected sentinel at %s", sentinel)
+	}
+}
+
+func TestEnsureDefaultVhost_preservesUserEdits(t *testing.T) {
+	confD := setupConfD(t)
+	// First pass: lerd writes the canonical content + sentinel.
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("first EnsureDefaultVhost: %v", err)
+	}
+	// User patches the file.
+	path := filepath.Join(confD, "_default.conf")
+	userEdited := []byte("# hand-tuned for staging\nserver {\n    listen 80;\n    ssl_reject_handshake off;\n}\n")
+	if err := os.WriteFile(path, userEdited, 0644); err != nil {
+		t.Fatalf("simulating user edit: %v", err)
+	}
+	// Second pass: should NOT overwrite.
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("second EnsureDefaultVhost: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-reading conf: %v", err)
+	}
+	if string(got) != string(userEdited) {
+		t.Errorf("user edit was overwritten\nwant:\n%s\ngot:\n%s", userEdited, got)
+	}
+}
+
+func TestEnsureDefaultVhost_idempotentWhenUntouched(t *testing.T) {
+	confD := setupConfD(t)
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("first EnsureDefaultVhost: %v", err)
+	}
+	path := filepath.Join(confD, "_default.conf")
+	before, _ := os.ReadFile(path)
+	// Second pass with no user edits: bytes should match exactly.
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("second EnsureDefaultVhost: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Errorf("re-run without edits should be a no-op\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestEnsureDefaultVhost_templateChangeAutoUpdatesWhenUnedited(t *testing.T) {
+	confD := setupConfD(t)
+	// Simulate a previously-installed lerd that wrote OLD content + a
+	// sentinel matching that old content. Reaching EnsureDefaultVhost
+	// today should detect the template-vs-on-disk drift and rewrite.
+	if err := os.MkdirAll(confD, 0755); err != nil {
+		t.Fatal(err)
+	}
+	stale := []byte("# old lerd template, before the latest binary\nserver { listen 80; }\n")
+	path := filepath.Join(confD, "_default.conf")
+	if err := os.WriteFile(path, stale, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+defaultVhostManagedHashSuffix, []byte(contentHashHex(stale)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("EnsureDefaultVhost: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if !strings.Contains(string(got), "default_server") {
+		t.Errorf("expected lerd to overwrite stale content with the current template, got:\n%s", got)
+	}
+}
+
+func TestEnsureDefaultVhost_recoversManagementWhenSentinelMissingButContentMatches(t *testing.T) {
+	confD := setupConfD(t)
+	// Simulate a sentinel-write crash from a prior run: the conf is lerd's
+	// canonical bytes, but the sentinel file never made it to disk. The
+	// next run must reclaim management (write the sentinel) rather than
+	// silently treat the file as user-managed.
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("first EnsureDefaultVhost: %v", err)
+	}
+	path := filepath.Join(confD, "_default.conf")
+	sentinel := path + defaultVhostManagedHashSuffix
+	if err := os.Remove(sentinel); err != nil {
+		t.Fatalf("removing sentinel: %v", err)
+	}
+
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("recovery EnsureDefaultVhost: %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("expected sentinel to be recreated when on-disk matches canonical, got %v", err)
+	}
+}
+
+func TestEnsureDefaultVhost_removingFileResetsManagement(t *testing.T) {
+	confD := setupConfD(t)
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("first EnsureDefaultVhost: %v", err)
+	}
+	path := filepath.Join(confD, "_default.conf")
+	sentinel := path + defaultVhostManagedHashSuffix
+	// User deletes the file (and may have left the sentinel; either way,
+	// lerd should regenerate the catch-all on the next run).
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("removing conf: %v", err)
+	}
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("regenerate after delete: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("expected lerd to recreate the file after user removed it: %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("expected sentinel to be re-created alongside: %v", err)
+	}
+}
+
+func TestWriteFileAtomic_writesContentAndLeavesNoTempBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "managed.conf")
+	if err := WriteFileAtomic(path, []byte("server { listen 80; }\n"), 0644); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "server { listen 80; }\n" {
+		t.Fatalf("content mismatch or read err: got=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("expected sibling .tmp to be cleaned up, stat err=%v", err)
+	}
+}
+
+func TestWriteFileAtomic_preservesExistingFileMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "managed.conf")
+	if err := os.WriteFile(path, []byte("v1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileAtomic(path, []byte("v2\n"), 0644); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Errorf("existing chmod was reset: got mode %o, want 0600", got)
+	}
+}
+
+func TestWriteFileAtomic_usesCallerModeForNewFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fresh.conf")
+	if err := WriteFileAtomic(path, []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Errorf("fresh-create mode: got %o, want 0644", got)
+	}
+}
+
+func TestEnsureDefaultVhost_leavesNoTempFilesInConfD(t *testing.T) {
+	confD := setupConfD(t)
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("EnsureDefaultVhost: %v", err)
+	}
+	// Second pass through the "on-disk matches what we last wrote" branch.
+	if err := EnsureDefaultVhost(); err != nil {
+		t.Fatalf("re-run EnsureDefaultVhost: %v", err)
+	}
+	entries, err := os.ReadDir(confD)
+	if err != nil {
+		t.Fatalf("readdir conf.d: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("unexpected leftover temp file in conf.d: %s", e.Name())
+		}
+	}
 }
 
 func TestEnsureLerdVhost_linuxProxiesUnixSocket(t *testing.T) {
@@ -826,6 +1127,44 @@ func TestEnsureNginxConfig_writesForwardedAndCustomD(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "lerd", "nginx", "custom.d")); err != nil {
 		t.Errorf("expected custom.d dir to be created: %v", err)
+	}
+	// http.d dir + http.d include line in the rendered nginx.conf are the
+	// preconditions the http config editor heals on its first POST. Anchor
+	// both here so the heal stays a no-op once it has run (and so a
+	// regression to either side surfaces as a unit failure rather than as
+	// a silent-write-on-stale-install bug).
+	if _, err := os.Stat(filepath.Join(tmp, "lerd", "nginx", "http.d")); err != nil {
+		t.Errorf("expected http.d dir to be created: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(tmp, "lerd", "nginx", "nginx.conf"))
+	if err != nil {
+		t.Fatalf("read rendered nginx.conf: %v", err)
+	}
+	if !strings.Contains(string(body), "include /etc/nginx/http.d/*.conf;") {
+		t.Errorf("rendered nginx.conf missing http.d include directive, got:\n%s", body)
+	}
+}
+
+// TestEnsureNginxConfigServerNamesHashBucket guards against issue #455: a
+// worktree vhost emits a long "<branch>.<site>.test *.<branch>.<site>.test"
+// server_name that overflows nginx's default server_names_hash_bucket_size of
+// 64, crashing nginx for every site. The rendered global nginx.conf must raise
+// the bucket/max sizes so long branch names always fit.
+func TestEnsureNginxConfigServerNamesHashBucket(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	if err := EnsureNginxConfig(); err != nil {
+		t.Fatalf("EnsureNginxConfig: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(tmp, "lerd", "nginx", "nginx.conf"))
+	if err != nil {
+		t.Fatalf("read rendered nginx.conf: %v", err)
+	}
+	if !strings.Contains(string(body), "server_names_hash_bucket_size 256;") {
+		t.Errorf("rendered nginx.conf missing server_names_hash_bucket_size directive, got:\n%s", body)
+	}
+	if !strings.Contains(string(body), "server_names_hash_max_size 1024;") {
+		t.Errorf("rendered nginx.conf missing server_names_hash_max_size directive, got:\n%s", body)
 	}
 }
 

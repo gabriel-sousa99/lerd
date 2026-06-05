@@ -10,7 +10,7 @@
   import { version } from '$stores/version';
   import { coreServices } from '$stores/services';
   import { sites } from '$stores/sites';
-  import { status, statusLoaded } from '$stores/status';
+  import { status, statusLoaded, dnsState } from '$stores/status';
   import { accessMode } from '$stores/accessMode';
   import { goToTab } from '$stores/route';
   import { apiFetch } from '$lib/api';
@@ -24,7 +24,10 @@
   const coreDown = $derived.by(() => {
     if (!$statusLoaded) return [] as string[];
     const issues: string[] = [];
-    if ($status.dns?.enabled !== false && !$status.dns.ok) issues.push('DNS');
+    // Only a genuine lerd-dns outage is a core failure. "degraded" means
+    // lerd-dns is healthy but the system resolver is bypassed (typically a
+    // VPN), which lerd recovers from on its own, so it doesn't belong here.
+    if ($status.dns?.enabled !== false && dnsState($status) === 'down') issues.push('DNS');
     if (!$status.nginx.running) issues.push('Nginx');
     if (!$status.watcher_running) issues.push('Watcher');
     return issues;
@@ -64,7 +67,7 @@
 </script>
 
 {#if priority === 'error'}
-  <div class="rounded-xl border-l-4 border-l-red-500 border border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-500/10 px-4 py-3">
+  <div class="rounded-xl border-l-4 border-l-red-500 border border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-500/10 px-3 py-3">
     <div class="flex flex-wrap items-center gap-3">
       <span class="relative flex shrink-0">
         <span class="animate-ping absolute inline-flex h-2.5 w-2.5 rounded-full bg-red-400 opacity-75"></span>
@@ -108,7 +111,7 @@
     </div>
   </div>
 {:else if priority === 'updates'}
-  <div class="rounded-xl border-l-4 border-l-yellow-500 border border-yellow-200 dark:border-yellow-500/30 bg-yellow-50 dark:bg-yellow-500/10 px-4 py-3">
+  <div class="rounded-xl border-l-4 border-l-yellow-500 border border-yellow-200 dark:border-yellow-500/30 bg-yellow-50 dark:bg-yellow-500/10 px-3 py-3">
     <div class="flex flex-wrap items-center gap-3">
       <svg class="w-5 h-5 shrink-0 text-yellow-600 dark:text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
@@ -130,7 +133,7 @@
     </div>
   </div>
 {:else}
-  <div class="rounded-xl border border-emerald-200/70 dark:border-emerald-500/20 bg-emerald-50/60 dark:bg-emerald-500/5 px-4 py-2 flex items-center gap-3">
+  <div class="rounded-xl border border-emerald-200/70 dark:border-emerald-500/20 bg-emerald-50/60 dark:bg-emerald-500/5 px-3 py-2 flex items-center gap-3">
     <span class="relative flex shrink-0">
       <span class="absolute inline-flex h-2 w-2 rounded-full bg-emerald-400 opacity-75 animate-ping"></span>
       <span class="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>

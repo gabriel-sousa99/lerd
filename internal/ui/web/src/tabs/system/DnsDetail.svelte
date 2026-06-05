@@ -4,26 +4,34 @@
   import StatusPill from '$components/StatusPill.svelte';
   import InfoRow from '$components/InfoRow.svelte';
   import LogViewer from '$components/LogViewer.svelte';
-  import { status } from '$stores/status';
+  import { status, dnsState } from '$stores/status';
   import { m } from '../../paraglide/messages.js';
+
+  const logsEnabled = $derived($status.dns?.enabled !== false);
 </script>
 
 {#snippet pill()}
   {#if $status.dns?.enabled === false}
     <StatusPill tone="muted" label="disabled" />
   {:else}
-    <StatusPill tone={$status.dns.ok ? 'ok' : 'error'} label={$status.dns.ok ? m.system_dns_ok() : m.system_dns_failed()} />
+    {@const dns = dnsState($status)}
+    <StatusPill
+      tone={dns === 'ok' ? 'ok' : dns === 'degraded' ? 'warn' : 'error'}
+      label={dns === 'ok' ? m.system_dns_ok() : dns === 'degraded' ? m.system_dns_degraded() : m.system_dns_failed()}
+    />
   {/if}
 {/snippet}
 
 <DetailPanel>
   <DetailHeader title={m.system_dns()} trailing={pill} />
-  <div class="px-3 sm:px-5 py-3 space-y-2 shrink-0">
+  <div class="px-3 py-3 space-y-2 shrink-0">
     <InfoRow label={m.system_tld()} value={'.' + $status.dns.tld} />
     {#if $status.dns?.enabled === false}
       <p class="text-xs text-gray-400">
         lerd-dns is disabled. Sites resolve through the system resolver via *.{$status.dns.tld} (RFC 6761). HTTPS still works — the mkcert CA is installed regardless of this setting. To enable lerd-managed DNS, set <code class="bg-gray-100 dark:bg-white/5 px-1 rounded-sm">dns.enabled: true</code> in <code class="bg-gray-100 dark:bg-white/5 px-1 rounded-sm">~/.config/lerd/config.yaml</code> and run <code class="bg-gray-100 dark:bg-white/5 px-1 rounded-sm">lerd install</code>.
       </p>
+    {:else if dnsState($status) === 'degraded'}
+      <p class="text-xs text-gray-400">{m.system_dns_degradedHint()}</p>
     {:else if !$status.dns.ok}
       <p class="text-xs text-gray-400">
         {@html m.system_dns_fixHint({
@@ -33,7 +41,7 @@
       </p>
     {/if}
   </div>
-  {#if $status.dns?.enabled !== false}
+  {#if logsEnabled}
     <LogViewer
       path="/api/logs/lerd-dns"
       emptyLabel={m.system_dns_quietDefault({ option: '`log-queries`', path: '~/.local/share/lerd/dnsmasq/lerd.conf' })}

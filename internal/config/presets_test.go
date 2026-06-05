@@ -11,17 +11,20 @@ func TestListPresets_IncludesShippedPresets(t *testing.T) {
 		t.Fatalf("ListPresets() error = %v", err)
 	}
 	want := map[string]bool{
-		"phpmyadmin":    false,
-		"pgadmin":       false,
-		"mongo":         false,
-		"mongo-express": false,
-		"selenium":      false,
-		"stripe-mock":   false,
-		"mysql":         false,
-		"memcached":     false,
-		"rabbitmq":      false,
-		"elasticsearch": false,
-		"elasticvue":    false,
+		"phpmyadmin":          false,
+		"pgadmin":             false,
+		"mongo":               false,
+		"mongo-express":       false,
+		"selenium":            false,
+		"stripe-mock":         false,
+		"mysql":               false,
+		"memcached":           false,
+		"rabbitmq":            false,
+		"elasticsearch":       false,
+		"elasticvue":          false,
+		"typesense":           false,
+		"typesense-dashboard": false,
+		"valkey":              false,
 	}
 	for _, p := range presets {
 		if _, ok := want[p.Name]; ok {
@@ -103,6 +106,81 @@ func TestLoadPreset_Memcached(t *testing.T) {
 	}
 	if p.EnvDetect == nil || p.EnvDetect.Key != "MEMCACHED_HOST" {
 		t.Errorf("memcached env_detect should be key=MEMCACHED_HOST, got %+v", p.EnvDetect)
+	}
+}
+
+func TestLoadPreset_Valkey(t *testing.T) {
+	p, err := LoadPreset("valkey")
+	if err != nil {
+		t.Fatalf("LoadPreset(valkey) error = %v", err)
+	}
+	if p.Image == "" || len(p.Ports) != 1 {
+		t.Errorf("valkey preset missing image or port, got: %+v", p)
+	}
+	if p.Ports[0] != "6380:6379" {
+		t.Errorf("valkey must publish 6380:6379 to avoid colliding with redis, got %q", p.Ports[0])
+	}
+	if p.DataDir != "/data" {
+		t.Errorf("valkey should persist /data so its dataset survives restarts, got %q", p.DataDir)
+	}
+	hasRedisHost := false
+	for _, kv := range p.EnvVars {
+		if kv == "REDIS_HOST=lerd-valkey" {
+			hasRedisHost = true
+		}
+	}
+	if !hasRedisHost {
+		t.Errorf("valkey must point REDIS_HOST at lerd-valkey, got %v", p.EnvVars)
+	}
+	if p.Default {
+		t.Errorf("valkey is an opt-in add-on preset and must not be default")
+	}
+}
+
+func TestLoadPreset_Typesense(t *testing.T) {
+	p, err := LoadPreset("typesense")
+	if err != nil {
+		t.Fatalf("LoadPreset(typesense) error = %v", err)
+	}
+	if p.Image == "" || len(p.Ports) != 1 || p.Ports[0] != "8108:8108" {
+		t.Errorf("typesense preset missing image or 8108:8108 port, got: %+v", p)
+	}
+	if p.DataDir != "/data" {
+		t.Errorf("typesense must persist /data so the search index survives restarts, got %q", p.DataDir)
+	}
+	if !strings.Contains(p.Exec, "--api-key=") || !strings.Contains(p.Exec, "--data-dir") {
+		t.Errorf("typesense exec must pass --api-key and --data-dir, got %q", p.Exec)
+	}
+	if p.EnvDetect == nil || p.EnvDetect.Composer != "typesense/typesense-php" {
+		t.Errorf("typesense env_detect should fire on composer typesense/typesense-php, got %+v", p.EnvDetect)
+	}
+	hasScout := false
+	for _, kv := range p.EnvVars {
+		if kv == "SCOUT_DRIVER=typesense" {
+			hasScout = true
+		}
+	}
+	if !hasScout {
+		t.Errorf("typesense must set SCOUT_DRIVER=typesense for Laravel Scout, got %v", p.EnvVars)
+	}
+	if p.Default {
+		t.Errorf("typesense is an opt-in add-on preset and must not be default")
+	}
+}
+
+func TestLoadPreset_TypesenseDashboard(t *testing.T) {
+	p, err := LoadPreset("typesense-dashboard")
+	if err != nil {
+		t.Fatalf("LoadPreset(typesense-dashboard) error = %v", err)
+	}
+	if len(p.DependsOn) != 1 || p.DependsOn[0] != "typesense" {
+		t.Errorf("typesense-dashboard should depend on typesense, got %v", p.DependsOn)
+	}
+	if p.Dashboard == "" {
+		t.Errorf("typesense-dashboard must expose its UI as dashboard")
+	}
+	if p.Environment["TYPESENSE_DASHBOARD_CONFIG"] == "" {
+		t.Errorf("typesense-dashboard must pre-wire the connection via TYPESENSE_DASHBOARD_CONFIG")
 	}
 }
 
@@ -416,10 +494,11 @@ func TestLoadPreset_DefaultsTrackLatest(t *testing.T) {
 	}
 }
 
-func TestListPresets_CanonicalHiddenFromAlternates(t *testing.T) {
-	// The canonical version is the default install — listing it as an
-	// "alternate" would let users pick it from the picker and clobber the
-	// default service. Filter it out of PresetMeta.Versions.
+func TestListPresets_IncludesCanonicalInVersions(t *testing.T) {
+	// Canonical IS the default install but it must show in the picker so the
+	// user can pick it explicitly (e.g. install pgvector 18 when 18 is the
+	// canonical). The label carries a "(default)" marker and DefaultVersion
+	// preselects the canonical in the UI dropdown.
 	metas, err := ListPresets()
 	if err != nil {
 		t.Fatalf("ListPresets: %v", err)
@@ -434,24 +513,46 @@ func TestListPresets_CanonicalHiddenFromAlternates(t *testing.T) {
 	if mysql == nil {
 		t.Fatal("mysql preset missing from ListPresets")
 	}
+	wantAll := map[string]bool{"8.4": false, "9.7": false, "5.7": false}
+	canonicalFound := false
 	for _, v := range mysql.Versions {
+		if _, ok := wantAll[v.Tag]; ok {
+			wantAll[v.Tag] = true
+		}
 		if v.Canonical {
-			t.Errorf("ListPresets must not surface canonical version %q in the alternates picker", v.Tag)
-		}
-		if v.Tag == "8.4" {
-			t.Errorf("8.4 is canonical and should be filtered out of mysql alternates")
+			canonicalFound = true
 		}
 	}
-	wantAlts := map[string]bool{"9.7": false, "5.7": false}
-	for _, v := range mysql.Versions {
-		if _, ok := wantAlts[v.Tag]; ok {
-			wantAlts[v.Tag] = true
-		}
-	}
-	for tag, found := range wantAlts {
+	for tag, found := range wantAll {
 		if !found {
-			t.Errorf("expected mysql alternate %q in picker, got %v", tag, mysql.Versions)
+			t.Errorf("expected mysql version %q in picker, got %v", tag, mysql.Versions)
 		}
+	}
+	if !canonicalFound {
+		t.Errorf("ListPresets must surface the canonical version so users can pick the default install explicitly")
+	}
+	if mysql.DefaultVersion != "8.4" {
+		t.Errorf("mysql DefaultVersion = %q, want 8.4 (the canonical) so the picker preselects it", mysql.DefaultVersion)
+	}
+}
+
+func TestPresetVersionServiceName(t *testing.T) {
+	cases := []struct {
+		name string
+		v    PresetVersion
+		want string
+	}{
+		{"postgres-pgvector", PresetVersion{Tag: "18", Canonical: true}, "postgres-pgvector"},
+		{"postgres-pgvector", PresetVersion{Tag: "17", Canonical: false}, "postgres-pgvector-17"},
+		{"mysql", PresetVersion{Tag: "8.4", Canonical: true}, "mysql"},
+		{"mysql", PresetVersion{Tag: "5.7", Canonical: false}, "mysql-5-7"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"-"+tc.v.Tag, func(t *testing.T) {
+			if got := PresetVersionServiceName(tc.name, tc.v); got != tc.want {
+				t.Errorf("PresetVersionServiceName(%q, %+v) = %q, want %q", tc.name, tc.v, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -592,6 +693,37 @@ func TestPresetCanonicalTag(t *testing.T) {
 	}
 	if !pm.Init {
 		t.Error("mariadb preset must set init: true so PID 1 catches SIGTERM (mysql fork, same issue as #380)")
+	}
+}
+
+// A pinned canonical service keeps the canonical port: ResolvePinned templates
+// {{host_port}} from the canonical version, not the pinned one. Regression
+// guard for the pg16 → 18 migrate binding 5418 instead of 5432.
+func TestResolvePinned_CanonicalKeepsCanonicalPort(t *testing.T) {
+	p, err := LoadPreset("postgres")
+	if err != nil {
+		t.Fatalf("LoadPreset: %v", err)
+	}
+	svc, err := p.ResolvePinned("18")
+	if err != nil {
+		t.Fatalf("ResolvePinned: %v", err)
+	}
+	if svc.Name != "postgres" {
+		t.Errorf("name = %q, want bare postgres", svc.Name)
+	}
+	if svc.Image != "docker.io/postgis/postgis:18-3.6-alpine" {
+		t.Errorf("image = %q, want the pinned pg18 image", svc.Image)
+	}
+	if len(svc.Ports) == 0 || !strings.HasPrefix(svc.Ports[0], "5432:") {
+		t.Errorf("ports = %v, want canonical 5432:5432", svc.Ports)
+	}
+	for _, port := range svc.Ports {
+		if strings.Contains(port, "5418") {
+			t.Errorf("pinned canonical postgres must not adopt version 18's alternate port: %v", svc.Ports)
+		}
+	}
+	if strings.Contains(svc.ConnectionURL, "5418") {
+		t.Errorf("connection url must use the canonical port, got %q", svc.ConnectionURL)
 	}
 }
 
@@ -783,6 +915,104 @@ func TestPresetResolve_PostgresAlternates(t *testing.T) {
 		for _, port := range svc.Ports {
 			if strings.Contains(port, "{{") {
 				t.Errorf("postgres %s alternate ports must be substituted, got %q", tag, port)
+			}
+		}
+	}
+}
+
+func TestLoadPreset_PostgresPgvector(t *testing.T) {
+	p, err := LoadPreset("postgres-pgvector")
+	if err != nil {
+		t.Fatalf("LoadPreset(postgres-pgvector): %v", err)
+	}
+	if p.Default {
+		t.Errorf("postgres-pgvector must be opt-in, not a default preset")
+	}
+	if p.Family != "postgres" {
+		t.Errorf("postgres-pgvector Family = %q, want postgres (so pgadmin auto-discovers it)", p.Family)
+	}
+	if p.DefaultVersion != "18" {
+		t.Errorf("postgres-pgvector DefaultVersion = %q, want 18 (issue #378 specifically asks for PG18 + pgvector)", p.DefaultVersion)
+	}
+	if got := p.CanonicalTag(); got != "18" {
+		t.Errorf("postgres-pgvector CanonicalTag() = %q, want 18", got)
+	}
+	if got := p.Environment["PGDATA"]; got != "/var/lib/postgresql/data" {
+		t.Errorf("postgres-pgvector must pin PGDATA=/var/lib/postgresql/data for v18+ compat, got %q", got)
+	}
+	wantTags := map[string]bool{"18": false, "17": false, "16": false}
+	for _, v := range p.Versions {
+		if _, ok := wantTags[v.Tag]; ok {
+			wantTags[v.Tag] = true
+		}
+		if !strings.Contains(v.Image, "pgvector/pgvector") {
+			t.Errorf("postgres-pgvector version %q must use the pgvector/pgvector image, got %q", v.Tag, v.Image)
+		}
+	}
+	for tag, found := range wantTags {
+		if !found {
+			t.Errorf("postgres-pgvector preset missing version %q", tag)
+		}
+	}
+}
+
+func TestPresetResolve_PostgresPgvectorCanonical(t *testing.T) {
+	p, err := LoadPreset("postgres-pgvector")
+	if err != nil {
+		t.Fatalf("LoadPreset: %v", err)
+	}
+	svc, err := p.Resolve("18")
+	if err != nil {
+		t.Fatalf("Resolve(18): %v", err)
+	}
+	if svc.Name != "postgres-pgvector" {
+		t.Errorf("canonical postgres-pgvector Name = %q, want bare postgres-pgvector", svc.Name)
+	}
+	if len(svc.Ports) != 1 || svc.Ports[0] != "5518:5432" {
+		t.Errorf("canonical postgres-pgvector Ports = %v, want [5518:5432]", svc.Ports)
+	}
+	if svc.ConnectionURL != "postgresql://postgres:lerd@127.0.0.1:5518/lerd" {
+		t.Errorf("canonical postgres-pgvector ConnectionURL = %q", svc.ConnectionURL)
+	}
+	wantHost := "DB_HOST=lerd-postgres-pgvector"
+	found := false
+	for _, kv := range svc.EnvVars {
+		if kv == wantHost {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected %s in env_vars, got %v", wantHost, svc.EnvVars)
+	}
+}
+
+func TestPresetResolve_PostgresPgvectorAlternates(t *testing.T) {
+	p, err := LoadPreset("postgres-pgvector")
+	if err != nil {
+		t.Fatalf("LoadPreset: %v", err)
+	}
+	cases := map[string]struct {
+		wantName string
+		wantPort string
+	}{
+		"17": {"postgres-pgvector-17", "5517:5432"},
+		"16": {"postgres-pgvector-16", "5516:5432"},
+	}
+	for tag, want := range cases {
+		svc, err := p.Resolve(tag)
+		if err != nil {
+			t.Fatalf("Resolve(%s): %v", tag, err)
+		}
+		if svc.Name != want.wantName {
+			t.Errorf("postgres-pgvector %s: Name = %q, want %q", tag, svc.Name, want.wantName)
+		}
+		if len(svc.Ports) == 0 || svc.Ports[0] != want.wantPort {
+			t.Errorf("postgres-pgvector %s: Ports = %v, want [%s]", tag, svc.Ports, want.wantPort)
+		}
+		for _, port := range svc.Ports {
+			if strings.Contains(port, "{{") {
+				t.Errorf("postgres-pgvector %s alternate ports must be substituted, got %q", tag, port)
 			}
 		}
 	}

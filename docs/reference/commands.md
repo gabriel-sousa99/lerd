@@ -116,6 +116,12 @@ Supported PHP versions: **8.5**, **8.4**, **8.3**, **8.2**, **8.1**, and the fro
 | `lerd dump status` | Show whether the bridge is enabled and how many events are buffered |
 | `lerd dump tail [--site X] [--ctx fpm\|cli]` | Stream captured dumps to the terminal until Ctrl-C |
 | `lerd dump clear` | Clear the in-memory dump ring without disabling the bridge |
+| `lerd profile on` | Turn the SPX profiler on so every PHP-FPM site's requests are profiled into flame graphs |
+| `lerd profile off` | Turn the SPX profiler off |
+| `lerd profile status` | Show whether the profiler is on and the SPX web UI URL |
+| `lerd profile open` | Open the SPX profiler web UI in the browser |
+| `lerd profile run <command> [args...]` | Profile a one-off CLI command (e.g. `lerd profile run artisan queue:work`) |
+| `lerd profile clear` | Delete all captured SPX profile reports |
 | `lerd notify on` | Enable lerd notifications globally (dashboard banners + Web Push fanout) |
 | `lerd notify off` | Globally mute lerd notifications; bypasses per-device prefs |
 | `lerd notify status` | Show whether notifications are globally enabled |
@@ -174,6 +180,10 @@ Switch the PHP runtime for the current site between shared PHP-FPM and per-site 
 | `lerd db:import [-d name] <file.sql>` | Import a SQL dump (defaults to site DB from `.env`) |
 | `lerd db:export [-d name] [-o file.sql]` | Export a database to a SQL dump (defaults to site DB from `.env`) |
 | `lerd db:shell` | Open an interactive MySQL or PostgreSQL shell |
+| `lerd db:snapshot [name] [-A]` | Create a named, restorable snapshot of a database |
+| `lerd db:snapshots [--all]` | List stored database snapshots |
+| `lerd db:restore <name> [-A] [-f]` | Restore a database from a stored snapshot |
+| `lerd db:snapshot:rm <name> [-A]` | Delete a stored database snapshot |
 
 ## Import
 
