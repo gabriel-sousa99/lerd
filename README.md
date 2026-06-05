@@ -9,14 +9,14 @@
 > [!IMPORTANT]
 > Este fork mantém o mesmo binário `lerd` (compatibilidade total) e
 > aponta o auto-update para **este** repositório. Releases seguem o
-> esquema `v1.21.2-oracle.N`.
+> esquema `v1.23.1-oracle.N`.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL2%20(beta)-lightgrey)]()
 [![Docs](https://img.shields.io/badge/docs-geodro.github.io%2Flerd-blue)](https://geodro.github.io/lerd/)
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Flerd-ff2d20?logo=reddit)](https://reddit.com/r/lerd)
 
-[![Fork base](https://img.shields.io/badge/forked%20from-geodro%2Flerd%20v1.21.2-blue)](https://github.com/geodro/lerd)
+[![Fork base](https://img.shields.io/badge/forked%20from-geodro%2Flerd%20v1.23.1-blue)](https://github.com/geodro/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
 [![PHP](https://img.shields.io/badge/PHP-5.6%20%E2%80%93%208.5-777BB4)]()
 
@@ -39,7 +39,7 @@
 
 > Recursos herdados do upstream (`geodro/lerd`), todos presentes nesta fork:
 >
-> - 🌐 **Automatic `.test` domains** with one-command TLS, or [opt out of lerd-managed DNS](https://geodro.github.io/lerd/features/dns/) and use `*.localhost` (no dnsmasq, no system resolver tweak, no sudo for the DNS bits)
+> - 🌐 **Automatic `.test` domains** with one-command TLS, or [opt out of lerd-managed DNS](https://geodro.github.io/lerd/features/dns/) and use `*.localhost` (no dnsmasq, no system resolver tweak, no sudo for the DNS bits), with VPN-aware DNS that re-syncs container resolvers within a second when a tunnel connects or disconnects
 > - 🐘 **Per-project PHP version** (8.1–8.5, plus a frozen 7.4 / 8.0 legacy tier for hosted-on-the-old-stack projects), switch with one click
 > - ⚡ **FrankenPHP runtime** per site as an alternative to shared PHP-FPM, with Laravel Octane and Symfony Runtime worker mode
 > - 📦 **Node.js isolation** per project (Node 22, 24)
@@ -49,14 +49,16 @@
 > - 🛰️ **Debug window** that intercepts every `dump()` / `dd()` and streams it to the dashboard, TUI (`D` key), MCP, and `lerd dump tail`, scoped per site and per worktree branch, with the original response left clean unless you flip passthrough on. The same window captures SQL queries with N+1 and slow-query detection, plus outgoing mail, rendered views, dispatched events, queued jobs, and outgoing HTTP, across both Laravel and Symfony, with optional opt-in capture of queue-worker activity
 > - 🔥 **SPX profiler** with one-click on/off, every PHP-FPM request becomes a flame graph viewable in a same-origin Profiler view in the dashboard. No FPM restart, no code changes, and `lerd profile run` profiles a one-shot artisan or CLI command
 > - 💻 **Terminal dashboard** (`lerd tui`) - btop-style TUI with live status, site detail pane, inline domain and version editing, shell drop-in, log tailing, and filter/sort — the same operations surface as the web UI, for tmux and SSH workflows
-> - 🗄️ **One-click services**: MySQL, PostgreSQL, Redis, Meilisearch, RustFS, Mailpit, Gotenberg, Stripe Mock, Reverb and more. Every default service is a YAML preset you can update, migrate, rollback, or reinstall in place, including a reset-data reinstall that auto-recreates linked sites' databases and buckets
+> - 🗄️ **One-click services**: MySQL, PostgreSQL, Redis, Meilisearch, RustFS, Mailpit, Gotenberg, Stripe Mock, Reverb and more. Every default service is a YAML preset you can update, migrate, rollback, or reinstall in place, including a reset-data reinstall that auto-recreates linked sites' databases and buckets, plus on-demand database snapshots (create / list / restore / delete) from CLI, dashboard, and MCP
 > - 🌳 **First-class git worktrees** with auto-detected branch domains, per-worktree PHP/Node versions, optional per-worktree database isolation (clone from main or empty), a per-worktree LAN-share proxy, `env_overrides` templating in `.lerd.yaml` for multi-tenant apps, automatic wildcard cert SANs for `*.branch.site.test`, a built-in Vite dev server worker that runs on the host per branch, and a dashboard modal for adding and removing worktrees without touching the CLI
-> - ⚒️ **Worker self-heal**, failed queue, schedule, horizon, reverb, and stripe workers are surfaced everywhere (CLI, dashboard banner, TUI, MCP) and recovered with one click or `lerd worker heal`
+> - ⚒️ **Worker self-heal**, failed queue, schedule, horizon, reverb, and stripe workers are surfaced everywhere (CLI, dashboard banner, TUI, MCP) and recovered with one click or `lerd worker heal`, with opt-in Horizon `horizon:listen` auto-reload so dev picks up code changes without a manual restart (toggleable from the dashboard)
 > - 📋 **Live logs** for PHP-FPM, Queue, Schedule, Reverb, per site
 > - 🔒 **Rootless & daemonless** - Podman-native, no Docker required, dual-stack IPv4 + IPv6
 > - 🤖 **MCP server** - let AI assistants (Claude Code, Windsurf, Junie) manage your environment directly
 > - 🧩 **Framework store** - community definitions for Laravel, Symfony, WordPress, Drupal, CakePHP, Statamic with versioned auto-detection
 > - ⚡ **Framework-agnostic** workers, env setup, and nginx proxy — driven by YAML definitions, not hardcoded
+> - 🪟 **Windows via WSL2 (beta)** — `lerd wsl:setup` provisiona systemd, networking mirrored e os pré-requisitos; guia completo em [docs/wsl2.md](docs/wsl2.md)
+> - 🧰 **`lerd init` semeia a partir de Herd, DDEV e Lando** e suporta um `.env.lerd_override` pessoal por projeto, para overrides que nunca tocam o `.env` versionado
 
 Esta fork adiciona, por cima de tudo isso:
 
@@ -75,7 +77,7 @@ Esta fork adiciona, por cima de tudo isso:
 | Instalar versão PHP                | só CLI                       | **botão no dashboard + SSE logs ao vivo**                           |
 | Service presets adicionais         | mysql/postgres/redis/…       | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**             |
 | Xdebug por padrão                  | `start_with_request=yes`     | **`=trigger`** (sem spam em CLI sem IDE)                            |
-| Versão                             | `1.21.2`                     | `1.21.2-oracle.N`                                                   |
+| Versão                             | `1.23.1`                     | `1.23.1-oracle.N`                                                   |
 
 ### Extensões PHP nas imagens
 
@@ -190,7 +192,7 @@ O script verifica `podman`/`git`/`mkcert`, baixa o binário para
 NÃO** → sites em `http://meusite.localhost/` (sem sudo, RFC 6761).
 
 ```bash
-lerd about    # confirma "Lerd Oracle Edition" e versão 1.21.2-oracle.N
+lerd about    # confirma "Lerd Oracle Edition" e versão 1.23.1-oracle.N
 ```
 
 > [!TIP]
