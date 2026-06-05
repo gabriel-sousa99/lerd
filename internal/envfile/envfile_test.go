@@ -382,7 +382,7 @@ func TestSyncPrimaryDomain_preservesServiceAndCredentialKeys(t *testing.T) {
 // set of keys lerd touches when uploading a project. Anything outside this
 // list belongs to the explicit `lerd env` flow, not the automatic one.
 // If you add a key here, you are widening the implicit-rewrite blast radius
-// for every uploaded project — update the changelog and the unimed-vr-security
+// for every uploaded project — update the changelog and the security
 // review accordingly.
 func TestDomainScopedKeys_listIsBounded(t *testing.T) {
 	want := map[string]bool{

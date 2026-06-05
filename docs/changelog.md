@@ -21,7 +21,7 @@ cookie de terceiro, Sanctum quebrado).
   para a origem unificada (`https://<domínio>`, sem `/api`), espelhando a máquina
   dos sites de API. Idempotente, escopo bounded (`FrontendAPIBaseKeys`).
 - Defaults de rota mais ricos: `/redirect`, `/authenticate`, `/login`, `/logout`,
-  `/up` — cobrem o fluxo SSO do `unimedvr/core` (`401 → /redirect → /authenticate`).
+  `/up` — cobrem fluxos SSO comuns (`401 → /redirect → /authenticate`).
   Alinhado também no dashboard: o builder de rotas client-side (`fullstack.ts`)
   usa os mesmos defaults, então proxies fullstack criados pela UI também trazem
   as rotas SSO (antes só o caminho CLI/backend as incluía).

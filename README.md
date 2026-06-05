@@ -301,7 +301,7 @@ Roteamento resultante: `/` → SPA (porta, com HMR); `/api /sanctum /broadcastin
   `APP_URL`/`SESSION_DOMAIN`/`SANCTUM_STATEFUL_DOMAINS` no domínio unificado; com
   `--path`, a SPA recebe a API-base (`URL_API`/`VITE_API_URL`/`VITE_APP_API_URL`).
   Desvincular/remover reverte.
-- Os defaults de rota cobrem o fluxo SSO do `unimedvr/core`
+- Os defaults de rota cobrem fluxos SSO comuns
   (`401 → /redirect → /authenticate`). Rotas custom via `--api-path` (repetível).
 
 No **dashboard**: toggle **Simples | Fullstack** com pickers, paths editáveis,

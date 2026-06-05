@@ -49,7 +49,7 @@ devServer: {
 
 Os defaults de rota cobrem `/api /sanctum /broadcasting /storage /redirect
 /authenticate /login /logout /up`. `/redirect` e `/authenticate` são as rotas
-**web no root** do fluxo SSO do `unimedvr/core` (`401 → /redirect → provider →
+**web no root** de fluxos SSO comuns (`401 → /redirect → provider →
 /authenticate → sessão`). Rotas fora desse conjunto exigem `--api-path`
 explícito (repetível):
 

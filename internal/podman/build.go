@@ -945,7 +945,7 @@ func EnsurePathMounted(path, phpVersion string) {
 			// Belt and suspenders: even when reload+restart both report
 			// success, the running container can end up without the new
 			// mount (observed in production — see oracle.X release notes
-			// for the runc chdir-failed incident on /home/unimedvr/...).
+			// for the runc chdir-failed incident on a user home path).
 			// Verify the destination is actually present; if not, mark
 			// failed so the debounce shortens and a retry happens fast.
 			if ContainerRunningQuiet(unit) {
