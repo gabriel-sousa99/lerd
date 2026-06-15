@@ -5,6 +5,8 @@
     type Site,
     pauseSite,
     resumeSite,
+    pinSite,
+    unpinSite,
     unlinkSite,
     restartSite,
     openSiteInBrowser,
@@ -15,8 +17,15 @@
     toggleTLS,
     toggleLANShare
   } from '$stores/sites';
-  import { openDomainModal, openWorktreeAddModal, openWorktreeRemoveModal } from '$stores/modals';
+  import {
+    openDomainModal,
+    openGroupModal,
+    openWorktreeAddModal,
+    openWorktreeRemoveModal
+  } from '$stores/modals';
+  import Icon from '$components/Icon.svelte';
   import { accessMode } from '$stores/accessMode';
+  import { idleEnabled } from '$stores/idle';
   import { status, loadStatus } from '$stores/status';
   import { xdebugOn, xdebugOff, type XdebugMode } from '$stores/xdebug';
   import { apiBase } from '$lib/api';
@@ -47,14 +56,25 @@
   let restartBusy = $state(false);
   let tlsBusy = $state(false);
   let lanBusy = $state(false);
+  let pinBusy = $state(false);
   let xdebugBusy = $state(false);
+
+  async function togglePin() {
+    pinBusy = true;
+    try {
+      await (site.pinned ? unpinSite(site.domain) : pinSite(site.domain));
+    } finally {
+      pinBusy = false;
+    }
+  }
   let overflowOpen = $state(false);
   let overflowEl: HTMLDivElement | null = $state(null);
 
-  // Xdebug toggles the shared FPM image for this site's PHP version. Only PHP
-  // sites on the shared FPM runtime have it (not FrankenPHP or containers).
+  // Xdebug toggles the per-version xdebug ini, which both the shared FPM image
+  // and a FrankenPHP site's own container mount, so the toggle applies to
+  // FrankenPHP sites too. Custom (non-PHP) containers have no xdebug.
   const showXdebug = $derived(
-    Boolean(site.uses_php) && !site.custom_container && site.runtime !== 'frankenphp'
+    Boolean(site.uses_php) && !site.custom_container
   );
   const xdebugFpm = $derived(
     site.php_version ? $status.php_fpms.find((f) => f.version === site.php_version) : undefined
@@ -217,7 +237,7 @@
                 stroke-linecap="round"
                 stroke-linejoin="round"
                 viewBox="0 0 24 24"
-                aria-label="main"
+                aria-label={m.sites_ariaMain()}
               >
                 <path d="M3 10.5L12 3l9 7.5V20a1 1 0 01-1 1h-4v-6h-8v6H4a1 1 0 01-1-1v-9.5z" />
               </svg>
@@ -329,6 +349,21 @@
             />
           </svg>
         </span>
+      {:else if !dnsEnabled}
+        <span
+          class="shrink-0 -ml-1 p-1 inline-flex items-center text-gray-400 dark:text-gray-500"
+          title={m.sites_controls_httpsUnavailable()}
+          aria-label={m.sites_controls_httpsUnavailable()}
+        >
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+            />
+          </svg>
+        </span>
       {:else}
         <span class="shrink-0 -ml-1 p-1 inline-flex items-center text-gray-400 dark:text-gray-500" aria-label="No TLS">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -383,6 +418,23 @@
       {/if}
 
       <DomainMorePill {site} />
+
+      {#if !activeWorktreeBranch && !site.host_proxy}
+        <button
+          type="button"
+          onclick={() => openGroupModal(site)}
+          title={site.group ? 'Manage group' : 'Group with another site'}
+          aria-label={m.group_manage()}
+          class="inline-flex items-center gap-1 shrink-0 text-xs transition-colors {site.group
+            ? 'text-lerd-red'
+            : 'text-gray-400 dark:text-gray-500 hover:text-lerd-red'}"
+        >
+          <Icon name="group" class="w-3.5 h-3.5" />
+          {#if site.group_subdomain}
+            <span class="font-mono">{site.group_subdomain}.</span>
+          {/if}
+        </button>
+      {/if}
 
       <span class="flex items-center gap-1.5 shrink-0">
         {#if activeFrameworkLabel}
@@ -576,6 +628,25 @@
                   />
                 </svg>
                 {restartBusy ? '...' : m.sites_restartContainer()}
+              </button>
+            {/if}
+            {#if $idleEnabled && !site.paused && !activeWorktreeBranch}
+              <button
+                type="button"
+                role="menuitem"
+                onclick={() => {
+                  overflowOpen = false;
+                  togglePin();
+                }}
+                disabled={pinBusy}
+                class="w-full px-3 py-1.5 text-xs text-left flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors disabled:opacity-50 {site.pinned
+                  ? 'text-amber-600 dark:text-amber-400'
+                  : 'text-gray-700 dark:text-gray-200'}"
+              >
+                <svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill={site.pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+                  <path d="M16 9V4h1a1 1 0 0 0 0-2H7a1 1 0 0 0 0 2h1v5l-2 3v2h5v5l1 1 1-1v-5h5v-2l-2-3z" />
+                </svg>
+                {pinBusy ? '...' : site.pinned ? m.sites_unpin() : m.sites_pin()}
               </button>
             {/if}
             {#if !activeWorktreeBranch}

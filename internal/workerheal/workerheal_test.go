@@ -83,6 +83,28 @@ func TestDetect_FailedWorkerReturned(t *testing.T) {
 	}
 }
 
+func TestDetect_SuppressedWhenStopped(t *testing.T) {
+	stubEnv(t,
+		[]string{"myapp"}, nil,
+		map[string]string{
+			"lerd-queue-myapp.service": "failed",
+			"lerd-php85-fpm.service":   "inactive",
+		},
+		nil,
+	)
+	prev := isStoppedFn
+	isStoppedFn = func() bool { return true }
+	t.Cleanup(func() { isStoppedFn = prev })
+
+	got, err := Detect()
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no unhealthy workers while lerd is stopped, got %v", unitNames(got))
+	}
+}
+
 func TestDetect_PausedSiteExcluded(t *testing.T) {
 	stubEnv(t,
 		[]string{"alpha", "beta"},
@@ -147,9 +169,9 @@ func TestDetect_HyphenatedWorkerName(t *testing.T) {
 	// Custom worker with a hyphen in its name plus a site whose name itself
 	// contains hyphens — make sure the longest-suffix match keeps both.
 	stubEnv(t,
-		[]string{"score-diviner"}, nil,
+		[]string{"tallyboard"}, nil,
 		map[string]string{
-			"lerd-emit-events-score-diviner.service": "failed",
+			"lerd-emit-events-tallyboard.service": "failed",
 		},
 		nil,
 	)
@@ -158,7 +180,7 @@ func TestDetect_HyphenatedWorkerName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
-	if len(got) != 1 || got[0].Worker != "emit-events" || got[0].Site != "score-diviner" {
+	if len(got) != 1 || got[0].Worker != "emit-events" || got[0].Site != "tallyboard" {
 		t.Errorf("split wrong: %+v", got)
 	}
 }

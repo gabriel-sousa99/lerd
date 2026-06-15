@@ -6,21 +6,27 @@
     toggleQueue,
     toggleHorizon,
     setHorizonReload,
+    setOctaneReload,
     toggleSchedule,
     toggleReverb,
     toggleStripe,
+    setStripeConfig,
     toggleWorker,
     setWorktreeDBIsolated,
     loadSites
   } from '$stores/sites';
   import { loadServices } from '$stores/services';
-  import { phpVersions } from '$stores/phpVersions';
+  import { phpVersions, phpOptionsForSite } from '$stores/phpVersions';
   import { nodeVersions } from '$stores/nodeVersions';
   import { status } from '$stores/status';
   import WorktreeDBIsolateModal from './WorktreeDBIsolateModal.svelte';
   import HorizonControl from './HorizonControl.svelte';
   import HorizonReloadWatcherModal from './HorizonReloadWatcherModal.svelte';
+  import OctaneControl from './OctaneControl.svelte';
+  import OctaneReloadWatcherModal from './OctaneReloadWatcherModal.svelte';
+  import StripeControl from './StripeControl.svelte';
   import CommandsDropdown from '$components/CommandsDropdown.svelte';
+  import SiteDoctorModal from './SiteDoctorModal.svelte';
   import Dropdown from '$components/Dropdown.svelte';
   import ToggleButton from '$components/ToggleButton.svelte';
   import { m } from '../../paraglide/messages.js';
@@ -35,14 +41,42 @@
     if (!activeWorktreeBranch) return undefined;
     return (site.worktrees || []).find((w) => w.branch === activeWorktreeBranch);
   });
+  // Workers idle-suspend has stopped: shown as "asleep" on their toggles rather
+  // than a plain "off", so they don't look broken.
+  const asleepWorkers = $derived(new Set(site.idle_suspended_workers || []));
+
   const effectivePhp = $derived(activeWorktree?.php_version ?? site.php_version ?? '');
   const effectiveNode = $derived(activeWorktree?.node_version ?? site.node_version ?? '');
   const phpInherited = $derived(Boolean(activeWorktree) && !activeWorktree?.php_version_override);
   const nodeInherited = $derived(Boolean(activeWorktree) && !activeWorktree?.node_version_override);
+  const phpOptions = $derived(
+    phpOptionsForSite(site.runtime, $phpVersions, $status.frankenphp_php_versions, effectivePhp)
+  );
+  // When host bun is available, the Node dropdown offers a "bun" entry that
+  // pins .lerd.yaml js_runtime (project-level), leaving node_version intact.
+  // js_runtime is project-level, so the bun toggle only belongs on the main
+  // site dropdown — offering it per worktree would let a worktree action flip
+  // the whole project's runtime and show a confusing selection.
+  const usingBun = $derived(!activeWorktreeBranch && site.js_runtime === 'bun');
+  // Bake "Node " into the version labels so the bun entry can stay bare "bun"
+  // instead of reading "Node bun" (the Dropdown prefixes its label onto rows).
+  const nodeOptions = $derived([
+    ...$nodeVersions.map((v) => ({ value: v, label: 'Node ' + v })),
+    ...(!activeWorktreeBranch && $status.bun_available
+      ? [{ value: 'bun', label: 'bun', description: 'JS runtime' }]
+      : [])
+  ]);
+  const nodeValue = $derived(usingBun ? 'bun' : effectiveNode);
   const dbCapable = $derived((site.services || []).some((s) => /^(mysql|mariadb|postgres)/.test(s)));
   const dbIsolated = $derived(Boolean(activeWorktree?.db_isolated));
   let dbBusy = $state(false);
   let isolateModalOpen = $state(false);
+
+  // Laravel Doctor lives behind an on-demand button next to Commands rather than
+  // a permanent tab: its checks (including a migrate:status exec) only run when
+  // the modal is opened, so a healthy site carries no extra weight.
+  const canDoctor = $derived(Boolean(site.is_laravel));
+  let doctorOpen = $state(false);
 
   function onDBIsolatedChange() {
     if (!activeWorktreeBranch || dbBusy) return;
@@ -188,6 +222,36 @@
     await applyReload(desired);
   }
 
+  // Octane (FrankenPHP worker mode) auto-reload, mirroring the Horizon flow:
+  // re-applying the FrankenPHP container restarts it, so the control dips and
+  // settles the same way the Horizon segment does.
+  let octaneWatcherModalOpen = $state(false);
+  let octaneReloadRestarting = $state(false);
+
+  async function applyOctaneReload(desired: boolean) {
+    if (octaneReloadRestarting) return;
+    octaneReloadRestarting = true;
+    try {
+      const r = await setOctaneReload(site, desired);
+      if (!r.ok) {
+        alert(m.sites_controls_octaneReloadFailed({ error: r.error || '' }));
+        return;
+      }
+      await Promise.all([loadSites(), loadServices()]);
+    } finally {
+      octaneReloadRestarting = false;
+    }
+  }
+
+  async function onToggleOctaneReload() {
+    const desired = !site.octane_reload;
+    if (desired && !site.octane_reload_ready) {
+      octaneWatcherModalOpen = true;
+      return;
+    }
+    await applyOctaneReload(desired);
+  }
+
   async function onPhpChange(e: Event) {
     const v = (e.target as HTMLSelectElement).value;
     versionBusy = true;
@@ -220,12 +284,20 @@
       <span class="text-xs text-violet-500 dark:text-violet-400 border border-violet-200 dark:border-violet-500/30 rounded-sm px-2 py-1">
         {(site.container_image || 'container') + ' :' + site.container_port}
       </span>
+    {:else if site.host_proxy}
+      <span class="text-xs text-violet-500 dark:text-violet-400 border border-violet-200 dark:border-violet-500/30 rounded-sm px-2 py-1">
+        {m.sites_controls_proxyBadge()}{site.host_port ? ' :' + site.host_port : ''}
+      </span>
+    {:else if site.runtime === 'fpm-custom'}
+      <span class="text-xs text-violet-500 dark:text-violet-400 border border-violet-200 dark:border-violet-500/30 rounded-sm px-2 py-1">
+        PHP {effectivePhp} · custom image
+      </span>
     {:else if site.uses_php}
-      {#if $phpVersions.length > 0}
+      {#if phpOptions.length > 0}
         <Dropdown
           label="PHP"
           value={effectivePhp}
-          options={$phpVersions}
+          options={phpOptions}
           disabled={versionBusy}
           inherited={phpInherited}
           inheritedSuffix={m.sites_controls_inheritedSuffix()}
@@ -240,15 +312,22 @@
 
     {#if $status.node_managed_by_lerd && $nodeVersions.length > 0}
       <Dropdown
-        label="Node"
-        value={effectiveNode}
-        options={$nodeVersions}
+        value={nodeValue}
+        options={nodeOptions}
         disabled={versionBusy}
-        inherited={nodeInherited}
+        inherited={nodeInherited && !usingBun}
         inheritedSuffix={m.sites_controls_inheritedSuffix()}
         title={nodeInherited ? m.sites_controls_inheritsFromMain() : ''}
-        placeholder={m.sites_controls_nodeDefault()}
+        placeholder={$status.node_default ? m.sites_controls_nodeDefaultVersion({ version: $status.node_default }) : m.sites_controls_nodeDefault()}
         onchange={(v) => onNodeChange({ target: { value: v } } as unknown as Event)}
+      />
+    {/if}
+
+    {#if site.runtime === 'frankenphp' && site.runtime_worker && site.is_laravel}
+      <OctaneControl
+        reload={Boolean(site.octane_reload)}
+        reloadLoading={octaneReloadRestarting}
+        onToggleReload={onToggleOctaneReload}
       />
     {/if}
 
@@ -289,6 +368,7 @@
         <ToggleButton
           label={m.sites_controls_queue()}
           on={Boolean(site.queue_running)}
+          asleep={asleepWorkers.has('queue')}
           failing={Boolean(site.queue_failing)}
           loading={isPending('queue')}
           disabled={isPending('queue')}
@@ -300,6 +380,7 @@
       {#if site.has_horizon}
         <HorizonControl
           running={Boolean(site.horizon_running)}
+          asleep={asleepWorkers.has('horizon')}
           failing={Boolean(site.horizon_failing)}
           reload={Boolean(site.horizon_reload)}
           horizonLoading={isPending('horizon') || reloadRestarting}
@@ -313,6 +394,7 @@
         <ToggleButton
           label={m.sites_controls_schedule()}
           on={Boolean(site.schedule_running)}
+          asleep={asleepWorkers.has('schedule')}
           failing={Boolean(site.schedule_failing)}
           loading={isPending('schedule')}
           disabled={isPending('schedule')}
@@ -325,6 +407,7 @@
         <ToggleButton
           label={m.sites_controls_reverb()}
           on={Boolean(site.reverb_running)}
+          asleep={asleepWorkers.has('reverb')}
           failing={Boolean(site.reverb_failing)}
           loading={isPending('reverb')}
           disabled={isPending('reverb')}
@@ -334,13 +417,13 @@
       {/if}
 
       {#if site.stripe_secret_set}
-        <ToggleButton
-          label={m.sites_controls_stripe()}
-          on={Boolean(site.stripe_running)}
+        <StripeControl
+          running={Boolean(site.stripe_running)}
+          asleep={asleepWorkers.has('stripe')}
           loading={isPending('stripe')}
-          disabled={isPending('stripe')}
-          onclick={() => transition('stripe', !site.stripe_running, () => toggleStripe(site))}
-          title={site.stripe_running ? m.sites_controls_stripeToggle_on() : m.sites_controls_stripeToggle_off()}
+          webhookPath={site.stripe_webhook_path}
+          onToggle={() => transition('stripe', !site.stripe_running, () => toggleStripe(site))}
+          onSaveConfig={(path) => setStripeConfig(site, path)}
         />
       {/if}
 
@@ -350,6 +433,7 @@
         <ToggleButton
           label={shortLabel}
           on={Boolean(w.running)}
+          asleep={asleepWorkers.has(w.name)}
           failing={Boolean(w.failing)}
           loading={isPending('worker:' + w.name)}
           disabled={isPending('worker:' + w.name)}
@@ -366,9 +450,34 @@
     {/if}
   </div>
 
+    {#if canDoctor}
+      <button
+        type="button"
+        onclick={() => (doctorOpen = true)}
+        class="shrink-0 inline-flex items-center justify-center h-7 w-7 rounded-md border border-gray-200 dark:border-lerd-border bg-white dark:bg-lerd-card hover:border-lerd-red hover:text-lerd-red transition-colors text-gray-700 dark:text-gray-200"
+        title={m.sites_doctor_title()}
+        aria-label={m.sites_doctor_button()}
+      >
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 00-2 2v5a6 6 0 006 6 6 6 0 006-6V4a2 2 0 00-2-2h-1a.3.3 0 10.2.3" />
+          <path d="M8 15v1a6 6 0 006 6 6 6 0 006-6v-4" />
+          <circle cx="20" cy="10" r="2" />
+        </svg>
+      </button>
+    {/if}
+
     <CommandsDropdown domain={site.domain} branch={activeWorktreeBranch} />
   </div>
 </div>
+
+{#if canDoctor}
+  <SiteDoctorModal
+    open={doctorOpen}
+    {site}
+    branch={activeWorktreeBranch}
+    onclose={() => (doctorOpen = false)}
+  />
+{/if}
 
 {#if activeWorktreeBranch}
   <WorktreeDBIsolateModal
@@ -388,4 +497,11 @@
   {site}
   onclose={() => (watcherModalOpen = false)}
   oninstalled={() => void applyReload(true)}
+/>
+
+<OctaneReloadWatcherModal
+  open={octaneWatcherModalOpen}
+  {site}
+  onclose={() => (octaneWatcherModalOpen = false)}
+  oninstalled={() => void applyOctaneReload(true)}
 />

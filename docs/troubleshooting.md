@@ -68,10 +68,10 @@ The chain in order:
 | `interface routes .test to 5300` | `resolvectl status` shows `127.0.0.1:5300` and `~<tld>` on the active interface.        | `sudo systemctl restart NetworkManager`, or set the routing manually with `sudo resolvectl domain <iface> ~test ~.`.                                                                                                                                                 |
 | `system DNS lookup`              | `host lerd-probe.test` (the system resolver) returns 127.0.0.1.                         | The drop-in is installed but resolved isn't honouring it. Check whether cloud-init or another tool wrote a higher-priority resolver config. Common on EC2 / cloud images. With a VPN connected this rung is reported as a warning rather than a failure, see the VPN section below. |
 
-You can also call this programmatically over MCP via the `dns_diagnose` tool, useful for AI-driven troubleshooting:
+You can also call this programmatically over MCP via the `diag` tool's `dns_diagnose` action, useful for AI-driven troubleshooting:
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dns_diagnose","arguments":{}}}' | lerd mcp
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"diag","arguments":{"action":"dns_diagnose"}}}' | lerd mcp
 ```
 
 The response includes a `steps` array with a `status` (`ok` / `fail` / `warn` / `skip`) and `hint` per rung, plus a `first_failure` index so an LLM can jump straight to the broken layer.
@@ -374,4 +374,25 @@ cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/networks/aardvark-dns/ler
 # if only 10.89.7.1 is present, the drift fix didn't run — re-run lerd install
 ```
 
+:::
+
+::: details Podman Machine overlay-storage error (macOS)
+Symptom: on macOS, `lerd start` fails and **every** container start reports a graph-driver / overlay error:
+
+```
+exit status 125: Error: getting graph driver info "<id>":
+readlink /var/lib/containers/storage/overlay: invalid argument
+```
+
+Cause: the macOS host was shut down ungracefully (forced power-off, battery death, kernel panic) while the Podman Machine VM was still running. The VM's container storage is left with a stale overlay mount and corrupt container layers, so no container can start until the storage is remounted and the stale containers are rebuilt.
+
+`lerd start` detects this and **self-heals automatically** on the first run: it restarts the Podman Machine to remount the storage, force-removes the stale `lerd-*` containers so they rebuild on fresh storage, and retries the start pass once. Your data is safe throughout: lerd bind-mounts every database and site directory to the host, not into the VM.
+
+If the automatic recovery isn't enough (it prints guidance pointing here), recreate the VM:
+
+```bash
+lerd machine reset
+```
+
+This stops the VM, removes it, and re-initialises it. Databases and site data are preserved (they live on the host); container images are rebuilt automatically on the next `lerd start`. See [Start, Stop & Autostart → `lerd machine reset`](usage/lifecycle.md#lerd-machine-reset-macos).
 :::

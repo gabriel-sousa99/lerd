@@ -47,7 +47,8 @@ func detectSiteProxy(site config.Site) (path string, port int, ok bool) {
 }
 
 type nginxConfData struct {
-	Resolver string
+	Resolver     string
+	AccessSocket string
 }
 
 // VhostData is the data passed to vhost templates.
@@ -57,6 +58,9 @@ type VhostData struct {
 	Path            string
 	PHPVersion      string
 	PHPVersionShort string
+	// FPMContainer is the container nginx fastcgi's to: the shared
+	// lerd-php<ver>-fpm, or a per-site container for custom-FPM sites.
+	FPMContainer    string
 	CertDomain      string // domain whose cert files to use (defaults to Domain)
 	PublicDir       string // document root subdirectory, e.g. "public", "web", "."
 	Proxy           bool   // true when the site has a worker with WebSocket/HTTP proxy config
@@ -64,7 +68,9 @@ type VhostData struct {
 	ProxyPort       int    // port the worker listens on inside the PHP-FPM container
 	CustomContainer string // container name for custom container sites (e.g. "lerd-custom-nestapp")
 	CustomPort      int    // port the app listens on inside the custom container
-	BackendSSL      bool   // proxy to the container via HTTPS (app serves TLS on its own port)
+	UpstreamHost    string // host-proxy upstream address (e.g. "host.containers.internal")
+	UpstreamPort    int    // host-proxy upstream port (the dev server's host port)
+	BackendSSL      bool   // proxy to the backend via HTTPS (app serves TLS on its own port)
 	// LerdSite / LerdBranch surface the parent site name and (for worktrees)
 	// the branch to PHP via fastcgi_param so the debug bridge can tag events
 	// with stable identifiers instead of guessing from DOCUMENT_ROOT.
@@ -162,6 +168,7 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 		Path:            site.Path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
+		FPMContainer:    podman.FPMContainerName(site, phpVersion),
 		PublicDir:       publicDir,
 		Proxy:           hasProxy,
 		ProxyPath:       proxyPath,
@@ -205,6 +212,7 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 		Path:            site.Path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
+		FPMContainer:    podman.FPMContainerName(site, phpVersion),
 		CertDomain:      site.PrimaryDomain(),
 		PublicDir:       publicDir,
 		Proxy:           hasProxy,
@@ -360,6 +368,66 @@ func GenerateCustomSSLVhost(site config.Site) error {
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
+// hostProxyUpstream returns the host address nginx proxies a host-proxy site to.
+// macOS resolves host.containers.internal via gvproxy; on Linux we reuse the
+// routable gateway IP the probe cached in the hosts file (pure read, no podman).
+func hostProxyUpstream() string {
+	if runtime.GOOS == "darwin" {
+		return "host.containers.internal"
+	}
+	if ip := podman.ReadHostGatewayFromFile(); ip != "" {
+		return ip
+	}
+	return "host.containers.internal"
+}
+
+// GenerateHostProxyVhost renders the HTTP vhost for a host-proxy site and writes
+// it to conf.d. Nginx reverse-proxies to a process on the host instead of a
+// container.
+func GenerateHostProxyVhost(site config.Site) error {
+	return generateHostProxyVhost(site, "vhost-hostproxy.conf.tmpl", site.PrimaryDomain()+".conf", false)
+}
+
+// GenerateHostProxySSLVhost renders the SSL vhost for a host-proxy site and
+// writes it to conf.d/<domain>-ssl.conf.
+func GenerateHostProxySSLVhost(site config.Site) error {
+	return generateHostProxyVhost(site, "vhost-hostproxy-ssl.conf.tmpl", site.PrimaryDomain()+"-ssl.conf", true)
+}
+
+func generateHostProxyVhost(site config.Site, tmplName, confName string, ssl bool) error {
+	tmplData, err := GetTemplate(tmplName)
+	if err != nil {
+		return err
+	}
+	tmpl, err := template.New(tmplName).Parse(string(tmplData))
+	if err != nil {
+		return err
+	}
+
+	data := VhostData{
+		Domain:         site.PrimaryDomain(),
+		ServerNames:    serverNamesWithWildcards(site.Domains),
+		UpstreamHost:   hostProxyUpstream(),
+		UpstreamPort:   site.HostPort,
+		BackendSSL:     site.HostSSL,
+		RequestTimeout: resolveRequestTimeout(site.Path),
+	}
+	if ssl {
+		data.CertDomain = site.PrimaryDomain()
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
+		return err
+	}
+	confPath := filepath.Join(config.NginxConfD(), confName)
+	return os.WriteFile(confPath, buf.Bytes(), 0644)
+}
+
 // GenerateWorktreeVhostFor picks GenerateWorktreeSSLVhost or GenerateWorktreeVhost
 // based on the secured flag, so callers (scanWorktrees, syncWorktree,
 // migrateWorktreeVhosts) don't repeat the if/else around the two
@@ -371,6 +439,16 @@ func GenerateWorktreeVhostFor(domain, path, phpVersion, parentDomain, siteName, 
 		return GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, branch)
 	}
 	return GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch)
+}
+
+// worktreeFPMContainer resolves the FPM container a worktree vhost points at:
+// the parent site's per-site container for custom-FPM sites, otherwise the
+// shared lerd-php<ver>-fpm.
+func worktreeFPMContainer(siteName, phpVersion string) string {
+	if site, _ := config.FindSite(siteName); site != nil {
+		return podman.FPMContainerName(*site, phpVersion)
+	}
+	return "lerd-php" + phpShort(phpVersion) + "-fpm"
 }
 
 // GenerateWorktreeVhost renders the HTTP vhost template for a worktree checkout
@@ -392,6 +470,7 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 		Path:            path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
+		FPMContainer:    worktreeFPMContainer(siteName, phpVersion),
 		PublicDir:       "public",
 		LerdSite:        siteName,
 		LerdBranch:      branch,
@@ -430,6 +509,7 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 		Path:            path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
+		FPMContainer:    worktreeFPMContainer(siteName, phpVersion),
 		CertDomain:      parentDomain,
 		PublicDir:       "public",
 		LerdSite:        siteName,
@@ -448,6 +528,44 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 	}
 	confPath := filepath.Join(config.NginxConfD(), domain+".conf")
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
+}
+
+// GenerateWorktreeHostProxyVhostFor renders a worktree's host-proxy vhost: nginx
+// reverse-proxies the worktree domain to the dev server running on the host at
+// upstreamPort (the worktree's own port). The HTTP/SSL choice mirrors
+// GenerateWorktreeVhostFor, and the SSL variant reuses the parent's wildcard
+// cert (*.parentDomain) just like the PHP worktree path.
+func GenerateWorktreeHostProxyVhostFor(domain, path, parentDomain string, upstreamPort int, backendSSL, secured bool) error {
+	data := VhostData{
+		Domain:         domain,
+		ServerNames:    domain + " *." + domain,
+		UpstreamHost:   hostProxyUpstream(),
+		UpstreamPort:   upstreamPort,
+		BackendSSL:     backendSSL,
+		RequestTimeout: resolveRequestTimeout(path),
+	}
+	tmplName := "vhost-hostproxy.conf.tmpl"
+	if secured {
+		tmplName = "vhost-hostproxy-ssl.conf.tmpl"
+		data.CertDomain = parentDomain
+	}
+
+	tmplData, err := GetTemplate(tmplName)
+	if err != nil {
+		return err
+	}
+	tmpl, err := template.New(tmplName).Parse(string(tmplData))
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(config.NginxConfD(), domain+".conf"), buf.Bytes(), 0644)
 }
 
 // GeneratePausedVhost writes a minimal nginx vhost that serves the static paused
@@ -716,6 +834,8 @@ func RepairVhosts() []VhostRepair {
 			// Regenerate as plain HTTP vhost.
 			var regenErr error
 			switch {
+			case site.IsHostProxy():
+				regenErr = GenerateHostProxyVhost(site)
 			case site.IsCustomContainer():
 				regenErr = GenerateCustomVhost(site)
 			case site.IsFrankenPHP():
@@ -1081,6 +1201,10 @@ func EnsureLerdVhost() error {
         proxy_pass http://host.containers.internal:7073;
     }
 
+    location ^~ /_svc/ {
+        proxy_pass http://host.containers.internal:7073;
+    }
+
     location = /manifest.webmanifest {
         proxy_pass http://host.containers.internal:7073;
     }
@@ -1123,6 +1247,10 @@ func EnsureLerdVhost() error {
     }
 
     location ^~ /_spx/ {
+        proxy_pass http://unix:%[1]s:$request_uri;
+    }
+
+    location ^~ /_svc/ {
         proxy_pass http://unix:%[1]s:$request_uri;
     }
 
@@ -1177,7 +1305,8 @@ func EnsureNginxConfig() error {
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, nginxConfData{
-		Resolver: podman.NetworkGateway("lerd"),
+		Resolver:     podman.NetworkGateway("lerd"),
+		AccessSocket: config.AccessSocketPath(),
 	}); err != nil {
 		return fmt.Errorf("rendering nginx.conf: %w", err)
 	}

@@ -31,8 +31,11 @@ func RebuildSite(name string) error {
 	if err != nil {
 		return fmt.Errorf("site %q not found", name)
 	}
-	if !site.IsCustomContainer() {
-		return fmt.Errorf("site %q is not a custom container site — use 'lerd php:rebuild' for PHP sites", name)
+	if site.IsHostProxy() {
+		return fmt.Errorf("site %q is a host-proxy site with no container to rebuild; use 'lerd restart' to restart its dev server", name)
+	}
+	if !site.IsCustomContainer() && !site.IsCustomFPM() {
+		return fmt.Errorf("site %q is not a custom container site, use 'lerd php:rebuild' for PHP sites", name)
 	}
 
 	proj, err := config.LoadProjectConfig(site.Path)
@@ -51,6 +54,9 @@ func RebuildSite(name string) error {
 
 	// Restart the container to pick up the new image.
 	unit := podman.CustomContainerName(name)
+	if site.IsCustomFPM() {
+		unit = podman.CustomFPMContainerName(name)
+	}
 	running, _ := podman.ContainerRunning(unit)
 	if running {
 		if err := podman.RestartUnit(unit); err != nil {

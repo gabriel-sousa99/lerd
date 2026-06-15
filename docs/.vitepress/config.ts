@@ -112,9 +112,11 @@ export default defineConfig({
           text: "Sites & Runtimes",
           items: [
             { text: "Site Management", link: "/usage/sites" },
+            { text: "Site Groups", link: "/usage/site-groups" },
             { text: "PHP", link: "/usage/php" },
             { text: "Node", link: "/usage/node" },
             { text: "Custom Containers", link: "/usage/custom-containers" },
+            { text: "Host-Proxy Sites", link: "/usage/host-proxy" },
             { text: "Nginx Overrides", link: "/usage/nginx-overrides" },
           ],
         },
@@ -133,11 +135,13 @@ export default defineConfig({
           items: [
             { text: "Frameworks", link: "/usage/frameworks" },
             { text: "Framework Workers", link: "/usage/framework-workers" },
+            { text: "Framework Commands", link: "/features/commands" },
             {
               text: "Framework Definitions",
               link: "/usage/framework-definitions",
             },
             { text: "Queue Workers", link: "/usage/queue-workers" },
+            { text: "Idle-Suspend", link: "/usage/idle-suspend" },
             { text: "Worker Runtime (macOS)", link: "/usage/worker-runtime" },
             { text: "Healing Failed Workers", link: "/usage/worker-heal" },
             { text: "Browser Testing", link: "/usage/browser-testing" },

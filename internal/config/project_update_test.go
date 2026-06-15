@@ -207,6 +207,37 @@ func TestSyncProjectDomains_CaseInsensitiveDedup(t *testing.T) {
 	}
 }
 
+func TestReplaceProjectDomain_dropsRenamedDomain(t *testing.T) {
+	// admin-starlane grouped into admin.starlane: the old standalone domain
+	// must not survive in .lerd.yaml, while a genuine conflict-filtered extra is.
+	dir := setupProjectConfig(t, &ProjectConfig{Domains: []string{"admin-starlane", "conflict-domain"}})
+	if err := ReplaceProjectDomain(dir, []string{"admin.starlane.test"}, "admin-starlane.test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(t, dir)
+	want := []string{"admin.starlane", "conflict-domain"}
+	if len(cfg.Domains) != len(want) {
+		t.Fatalf("Domains = %v, want %v", cfg.Domains, want)
+	}
+	for i, d := range want {
+		if cfg.Domains[i] != d {
+			t.Errorf("Domains[%d] = %q, want %q", i, cfg.Domains[i], d)
+		}
+	}
+}
+
+func TestReplaceProjectDomain_keepsStillCurrentDomain(t *testing.T) {
+	// When oldDomain is still in the new set (no real rename), it is kept.
+	dir := setupProjectConfig(t, &ProjectConfig{Domains: []string{"myapp"}})
+	if err := ReplaceProjectDomain(dir, []string{"myapp.test", "api.test"}, "myapp.test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(t, dir)
+	if len(cfg.Domains) != 2 || cfg.Domains[0] != "myapp" || cfg.Domains[1] != "api" {
+		t.Errorf("Domains = %v, want [myapp api]", cfg.Domains)
+	}
+}
+
 func TestSyncProjectDomains_NoOpWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	if err := SyncProjectDomains(dir, []string{"myapp.test"}, "test"); err != nil {
@@ -412,6 +443,47 @@ func TestReplaceProjectDBService_AddsWhenNoDB(t *testing.T) {
 	}
 	if cfg.Services[1].Name != "sqlite" {
 		t.Errorf("Services[1] = %q, want sqlite", cfg.Services[1].Name)
+	}
+}
+
+func TestReplaceProjectDBService_SyncsExplicitDBServiceBlock(t *testing.T) {
+	dir := setupProjectConfig(t, &ProjectConfig{
+		Services: []ProjectService{{Name: "postgres"}},
+		DB:       ProjectDB{Service: "postgres"},
+	})
+	if err := ReplaceProjectDBService(dir, "postgres-18"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(t, dir)
+	if cfg.DB.Service != "postgres-18" {
+		t.Errorf("db.service = %q, want postgres-18 (stale block would point later db commands at the old service)", cfg.DB.Service)
+	}
+}
+
+func TestReplaceProjectDBService_ClearsDBServiceForSqlite(t *testing.T) {
+	dir := setupProjectConfig(t, &ProjectConfig{
+		Services: []ProjectService{{Name: "mysql"}},
+		DB:       ProjectDB{Service: "mysql"},
+	})
+	if err := ReplaceProjectDBService(dir, "sqlite"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(t, dir)
+	if cfg.DB.Service != "" {
+		t.Errorf("db.service = %q, want empty (sqlite has no container service; a stale value resolves to a bogus host)", cfg.DB.Service)
+	}
+}
+
+func TestReplaceProjectDBService_LeavesDBServiceEmptyWhenUnset(t *testing.T) {
+	dir := setupProjectConfig(t, &ProjectConfig{
+		Services: []ProjectService{{Name: "mysql"}},
+	})
+	if err := ReplaceProjectDBService(dir, "postgres"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(t, dir)
+	if cfg.DB.Service != "" {
+		t.Errorf("db.service = %q, want empty (must not introduce a block the user didn't have)", cfg.DB.Service)
 	}
 }
 

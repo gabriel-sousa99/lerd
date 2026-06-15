@@ -211,10 +211,9 @@ func HorizonStartForSite(siteName, sitePath, phpVersion string) error {
 
 // buildHorizonUnit renders the Horizon systemd unit body. Horizon always
 // uses Redis so lerd-redis is in After=/Wants= alongside the FPM container.
-func buildHorizonUnit(siteName, sitePath, phpVersion string) string {
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
+// Pure: the caller resolves fpmUnit, so tests don't touch the live registry.
+func buildHorizonUnit(siteName, sitePath, fpmUnit string) string {
+	container := fpmUnit
 
 	return fmt.Sprintf(`[Unit]
 Description=Lerd Horizon (%s)

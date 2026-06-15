@@ -16,6 +16,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
@@ -33,6 +34,8 @@ func NewInstallCmd() *cobra.Command {
 	}
 	cmd.Flags().Bool("no-ipv6", false,
 		"Force the lerd network to v4-only even if the host supports IPv6 (also: LERD_DISABLE_IPV6=1)")
+	cmd.Flags().String("dns", "",
+		"Preselect the DNS mode and skip the prompt: 'managed' (.test + HTTPS) or 'localhost' (.localhost, plain HTTP)")
 	cmd.Flags().Bool("from-update", false, "")
 	_ = cmd.Flags().MarkHidden("from-update")
 	return cmd
@@ -63,6 +66,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		noIPv6 = true
 	}
 	fromUpdate, _ := cmd.Flags().GetBool("from-update")
+	dnsFlag, _ := cmd.Flags().GetString("dns")
 	if noIPv6 {
 		podman.MarkIPv6Disabled("lerd")
 		fmt.Println("  IPv6 disabled by user; lerd network will be v4-only.")
@@ -160,10 +164,23 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		wantLaravelInstaller = confirmInstallPrompt("Install Laravel installer (laravel new)?")
 	}
 
+	// lerd never installs bun itself, but if the user already has it we say so
+	// and soften the Node prompt: a bun user can decline lerd-managed Node and
+	// keep a clean system. Detected bun is used automatically for bun projects
+	// and mirrored into the PHP container on setup.
+	bunPath := nodeDet.BunPath()
+	if bunPath != "" {
+		fmt.Printf("  --> bun detected at %s — lerd will use it automatically for projects that use bun\n", bunPath)
+	}
+
 	wantLerdNode := true
 	if systemNode := detectSystemNode(); systemNode != "" {
 		fmt.Printf("  --> Node.js detected at %s\n", systemNode)
-		wantLerdNode = confirmInstallPrompt("Let lerd manage Node.js versions (installs fnm shims, may override system node)?")
+		prompt := "Let lerd manage Node.js versions (installs fnm shims, may override system node)?"
+		if bunPath != "" {
+			prompt += " Decline to keep your system Node and use bun."
+		}
+		wantLerdNode = confirmInstallPrompt(prompt)
 	}
 
 	// Ask whether lerd should manage local DNS. Prompted on every direct
@@ -189,6 +206,8 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		}
 		if fromUpdate {
 			wantDNS = prevEnabled
+		} else if flagDNS, ok := parseDNSMode(dnsFlag); ok {
+			wantDNS = flagDNS
 		} else {
 			wantDNS = confirmInstallPromptDefault(
 				"Let lerd manage DNS for local sites? (default No — use *.localhost, no dnsmasq, no HTTPS, no sudo)",
@@ -310,6 +329,21 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 				continue
 			}
 			switch {
+			case site.IsHostProxy():
+				if site.Secured {
+					if err := nginx.GenerateHostProxySSLVhost(site); err != nil {
+						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
+						continue
+					}
+					sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
+					mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
+					os.Remove(mainConf)          //nolint:errcheck
+					os.Rename(sslConf, mainConf) //nolint:errcheck
+				} else {
+					if err := nginx.GenerateHostProxyVhost(site); err != nil {
+						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
+					}
+				}
 			case site.IsCustomContainer():
 				if site.Secured {
 					if err := nginx.GenerateCustomSSLVhost(site); err != nil {
@@ -736,6 +770,18 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// after a clean install from config backup).
 	migrateServiceUnits()
 
+	// Build any missing derived FrankenPHP image regardless of autostart: the
+	// quadlet refresh above already rewrote FrankenPHP quadlets to point at the
+	// localhost derived image, so the image must exist or the next container
+	// restart (reboot, manual, a php.ini save) would reference a missing image.
+	// BuildFrankenPHPImage no-ops when the image is already current; it never
+	// restarts a container, so it's safe to run with autostart disabled.
+	for _, v := range activeFrankenPHPVersions() {
+		if err := podman.BuildFrankenPHPImage(v, false, os.Stdout); err != nil {
+			fmt.Printf("  WARN: building FrankenPHP image for PHP %s: %v\n", v, err)
+		}
+	}
+
 	// Start service containers and workers only when autostart is on.
 	// When the user has explicitly disabled autostart we leave them
 	// stopped — `lerd update` running install via re-exec must not flip
@@ -747,8 +793,8 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		// new binary against stale images. Gated by autostartOn because
 		// php:rebuild restarts FPM and worker units unconditionally.
 		activeFPM, _ := phpDet.ListInstalled()
-		if podman.NeedsFPMRebuild(activeFPM) {
-			fmt.Println("\n==> PHP-FPM Containerfile changed — rebuilding images")
+		if podman.NeedsFPMRebuild(activeFPM) || podman.NeedsFrankenPHPRebuild(activeFrankenPHPVersions()) {
+			fmt.Println("\n==> PHP image definitions changed — rebuilding images")
 			self, err := os.Executable()
 			if err != nil {
 				fmt.Printf("  WARN: locating lerd binary for php:rebuild: %v\n", err)
@@ -816,6 +862,16 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 	if wantLerdNode {
 		ensureDefaultNode()
+	}
+
+	// Re-sync host workers to the current JS runtime once the Node-management
+	// state is finalized. This makes "install bun, then `lerd update`" switch
+	// Vite and friends onto bun with no manual re-link. Gated on bun being
+	// present (no reason to touch workers otherwise) and on autostart (don't
+	// start units the user disabled); change-detection inside means only
+	// workers whose command actually changes get restarted.
+	if autostartOn && bunPath != "" {
+		regenerateHostWorkers()
 	}
 
 	refreshStoreFrameworks()
@@ -891,9 +947,7 @@ func refreshUnreferencedCustomQuadlets(seenSvc map[string]bool, reg *config.Site
 				fmt.Printf("  WARN: refreshing %s quadlet: %v\n", podman.CustomContainerName(s.Name), err)
 			}
 		case s.IsFrankenPHP():
-			fw, _ := config.GetFrameworkForDir(s.Framework, s.Path)
-			entrypoint := fw.FrankenPHPEntrypoint(s.RuntimeWorker)
-			env := fw.FrankenPHPEnv(s.RuntimeWorker)
+			entrypoint, env := s.FrankenPHPQuadletSpec()
 			if err := podman.WriteFrankenPHPQuadlet(s.Name, s.Path, s.PHPVersion, entrypoint, env); err != nil {
 				fmt.Printf("  WARN: refreshing %s quadlet: %v\n", podman.FrankenPHPContainerName(s.Name), err)
 			}
@@ -1170,6 +1224,22 @@ func detectSystemNode() string {
 // RunParallel invocation, which leaves a goroutine reading from os.Stdin.
 func confirmInstallPrompt(question string) bool {
 	return confirmInstallPromptDefault(question, true)
+}
+
+// parseDNSMode maps the --dns flag to a wantDNS bool. It lets the installer
+// script ask the .test/.localhost question up front (so it can skip the
+// HTTPS-only prerequisites for localhost mode) and hand the answer to
+// `lerd install` instead of prompting twice. An empty or unrecognised value
+// returns ok=false so the caller falls back to the interactive prompt.
+func parseDNSMode(flag string) (enabled bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(flag)) {
+	case "managed", "enabled", "test", "on", "yes", "true":
+		return true, true
+	case "localhost", "disabled", "off", "no", "false":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // confirmInstallPromptDefault is like confirmInstallPrompt but lets the caller

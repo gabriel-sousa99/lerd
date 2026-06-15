@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
@@ -70,6 +71,11 @@ func toggleSecureCmd(args []string, secured bool) error {
 	if err != nil {
 		return fmt.Errorf("site %q not found — run 'lerd link' first", name)
 	}
+	if secured {
+		if gcfg, _ := config.LoadGlobal(); !gcfg.DNSManaged() {
+			return certs.ErrDNSDisabled
+		}
+	}
 	verb := "Issuing certificate"
 	if !secured {
 		verb = "Removing certificate"
@@ -116,5 +122,5 @@ func restartStripeIfActive(site *config.Site) {
 		fmt.Printf("[WARN] restarting stripe listener: %v\n", err)
 		return
 	}
-	fmt.Printf("  Restarted stripe listener → %s/stripe/webhook\n", baseURL)
+	fmt.Printf("  Restarted stripe listener → %s%s\n", baseURL, config.StripeWebhookPath(site.Path))
 }

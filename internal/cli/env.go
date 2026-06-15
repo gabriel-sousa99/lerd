@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,12 +19,121 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/grouping"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	"github.com/spf13/cobra"
 )
+
+// hostProxyLoopback is the address a host-proxy app uses to reach lerd services.
+// Host-proxy apps run on the host, off the podman bridge, so they reach services
+// through the loopback ports those services publish rather than container DNS.
+const hostProxyLoopback = "127.0.0.1"
+
+// rewriteEnvForHostProxy adapts lerd's computed service connection values for a
+// host-proxy app. Bare "lerd-*" hostnames become 127.0.0.1, and *_PORT values
+// map from the container port to the service's published host port (e.g. mariadb
+// 3306 -> 3411). Containerised sites keep the container DNS names untouched.
+func rewriteEnvForHostProxy(updates map[string]string, serviceNames []string) {
+	// Sort so a container port shared by two services (e.g. mysql and mariadb
+	// both on 3306) resolves to a stable host port rather than whichever map
+	// iteration happened to land last.
+	names := append([]string(nil), serviceNames...)
+	sort.Strings(names)
+	containerToHost := map[string]string{}
+	for _, name := range names {
+		for _, mapping := range servicePortMappings(name) {
+			if host, container, ok := splitHostContainerPort(mapping); ok {
+				if _, seen := containerToHost[container]; !seen {
+					containerToHost[container] = host
+				}
+			}
+		}
+	}
+	applyHostProxyEnv(updates, containerToHost)
+}
+
+// hostProxyConnKey reports whether an env key names a service connection target
+// (a host, port, URL, DSN, or endpoint). The host-proxy rewrite only touches
+// these so an unrelated value that happens to contain a "lerd-" token (e.g.
+// APP_NAME=lerd-demo) is never mangled into 127.0.0.1.
+func hostProxyConnKey(k string) bool {
+	for _, suf := range []string{"_HOST", "_PORT", "_URL", "_DSN", "_ENDPOINT", "_SERVER"} {
+		if strings.HasSuffix(k, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// lerdContainerHostRe matches a lerd container hostname with an optional
+// trailing :port, both as a bare value (DB_HOST=lerd-redis) and embedded in a
+// connection string (MONGO_DSN=mongodb://root:pw@lerd-mongo:27017/db).
+var lerdContainerHostRe = regexp.MustCompile(`lerd-[a-z0-9-]+(?::\d+)?`)
+
+// applyHostProxyEnv is the pure rewrite step: every "lerd-<name>[:port]" token
+// (bare or inside a URL) becomes loopback with the service's published host
+// port, and a discrete *_PORT value with no host alongside is remapped too.
+// Split from rewriteEnvForHostProxy so the logic is testable without services.
+func applyHostProxyEnv(updates, containerToHost map[string]string) {
+	for k, v := range updates {
+		if !hostProxyConnKey(k) {
+			continue
+		}
+		nv := lerdContainerHostRe.ReplaceAllStringFunc(v, func(m string) string {
+			_, port, found := strings.Cut(m, ":")
+			if !found {
+				return hostProxyLoopback
+			}
+			if mapped, ok := containerToHost[port]; ok {
+				port = mapped
+			}
+			return hostProxyLoopback + ":" + port
+		})
+		if nv != v {
+			updates[k] = nv
+			continue
+		}
+		// No host token to anchor on: a standalone *_PORT (e.g. DB_PORT=3306)
+		// still needs remapping to its published host port.
+		if strings.HasSuffix(k, "_PORT") {
+			if mapped, ok := containerToHost[v]; ok {
+				updates[k] = mapped
+			}
+		}
+	}
+}
+
+// servicePortMappings returns the "host:container" port mappings a service
+// publishes. The installed/custom service is consulted first so a pinned or
+// non-canonical version reports its real published port; the default preset is
+// the fallback for services not separately registered.
+func servicePortMappings(name string) []string {
+	if svc, err := config.LoadCustomService(name); err == nil && len(svc.Ports) > 0 {
+		return svc.Ports
+	}
+	if svc, err := config.DefaultPresetMeta(name); err == nil && len(svc.Ports) > 0 {
+		return svc.Ports
+	}
+	return nil
+}
+
+// splitHostContainerPort parses a podman port mapping ("3411:3306", or
+// "127.0.0.1:3411:3306" with an optional "/tcp" suffix) into host and container.
+func splitHostContainerPort(mapping string) (host, container string, ok bool) {
+	parts := strings.Split(mapping, ":")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	host = parts[len(parts)-2]
+	container = strings.SplitN(parts[len(parts)-1], "/", 2)[0]
+	if host == "" || container == "" {
+		return "", "", false
+	}
+	return host, container, true
+}
 
 // projectDBName returns a safe database name for the project at path.
 // It uses the registered site name, falling back to the directory name,
@@ -32,6 +143,11 @@ func projectDBName(path string) string {
 	if reg, err := config.LoadSites(); err == nil {
 		for _, s := range reg.Sites {
 			if s.Path == path {
+				// A shared-DB group secondary uses the group main's database, so
+				// env setup must not reset it to the secondary's own slug.
+				if shared, ok := grouping.SharedDBNameFor(&s); ok {
+					return shared
+				}
 				name = s.Name
 				break
 			}
@@ -161,7 +277,7 @@ func runEnvDomainOnly(cwd string) error {
 			if kg.Command != "" {
 				if _, statErr := os.Stat(filepath.Join(cwd, "vendor")); statErr == nil {
 					fmt.Printf("  Generating %s...\n", kg.EnvKey)
-					if err := artisanIn(cwd, kg.Command); err != nil {
+					if err := consoleIn(cwd, fw.Console, kg.Command); err != nil {
 						fmt.Printf("  [WARN] %s failed: %v\n", kg.Command, err)
 					}
 				} else if kg.FallbackPrefix != "" {
@@ -360,6 +476,19 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		bucket: s3BucketName(dbName),
 		domain: site.PrimaryDomain(),
 		scheme: scheme,
+	}
+
+	// Framework default env vars: seeded only when the key is absent, so a value
+	// the user set directly survives re-runs (link/secure/domain/db:move). The
+	// detected-service values and .env.lerd_override still win and can force one.
+	for _, kv := range fw.Env.Vars {
+		k, v, _ := strings.Cut(kv, "=")
+		if _, present := envMap[k]; present {
+			continue
+		}
+		val := applySiteHandle(v, tplCtx)
+		updates[k] = val
+		fmt.Printf("  Setting %s=%s\n", k, val)
 	}
 
 	// Load .lerd.yaml service hints so we can apply env vars for services
@@ -725,6 +854,17 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		patchDuskTestCase(cwd)
 	}
 
+	// 3c-bis. Pest browser testing drives Playwright in-container, which the
+	// Selenium preset does not provide. Surface the one-time setup command when
+	// the plugin is present but chromium isn't baked into the FPM image yet.
+	if config.ComposerHasPackage(cwd, "pestphp/pest-plugin-browser") {
+		if v, derr := phpDet.DetectVersion(cwd); derr == nil && pestBrowserSupportedVersion(v) == nil {
+			if gcfg, cerr := config.LoadGlobal(); cerr == nil && !slices.Contains(gcfg.GetPackages(v), pestBrowserPkg) {
+				fmt.Println("  Detected pest-plugin-browser — run `lerd pest:browser install` to enable in-container browser testing")
+			}
+		}
+	}
+
 	// 3d. Generate REVERB_ env vars if a worker with proxy config is detected and
 	// BROADCAST_CONNECTION=reverb is set.
 	if fw.HasWorker("reverb", cwd) &&
@@ -746,6 +886,16 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	if url := resolveAppURL(cwd, site); url != "" {
 		updates[urlKey] = url
 		fmt.Printf("  Setting %s=%s\n", urlKey, url)
+	}
+
+	// 4d. Host-proxy apps run on the host, so point service connections at
+	// loopback and the published host ports instead of container DNS names.
+	if site.IsHostProxy() {
+		names := make([]string, 0, len(lerdYAMLServices))
+		for n := range lerdYAMLServices {
+			names = append(names, n)
+		}
+		rewriteEnvForHostProxy(updates, names)
 	}
 
 	// 4e. Apply personal .env.lerd_override values last so they win over lerd's
@@ -776,7 +926,10 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		if kg.Command != "" {
 			if _, statErr := os.Stat(filepath.Join(cwd, "vendor")); statErr == nil {
 				fmt.Printf("  Generating %s...\n", kg.EnvKey)
-				if err := artisanIn(cwd, kg.Command); err != nil {
+				// Use the framework's console binary (e.g. "spark" for
+				// CodeIgniter), not a hardcoded "artisan", so key generation
+				// works for non-Laravel frameworks.
+				if err := consoleIn(cwd, fw.Console, kg.Command); err != nil {
 					fmt.Printf("  [WARN] %s failed: %v\n", kg.Command, err)
 				}
 			} else if kg.FallbackPrefix != "" {
@@ -1042,20 +1195,28 @@ func generateRandomKey(prefix string) string {
 	return prefix + base64.StdEncoding.EncodeToString(key)
 }
 
-func artisanIn(dir string, args ...string) error {
+// consoleExecArgs builds the podman exec args to run a framework console
+// command (php <console> <args...>) inside the PHP-FPM container for the given
+// PHP version. An empty console defaults to "artisan" for Laravel.
+func consoleExecArgs(dir, version, console string, args ...string) []string {
+	if console == "" {
+		console = "artisan"
+	}
+
+	container := fpmContainerForDir(dir, version)
+
+	cmdArgs := []string{"exec", "-i", "-w", dir, container, "php", console}
+	return append(cmdArgs, args...)
+}
+
+func consoleIn(dir, console string, args ...string) error {
 	version, err := phpDet.DetectVersion(dir)
 	if err != nil {
 		cfg, _ := config.LoadGlobal()
 		version = cfg.PHP.DefaultVersion
 	}
 
-	short := strings.ReplaceAll(version, ".", "")
-	container := "lerd-php" + short + "-fpm"
-
-	cmdArgs := []string{"exec", "-i", "-w", dir, container, "php", "artisan"}
-	cmdArgs = append(cmdArgs, args...)
-
-	cmd := podman.Cmd(cmdArgs...)
+	cmd := podman.Cmd(consoleExecArgs(dir, version, console, args...)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

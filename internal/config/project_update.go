@@ -36,6 +36,35 @@ func SetProjectPHPVersion(dir string, version string) error {
 	})
 }
 
+// SetProjectStripe writes the project's Stripe listener settings (webhook path
+// and/or secret env key) to .lerd.yaml, creating the file if needed. An empty
+// argument leaves the corresponding field untouched; when both are empty this
+// is a no-op so we never materialise an empty "stripe: {}" block or create a
+// .lerd.yaml the project didn't have.
+func SetProjectStripe(dir, path, secretEnvKey string) error {
+	if path == "" && secretEnvKey == "" {
+		return nil
+	}
+	normPath, err := ValidateStripeWebhookPath(path)
+	if err != nil {
+		return err
+	}
+	cfg, err := LoadProjectConfig(dir)
+	if err != nil {
+		return err
+	}
+	if cfg.Stripe == nil {
+		cfg.Stripe = &StripeConfig{}
+	}
+	if normPath != "" {
+		cfg.Stripe.Path = normPath
+	}
+	if secretEnvKey != "" {
+		cfg.Stripe.SecretEnvKey = secretEnvKey
+	}
+	return SaveProjectConfig(dir, cfg)
+}
+
 // SetProjectWorkers replaces the workers list. No-op if .lerd.yaml does not exist.
 func SetProjectWorkers(dir string, workers []string) error {
 	return updateProjectConfig(dir, func(cfg *ProjectConfig) {
@@ -121,6 +150,28 @@ func SyncProjectDomains(dir string, fullDomains []string, tld string) error {
 	})
 }
 
+// ReplaceProjectDomain syncs the registry domains into .lerd.yaml (preserving
+// conflict-filtered extras via SyncProjectDomains) and then drops oldDomain when
+// it is no longer one of the site's domains. Use this on a rename or removal so
+// the replaced domain isn't left behind to re-register on a future link;
+// SyncProjectDomains alone merges and would re-append it. oldDomain is the full
+// domain (with TLD). No-op if .lerd.yaml does not exist.
+func ReplaceProjectDomain(dir string, fullDomains []string, oldDomain, tld string) error {
+	if err := SyncProjectDomains(dir, fullDomains, tld); err != nil {
+		return err
+	}
+	if oldDomain == "" {
+		return nil
+	}
+	stripped := strings.TrimSuffix(oldDomain, "."+tld)
+	for _, d := range fullDomains {
+		if strings.EqualFold(strings.TrimSuffix(d, "."+tld), stripped) {
+			return nil // still a current domain, keep it
+		}
+	}
+	return RemoveProjectDomain(dir, stripped)
+}
+
 // RemoveProjectDomain removes a single domain (case-insensitive match).
 // No-op if .lerd.yaml does not exist.
 func RemoveProjectDomain(dir string, domain string) error {
@@ -142,6 +193,23 @@ func SetProjectRuntime(dir, runtime string, worker bool) error {
 		cfg.Runtime = runtime
 		cfg.RuntimeWorker = worker && runtime != ""
 	})
+}
+
+// SetProjectJSRuntime pins the JavaScript runtime ("bun" or "node") in
+// .lerd.yaml, preserving every other field (notably node_version). Unlike
+// updateProjectConfig it creates .lerd.yaml when missing so the toggle persists
+// for sites that never had one. Passing "" clears the pin (back to autodetect).
+func SetProjectJSRuntime(dir, runtime string) error {
+	cfg := &ProjectConfig{}
+	if _, err := os.Stat(filepath.Join(dir, ".lerd.yaml")); err == nil {
+		loaded, lerr := LoadProjectConfig(dir)
+		if lerr != nil {
+			return lerr
+		}
+		cfg = loaded
+	}
+	cfg.JSRuntime = runtime
+	return SaveProjectConfig(dir, cfg)
 }
 
 // SetProjectFrameworkVersion updates framework_version. No-op if .lerd.yaml
@@ -278,6 +346,18 @@ func ReplaceProjectDBService(dir string, choice string) error {
 		}
 	}
 	cfg.Services = append(filtered, ProjectService{Name: choice})
+	// Keep an explicit db.service block in sync: resolveDB reads it before the
+	// services list and .env, so a stale value would point later `lerd db`
+	// commands at the old service. Only touch a block the user already had, and
+	// clear it for sqlite (which has no container service to target) so
+	// resolution falls through to the .env sqlite connection.
+	if cfg.DB.Service != "" {
+		if choice == "sqlite" {
+			cfg.DB.Service = ""
+		} else {
+			cfg.DB.Service = choice
+		}
+	}
 	return SaveProjectConfig(dir, cfg)
 }
 

@@ -12,6 +12,7 @@
   import { loadPhpVersions } from '$stores/phpVersions';
   import { loadNodeVersions } from '$stores/nodeVersions';
   import { loadAutostart } from '$stores/autostart';
+  import { loadIdle } from '$stores/idle';
   import { loadSites } from '$stores/sites';
   import { loadServices } from '$stores/services';
   import { loadProxies } from '$stores/proxies';
@@ -50,6 +51,7 @@
     loadPhpVersions();
     loadNodeVersions();
     loadAutostart();
+    loadIdle();
     loadSites();
     loadServices();
     loadProxies();

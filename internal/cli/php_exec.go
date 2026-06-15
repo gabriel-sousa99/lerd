@@ -60,10 +60,24 @@ func RunPHPCapture(cwd string, args []string) (int, error) {
 	return RunPHPCaptureEnv(cwd, args, nil)
 }
 
+// fpmContainerForDir resolves the FPM container an exec in dir should target:
+// the per-site container for custom-FPM sites, otherwise the shared
+// lerd-php<version>-fpm container. dir may be a subdirectory of the project, so
+// it resolves the containing site root first (matching version detection, which
+// also walks up), otherwise a custom-FPM exec from a subdir would wrongly hit
+// the shared container.
+func fpmContainerForDir(dir, version string) string {
+	if site, _ := config.FindSiteByPath(siteRootFor(dir)); site != nil {
+		return podman.FPMContainerName(*site, version)
+	}
+	return "lerd-php" + strings.ReplaceAll(version, ".", "") + "-fpm"
+}
+
 // RunPHPCaptureEnv is RunPHPCapture with extra KEY=VALUE environment entries
 // injected into the container exec — used by `lerd profile run` to set
 // SPX_ENABLED so a CLI command is profiled.
 func RunPHPCaptureEnv(cwd string, args []string, extraEnv []string) (int, error) {
+	recordCwdActivity(cwd) // keep the site awake under idle-suspend while you work in the terminal
 	version, err := phpDet.DetectVersion(cwd)
 	if err != nil {
 		cfg, cfgErr := config.LoadGlobal()
@@ -73,8 +87,7 @@ func RunPHPCaptureEnv(cwd string, args []string, extraEnv []string) (int, error)
 		version = cfg.PHP.DefaultVersion
 	}
 
-	short := strings.ReplaceAll(version, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := fpmContainerForDir(cwd, version)
 
 	home := os.Getenv("HOME")
 	composerHome := os.Getenv("COMPOSER_HOME")

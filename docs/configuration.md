@@ -20,6 +20,14 @@ nginx:
                         # .lerd.yaml request_timeout overrides it per site.
 dns:
   tld: "test"
+host_proxy:
+  disabled: false         # set true to refuse setting up or starting any
+                          # host-proxy dev server (lerd never supervises a
+                          # process on the host). Default false.
+  skip_confirmation: false # set true to link a host-proxy project without the
+                          # "start this command on your host?" confirmation.
+                          # Default false so a command from a cloned repo is
+                          # never run unconfirmed. See usage/host-proxy.md.
 parked_directories:
   - ~/Lerd
 services:
@@ -77,6 +85,7 @@ A portable, self-contained description of a project's local environment. Created
 | `container` | Custom container config for non-PHP sites. When present, lerd builds a dedicated container from the project's Containerfile and nginx reverse-proxies to it. See below and [Custom Containers](./usage/custom-containers.md) |
 | `custom_workers` | Custom worker definitions (name to config map). Works for both PHP and custom container sites. See below |
 | `db` | Database targeting for non-PHP projects: `service` (e.g. `mysql`, `postgres`) and `database` name |
+| `stripe` | Optional Stripe webhook listener config: `path` (forward route, defaults to `/stripe/webhook`) and `secret_env_key` (which `.env` key holds the secret, defaults to auto-detection). See [Stripe](./usage/stripe.md) |
 
 ### Basic example
 
@@ -171,6 +180,8 @@ Framework yamls (under `lerd-frameworks/frameworks/<framework>/<version>.yaml`) 
 
 Custom services can be defined directly in `.lerd.yaml` instead of (or in addition to) registering them with `lerd service add`. This makes the project fully self-contained: cloning it and running `lerd link` is enough to reproduce the environment.
 
+Because an inline service runs a container image and command that come from the project, `lerd link` shows the image, command, and ports of a not-yet-installed inline service and asks before installing it (a non-interactive or dashboard link, which is itself an explicit action, proceeds without the prompt). lerd also rejects control characters in service fields so a definition can't inject directives into the generated container unit. Only link projects you trust, the same as before running their build or dev scripts.
+
 ```yaml
 php_version: "8.5"
 node_version: "22"
@@ -242,6 +253,6 @@ Commit `.lerd.yaml` to the repository. On a fresh machine, `lerd link` is suffic
 
 The Lerd watcher also monitors `.lerd.yaml` for changes. When you switch branches with a different config the PHP and Node versions are re-detected and applied automatically, no manual `lerd link` or `lerd init` needed. See [Automatic version switching](./features/project-setup.md#automatic-version-switching) for details.
 
-`lerd isolate`, the UI PHP version selector, and the MCP `site_php` tool all keep `php_version` in sync when this file exists.
+`lerd isolate`, the UI PHP version selector, and the MCP `site` tool's `php` action all keep `php_version` in sync when this file exists.
 
 `lerd secure`, `lerd unsecure`, the UI HTTPS toggle, and the MCP `secure`/`unsecure` tools keep `secured` in sync when this file exists.

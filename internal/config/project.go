@@ -48,11 +48,27 @@ type ContainerConfig struct {
 	SSL           bool   `yaml:"ssl,omitempty"`           // proxy to the container via HTTPS (app serves TLS on its port)
 }
 
+// ProxyConfig holds per-project host-proxy settings. When present in
+// .lerd.yaml the site runs no container: lerd supervises the dev command on
+// the host and nginx reverse-proxies the domain to it on the given port.
+type ProxyConfig struct {
+	Command    string `yaml:"command,omitempty"`      // dev command, e.g. "npm run start:dev"; empty = proxy-only
+	Port       int    `yaml:"port"`                   // host port the app binds (required)
+	SSL        bool   `yaml:"ssl,omitempty"`          // app serves TLS on its port; proxy via https
+	PortEnvKey string `yaml:"port_env_key,omitempty"` // env var the port is injected as (default "PORT")
+}
+
 // ProjectConfig holds per-project configuration stored in .lerd.yaml.
 type ProjectConfig struct {
-	Domains          []string   `yaml:"domains,omitempty"`
-	PHPVersion       string     `yaml:"php_version,omitempty"`
-	NodeVersion      string     `yaml:"node_version,omitempty"`
+	Domains     []string `yaml:"domains,omitempty"`
+	PHPVersion  string   `yaml:"php_version,omitempty"`
+	NodeVersion string   `yaml:"node_version,omitempty"`
+	// JSRuntime pins the JavaScript runtime for this project's host workers and
+	// install/build steps: "bun" forces bun, "node" (or "npm") forces Node/npm
+	// and opts out of the no-Node bun fallback. Empty auto-detects bun from a
+	// bun.lockb / bunfig.toml / packageManager field. Use "node" for apps bun
+	// can't run (e.g. NestJS with native addons). See node.UsesBun.
+	JSRuntime        string     `yaml:"js_runtime,omitempty"`
 	Framework        string     `yaml:"framework,omitempty"`
 	FrameworkVersion string     `yaml:"framework_version,omitempty"`
 	FrameworkDef     *Framework `yaml:"framework_def,omitempty"`
@@ -87,6 +103,9 @@ type ProjectConfig struct {
 	// Database choice is "oracle" (or set manually). nil for every other DB.
 	Oracle    *ProjectOracleConfig `yaml:"oracle,omitempty"`
 	Container *ContainerConfig     `yaml:"container,omitempty"`
+	// Proxy, when set, makes this a host-proxy site (see ProxyConfig). Mutually
+	// exclusive with Container; Validate rejects setting both.
+	Proxy *ProxyConfig `yaml:"proxy,omitempty"`
 	// Runtime selects how the site's PHP is served. "fpm" (default) uses the
 	// shared lerd-php{version}-fpm container; "frankenphp" spins up a
 	// per-site dunglas/frankenphp container that keeps PHP resident.
@@ -109,18 +128,32 @@ type ProjectConfig struct {
 	// seconds. Zero inherits the global nginx.request_timeout (default 60s).
 	// Raise it for apps with deliberately long-running requests.
 	RequestTimeout int `yaml:"request_timeout,omitempty"`
+	// Stripe holds optional per-project Stripe webhook listener settings: the
+	// route events forward to and which .env key holds the secret. Absent for
+	// projects on the Laravel defaults, which are auto-detected.
+	Stripe *StripeConfig `yaml:"stripe,omitempty"`
 }
 
 // IsEmpty returns true when the config has no meaningful content, which
 // typically means .lerd.yaml did not exist.
 func (c *ProjectConfig) IsEmpty() bool {
 	return len(c.Domains) == 0 && c.PHPVersion == "" && c.NodeVersion == "" &&
+		c.JSRuntime == "" &&
 		c.Framework == "" && c.PublicDir == "" && len(c.Services) == 0 &&
 		len(c.Workers) == 0 && len(c.CustomWorkers) == 0 && len(c.ReloadWorkers) == 0 && !c.Secured &&
 		c.AppURL == "" && c.DB.Service == "" && c.DB.Database == "" &&
 		c.Oracle == nil &&
-		c.Container == nil && c.Runtime == "" && !c.RuntimeWorker &&
-		!c.DBIsolated && len(c.EnvOverrides) == 0 && c.RequestTimeout == 0
+		c.Container == nil && c.Proxy == nil && c.Runtime == "" && !c.RuntimeWorker &&
+		!c.DBIsolated && len(c.EnvOverrides) == 0 && c.RequestTimeout == 0 && c.Stripe == nil
+}
+
+// Validate reports configuration that can't be honoured. A site is either a
+// custom container or a host proxy, never both.
+func (c *ProjectConfig) Validate() error {
+	if c.Container != nil && c.Proxy != nil {
+		return fmt.Errorf(".lerd.yaml sets both container: and proxy:; a site can only be one")
+	}
+	return nil
 }
 
 // ReloadsWorker reports whether the named worker is opted into auto-reload
@@ -347,6 +380,20 @@ func LoadProjectConfig(dir string) (*ProjectConfig, error) {
 		cfg.PublicDir = ""
 	}
 
+	if err := cfg.Validate(); err != nil {
+		fmt.Printf("[WARN] %s: %v, ignoring proxy:\n", path, err)
+		cfg.Proxy = nil
+	}
+
+	// Neutralise a hostile webhook path at the source so it can never reach the
+	// Stripe listener unit's ExecStart line; readers fall back to the default.
+	if cfg.Stripe != nil && cfg.Stripe.Path != "" {
+		if _, err := ValidateStripeWebhookPath(cfg.Stripe.Path); err != nil {
+			fmt.Printf("[WARN] %s: %v, ignoring stripe path\n", path, err)
+			cfg.Stripe.Path = ""
+		}
+	}
+
 	projectConfigCacheMu.Lock()
 	projectConfigCache[path] = projectConfigCacheEntry{
 		cfg: &cfg, mtime: info.ModTime(), size: info.Size(),
@@ -392,6 +439,14 @@ func cloneProjectConfig(in *ProjectConfig) *ProjectConfig {
 	if in.Container != nil {
 		cp := *in.Container
 		out.Container = &cp
+	}
+	if in.Proxy != nil {
+		cp := *in.Proxy
+		out.Proxy = &cp
+	}
+	if in.Stripe != nil {
+		cp := *in.Stripe
+		out.Stripe = &cp
 	}
 	if in.FrameworkDef != nil {
 		out.FrameworkDef = cloneFrameworkMutable(in.FrameworkDef)

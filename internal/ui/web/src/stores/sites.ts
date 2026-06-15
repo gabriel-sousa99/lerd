@@ -11,6 +11,7 @@ export interface FrameworkWorker {
 
 export interface Site {
   name?: string;
+  app_name?: string;
   domain: string;
   domains?: string[];
   conflicting_domains?: Array<{ domain: string; owned_by?: string }>;
@@ -19,6 +20,7 @@ export interface Site {
   php_version?: string;
   uses_php?: boolean;
   node_version?: string;
+  js_runtime?: string;
   runtime?: string;
   runtime_worker?: boolean;
   tls?: boolean;
@@ -28,10 +30,22 @@ export interface Site {
   has_favicon?: boolean;
   has_env?: boolean;
   paused?: boolean;
+  pinned?: boolean;
+  idle_suspended?: boolean;
+  idle?: boolean;
+  idle_suspended_workers?: string[];
   services?: string[];
   custom_container?: boolean;
   container_image?: string;
   container_port?: number;
+  host_proxy?: boolean;
+  host_port?: number;
+  host_has_dev_server?: boolean;
+  group?: string;
+  group_subdomain?: string;
+  group_main_domain?: string;
+  group_shared_db?: boolean;
+  multi_tenant?: boolean;
   worktrees?: Array<{
     branch?: string;
     domain?: string;
@@ -47,6 +61,7 @@ export interface Site {
     lan_port?: number;
     lan_share_url?: string;
     framework_workers?: FrameworkWorker[];
+    idle_suspended_workers?: string[];
   }>;
   has_queue_worker?: boolean;
   has_schedule_worker?: boolean;
@@ -60,8 +75,11 @@ export interface Site {
   horizon_failing?: boolean;
   horizon_reload?: boolean;
   horizon_reload_ready?: boolean;
+  octane_reload?: boolean;
+  octane_reload_ready?: boolean;
   stripe_running?: boolean;
   stripe_secret_set?: boolean;
+  stripe_webhook_path?: string;
   schedule_running?: boolean;
   schedule_failing?: boolean;
   reverb_running?: boolean;
@@ -123,6 +141,10 @@ export function findSite(domain: string): Site | undefined {
   return get(sites).find((s) => s.domain === domain);
 }
 
+export function isGroupSecondary(s: Site): boolean {
+  return Boolean(s.group) && Boolean(s.group_subdomain);
+}
+
 export function siteWorkerFailing(s: Site): boolean {
   return Boolean(
     s.queue_failing ||
@@ -133,10 +155,64 @@ export function siteWorkerFailing(s: Site): boolean {
   );
 }
 
+export type WorkerDotColor = 'amber' | 'violet' | 'emerald' | 'sky' | 'indigo';
+
+// Colors for each running worker, used as little status dots in list rows and
+// dashboard tiles. Kept here so the row and tile views never drift apart.
+export function runningWorkerColors(s: Site): WorkerDotColor[] {
+  const dots: WorkerDotColor[] = [];
+  if (s.queue_running) dots.push('amber');
+  if (s.horizon_running) dots.push('amber');
+  if (s.stripe_running) dots.push('violet');
+  if (s.schedule_running) dots.push('emerald');
+  if (s.reverb_running) dots.push('sky');
+  for (const w of s.framework_workers || []) if (w.running) dots.push('indigo');
+  return dots;
+}
+
+function workerColorByName(name: string): WorkerDotColor {
+  if (name === 'queue' || name === 'horizon') return 'amber';
+  if (name === 'stripe') return 'violet';
+  if (name === 'schedule') return 'emerald';
+  if (name === 'reverb') return 'sky';
+  return 'indigo';
+}
+
+// idleWorkerColors returns the dot colors to show while a site sleeps: the
+// workers the engine suspended (so they keep their dots, dimmed, instead of
+// disappearing), falling back to whatever is still running during the brief
+// suspend transition.
+export function idleWorkerColors(s: Site): WorkerDotColor[] {
+  const dots = (s.idle_suspended_workers || []).map(workerColorByName);
+  return dots.length > 0 ? dots : runningWorkerColors(s);
+}
+
+// siteHasWorkers reports whether a site has any background worker at all (queue,
+// schedule, horizon, reverb, a stripe listener, or a framework worker). Sites
+// with none never sleep, so the dashboard must not show them the idle moon.
+export function siteHasWorkers(s: Site): boolean {
+  return Boolean(
+    s.has_queue_worker ||
+      s.has_schedule_worker ||
+      s.has_horizon ||
+      s.has_reverb ||
+      s.stripe_running ||
+      s.stripe_secret_set ||
+      (s.framework_workers && s.framework_workers.length > 0) ||
+      (s.idle_suspended_workers && s.idle_suspended_workers.length > 0)
+  );
+}
+
 export function openSiteInBrowser(s: Site, branch: string = '') {
   const target = activeWorktreeDomain(s, branch);
   const useTLS = Boolean(s.tls);
   const url = (useTLS ? 'https://' : 'http://') + target;
+  // Opening the site loads it, which wakes it via the activity feed. Clear the
+  // idle marker optimistically so the sleep indicator drops immediately rather
+  // than lingering until the next poll confirms the activity.
+  sites.update((list) =>
+    list.map((x) => (x.name === s.name ? { ...x, idle: false, idle_suspended: false } : x))
+  );
   window.open(url, '_blank', 'noopener');
 }
 
@@ -395,9 +471,25 @@ export async function restoreSiteNginx(
   }
 }
 
+export async function reorderSites(order: string[]): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch('/api/sites/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order })
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+  }
+}
+
 export const restartSite = (d: string) => postAction(site(d, 'restart'));
 export const pauseSite = (d: string) => postAction(site(d, 'pause'));
 export const resumeSite = (d: string) => postAction(site(d, 'unpause'));
+export const pinSite = (d: string) => postAction(site(d, 'pin'));
+export const unpinSite = (d: string) => postAction(site(d, 'unpin'));
 export const unlinkSite = (d: string) => postAction(site(d, 'unlink'));
 export const openTerminal = (d: string, branch: string = '') =>
   postAction(site(d, 'terminal') + (branch ? `?branch=${encodeURIComponent(branch)}` : ''));
@@ -433,12 +525,18 @@ export const setHorizonReload = (s: Site, enabled: boolean) =>
   postAction(site(s.domain, 'horizon:reload') + `?enabled=${enabled ? 'true' : 'false'}`);
 export const installHorizonReloadWatcher = (s: Site) =>
   postAction(site(s.domain, 'horizon:install-watcher'));
+export const setOctaneReload = (s: Site, enabled: boolean) =>
+  postAction(site(s.domain, 'octane:reload') + `?enabled=${enabled ? 'true' : 'false'}`);
+export const installOctaneReloadWatcher = (s: Site) =>
+  postAction(site(s.domain, 'octane:install-watcher'));
 export const toggleSchedule = (s: Site) =>
   postAction(site(s.domain, s.schedule_running ? 'schedule:stop' : 'schedule:start'));
 export const toggleReverb = (s: Site) =>
   postAction(site(s.domain, s.reverb_running ? 'reverb:stop' : 'reverb:start'));
 export const toggleStripe = (s: Site) =>
   postAction(site(s.domain, s.stripe_running ? 'stripe:stop' : 'stripe:start'));
+export const setStripeConfig = (s: Site, path: string) =>
+  postAction(site(s.domain, 'stripe:config') + '?path=' + encodeURIComponent(path));
 export const toggleWorker = (s: Site, w: FrameworkWorker, branch: string = '') =>
   postAction(
     site(s.domain, 'worker:' + w.name + (w.running ? ':stop' : ':start')) +
@@ -574,6 +672,7 @@ export async function setSiteVersion(
 export function fpmContainer(s: Site): string {
   if (s.custom_container) return 'lerd-custom-' + (s.name || s.domain);
   if (s.runtime === 'frankenphp') return 'lerd-fp-' + (s.name || s.domain);
+  if (s.runtime === 'fpm-custom') return 'lerd-cfpm-' + (s.name || s.domain);
   if (!s.php_version) return '';
   return 'lerd-php' + s.php_version.replace('.', '') + '-fpm';
 }
@@ -581,5 +680,6 @@ export function fpmContainer(s: Site): string {
 export function fpmTabLabel(s: Site): string {
   if (s.custom_container) return 'Container';
   if (s.runtime === 'frankenphp') return 'FrankenPHP';
+  if (s.runtime === 'fpm-custom') return 'Custom FPM';
   return 'PHP-FPM';
 }

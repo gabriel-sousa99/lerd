@@ -30,6 +30,14 @@ Volume={{.ZshHistoryDir}}:/root/.zsh_state:rw
 # known_hosts + id_* keys for clone/fetch over ssh. read-only so a runaway
 # composer plugin can't rewrite authorized_keys on the host. Fork addition.
 Volume={{.HostSSHDir}}:/root/.ssh:ro
+# Persistent home for an optional in-container musl bun (lerd php:bun install).
+# bun installs and self-updates here; survives image rebuilds and is shared
+# across PHP versions. Empty until the user opts in.
+Volume={{.BunVolumeDir}}:/root/.bun:rw
+# Persistent Playwright browser cache for opt-in Pest browser testing (lerd
+# pest:browser install). Holds the downloaded registry and lerd's musl-chromium
+# shims so they survive image rebuilds. Empty until the user opts in.
+Volume={{.PlaywrightVolumeDir}}:/root/.cache/ms-playwright:rw
 Environment=HOME=/root
 # GIT_SSH_COMMAND ensures git (and composer when it shells out to git)
 # uses StrictHostKeyChecking=accept-new on first contact with a remote so

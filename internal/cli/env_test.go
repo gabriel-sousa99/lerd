@@ -84,8 +84,8 @@ func TestS3BucketName(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"admin_astrolov", "admin-astrolov"},
-		{"Admin_Astrolov", "admin-astrolov"},
+		{"admin_starlane", "admin-starlane"},
+		{"Admin_Starlane", "admin-starlane"},
 		{"my-app", "my-app"},
 		{"MyApp 2", "myapp-2"},
 		{"my.bucket.v2", "my.bucket.v2"},
@@ -106,13 +106,13 @@ func TestS3BucketName(t *testing.T) {
 }
 
 func TestApplySiteHandleBucket(t *testing.T) {
-	ctx := siteTemplateCtx{site: "admin_astrolov", bucket: "admin-astrolov"}
+	ctx := siteTemplateCtx{site: "admin_starlane", bucket: "admin-starlane"}
 	got := applySiteHandle("AWS_BUCKET={{bucket}}", ctx)
-	if got != "AWS_BUCKET=admin-astrolov" {
+	if got != "AWS_BUCKET=admin-starlane" {
 		t.Errorf("expected sanitised bucket, got %q", got)
 	}
 	gotSite := applySiteHandle("DB_DATABASE={{site}}", ctx)
-	if gotSite != "DB_DATABASE=admin_astrolov" {
+	if gotSite != "DB_DATABASE=admin_starlane" {
 		t.Errorf("{{site}} should preserve underscores, got %q", gotSite)
 	}
 }
@@ -236,5 +236,155 @@ func TestShouldApplyService(t *testing.T) {
 					tc.svc, tc.detected, tc.picked, tc.userPickedDB, tc.valkeyPicked, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestConsoleExecArgs guards that key generation runs the framework's own
+// console binary, not a hardcoded "artisan". CodeIgniter (spark) was the first
+// store framework to define key_generation on a non-artisan console, which is
+// what surfaced the original bug.
+func TestConsoleExecArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		console string
+		want    string // the console binary expected in the exec args
+	}{
+		{"codeigniter uses spark", "spark", "spark"},
+		{"laravel uses artisan", "artisan", "artisan"},
+		{"empty console falls back to artisan", "", "artisan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := consoleExecArgs("/proj", "8.4", tc.console, "key:generate")
+			want := []string{"exec", "-i", "-w", "/proj", "lerd-php84-fpm", "php", tc.want, "key:generate"}
+			if strings.Join(got, " ") != strings.Join(want, " ") {
+				t.Errorf("consoleExecArgs(console=%q) = %v, want %v", tc.console, got, want)
+			}
+		})
+	}
+}
+
+// ── host-proxy env rewriting ──────────────────────────────────────────────────
+
+func TestSplitHostContainerPort(t *testing.T) {
+	cases := []struct {
+		in         string
+		host, cont string
+		ok         bool
+	}{
+		{"3411:3306", "3411", "3306", true},
+		{"6379:6379", "6379", "6379", true},
+		{"127.0.0.1:3411:3306", "3411", "3306", true},
+		{"3411:3306/tcp", "3411", "3306", true},
+		{"3306", "", "", false},
+		{"", "", "", false},
+	}
+	for _, c := range cases {
+		host, cont, ok := splitHostContainerPort(c.in)
+		if host != c.host || cont != c.cont || ok != c.ok {
+			t.Errorf("splitHostContainerPort(%q) = (%q,%q,%v), want (%q,%q,%v)", c.in, host, cont, ok, c.host, c.cont, c.ok)
+		}
+	}
+}
+
+func TestApplyHostProxyEnv_rewritesHostAndPort(t *testing.T) {
+	// mariadb: container 3306 publishes on host 3411.
+	updates := map[string]string{
+		"DB_HOST":     "lerd-mariadb-11",
+		"DB_PORT":     "3306",
+		"DB_DATABASE": "flowmeter",
+		"REDIS_HOST":  "lerd-redis",
+		"REDIS_PORT":  "6379",
+		"APP_URL":     "https://flowmeter.test",
+		"APP_NAME":    "ecom",
+	}
+	applyHostProxyEnv(updates, map[string]string{"3306": "3411", "6379": "6379"})
+
+	if updates["DB_HOST"] != "127.0.0.1" {
+		t.Errorf("DB_HOST = %q, want 127.0.0.1", updates["DB_HOST"])
+	}
+	if updates["REDIS_HOST"] != "127.0.0.1" {
+		t.Errorf("REDIS_HOST = %q, want 127.0.0.1", updates["REDIS_HOST"])
+	}
+	if updates["DB_PORT"] != "3411" {
+		t.Errorf("DB_PORT = %q, want 3411 (published host port)", updates["DB_PORT"])
+	}
+	if updates["REDIS_PORT"] != "6379" {
+		t.Errorf("REDIS_PORT = %q, want 6379 (unchanged when host==container)", updates["REDIS_PORT"])
+	}
+	// Non-service values must be left alone.
+	if updates["DB_DATABASE"] != "flowmeter" {
+		t.Errorf("DB_DATABASE was mangled: %q", updates["DB_DATABASE"])
+	}
+	if updates["APP_URL"] != "https://flowmeter.test" {
+		t.Errorf("APP_URL was mangled: %q", updates["APP_URL"])
+	}
+	if updates["APP_NAME"] != "ecom" {
+		t.Errorf("APP_NAME was mangled: %q", updates["APP_NAME"])
+	}
+}
+
+func TestApplyHostProxyEnv_rewritesEmbeddedUrlHosts(t *testing.T) {
+	// Services configured via a URL (mongo, elasticsearch, …) carry the container
+	// hostname inside the value; the host must be rewritten to loopback and the
+	// embedded port remapped, while credentials and path survive.
+	updates := map[string]string{
+		"MONGO_DSN":         "mongodb://root:lerd@lerd-mongo:27017/site?authSource=admin",
+		"ELASTICSEARCH_URL": "http://lerd-elasticsearch:9200",
+		"DB_PORT":           "3306",
+	}
+	applyHostProxyEnv(updates, map[string]string{"27017": "27017", "9200": "9200", "3306": "3411"})
+
+	if got := updates["MONGO_DSN"]; got != "mongodb://root:lerd@127.0.0.1:27017/site?authSource=admin" {
+		t.Errorf("MONGO_DSN = %q", got)
+	}
+	if got := updates["ELASTICSEARCH_URL"]; got != "http://127.0.0.1:9200" {
+		t.Errorf("ELASTICSEARCH_URL = %q", got)
+	}
+	// A standalone *_PORT with no host token is still remapped.
+	if got := updates["DB_PORT"]; got != "3411" {
+		t.Errorf("DB_PORT = %q, want 3411", got)
+	}
+}
+
+func TestApplyHostProxyEnv_leavesNonConnectionKeysAlone(t *testing.T) {
+	// A value carrying a "lerd-" token in a key that is NOT a connection target
+	// must survive untouched — only host/port/url/dsn/endpoint keys get rewritten.
+	updates := map[string]string{
+		"APP_NAME":     "lerd-demo",                    // not a conn key: keep
+		"CACHE_PREFIX": "lerd-cache",                   // not a conn key: keep
+		"DB_HOST":      "lerd-mariadb",                 // conn key: rewrite to loopback
+		"MONGO_DSN":    "mongodb://lerd-mongo:27017/x", // conn key: rewrite host
+	}
+	applyHostProxyEnv(updates, map[string]string{"27017": "27017"})
+
+	if updates["APP_NAME"] != "lerd-demo" {
+		t.Errorf("APP_NAME mangled: %q", updates["APP_NAME"])
+	}
+	if updates["CACHE_PREFIX"] != "lerd-cache" {
+		t.Errorf("CACHE_PREFIX mangled: %q", updates["CACHE_PREFIX"])
+	}
+	if updates["DB_HOST"] != "127.0.0.1" {
+		t.Errorf("DB_HOST = %q, want 127.0.0.1", updates["DB_HOST"])
+	}
+	if updates["MONGO_DSN"] != "mongodb://127.0.0.1:27017/x" {
+		t.Errorf("MONGO_DSN = %q", updates["MONGO_DSN"])
+	}
+}
+
+func TestRewriteEnvForHostProxy_usesPresetPorts(t *testing.T) {
+	// postgres + redis are default presets resolvable from the embedded YAML,
+	// so the full path (preset lookup -> port map -> rewrite) works offline.
+	updates := map[string]string{
+		"DB_HOST":    "lerd-postgres",
+		"DB_PORT":    "5432",
+		"REDIS_HOST": "lerd-redis",
+		"REDIS_PORT": "6379",
+	}
+	rewriteEnvForHostProxy(updates, []string{"postgres", "redis"})
+	if updates["DB_HOST"] != "127.0.0.1" || updates["REDIS_HOST"] != "127.0.0.1" {
+		t.Errorf("hosts not rewritten to loopback: %+v", updates)
+	}
+	if updates["DB_PORT"] != "5432" || updates["REDIS_PORT"] != "6379" {
+		t.Errorf("ports changed unexpectedly: %+v", updates)
 	}
 }

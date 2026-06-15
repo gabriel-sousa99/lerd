@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,7 +15,6 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
-	"github.com/gabriel-sousa99/lerd/internal/wsl"
 	"github.com/spf13/cobra"
 )
 
@@ -252,22 +250,17 @@ func resolveWorkerCommand(sitePath, workerName string, w config.FrameworkWorker)
 }
 
 // watcherNeedsPolling reports whether the reload watcher has to poll because
-// host filesystem events don't reach it: always on macOS (workers run in the
-// podman VM), and on WSL2 only for projects under a /mnt (9p) mount, where
-// inotify isn't delivered. WSL projects on the native Linux filesystem get
-// inotify and are left alone, mirroring the doctor's /mnt check.
+// host filesystem events don't reach it. Delegates to config.WatcherNeedsPolling
+// (the canonical predicate, shared with the Octane reload path).
 func watcherNeedsPolling(sitePath string) bool {
-	if runtime.GOOS == "darwin" {
-		return true
-	}
-	return wsl.IsWSL() && strings.HasPrefix(sitePath, "/mnt/")
+	return config.WatcherNeedsPolling(sitePath)
 }
 
 // projectHasChokidar reports whether the chokidar package, required by the
-// reload command's file watcher, is installed in the project.
+// reload command's file watcher, is installed in the project. Delegates to
+// config.ProjectHasChokidar.
 func projectHasChokidar(sitePath string) bool {
-	info, err := os.Stat(filepath.Join(sitePath, "node_modules", "chokidar"))
-	return err == nil && info.IsDir()
+	return config.ProjectHasChokidar(sitePath)
 }
 
 // ProjectHasChokidar is the exported view of projectHasChokidar, for the UI
@@ -365,6 +358,12 @@ func WorkerStartForSite(siteName, sitePath, phpVersion, workerName string, w con
 	}
 
 	if changed {
+		// A rewritten unit (e.g. a runtime switch re-pointed the worker at a
+		// different container) only takes effect once systemd re-reads it;
+		// without this, Enable/Start act on the stale cached unit.
+		if err := podman.DaemonReloadFn(); err != nil {
+			fmt.Printf("[WARN] daemon-reload: %v\n", err)
+		}
 		if err := services.Mgr.Enable(lifecycleTarget); err != nil {
 			fmt.Printf("[WARN] enable: %v\n", err)
 		}
@@ -594,7 +593,7 @@ func workerNames(siteName, sitePath, workerName string) (unit, display string) {
 		return unit, display
 	}
 	wtBase := filepath.Base(sitePath)
-	return unit + "-" + wtBase, display + "/" + wtBase
+	return unit + "-" + config.WorktreeUnitSlug(wtBase), display + "/" + wtBase
 }
 
 // workerUnitName is a thin wrapper around workerNames for callers that only
@@ -618,10 +617,17 @@ func workerUnitName(siteName, sitePath, workerName string) string {
 func resolveWorkerFPMUnit(siteName, phpVersion string) string {
 	if site, _ := config.FindSite(siteName); site != nil {
 		switch {
+		case site.IsHostProxy():
+			// Host-proxy sites run their dev server on the host and have no FPM
+			// container, so there is nothing to depend on or exec into. Returning
+			// "" lets writeHostWorkerUnitFile skip the FPM ordering block.
+			return ""
 		case site.IsCustomContainer():
 			return podman.CustomContainerName(siteName)
 		case site.IsFrankenPHP():
 			return podman.FrankenPHPContainerName(siteName)
+		case site.IsCustomFPM():
+			return podman.CustomFPMContainerName(siteName)
 		}
 	}
 	return "lerd-php" + strings.ReplaceAll(phpVersion, ".", "") + "-fpm"
@@ -682,6 +688,8 @@ func StopAllWorkersForWorktree(siteName, wtBase string) error {
 	if siteName == "" || wtBase == "" {
 		return nil
 	}
+	// Unit names sanitize dots, so match against the same slug used at creation.
+	wtBase = config.WorktreeUnitSlug(wtBase)
 	suffix := "-" + siteName + "-" + wtBase
 	pattern := "lerd-*" + suffix
 	units := services.Mgr.ListServiceUnits(pattern)
@@ -705,6 +713,81 @@ func StopAllWorkersForWorktree(siteName, wtBase string) error {
 	return firstErr
 }
 
+// workerNameForSiteUnit parses a worker unit name shaped lerd-<worker>-<site> or
+// lerd-<worker>-<site>-<slug> and returns <worker>. ok is false when the unit
+// is not a worker unit for siteName.
+func workerNameForSiteUnit(unit, siteName string) (string, bool) {
+	rem, ok := strings.CutPrefix(unit, "lerd-")
+	if !ok {
+		return "", false
+	}
+	marker := "-" + siteName
+	for idx := strings.Index(rem, marker); idx > 0; {
+		after := rem[idx+len(marker):]
+		if after == "" || strings.HasPrefix(after, "-") {
+			return rem[:idx], true
+		}
+		next := strings.Index(rem[idx+1:], marker)
+		if next < 0 {
+			break
+		}
+		idx += 1 + next
+	}
+	return "", false
+}
+
+// siteOwnsWorkerUnit reports whether unit unambiguously belongs to siteName: the
+// name must parse as siteName's worker unit AND no other registered site parse
+// it too. Worker-unit names are ambiguous (lerd-horizon-web-feat is both web's
+// "feat" worktree horizon unit and a "feat" site's "horizon-web" worker), so
+// when another registered site also matches we decline rather than risk tearing
+// down the wrong site's unit; the cost is at most leaving one unit behind.
+func siteOwnsWorkerUnit(unit, siteName string, others []string) (string, bool) {
+	worker, ok := workerNameForSiteUnit(unit, siteName)
+	if !ok {
+		return "", false
+	}
+	for _, o := range others {
+		if o == siteName {
+			continue
+		}
+		if _, also := workerNameForSiteUnit(unit, o); also {
+			return "", false
+		}
+	}
+	return worker, true
+}
+
+// stopAllSiteWorkerUnits stops and removes every worker unit for a site, parent
+// and per-worktree, by listing units rather than walking git, so it works even
+// after the site path is deleted (watcher prune) when worktree detection can't
+// run. Only units siteOwnsWorkerUnit confirms are unambiguously this site's are
+// torn down.
+func stopAllSiteWorkerUnits(site *config.Site) {
+	var others []string
+	if reg, err := config.LoadSites(); err == nil {
+		for _, s := range reg.Sites {
+			if s.Name != "" && s.Name != site.Name {
+				others = append(others, s.Name)
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, glob := range []string{"lerd-*-" + site.Name, "lerd-*-" + site.Name + "-*"} {
+		for _, unit := range services.Mgr.ListServiceUnits(glob) {
+			if seen[unit] {
+				continue
+			}
+			worker, ok := siteOwnsWorkerUnit(unit, site.Name, others)
+			if !ok {
+				continue
+			}
+			seen[unit] = true
+			_ = stopWorkerUnit(unit, worker, site.Name)
+		}
+	}
+}
+
 // isServiceActiveOrRestarting returns true if the unit is active or activating.
 func isServiceActiveOrRestarting(name string) bool {
 	status, _ := podman.UnitStatus(name)
@@ -720,11 +803,23 @@ func findOrphanedWorkers(siteName string, known map[string]bool) []string {
 	if reg, err := config.LoadSites(); err == nil {
 		sites = reg.Sites
 	}
+	// A host-proxy site's dev server (lerd-app-<site>) is the main process, not
+	// an orphan; handled here so callers don't each special-case it.
+	hostProxySite := false
+	for _, s := range sites {
+		if s.Name == siteName && s.IsHostProxy() {
+			hostProxySite = true
+			break
+		}
+	}
 	var orphans []string
 	for _, unit := range units {
 		workerName := strings.TrimPrefix(unit, prefix)
 		workerName = strings.TrimSuffix(workerName, suffix)
 		if workerName == "" || known[workerName] {
+			continue
+		}
+		if hostProxySite && workerName == config.HostProxyWorkerName {
 			continue
 		}
 		switch workerName {

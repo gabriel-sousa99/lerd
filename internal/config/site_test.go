@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -30,6 +31,24 @@ func TestAddSite_Basic(t *testing.T) {
 	}
 	if reg.Sites[0].Name != "myapp" {
 		t.Errorf("Name = %q, want myapp", reg.Sites[0].Name)
+	}
+}
+
+func TestAddSite_RejectsUnitInjectionNames(t *testing.T) {
+	setDataDir(t)
+	for _, name := range []string{
+		"app\nExecStartPre=/bin/sh -c evil",
+		"app\rfoo",
+		"a/b",
+		"app\x00",
+	} {
+		if err := AddSite(Site{Name: name, Domains: []string{"x.test"}, Path: "/srv/x"}); err == nil {
+			t.Errorf("AddSite(%q) should have been rejected", name)
+		}
+	}
+	// A clean name still works.
+	if err := AddSite(Site{Name: "myapp", Domains: []string{"myapp.test"}, Path: "/srv/myapp"}); err != nil {
+		t.Errorf("AddSite with clean name should succeed: %v", err)
 	}
 }
 
@@ -81,6 +100,80 @@ func TestRemoveSite_NotFound_NoError(t *testing.T) {
 
 	if err := RemoveSite("ghost"); err != nil {
 		t.Errorf("expected no error removing non-existent site, got: %v", err)
+	}
+}
+
+func TestReorderSites(t *testing.T) {
+	names := func(reg *SiteRegistry) []string {
+		out := make([]string, len(reg.Sites))
+		for i, s := range reg.Sites {
+			out[i] = s.Name
+		}
+		return out
+	}
+
+	cases := []struct {
+		name  string
+		seed  []string
+		order []string
+		want  []string
+	}{
+		{"full permutation", []string{"a", "b", "c"}, []string{"c", "a", "b"}, []string{"c", "a", "b"}},
+		{"partial keeps leftovers in original order", []string{"a", "b", "c", "d"}, []string{"c", "a"}, []string{"c", "a", "b", "d"}},
+		{"unknown names ignored", []string{"a", "b"}, []string{"ghost", "b"}, []string{"b", "a"}},
+		{"duplicate name no-ops", []string{"a", "b"}, []string{"a", "a", "b"}, []string{"a", "b"}},
+		{"empty order is identity", []string{"a", "b", "c"}, []string{}, []string{"a", "b", "c"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setDataDir(t)
+			for _, n := range tc.seed {
+				AddSite(Site{Name: n, Domains: []string{n + ".test"}, Path: "/" + n})
+			}
+
+			if err := ReorderSites(tc.order); err != nil {
+				t.Fatalf("ReorderSites: %v", err)
+			}
+
+			reg, err := LoadSites()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := names(reg)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("order = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReorderSites_KeepsSecondary(t *testing.T) {
+	setDataDir(t)
+	AddSite(Site{Name: "main", Domains: []string{"main.test"}, Path: "/main", Group: "shop"})
+	AddSite(Site{Name: "sub", Domains: []string{"admin.main.test"}, Path: "/main", Group: "shop", GroupSubdomain: "admin"})
+	AddSite(Site{Name: "other", Domains: []string{"other.test"}, Path: "/other"})
+
+	// Reorder only the mains by name; the secondary must survive as a leftover.
+	if err := ReorderSites([]string{"other", "main"}); err != nil {
+		t.Fatalf("ReorderSites: %v", err)
+	}
+
+	reg, err := LoadSites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reg.Sites) != 3 {
+		t.Fatalf("expected 3 sites after reorder, got %d", len(reg.Sites))
+	}
+	found := false
+	for _, s := range reg.Sites {
+		if s.Name == "sub" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("grouped secondary 'sub' was dropped by reorder")
 	}
 }
 
@@ -503,6 +596,87 @@ func TestSaveLoad_ContainerPort_RoundTrip(t *testing.T) {
 	}
 	if got.Sites[1].IsCustomContainer() {
 		t.Error("phpapp should not be custom container")
+	}
+}
+
+// ── IsHostProxy ───────────────────────────────────────────────────────────────
+
+func TestIsHostProxy(t *testing.T) {
+	s := &Site{HostPort: 3000}
+	if !s.IsHostProxy() {
+		t.Error("expected IsHostProxy() = true for port 3000")
+	}
+}
+
+func TestIsHostProxy_False(t *testing.T) {
+	s := &Site{}
+	if s.IsHostProxy() {
+		t.Error("expected IsHostProxy() = false for zero port")
+	}
+}
+
+func TestSaveLoad_HostProxy_RoundTrip(t *testing.T) {
+	setDataDir(t)
+
+	reg := &SiteRegistry{
+		Sites: []Site{
+			{Name: "nestapp", Domains: []string{"nestapp.test"}, Path: "/srv/nestapp",
+				HostPort: 3000, HostSSL: true, HostCommand: "npm run start:dev"},
+			{Name: "phpapp", Domains: []string{"phpapp.test"}, Path: "/srv/phpapp", PHPVersion: "8.4"},
+		},
+	}
+	if err := SaveSites(reg); err != nil {
+		t.Fatalf("SaveSites: %v", err)
+	}
+
+	got, err := LoadSites()
+	if err != nil {
+		t.Fatalf("LoadSites: %v", err)
+	}
+	if got.Sites[0].HostPort != 3000 || !got.Sites[0].HostSSL ||
+		got.Sites[0].HostCommand != "npm run start:dev" {
+		t.Errorf("nestapp host-proxy fields not persisted: %+v", got.Sites[0])
+	}
+	if !got.Sites[0].IsHostProxy() {
+		t.Error("nestapp should be host proxy")
+	}
+	if got.Sites[1].IsHostProxy() {
+		t.Error("phpapp should not be host proxy")
+	}
+}
+
+// ── Group fields round-trip ─────────────────────────────────────────────────
+
+func TestSaveLoad_GroupFields_RoundTrip(t *testing.T) {
+	setDataDir(t)
+
+	reg := &SiteRegistry{
+		Sites: []Site{
+			{Name: "starlane", Domains: []string{"starlane.test"}, Path: "/srv/starlane", Group: "starlane"},
+			{Name: "admin-starlane", Domains: []string{"admin.starlane.test"}, Path: "/srv/admin",
+				Group: "starlane", GroupSubdomain: "admin"},
+		},
+	}
+	if err := SaveSites(reg); err != nil {
+		t.Fatalf("SaveSites: %v", err)
+	}
+
+	got, err := LoadSites()
+	if err != nil {
+		t.Fatalf("LoadSites: %v", err)
+	}
+	main, sec := got.Sites[0], got.Sites[1]
+	if main.Group != "starlane" || main.GroupSubdomain != "" {
+		t.Errorf("main group fields = %q/%q, want starlane/empty", main.Group, main.GroupSubdomain)
+	}
+	if !main.IsGroupMain() || main.IsGroupSecondary() {
+		t.Errorf("main classification wrong: IsGroupMain=%v IsGroupSecondary=%v", main.IsGroupMain(), main.IsGroupSecondary())
+	}
+	if sec.Group != "starlane" || sec.GroupSubdomain != "admin" {
+		t.Errorf("secondary group fields = %q/%q, want starlane/admin", sec.Group, sec.GroupSubdomain)
+	}
+	if !sec.IsGroupSecondary() || sec.IsGroupMain() {
+		t.Errorf("secondary classification wrong: IsGroupSecondary=%v IsGroupMain=%v", sec.IsGroupSecondary(), sec.IsGroupMain())
 	}
 }
 

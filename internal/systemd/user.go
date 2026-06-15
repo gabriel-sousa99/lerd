@@ -89,6 +89,20 @@ func IsTimerActive(name string) bool { return DBusActiveState(name+".timer") == 
 
 // FindOrphanedWorkers scans systemd unit files for worker units belonging to
 // the given site that are running but not present in the known workers set.
+// unitBelongsToLongerSite reports whether the unit file belongs to a registered
+// site whose name is longer than siteName and ends with "-<siteName>" worth of
+// collision (e.g. unit "...-admin-astrolov.service" belongs to "admin-astrolov",
+// not "astrolov"). Used to keep one site's workers from leaking into another
+// whose name is a suffix of it.
+func unitBelongsToLongerSite(unitFile, siteName string, sites []config.Site) bool {
+	for _, s := range sites {
+		if len(s.Name) > len(siteName) && strings.HasSuffix(unitFile, "-"+s.Name+".service") {
+			return true
+		}
+	}
+	return false
+}
+
 func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
 	suffix := "-" + siteName + ".service"
 	prefix := "lerd-"
@@ -102,6 +116,16 @@ func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
 	if reg, err := config.LoadSites(); err == nil {
 		sites = reg.Sites
 	}
+	// A host-proxy site's dev server (lerd-app-<site>) is the site's main
+	// process, never an orphan; recognised here so no caller has to special-case
+	// it around every FindOrphanedWorkers call.
+	hostProxySite := false
+	for _, s := range sites {
+		if s.Name == siteName && s.IsHostProxy() {
+			hostProxySite = true
+			break
+		}
+	}
 	var orphans []string
 	for _, e := range entries {
 		name := e.Name()
@@ -111,6 +135,9 @@ func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
 		workerName := strings.TrimPrefix(name, prefix)
 		workerName = strings.TrimSuffix(workerName, suffix)
 		if workerName == "" {
+			continue
+		}
+		if hostProxySite && workerName == config.HostProxyWorkerName {
 			continue
 		}
 		// Skip non-worker units.
@@ -123,6 +150,13 @@ func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
 			continue
 		}
 		if UnitBelongsToOtherSiteWorktree(workerName, siteName, sites) {
+			continue
+		}
+		// Skip units owned by a registered site with a longer name whose suffix
+		// collides: lerd-queue-admin-astrolov is admin-astrolov's queue, not
+		// astrolov's "queue-admin". Without this, a group secondary's workers
+		// leak into the parent (and idle-suspend would stop them).
+		if unitBelongsToLongerSite(name, siteName, sites) {
 			continue
 		}
 		unitName := strings.TrimSuffix(name, ".service")

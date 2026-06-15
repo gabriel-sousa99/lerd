@@ -9,12 +9,23 @@
 | `lerd php:list` | List all installed PHP-FPM versions |
 | `lerd php:rebuild [--local]` | Force-rebuild all installed PHP-FPM images; `--local` builds from source instead of pulling a base |
 | `lerd fetch [version...] [--local]` | Pull pre-built PHP FPM base images from ghcr.io; `--local` builds from source instead |
-| `lerd xdebug on [version] [--mode MODE]` | Enable Xdebug for a PHP version with the given mode (default `debug`) and restart the FPM container |
+| `lerd xdebug on [version] [--mode MODE] [--on-demand]` | Enable Xdebug for a PHP version with the given mode (default `debug`) and restart the FPM container. `--on-demand` sets `start_with_request=trigger` so nothing auto-connects |
 | `lerd xdebug off [version]` | Disable Xdebug and restart the FPM container |
 | `lerd xdebug status` | Show Xdebug enabled/disabled state and active mode for all installed PHP versions |
+| `lerd xdebug pause [site] [--list] [--pid PID]` | Break the IDE debugger into a running worker/CLI process via Xdebug's control socket. `--list` shows candidate processes |
 | `lerd php:ext add <ext> [version] [--apk-deps "pkg ..."]` | Add a custom PHP extension to the FPM image and rebuild; `--apk-deps` lists extra Alpine packages the extension needs to build |
 | `lerd php:ext remove <ext> [version]` | Remove a custom PHP extension and rebuild |
 | `lerd php:ext list [version]` | List custom extensions configured for a PHP version |
+| `lerd php:bun install [version]` | Install a musl bun inside the PHP-FPM container, into a persistent volume |
+| `lerd php:bun remove` | Remove the in-container bun and clear its shared persistent volume |
+| `lerd php:bun update [version]` | Update the container's bun in place (`bun upgrade`) |
+| `lerd php:bun version [version]` | Show the bun version installed in the container |
+| `lerd php:pkg add <package...> [--php version]` | Install extra Alpine packages into the FPM image and rebuild |
+| `lerd php:pkg remove <package...> [--php version]` | Remove extra Alpine packages and rebuild |
+| `lerd php:pkg list [--php version]` | List the extra packages configured for a PHP version |
+| `lerd pest:browser install [version]` | Set up in-container Pest browser testing (musl chromium + Playwright shim); see [browser testing](browser-testing#pest-browser-testing-playwright) |
+| `lerd pest:browser remove [version]` | Remove chromium from the FPM image and disable Pest browser testing |
+| `lerd pest:browser doctor [version]` | Diagnose the Pest browser testing setup for a PHP version |
 | `lerd php:ini [version]` | Open the user php.ini for a PHP version in `$EDITOR` |
 
 If no version is given, the version is resolved from the current directory (`.php-version` or `composer.json`, falling back to the global default).
@@ -30,7 +41,7 @@ php artisan migrate
 composer install
 ```
 
-Because the `php` shim runs inside the PHP-FPM container, `php artisan`, `lerd artisan`, and the MCP `artisan` tool are all equivalent; they all execute inside the same container with the same PHP version and extensions. Use whichever form you prefer.
+Because the `php` shim runs inside the PHP-FPM container, `php artisan`, `lerd artisan`, and the MCP `exec` tool's `artisan` action are all equivalent; they all execute inside the same container with the same PHP version and extensions. Use whichever form you prefer.
 
 ### Shortcuts and `vendor/bin` fallback
 
@@ -74,7 +85,7 @@ lerd isolate 8.5
 
 This writes `.php-version: 8.5` (so CLI `php`, asdf, and other tools see the right version) and, when `.lerd.yaml` already exists in the project, also updates its `php_version` field to keep lerd's priority-1 override in sync. The site is re-linked automatically so nginx picks up the new version immediately.
 
-The UI PHP version selector and the MCP `site_php` tool follow the same rules; they always write both files when applicable.
+The UI PHP version selector and the MCP `site` tool's `php` action follow the same rules; they always write both files when applicable.
 
 The composer constraint is matched against all installed PHP versions using full semver rules (`^`, `~`, `>=`, `<`, `||`, `*`). The highest installed version that satisfies the constraint wins. If no installed version matches, the literal minimum from the constraint is used (and the FPM will be built on first use).
 
@@ -119,7 +130,7 @@ systemctl --user stop   lerd-php84-fpm
 Xdebug is configured with:
 
 - `xdebug.mode=<mode>` (defaults to `debug`, configurable per PHP version)
-- `xdebug.start_with_request=yes`
+- `xdebug.start_with_request=yes` (or `trigger` with `--on-demand`)
 - `xdebug.client_host=host.containers.internal` (reaches your host IDE from the container)
 - `xdebug.client_port=9003`
 
@@ -141,6 +152,20 @@ lerd xdebug on 8.4 --mode trace       # explicit version
 When combined with PCOV this matters in one direction: if your test runner's `phpunit.xml` prefers PCOV it still wins for coverage, but once you enable Xdebug in `coverage` mode your runner can fall back to Xdebug when PCOV isn't available or is disabled (`pcov.enabled = 0` in `lerd php:ini`). Running Xdebug in `coverage` mode carries the usual runtime cost, so only switch while you actually need coverage.
 
 Re-run `lerd xdebug on --mode <new>` at any time to swap modes without going through `off` first.
+
+### On-demand debugging (workers and CLI)
+
+By default `start_with_request=yes`, so with the debugger listening every request and every running worker tries to connect at once. To debug a single process on demand instead, enable on-demand mode and attach with `pause`:
+
+```bash
+lerd xdebug on --on-demand        # start_with_request=trigger — nothing auto-connects
+lerd xdebug pause --list          # list running PHP processes that expose a control socket
+lerd xdebug pause --pid 1234      # break the IDE into that process
+```
+
+`pause` uses Xdebug's [control socket](https://xdebug.org/docs/xdebugctl) (Xdebug >= 3.3, baked into lerd's FPM images) via the `xdebugctl` tool. It is the practical way to debug a **queue/Horizon worker, a scheduled task, or a CLI script** — processes where you can't set a trigger cookie. Run it from a project directory (or pass a site name); lerd resolves the site's container, scopes the candidate list to that site's own processes, and tells the running process to connect to your IDE on port `9003`. The worker must have been started *after* Xdebug was enabled, and your IDE must be listening.
+
+For ordinary web requests under `--on-demand`, use the [Xdebug Helper](https://xdebug.org/docs/step_debug#browser-extensions) browser extension (or append `?XDEBUG_TRIGGER=1`) to trigger a session per page.
 
 ---
 
@@ -254,6 +279,44 @@ If a library you depend on calls `setlocale()` and branches on whether it succee
 
 ---
 
+## Custom image (Containerfile)
+
+When `php:ext` and per-version ini tweaks are not enough and a single site needs its own bespoke image (an extra system toolchain, a patched binary, arbitrary build steps), you can give that PHP site its own `Containerfile.lerd`. lerd builds a per-site image and serves the site by fastcgi from a dedicated FPM container, instead of the shared `lerd-php<ver>-fpm` one. It is the same `container:` key used for [custom containers](../getting-started/containers.md), with one difference: **no port**. A `container:` block with a port is a reverse-proxied app; a `container:` block with no port on a PHP project is served by fastcgi from your image.
+
+Your `Containerfile.lerd` must build `FROM` the lerd base image for the site's PHP version, so it keeps php-fpm, the bundled extensions, and the pool config. That `:local` tag is lerd-managed and rebuilt on updates, so the `FROM` stays valid:
+
+```dockerfile
+FROM lerd-php84-fpm:local
+RUN apk add --no-cache htop vim
+```
+
+```yaml
+# .lerd.yaml
+domains:
+  - myapp
+container:
+  containerfile: Containerfile.lerd
+```
+
+Then `lerd link`. lerd builds `lerd-custom-myapp:local`, runs a dedicated FPM container `lerd-cfpm-myapp`, and points nginx fastcgi at it. The per-site container reuses every lerd mount, so xdebug, dumps, the debug bridge, the profiler, and `lerd shell` all work exactly as on a normal PHP site, and `lerd php`, `artisan`, `composer`, `tinker`, and queue/horizon workers all run inside it. Toggling xdebug for that PHP version restarts the per-site container too.
+
+The PHP version is fixed by the `FROM` line, not by `.php-version` or the dashboard, so the version selector is shown read-only for these sites. To change the version, edit the `FROM` and relink.
+
+```bash
+lerd rebuild        # rebuild the per-site image after editing Containerfile.lerd
+lerd restart        # restart the container without rebuilding
+```
+
+::: info PHP projects only
+A no-port `container:` is for PHP projects served by fastcgi. For a non-PHP app (Node, Python, Go) give the `container:` block a `port` so nginx reverse-proxies to it; see the [containers walkthrough](../getting-started/containers.md).
+:::
+
+::: warning One container per site
+Each custom-image PHP site runs its own FPM container rather than sharing the per-version one, so it uses more memory in the Podman VM. Reach for it only when a site genuinely needs its own image; for adding an extension or a package to every site on a version, `php:ext` stays lighter.
+:::
+
+---
+
 ## PHP shell
 
 `lerd shell` opens an interactive shell inside the PHP-FPM container for the current project:
@@ -282,6 +345,10 @@ What you get inside the container:
 - `HostName=` set to your host's hostname so the prompt reads `root@your-machine` instead of the auto-generated container id.
 
 If you want extra packages in the image (additional CLI tools, language toolchains, etc.), use `lerd php:ext` for PHP extensions, or fork the Containerfile at `internal/podman/quadlets/lerd-php-fpm.Containerfile`.
+
+For other tools and runtime libraries, `lerd php:pkg add <packages>` installs Alpine packages into the FPM image's runtime stage and rebuilds, for example `lerd php:pkg add htop vim`. The packages are saved in `~/.config/lerd/config.yaml` (under `php.packages`, keyed by version) and re-applied on every rebuild, so they survive `php:rebuild` and base image updates, exactly like custom extensions. They are layered onto the shared image rather than baked into the published base, so they only affect your local build. A non-existent package name fails the rebuild and the change is reverted.
+
+For [bun](https://bun.sh) specifically, run `lerd php:bun install` to drop a musl bun into the container's persistent `/root/.bun` volume (so `lerd shell` has it without rebuilding the image). See [bun](node#bun) for the full host and container story.
 
 ---
 

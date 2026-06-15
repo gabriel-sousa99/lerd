@@ -35,6 +35,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/grouping"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	lerdNode "github.com/gabriel-sousa99/lerd/internal/node"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
@@ -196,6 +197,22 @@ func Start(currentVersion string) error {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// Activity feed for idle-suspend from the CLI/shims: a php/composer/npm/
+	// artisan/tinker run in a project dir pings here so working on a site via
+	// the terminal (no page loads) keeps it awake and wakes it if it was asleep.
+	mux.HandleFunc("/api/internal/activity", func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackRequest(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if site := r.URL.Query().Get("site"); site != "" && activityTracker != nil {
+			activityTracker.TouchSite(site, time.Now())
+			idleEng.OnActivity(site)
+			publishSitesChanged() // push the wake/active state to dashboards live
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	mux.HandleFunc("/api/services/presets", withCORS(handleServicePresets))
 	mux.HandleFunc("/api/services/presets/", withCORS(publishAfter(handleServicePresetInstall, eventbus.KindServices, eventbus.KindStatus)))
 	mux.HandleFunc("/api/services/", withCORS(publishAfter(handleServiceAction, eventbus.KindServices, eventbus.KindStatus, eventbus.KindSites)))
@@ -214,7 +231,10 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/node-versions", withCORS(handleNodeVersions))
 	mux.HandleFunc("/api/node-versions/install", withCORS(publishAfter(handleInstallNodeVersion, eventbus.KindStatus)))
 	mux.HandleFunc("/api/node-versions/", withCORS(publishAfter(handleNodeVersionAction, eventbus.KindStatus, eventbus.KindSites)))
+	mux.HandleFunc("/api/node/manage", withCORS(publishAfter(handleNodeManage, eventbus.KindStatus, eventbus.KindSites)))
+	mux.HandleFunc("/api/node/unmanage", withCORS(publishAfter(handleNodeUnmanage, eventbus.KindStatus, eventbus.KindSites)))
 	mux.HandleFunc("/api/sites/link", withCORS(publishAfter(handleSiteLink, eventbus.KindSites)))
+	mux.HandleFunc("/api/sites/reorder", withCORS(publishAfter(handleSiteReorder, eventbus.KindSites)))
 	mux.HandleFunc("/api/sites/worktree-options", withCORS(handleSiteWorktreeOptions))
 	mux.HandleFunc("/api/sites/worktree-add", withCORS(publishAfter(handleSiteWorktreeAdd, eventbus.KindSites)))
 	mux.HandleFunc("/api/browse", withCORS(handleBrowse))
@@ -237,6 +257,7 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/profiler/status", withCORS(handleProfilerStatus))
 	mux.HandleFunc("/api/profiler/clear", withCORS(handleProfilerClear))
 	mux.HandleFunc("/_spx/", handleSpxProxy)
+	mux.HandleFunc("/_svc/", handleDashProxy)
 	mux.HandleFunc("/api/queue/", withCORS(handleQueueLogs))
 	mux.HandleFunc("/api/horizon/", withCORS(handleHorizonLogs))
 	mux.HandleFunc("/api/stripe/", withCORS(handleStripeLogs))
@@ -249,6 +270,7 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/settings", withCORS(handleSettings))
 	mux.HandleFunc("/api/settings/autostart", withCORS(handleSettingsAutostart))
 	mux.HandleFunc("/api/settings/worker-mode", withCORS(handleSettingsWorkerMode))
+	mux.HandleFunc("/api/settings/idle-suspend", withCORS(publishAfter(handleSettingsIdleSuspend, eventbus.KindSites)))
 	mux.HandleFunc("/api/workers/health", withCORS(handleWorkersHealth))
 	mux.HandleFunc("/api/workers/heal", withCORS(handleWorkersHeal))
 	mux.HandleFunc("/api/stats", withCORS(handleStats))
@@ -308,6 +330,10 @@ func Start(currentVersion string) error {
 	mux.Handle("/", serveSvelte())
 
 	handler := withRemoteControlGate(mux)
+
+	// Start the idle-suspend activity feed: bind the nginx access socket and
+	// seed per-site last-active times. Best-effort; never blocks serving.
+	startAccessFeed()
 
 	// Unix socket listener for the lerd.localhost nginx vhost. Linux only:
 	// on macOS, lerd-nginx runs inside the podman-machine VM and unix
@@ -614,7 +640,18 @@ type StatusResponse struct {
 	PHPDefault        string       `json:"php_default"`
 	NodeDefault       string       `json:"node_default"`
 	NodeManagedByLerd bool         `json:"node_managed_by_lerd"`
-	WatcherRunning    bool         `json:"watcher_running"`
+	// BunAvailable is true when a bun binary is installed on the host;
+	// BunVersion carries its version for an at-a-glance reference.
+	// UsingSystemBun is true when lerd isn't managing Node and there's no system
+	// Node, so bun is what actually runs JS host workers (Vite, installs).
+	BunAvailable   bool   `json:"bun_available"`
+	BunVersion     string `json:"bun_version"`
+	UsingSystemBun bool   `json:"using_system_bun"`
+	WatcherRunning bool   `json:"watcher_running"`
+	// FrankenPHPVersions are the PHP versions dunglas/frankenphp publishes an
+	// image for, so the UI can limit a FrankenPHP site's version dropdown to
+	// the ones it can actually run (intersected client-side with installed).
+	FrankenPHPVersions []string `json:"frankenphp_php_versions"`
 }
 
 type DNSStatus struct {
@@ -675,14 +712,24 @@ func buildStatus() StatusResponse {
 	nodeShim := filepath.Join(config.BinDir(), "node")
 	_, nodeShimErr := os.Stat(nodeShim)
 	nodeManagedByLerd := nodeShimErr == nil
+	bunAvailable := lerdNode.BunPath() != ""
+	bunVersion := ""
+	if bunAvailable {
+		bunVersion = lerdNode.BunVersion()
+	}
+	usingSystemBun := bunAvailable && !nodeManagedByLerd && !lerdNode.SystemNodeAvailable()
 	return StatusResponse{
-		DNS:               DNSStatus{OK: dnsStatus == dns.StatusOK, Status: string(dnsStatus), VPN: dns.VPNActive(), Enabled: dnsEnabled, TLD: tld},
-		Nginx:             ServiceCheck{Running: nginxRunning},
-		PHPFPMs:           phpStatuses,
-		PHPDefault:        phpDefault,
-		NodeDefault:       nodeDefault,
-		NodeManagedByLerd: nodeManagedByLerd,
-		WatcherRunning:    watcherRunning,
+		DNS:                DNSStatus{OK: dnsStatus == dns.StatusOK, Status: string(dnsStatus), VPN: dns.VPNActive(), Enabled: dnsEnabled, TLD: tld},
+		Nginx:              ServiceCheck{Running: nginxRunning},
+		PHPFPMs:            phpStatuses,
+		PHPDefault:         phpDefault,
+		NodeDefault:        nodeDefault,
+		NodeManagedByLerd:  nodeManagedByLerd,
+		BunAvailable:       bunAvailable,
+		BunVersion:         bunVersion,
+		UsingSystemBun:     usingSystemBun,
+		WatcherRunning:     watcherRunning,
+		FrankenPHPVersions: config.FrankenPHPVersions(),
 	}
 }
 
@@ -706,6 +753,10 @@ type WorktreeResponse struct {
 	LANPort             int            `json:"lan_port,omitempty"`
 	LANShareURL         string         `json:"lan_share_url,omitempty"`
 	FrameworkWorkers    []WorkerStatus `json:"framework_workers,omitempty"`
+	// Idle-suspend state for the worktree, which idles on its own timer.
+	LastActive           int64    `json:"last_active,omitempty"`
+	Idle                 bool     `json:"idle,omitempty"`
+	IdleSuspendedWorkers []string `json:"idle_suspended_workers,omitempty"`
 }
 
 // WorkerStatus represents a single framework worker and its running state.
@@ -728,6 +779,7 @@ type ConflictingDomain struct {
 // SiteResponse is the response for GET /api/sites.
 type SiteResponse struct {
 	Name               string              `json:"name"`
+	AppName            string              `json:"app_name,omitempty"`
 	Domain             string              `json:"domain"`
 	Domains            []string            `json:"domains"`
 	ConflictingDomains []ConflictingDomain `json:"conflicting_domains,omitempty"`
@@ -735,6 +787,7 @@ type SiteResponse struct {
 	PHPVersion         string              `json:"php_version"`
 	UsesPHP            bool                `json:"uses_php"`
 	NodeVersion        string              `json:"node_version"`
+	JSRuntime          string              `json:"js_runtime,omitempty"`
 	TLS                bool                `json:"tls"`
 	Framework          string              `json:"framework"`
 	FPMRunning         bool                `json:"fpm_running"`
@@ -744,6 +797,7 @@ type SiteResponse struct {
 	QueueFailing       bool                `json:"queue_failing,omitempty"`
 	StripeRunning      bool                `json:"stripe_running"`
 	StripeSecretSet    bool                `json:"stripe_secret_set"`
+	StripeWebhookPath  string              `json:"stripe_webhook_path,omitempty"`
 	ScheduleRunning    bool                `json:"schedule_running"`
 	ScheduleFailing    bool                `json:"schedule_failing,omitempty"`
 	ReverbRunning      bool                `json:"reverb_running"`
@@ -754,6 +808,8 @@ type SiteResponse struct {
 	HorizonFailing     bool                `json:"horizon_failing,omitempty"`
 	HorizonReload      bool                `json:"horizon_reload,omitempty"`       // horizon runs via horizon:listen (auto-reload)
 	HorizonReloadReady bool                `json:"horizon_reload_ready,omitempty"` // chokidar present, so auto-reload can be enabled without installing it
+	OctaneReload       bool                `json:"octane_reload,omitempty"`        // FrankenPHP worker serves via octane:start --watch (auto-reload)
+	OctaneReloadReady  bool                `json:"octane_reload_ready,omitempty"`  // FrankenPHP worker mode + chokidar present, so auto-reload can be enabled
 	HasQueueWorker     bool                `json:"has_queue_worker"`
 	HasScheduleWorker  bool                `json:"has_schedule_worker"`
 	FrameworkWorkers   []WorkerStatus      `json:"framework_workers,omitempty"`
@@ -762,19 +818,48 @@ type SiteResponse struct {
 	HasFavicon         bool                `json:"has_favicon"`
 	HasEnv             bool                `json:"has_env"`
 	Paused             bool                `json:"paused"`
-	Branch             string              `json:"branch"`
-	Worktrees          []WorktreeResponse  `json:"worktrees"`
+	// Pinned excludes the site from idle-suspend (kept always-warm).
+	Pinned bool `json:"pinned,omitempty"`
+	// LastActive is the unix-seconds time the site last saw a request, from the
+	// idle-suspend activity feed. Zero (omitted) means no activity recorded yet
+	// this lerd-ui session.
+	LastActive int64 `json:"last_active,omitempty"`
+	// IdleSuspended is true when the idle engine has gracefully stopped this
+	// site's workers (a subset of Idle: only sites that had workers to stop).
+	IdleSuspended bool `json:"idle_suspended,omitempty"`
+	// Idle is true when the site has gone past the idle timeout (and isn't
+	// paused), whether or not it had any workers to suspend. Drives the
+	// dashboard sleep (Zz) indicator, which marks every idle site.
+	Idle bool `json:"idle,omitempty"`
+	// IdleSuspendedWorkers names the workers the engine stopped while idle, so
+	// the dashboard can still show their (dimmed) dots — a sleeping site keeps
+	// its worker dots rather than losing them when the units stop.
+	IdleSuspendedWorkers []string           `json:"idle_suspended_workers,omitempty"`
+	Branch               string             `json:"branch"`
+	Worktrees            []WorktreeResponse `json:"worktrees"`
 	// Services lists the service names this site uses, sourced from the
 	// project's .lerd.yaml. Used by the dashboard to render service badges
 	// on the site detail panel.
-	Services        []string `json:"services,omitempty"`
-	LANPort         int      `json:"lan_port,omitempty"`
-	LANShareURL     string   `json:"lan_share_url,omitempty"`
-	CustomContainer bool     `json:"custom_container,omitempty"`
-	ContainerPort   int      `json:"container_port,omitempty"`
-	ContainerImage  string   `json:"container_image,omitempty"`
-	Runtime         string   `json:"runtime,omitempty"`
-	RuntimeWorker   bool     `json:"runtime_worker,omitempty"`
+	Services         []string `json:"services,omitempty"`
+	LANPort          int      `json:"lan_port,omitempty"`
+	LANShareURL      string   `json:"lan_share_url,omitempty"`
+	CustomContainer  bool     `json:"custom_container,omitempty"`
+	ContainerPort    int      `json:"container_port,omitempty"`
+	ContainerImage   string   `json:"container_image,omitempty"`
+	Runtime          string   `json:"runtime,omitempty"`
+	RuntimeWorker    bool     `json:"runtime_worker,omitempty"`
+	HostProxy        bool     `json:"host_proxy,omitempty"`
+	HostPort         int      `json:"host_port,omitempty"`
+	HostHasDevServer bool     `json:"host_has_dev_server,omitempty"`
+	// Grouping — Group is the group key (main site's name); GroupSubdomain is the
+	// label a secondary occupies; GroupMainDomain is the group main's base domain.
+	// MultiTenant flags a main whose project declares env_overrides (wildcard
+	// tenant subdomains) so the UI can warn that a secondary carves out a label.
+	Group           string `json:"group,omitempty"`
+	GroupSubdomain  string `json:"group_subdomain,omitempty"`
+	GroupMainDomain string `json:"group_main_domain,omitempty"`
+	GroupSharedDB   bool   `json:"group_shared_db,omitempty"`
+	MultiTenant     bool   `json:"multi_tenant,omitempty"`
 }
 
 func handleSites(w http.ResponseWriter, _ *http.Request) {
@@ -790,6 +875,46 @@ func buildSites() []SiteResponse {
 		return []SiteResponse{}
 	}
 	_ = siteinfo.PersistVersionChanges(enriched)
+
+	// Resolve the global idle policy once so each site can report whether it is
+	// currently idle (drives the dashboard sleep indicator).
+	idleCfg, _ := config.LoadGlobal()
+	idleOn := idleCfg != nil && idleCfg.IdleSuspend.Enabled
+	idleTimeout := config.DefaultIdleSuspendTimeout
+	if idleCfg != nil {
+		idleTimeout = idleCfg.IdleSuspendTimeout()
+	}
+	idleNow := time.Now()
+
+	// Per-site list of workers the engine suspended, so the dashboard can keep
+	// showing their dots dimmed instead of dropping them.
+	suspendedWorkers := map[string][]string{}
+	wtSuspendedWorkers := map[string][]string{}
+	pinnedSites := map[string]bool{}
+	if reg, err := config.LoadSites(); err == nil {
+		for _, s := range reg.Sites {
+			if len(s.IdleSuspendedWorkers) > 0 {
+				suspendedWorkers[s.Name] = s.IdleSuspendedWorkers
+			}
+			for wtBase, workers := range s.WorktreeIdleSuspended {
+				if len(workers) > 0 {
+					wtSuspendedWorkers[wtKey(s.Name, wtBase)] = workers
+				}
+			}
+			if s.Pinned {
+				pinnedSites[s.Name] = true
+			}
+		}
+	}
+
+	// Map each group key to its main site's base domain so secondaries can
+	// report group_main_domain without a second lookup.
+	groupMainDomain := map[string]string{}
+	for _, e := range enriched {
+		if e.Group != "" && e.GroupSubdomain == "" {
+			groupMainDomain[e.Group] = e.PrimaryDomain()
+		}
+	}
 
 	sites := make([]SiteResponse, 0, len(enriched))
 	for _, e := range enriched {
@@ -828,21 +953,25 @@ func buildSites() []SiteResponse {
 					Failing: fw.Failing,
 				})
 			}
+			wtKeyStr := wtKey(e.Name, config.WorktreeUnitSlug(filepath.Base(wt.Path)))
 			worktreeResponses = append(worktreeResponses, WorktreeResponse{
-				Branch:              wt.Branch,
-				Domain:              wt.Domain,
-				Path:                wt.Path,
-				PHPVersion:          wt.PHPVersion,
-				NodeVersion:         wt.NodeVersion,
-				PHPVersionOverride:  wt.PHPVersionOverride,
-				NodeVersionOverride: wt.NodeVersionOverride,
-				FrameworkVersion:    wt.FrameworkVersion,
-				FrameworkLabel:      wt.FrameworkLabel,
-				DBIsolated:          wt.DBIsolated,
-				DBDatabase:          wt.DBDatabase,
-				LANPort:             lanPort,
-				LANShareURL:         lanURL,
-				FrameworkWorkers:    wtWorkers,
+				Branch:               wt.Branch,
+				Domain:               wt.Domain,
+				Path:                 wt.Path,
+				PHPVersion:           wt.PHPVersion,
+				NodeVersion:          wt.NodeVersion,
+				PHPVersionOverride:   wt.PHPVersionOverride,
+				NodeVersionOverride:  wt.NodeVersionOverride,
+				FrameworkVersion:     wt.FrameworkVersion,
+				FrameworkLabel:       wt.FrameworkLabel,
+				DBIsolated:           wt.DBIsolated,
+				DBDatabase:           wt.DBDatabase,
+				LANPort:              lanPort,
+				LANShareURL:          lanURL,
+				FrameworkWorkers:     wtWorkers,
+				LastActive:           siteLastActiveUnix(wtKeyStr),
+				Idle:                 siteIsIdle(wtKeyStr, e.Paused, pinnedSites[e.Name], idleOn, idleTimeout, idleNow),
+				IdleSuspendedWorkers: wtSuspendedWorkers[wtKeyStr],
 			})
 		}
 		if worktreeResponses == nil {
@@ -850,51 +979,69 @@ func buildSites() []SiteResponse {
 		}
 
 		sites = append(sites, SiteResponse{
-			Name:               e.Name,
-			Domain:             e.PrimaryDomain(),
-			Domains:            e.Domains,
-			ConflictingDomains: conflicting,
-			Path:               e.Path,
-			PHPVersion:         e.PHPVersion,
-			UsesPHP:            e.UsesPHP,
-			NodeVersion:        e.NodeVersion,
-			TLS:                e.Secured,
-			Framework:          e.FrameworkName,
-			IsLaravel:          e.FrameworkName == "laravel",
-			FrameworkLabel:     e.FrameworkLabel,
-			FPMRunning:         e.FPMRunning,
-			QueueRunning:       e.QueueRunning,
-			QueueFailing:       e.QueueFailing,
-			StripeRunning:      e.StripeRunning,
-			StripeSecretSet:    e.StripeSecretSet,
-			ScheduleRunning:    e.ScheduleRunning,
-			ScheduleFailing:    e.ScheduleFailing,
-			ReverbRunning:      e.ReverbRunning,
-			ReverbFailing:      e.ReverbFailing,
-			HasReverb:          e.HasReverb,
-			HasHorizon:         e.HasHorizon,
-			HorizonRunning:     e.HorizonRunning,
-			HorizonFailing:     e.HorizonFailing,
-			HorizonReload:      e.HasHorizon && config.ProjectReloadsWorker(e.Path, "horizon"),
-			HorizonReloadReady: e.HasHorizon && cli.ProjectHasChokidar(e.Path),
-			HasQueueWorker:     e.HasQueueWorker,
-			HasScheduleWorker:  e.HasScheduleWorker,
-			FrameworkWorkers:   fwWorkers,
-			HasAppLogs:         e.HasAppLogs,
-			LatestLogTime:      e.LatestLogTime,
-			HasFavicon:         e.HasFavicon,
-			HasEnv:             siteHasEnv(e.Path),
-			Paused:             e.Paused,
-			Branch:             e.Branch,
-			Worktrees:          worktreeResponses,
-			Services:           e.Services,
-			LANPort:            e.LANPort,
-			LANShareURL:        cli.LANShareURL(e.LANPort),
-			CustomContainer:    e.ContainerPort > 0,
-			ContainerPort:      e.ContainerPort,
-			ContainerImage:     e.ContainerImage,
-			Runtime:            e.Runtime,
-			RuntimeWorker:      e.RuntimeWorker,
+			Name:                 e.Name,
+			AppName:              laravelAppName(e.FrameworkName, e.Path),
+			Domain:               e.PrimaryDomain(),
+			Domains:              e.Domains,
+			ConflictingDomains:   conflicting,
+			Path:                 e.Path,
+			PHPVersion:           e.PHPVersion,
+			UsesPHP:              e.UsesPHP,
+			NodeVersion:          e.NodeVersion,
+			JSRuntime:            projectJSRuntime(e.Path),
+			TLS:                  e.Secured,
+			Framework:            e.FrameworkName,
+			IsLaravel:            e.FrameworkName == "laravel",
+			FrameworkLabel:       e.FrameworkLabel,
+			FPMRunning:           e.FPMRunning,
+			QueueRunning:         e.QueueRunning,
+			QueueFailing:         e.QueueFailing,
+			StripeRunning:        e.StripeRunning,
+			StripeSecretSet:      e.StripeSecretSet,
+			StripeWebhookPath:    e.StripeWebhookPath,
+			ScheduleRunning:      e.ScheduleRunning,
+			ScheduleFailing:      e.ScheduleFailing,
+			ReverbRunning:        e.ReverbRunning,
+			ReverbFailing:        e.ReverbFailing,
+			HasReverb:            e.HasReverb,
+			HasHorizon:           e.HasHorizon,
+			HorizonRunning:       e.HorizonRunning,
+			HorizonFailing:       e.HorizonFailing,
+			HorizonReload:        e.HasHorizon && config.ProjectReloadsWorker(e.Path, "horizon"),
+			HorizonReloadReady:   e.HasHorizon && cli.ProjectHasChokidar(e.Path),
+			OctaneReload:         e.Runtime == "frankenphp" && e.RuntimeWorker && config.ProjectReloadsWorker(e.Path, "octane"),
+			OctaneReloadReady:    e.Runtime == "frankenphp" && e.RuntimeWorker && cli.SiteHasOctane(e.Path) && cli.ProjectHasChokidar(e.Path),
+			HasQueueWorker:       e.HasQueueWorker,
+			HasScheduleWorker:    e.HasScheduleWorker,
+			FrameworkWorkers:     fwWorkers,
+			HasAppLogs:           e.HasAppLogs,
+			LatestLogTime:        e.LatestLogTime,
+			HasFavicon:           e.HasFavicon,
+			HasEnv:               siteHasEnv(e.Path),
+			Paused:               e.Paused,
+			LastActive:           siteLastActiveUnix(e.Name),
+			IdleSuspended:        siteIsIdleSuspended(e.Name),
+			Idle:                 siteIsIdle(e.Name, e.Paused, pinnedSites[e.Name], idleOn, idleTimeout, idleNow),
+			IdleSuspendedWorkers: suspendedWorkers[e.Name],
+			Pinned:               pinnedSites[e.Name],
+			Branch:               e.Branch,
+			Worktrees:            worktreeResponses,
+			Services:             e.Services,
+			LANPort:              e.LANPort,
+			LANShareURL:          cli.LANShareURL(e.LANPort),
+			CustomContainer:      e.ContainerPort > 0,
+			ContainerPort:        e.ContainerPort,
+			ContainerImage:       e.ContainerImage,
+			Runtime:              e.Runtime,
+			RuntimeWorker:        e.RuntimeWorker,
+			HostProxy:            e.HostPort > 0,
+			HostPort:             e.HostPort,
+			HostHasDevServer:     e.HostPort > 0 && e.HostCommand != "",
+			Group:                e.Group,
+			GroupSubdomain:       e.GroupSubdomain,
+			GroupMainDomain:      groupMainDomain[e.Group],
+			GroupSharedDB:        e.GroupSharedDB,
+			MultiTenant:          e.Group != "" && e.GroupSubdomain == "" && siteHasEnvOverrides(e.Path),
 		})
 	}
 	return sites
@@ -1108,13 +1255,20 @@ func buildServicesList() []ServiceResponse {
 			conflicts = portConflictsFor(unit, ssOutput)
 		}
 		_, tunable := config.ServiceTuningMount(svc)
+		// Bundled dashboards that asked to open externally (cross-origin cookie
+		// trouble) are instead proxied same-origin under /_svc/<name>/ so they
+		// embed in the iframe overlay; user custom services keep the new tab.
+		dashboard, dashboardExternal := svc.Dashboard, svc.DashboardExternal
+		if dashProxyEligible(svc) {
+			dashboard, dashboardExternal = dashProxyPath(svc.Name), false
+		}
 		services = append(services, ServiceResponse{
 			Name:              svc.Name,
 			Status:            status,
 			Version:           podman.ServiceVersionLabel(svc.Image),
 			EnvVars:           envMap,
-			Dashboard:         svc.Dashboard,
-			DashboardExternal: svc.DashboardExternal,
+			Dashboard:         dashboard,
+			DashboardExternal: dashboardExternal,
 			ConnectionURL:     svc.ConnectionURL,
 			Custom:            true,
 			Tunable:           tunable,
@@ -2904,6 +3058,9 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 	if commandRoute(w, r, domain, parts[1:]) {
 		return
 	}
+	if doctorRoute(w, r, domain, parts[1:]) {
+		return
+	}
 	// /nginx subroutes (backups, restore) sit alongside the GET/POST on
 	// /nginx. The domain validation inside each handler closes the path
 	// traversal vector that the {domain} segment would otherwise open.
@@ -3036,6 +3193,10 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, SiteActionResponse{Error: "custom container sites do not use PHP versions"})
 			return
 		}
+		if site.IsHostProxy() {
+			writeJSON(w, SiteActionResponse{Error: "host-proxy sites do not use PHP versions"})
+			return
+		}
 		_ = config.SetProjectPHPVersion(site.Path, version)
 		site.PHPVersion = version
 		if site.IsFrankenPHP() {
@@ -3076,6 +3237,18 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, SiteActionResponse{Error: "version parameter required"})
 			return
 		}
+		// "bun" is a JS-runtime toggle, not a Node version: pin js_runtime in
+		// .lerd.yaml (preserving node_version) and re-sync host workers so the
+		// dev/Vite worker switches to bun. Project-level, so branch is ignored.
+		if version == "bun" {
+			if err := config.SetProjectJSRuntime(site.Path, "bun"); err != nil {
+				writeJSON(w, SiteActionResponse{Error: "setting js_runtime: " + err.Error()})
+				return
+			}
+			cli.RegenerateHostWorkersForSite(*site)
+			writeJSON(w, SiteActionResponse{OK: true})
+			return
+		}
 		if branch := r.URL.Query().Get("branch"); branch != "" {
 			wtPath := resolveSitePath(site, branch)
 			if wtPath == "" {
@@ -3097,6 +3270,12 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		site.NodeVersion = version
+		// Picking a Node version while pinned to bun means switch back to Node,
+		// so the chosen version actually runs.
+		if projectJSRuntime(site.Path) == "bun" {
+			_ = config.SetProjectJSRuntime(site.Path, "node")
+			cli.RegenerateHostWorkersForSite(*site)
+		}
 	case "unlink":
 		if err := cli.UnlinkSite(site.Name); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
@@ -3113,6 +3292,20 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		return
 	case "unpause":
 		if err := cli.UnpauseSite(site.Name); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "pin":
+		if err := cli.SetSitePinned(site.Name, true); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "unpin":
+		if err := cli.SetSitePinned(site.Name, false); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
@@ -3170,6 +3363,25 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
+	case "octane:reload":
+		enabled := r.URL.Query().Get("enabled") == "true"
+		phpVersion := site.PHPVersion
+		if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
+			phpVersion = detected
+		}
+		if err := cli.ApplyOctaneReload(site.Name, site.Path, phpVersion, enabled); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "octane:install-watcher":
+		if err := cli.InstallChokidar(site.Path); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
 	case "queue:start":
 		phpVersion := site.PHPVersion
 		if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
@@ -3206,6 +3418,18 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		if !site.Paused {
 			_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
 		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "stripe:config":
+		path := r.URL.Query().Get("path")
+		secretEnvKey := r.URL.Query().Get("secret_env_key")
+		if err := config.SetProjectStripe(site.Path, path, secretEnvKey); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		// Re-forward to the new route immediately when a listener is already
+		// running; no-op otherwise.
+		cli.RestartStripeIfActive(site)
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
 	case "schedule:start":
@@ -3409,7 +3633,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, SiteActionResponse{Error: "updating registry: " + err.Error()})
 			return
 		}
-		_ = config.SyncProjectDomains(site.Path, site.Domains, cfg.DNS.TLD)
+		_ = config.ReplaceProjectDomain(site.Path, site.Domains, oldDomain, cfg.DNS.TLD)
 		if err := siteops.RegenerateSiteVhost(site, oldPrimary); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
@@ -3421,6 +3645,11 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		_ = nginx.Reload()
 		if err := siteops.SyncEnvIfPrimaryChanged(site, oldPrimary); err != nil {
 			fmt.Fprintf(os.Stderr, "lerd-ui: syncing .env to new primary domain: %v\n", err)
+		}
+		if site.IsGroupMain() {
+			if err := grouping.CascadeMainDomainChange(site); err != nil {
+				fmt.Fprintf(os.Stderr, "lerd-ui: cascading group domain change: %v\n", err)
+			}
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
@@ -3484,7 +3713,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, SiteActionResponse{Error: "updating registry: " + err.Error()})
 			return
 		}
-		_ = config.SyncProjectDomains(site.Path, site.Domains, cfg.DNS.TLD)
+		_ = config.ReplaceProjectDomain(site.Path, site.Domains, fullDomain, cfg.DNS.TLD)
 		if err := siteops.RegenerateSiteVhost(site, oldPrimary); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
@@ -3496,6 +3725,68 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		_ = nginx.Reload()
 		if err := siteops.SyncEnvIfPrimaryChanged(site, oldPrimary); err != nil {
 			fmt.Fprintf(os.Stderr, "lerd-ui: syncing .env to new primary domain: %v\n", err)
+		}
+		if site.IsGroupMain() {
+			if err := grouping.CascadeMainDomainChange(site); err != nil {
+				fmt.Fprintf(os.Stderr, "lerd-ui: cascading group domain change: %v\n", err)
+			}
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "group:assign":
+		secondaryDomain := r.URL.Query().Get("secondary")
+		label := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("label")))
+		if secondaryDomain == "" || label == "" {
+			writeJSON(w, SiteActionResponse{Error: "secondary and label parameters required"})
+			return
+		}
+		secondary, secErr := config.FindSiteByDomain(secondaryDomain)
+		if secErr != nil {
+			writeJSON(w, SiteActionResponse{Error: "secondary site not found: " + secondaryDomain})
+			return
+		}
+		shareDB := r.URL.Query().Get("share_db") == "1"
+		if err := grouping.AssignSecondary(site, secondary, label, shareDB); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "group:set-db":
+		share := r.URL.Query().Get("share") == "1"
+		if err := grouping.SetSecondarySharedDB(site, share); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "group:unassign":
+		if err := grouping.UnassignSecondary(site); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "group:set-label":
+		label := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("label")))
+		if label == "" {
+			writeJSON(w, SiteActionResponse{Error: "label parameter required"})
+			return
+		}
+		if err := grouping.SetSecondaryLabel(site, label); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "group:remove":
+		if site.Group == "" {
+			writeJSON(w, SiteActionResponse{Error: "site is not part of a group"})
+			return
+		}
+		if err := grouping.DissolveGroup(site.Group); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
@@ -3681,7 +3972,14 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	version, action := parts[0], parts[1]
-	if !validVersion.MatchString(version) {
+	// The php.ini editor (config) also accepts a "site:<name>" scope for a
+	// FrankenPHP site's own per-site ini; every other action is version-only.
+	isSiteScope := strings.HasPrefix(version, "site:")
+	if isSiteScope && action != "config" {
+		http.NotFound(w, r)
+		return
+	}
+	if !isSiteScope && !validVersion.MatchString(version) {
 		http.NotFound(w, r)
 		return
 	}
@@ -3961,6 +4259,32 @@ func handleNodeVersionAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleNodeManage / handleNodeUnmanage opt the host into or out of
+// lerd-managed Node by shelling out to the lerd binary, reusing the CLI's shim
+// + worker-regeneration logic rather than duplicating it here. Synchronous:
+// these can take a few seconds (fnm install, worker restarts), so the UI shows
+// a loading state.
+func handleNodeManage(w http.ResponseWriter, r *http.Request) { runNodeMgmtCmd(w, r, "node:manage") }
+func handleNodeUnmanage(w http.ResponseWriter, r *http.Request) {
+	runNodeMgmtCmd(w, r, "node:unmanage")
+}
+
+func runNodeMgmtCmd(w http.ResponseWriter, r *http.Request, sub string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	self, err := os.Executable()
+	if err != nil || self == "" {
+		self = "lerd"
+	}
+	if out, err := exec.Command(self, sub).CombinedOutput(); err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": strings.TrimSpace(string(out))})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 var validVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
 
 func handleInstallNodeVersion(w http.ResponseWriter, r *http.Request) {
@@ -4105,22 +4429,69 @@ func handleQueueLogs(w http.ResponseWriter, r *http.Request) {
 
 // SettingsResponse is the response for GET /api/settings.
 type SettingsResponse struct {
-	AutostartOnLogin  bool   `json:"autostart_on_login"`
-	WorkerExecMode    string `json:"worker_exec_mode"`
-	WorkerModeApplies bool   `json:"worker_mode_applies"` // true on macOS only
+	AutostartOnLogin          bool   `json:"autostart_on_login"`
+	WorkerExecMode            string `json:"worker_exec_mode"`
+	WorkerModeApplies         bool   `json:"worker_mode_applies"` // true on macOS only
+	IdleSuspendEnabled        bool   `json:"idle_suspend_enabled"`
+	IdleSuspendTimeoutMinutes int    `json:"idle_suspend_timeout_minutes"`
 }
 
 func handleSettings(w http.ResponseWriter, _ *http.Request) {
 	cfg, _ := config.LoadGlobal()
 	mode := config.WorkerExecModeExec
+	idleEnabled := false
+	idleMinutes := int(config.DefaultIdleSuspendTimeout / time.Minute)
 	if cfg != nil {
 		mode = cfg.WorkerExecMode()
+		idleEnabled = cfg.IdleSuspend.Enabled
+		idleMinutes = int(cfg.IdleSuspendTimeout() / time.Minute)
 	}
 	writeJSON(w, SettingsResponse{
-		AutostartOnLogin:  lerdSystemd.IsAutostartEnabled(),
-		WorkerExecMode:    mode,
-		WorkerModeApplies: runtime.GOOS == "darwin",
+		AutostartOnLogin:          lerdSystemd.IsAutostartEnabled(),
+		WorkerExecMode:            mode,
+		WorkerModeApplies:         runtime.GOOS == "darwin",
+		IdleSuspendEnabled:        idleEnabled,
+		IdleSuspendTimeoutMinutes: idleMinutes,
 	})
+}
+
+// handleSettingsIdleSuspend sets the global idle-suspend policy (a single on/off
+// + timeout, not per site). The timeout arrives as whole minutes from the UI and
+// is stored as a Go duration string.
+func handleSettingsIdleSuspend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Enabled        bool `json:"enabled"`
+		TimeoutMinutes int  `json:"timeout_minutes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.TimeoutMinutes < 1 {
+		writeJSON(w, map[string]any{"ok": false, "error": "timeout must be at least 1 minute"})
+		return
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	cfg.IdleSuspend.Enabled = body.Enabled
+	cfg.IdleSuspend.Timeout = (time.Duration(body.TimeoutMinutes) * time.Minute).String()
+	if err := config.SaveGlobal(cfg); err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if !body.Enabled {
+		// Turning the feature off brings every suspended site's workers back
+		// immediately rather than on the next tick.
+		idleEng.ResumeAllSuspended()
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func handleSettingsWorkerMode(w http.ResponseWriter, r *http.Request) {
@@ -4474,8 +4845,27 @@ func ensureWorktreeEnvIfBranch(site *config.Site, branch string) {
 	}
 }
 
+// laravelAppName labels a sites-dashboard tile by its Laravel APP_NAME instead
+// of just the URL. Thin wrapper over siteinfo.LaravelAppName so the web and the
+// TUI share one implementation; see there for the gating rules.
+func laravelAppName(frameworkName, sitePath string) string {
+	return siteinfo.LaravelAppName(frameworkName, sitePath)
+}
+
 // siteHasEnv reports whether the site root contains a .env file. Cheap,
 // stat-only check used to decide whether to surface the Env tab in the UI.
+// projectJSRuntime returns the .lerd.yaml js_runtime pin ("bun"/"node") for a
+// site path, or "" when unset. LoadProjectConfig is cached so this is cheap.
+func projectJSRuntime(sitePath string) string {
+	if sitePath == "" {
+		return ""
+	}
+	if proj, err := config.LoadProjectConfig(sitePath); err == nil && proj != nil {
+		return proj.JSRuntime
+	}
+	return ""
+}
+
 func siteHasEnv(sitePath string) bool {
 	if sitePath == "" {
 		return false
@@ -4485,6 +4875,18 @@ func siteHasEnv(sitePath string) bool {
 		return false
 	}
 	return !info.IsDir()
+}
+
+// siteHasEnvOverrides reports whether the project declares env_overrides in its
+// .lerd.yaml, which lerd uses for per-tenant/per-worktree subdomain templating.
+// The UI warns when grouping a secondary under such a main, since the chosen
+// subdomain is carved out of the main's wildcard tenant space.
+func siteHasEnvOverrides(sitePath string) bool {
+	if sitePath == "" {
+		return false
+	}
+	cfg, err := config.LoadProjectConfig(sitePath)
+	return err == nil && cfg != nil && len(cfg.EnvOverrides) > 0
 }
 
 // resolveSitePath returns the filesystem path for the site or one of its
@@ -4540,6 +4942,21 @@ func handleAppLogs(w http.ResponseWriter, r *http.Request) {
 	fw, hasFw := config.GetFramework(fwName)
 	if !hasFw || len(fw.Logs) == 0 {
 		writeJSON(w, map[string]any{"files": []any{}, "entries": []any{}})
+		return
+	}
+
+	// POST /api/app-logs/{domain}/clear deletes the matched log files to reclaim
+	// disk. Loopback-only since it mutates files on the host.
+	if len(parts) == 2 && parts[1] == "clear" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !isLoopbackRequest(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		handleAppLogsClear(w, basePath, fw.Logs)
 		return
 	}
 
@@ -4624,6 +5041,29 @@ func handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 // handleSiteLink links a directory as a site via POST /api/sites/link.
 // It streams command output as SSE events and sends a final "done" event.
+// SiteReorderRequest is the JSON body for POST /api/sites/reorder.
+type SiteReorderRequest struct {
+	Order []string `json:"order"` // site names in the desired display order
+}
+
+func handleSiteReorder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+
+	var req SiteReorderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, SiteActionResponse{Error: "invalid request body"})
+		return
+	}
+	if err := config.ReorderSites(req.Order); err != nil {
+		writeJSON(w, SiteActionResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, SiteActionResponse{OK: true})
+}
+
 func handleSiteLink(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
@@ -4698,7 +5138,9 @@ func handleSiteLink(w http.ResponseWriter, r *http.Request) {
 	// Run lerd link.
 	fmt.Fprintf(w, "data: → Linking site...\n\n")
 	flusher.Flush()
-	out, failed := streamCmd(self, "link")
+	// --yes: clicking Link in the UI is the explicit consent the host-proxy
+	// confirmation prompt would otherwise ask for at the (non-interactive) CLI.
+	out, failed := streamCmd(self, "link", "--yes")
 	if failed {
 		fmt.Fprintf(w, "event: done\ndata: %s\n\n", mustJSON(map[string]any{"ok": false, "error": "link failed: " + out}))
 		flusher.Flush()
@@ -4735,6 +5177,11 @@ type labeledOption struct {
 // build script, and "Skip". The parent path is used as a proxy for the
 // not-yet-created worktree (a fresh worktree is a checkout of the same tree).
 func worktreeBuildOptions(site *config.Site) []labeledOption {
+	// Host-proxy worktrees run a dev server continuously; there is no
+	// build-then-serve step to choose, so the Assets picker is omitted.
+	if site.IsHostProxy() {
+		return nil
+	}
 	opts := []labeledOption{{Value: "auto", Label: "Automatic (recommended)"}}
 	var workers map[string]config.FrameworkWorker
 	if fw, ok := config.GetFrameworkForDir(site.Framework, site.Path); ok {

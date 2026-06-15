@@ -66,6 +66,11 @@ Setup steps include common tasks (composer install, npm install, lerd env) plus 
 | `lerd unpause [name]` | Resume a paused site: start container, restore vhost, restart workers |
 | `lerd restart [name]` | Restart the container for the current or named site (custom container or PHP-FPM) |
 | `lerd rebuild [name]` | Rebuild the custom container image from Containerfile and restart |
+| `lerd group add <main> <label>` | Group the current site under `<main>` (name or domain) at `<label>.<main-domain>`; add `--share-db` to share the main's database. See [Site Groups](../usage/site-groups.md) |
+| `lerd group label <label>` | Change the current secondary's subdomain label |
+| `lerd group db <share\|separate>` | Switch the current secondary between sharing the main's database and keeping its own |
+| `lerd group remove` | Ungroup the current secondary, restoring a standalone domain |
+| `lerd group list` | List all site groups and their members |
 | `lerd env` | Configure `.env` for the current project with lerd service connection settings; backs up the original as `.env.before_lerd` on first run (skipped if lerd has already written to the file) |
 | `lerd env:restore` | Restore `.env` from the pre-lerd backup (`.env.before_lerd`) |
 | `lerd env:override [KEY=VALUE ...]` | Create/seed a personal, gitignored `.env.lerd_override` whose values win over lerd's defaults on `lerd env`; `LERD_EXTERNAL_SERVICES=` marks services lerd should not start or provision |
@@ -105,17 +110,21 @@ Supported PHP versions: **8.5**, **8.4**, **8.3**, **8.2**, **8.1**, and the fro
 | `lerd php:list` | List all installed PHP-FPM versions |
 | `lerd php:rebuild [--local]` | Force-rebuild all installed PHP-FPM images (pulls pre-built base by default; `--local` builds from source) |
 | `lerd fetch [version...] [--local]` | Pull pre-built PHP FPM base images from ghcr.io for the given (or all supported) versions; `--local` builds from source instead |
-| `lerd xdebug on [version] [--mode MODE]` | Enable Xdebug for a PHP version. `--mode` defaults to `debug`; accepts `coverage`, `develop`, `profile`, `trace`, `gcstats`, or comma combos like `debug,coverage` |
+| `lerd xdebug on [version] [--mode MODE] [--on-demand]` | Enable Xdebug for a PHP version. `--mode` defaults to `debug`; accepts `coverage`, `develop`, `profile`, `trace`, `gcstats`, or comma combos like `debug,coverage`. `--on-demand` sets `start_with_request=trigger` so nothing auto-connects |
 | `lerd xdebug off [version]` | Disable Xdebug |
 | `lerd xdebug status` | Show Xdebug enabled/disabled state and active mode for all installed PHP versions |
+| `lerd xdebug pause [site] [--list] [--pid PID]` | Break the IDE debugger into a running worker/CLI process via Xdebug's control socket (`xdebugctl`). `--list` shows candidate processes, `--pid` targets one |
 | `lerd php:ext add <ext> [version] [--apk-deps PKG[,PKG]]` | Add a custom PHP extension and rebuild the FPM image. `--apk-deps` accepts additional Alpine packages that the extension needs at build time (e.g. `--apk-deps libwebp-dev,libpng-dev` for `gd` with WebP support); the package list is persisted in `~/.config/lerd/config.yaml` so future rebuilds reapply it |
 | `lerd php:ext remove <ext> [version]` | Remove a custom PHP extension and rebuild |
 | `lerd php:ext list [version]` | List custom extensions for a PHP version |
 | `lerd php:ini [version]` | Open the user php.ini for a PHP version in `$EDITOR` |
+| `lerd pest:browser install [version]` | Set up in-container Pest browser testing: bake musl chromium into the FPM image, download the Playwright registry into a persistent volume, and shim Playwright's glibc browser to it |
+| `lerd pest:browser remove [version]` | Remove chromium from the FPM image and disable Pest browser testing (the Playwright cache volume is left intact) |
+| `lerd pest:browser doctor [version]` | Diagnose the Pest browser testing setup (plugin, chromium, playwright, shim) for a PHP version |
 | `lerd dump on` | Enable the debug bridge so `dump()` / `dd()` calls ship to the lerd dashboard, TUI, and MCP tools |
 | `lerd dump off` | Disable the debug bridge and restore FPM containers to their default state |
 | `lerd dump status` | Show whether the bridge is enabled and how many events are buffered |
-| `lerd dump tail [--site X] [--ctx fpm\|cli]` | Stream captured dumps to the terminal until Ctrl-C |
+| `lerd dump tail [--site X] [--branch Y] [--ctx fpm\|cli]` | Stream captured dumps to the terminal until Ctrl-C |
 | `lerd dump clear` | Clear the in-memory dump ring without disabling the bridge |
 | `lerd profile on` | Turn the SPX profiler on so every PHP-FPM site's requests are profiled into flame graphs |
 | `lerd profile off` | Turn the SPX profiler off |
@@ -185,6 +194,7 @@ Switch the PHP runtime for the current site between shared PHP-FPM and per-site 
 | `lerd db:snapshots [--all]` | List stored database snapshots |
 | `lerd db:restore <name> [-A] [-f]` | Restore a database from a stored snapshot |
 | `lerd db:snapshot:rm <name> [-A]` | Delete a stored database snapshot |
+| `lerd db:move [--from svc] [--to svc] [--all\|--site name]` | Move sites' databases between two installed services in the same family and repoint their `.env`; wizard when run without flags |
 
 ## Import
 
@@ -252,6 +262,7 @@ Requires [Laravel Broadcasting](https://laravel.com/docs/13.x/broadcasting) with
 |---|---|
 | `lerd stripe:listen` | Start a Stripe webhook listener for the current project as a background service |
 | `lerd stripe:listen stop` | Stop the Stripe webhook listener |
+| `lerd stripe:config` | Show or set the webhook path and secret env key in `.lerd.yaml` without starting the listener |
 
 ## Console & runtime passthrough
 
@@ -268,7 +279,7 @@ Requires [Laravel Broadcasting](https://laravel.com/docs/13.x/broadcasting) with
 
 | Command | Description |
 |---|---|
-| `lerd mcp:enable-global` | Register lerd MCP at user scope, available in every Claude Code session regardless of directory |
+| `lerd mcp:enable-global` | Register lerd MCP at user scope across every supported assistant (Claude Code, Cursor, Junie, Codex, Gemini, Copilot, Antigravity, Windsurf), available in every session regardless of directory |
 | `lerd mcp:inject` | Inject the lerd MCP config and AI skill files into the current project |
 | `lerd mcp:inject --path <dir>` | Inject into a specific project directory |
 

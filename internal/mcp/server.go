@@ -18,6 +18,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/logsource"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	lerdNode "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
@@ -46,7 +47,6 @@ func builtinServiceEnv(name string) []string { return config.DefaultPresetEnvVar
 
 // phpVersionRe matches PHP version strings like "8.4" or "8.3" — digits only, no domain names.
 var phpVersionRe = regexp.MustCompile(`^\d+\.\d+$`)
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // defaultSitePath is resolved at startup: LERD_SITE_PATH takes precedence (injected by
 // mcp:inject for project-scoped use); if not set, the working directory is used so that
@@ -166,37 +166,6 @@ func dispatch(req *rpcRequest) (any, *rpcError) {
 	}
 }
 
-// ---- Tool definitions ----
-
-// siteHasConsole returns true when the site's framework defines a console command.
-func siteHasConsole() bool {
-	fw, ok := siteFramework()
-	return ok && fw.Console != ""
-}
-
-// siteHasWorker returns true when the site's framework defines the named worker
-// and its check rule passes.
-func siteHasWorker(name string) bool {
-	fw, ok := siteFramework()
-	if !ok {
-		return false
-	}
-	return fw.HasWorker(name, defaultSitePath)
-}
-
-// siteFramework returns the framework definition for the configured site path.
-// Returns (nil, false) when no path is set or no framework is found.
-func siteFramework() (*config.Framework, bool) {
-	if defaultSitePath == "" {
-		return nil, false
-	}
-	site, err := config.FindSiteByPath(defaultSitePath)
-	if err != nil {
-		return nil, false
-	}
-	return config.GetFrameworkForDir(site.Framework, site.Path)
-}
-
 // ToolNames returns the names of every registered MCP tool. Exported so
 // documentation drift tests in other packages can assert each tool is covered
 // by the injected skill and guidelines files.
@@ -209,1270 +178,11 @@ func ToolNames() []string {
 	return names
 }
 
-func toolList() []mcpTool {
-	tools := []mcpTool{
-		{
-			Name:        "sites",
-			Description: "List registered sites (domain, path, PHP/Node version, TLS, workers). Call first to discover site names.",
-			InputSchema: mcpSchema{
-				Type:       "object",
-				Properties: map[string]mcpProp{},
-			},
-		},
-		{
-			Name:        "service_control",
-			Description: "Lifecycle. update=pull. migrate=dump+restore. rollback=revert. remove=delete; remove_data also wipes data dir (rename-aside). reinstall=stop+remove+install same version; reset_data wipes data and reprovisions linked sites' DBs/buckets.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action":      {Type: "string", Enum: []string{"start", "stop", "restart", "pin", "unpin", "update", "rollback", "migrate", "remove", "reinstall"}},
-					"name":        {Type: "string"},
-					"tag":         {Type: "string", Description: "For update/migrate."},
-					"remove_data": {Type: "boolean", Description: "remove: rename data aside."},
-					"reset_data":  {Type: "boolean", Description: "reinstall: wipe data, reprovision."},
-				},
-				Required: []string{"action", "name"},
-			},
-		},
-		{
-			Name:        "logs",
-			Description: "Fetch recent container logs. target: nginx, service, PHP version (8.4), or site name. Defaults to current site's FPM.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"target": {Type: "string", Description: "nginx, service, PHP version, or site name. Defaults to current FPM."},
-					"lines":  {Type: "integer", Description: "Tail count (default 50)."},
-				},
-			},
-		},
-		{
-			Name:        "site_nginx",
-			Description: "Read/write/reset a site's custom nginx override. Saving runs nginx -t, backs up the prior file, and reloads. branch=<name> targets a worktree (new worktrees inherit main's override).",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action":  {Type: "string", Enum: []string{"read", "write", "reset"}},
-					"site":    {Type: "string", Description: "Site name. Defaults to current."},
-					"branch":  {Type: "string", Description: "Optional worktree branch."},
-					"content": {Type: "string", Description: "write: full file contents."},
-				},
-				Required: []string{"action"},
-			},
-		},
-		{
-			Name:        "composer",
-			Description: "Run composer in the PHP-FPM container.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-					"args": {Type: "array", Description: `e.g. ["install"] or ["require", "laravel/sanctum"].`},
-				},
-				Required: []string{"args"},
-			},
-		},
-		{
-			Name:        "vendor_bins",
-			Description: "List composer-installed binaries in vendor/bin (pest, phpunit, pint, etc.). Call before vendor_run.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-				},
-			},
-		},
-		{
-			Name:        "vendor_run",
-			Description: "Run a vendor/bin binary in the PHP-FPM container. Use vendor_bins first.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-					"bin":  {Type: "string", Description: "Binary name (pest, phpunit, pint, …)."},
-					"args": {Type: "array", Description: "Arguments to pass."},
-				},
-				Required: []string{"bin"},
-			},
-		},
-		{
-			Name:        "node",
-			Description: "Install or uninstall a Node.js version via fnm.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action":  {Type: "string", Enum: []string{"install", "uninstall"}},
-					"version": {Type: "string", Description: "Version or alias (e.g. 20, 20.11.0, lts)."},
-				},
-				Required: []string{"action", "version"},
-			},
-		},
-		{
-			Name:        "runtime_versions",
-			Description: "List installed PHP and Node.js versions (plus defaults).",
-			InputSchema: mcpSchema{
-				Type:       "object",
-				Properties: map[string]mcpProp{},
-			},
-		},
-		{
-			Name:        "status",
-			Description: "Health status of DNS, nginx, PHP-FPM containers, and the file watcher. Call when a site is unreachable.",
-			InputSchema: mcpSchema{
-				Type:       "object",
-				Properties: map[string]mcpProp{},
-			},
-		},
-		{
-			Name:        "doctor",
-			Description: "Full environment diagnostic (podman, systemd, DNS, ports, images, config). Call on setup issues.",
-			InputSchema: mcpSchema{
-				Type:       "object",
-				Properties: map[string]mcpProp{},
-			},
-		},
-		{
-			Name:        "service_add",
-			Description: "Register a custom OCI service (writes a systemd quadlet). Use service_preset_install for bundled presets.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name":        {Type: "string", Description: "Service slug (lowercase, hyphens)."},
-					"image":       {Type: "string", Description: "OCI image reference."},
-					"ports":       {Type: "array", Description: `host:container mappings, e.g. ["27017:27017"].`},
-					"environment": {Type: "array", Description: `Container env ["KEY=VALUE", ...].`},
-					"env_vars":    {Type: "array", Description: `Project .env keys to inject ["KEY=VALUE", ...].`},
-					"data_dir":    {Type: "string", Description: "Container path for persistent data."},
-					"description": {Type: "string", Description: "Human-readable description."},
-					"dashboard":   {Type: "string", Description: "Web dashboard URL."},
-					"depends_on":  {Type: "array", Description: `Services that must start first, e.g. ["mysql"].`},
-					"init":        {Type: "boolean", Description: "Pass --init for images that ignore SIGTERM as PID 1 (mysql, mariadb)."},
-				},
-				Required: []string{"name", "image"},
-			},
-		},
-		{
-			Name:        "service_expose",
-			Description: "Add or remove a published port on a built-in service.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name":   {Type: "string", Description: "mysql, redis, postgres, meilisearch, rustfs, mailpit."},
-					"port":   {Type: "string", Description: `"host:container" (e.g. "13306:3306").`},
-					"remove": {Type: "boolean", Description: "Set true to remove the mapping."},
-				},
-				Required: []string{"name", "port"},
-			},
-		},
-		{
-			Name:        "service_env",
-			Description: "Recommended Laravel .env connection keys for a service.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name": {
-						Type:        "string",
-						Description: "Service name (e.g. mysql, redis, mongodb).",
-					},
-				},
-				Required: []string{"name"},
-			},
-		},
-		{
-			Name:        "service_config",
-			Description: "Read/write/restore/reset/list_backups a service's runtime tuning override. Built-in mysql/mariadb/redis; custom services opt in via `tuning:` block in YAML.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name":        {Type: "string", Description: "Service name."},
-					"action":      {Type: "string", Description: "read|write|restore|reset|list_backups (default read)."},
-					"content":     {Type: "string", Description: "New contents (write only)."},
-					"backup":      {Type: "boolean", Description: "Stage backup before write (write only)."},
-					"backup_name": {Type: "string", Description: "Backup to restore (restore only). Omit for newest."},
-				},
-				Required: []string{"name"},
-			},
-		},
-		{
-			Name:        "service_preset_list",
-			Description: "List bundled service presets (name, description, versions, installed state). Call before service_preset_install.",
-			InputSchema: mcpSchema{
-				Type:       "object",
-				Properties: map[string]mcpProp{},
-			},
-		},
-		{
-			Name:        "service_preset_install",
-			Description: "Install a bundled preset (call service_preset_list first). Multi-version presets need version. Install any preset-dependency first.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name":    {Type: "string", Description: "Preset name (from service_preset_list)."},
-					"version": {Type: "string", Description: "Required for multi-version presets (mysql, mariadb)."},
-				},
-				Required: []string{"name"},
-			},
-		},
-		{
-			Name:        "service_check_updates",
-			Description: "Check registry for newer images. latest_tag=safe update; upgrade_tag=cross-strategy (may need migration). Omit name to scan all active.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name": {Type: "string", Description: "Service name. Omit to scan all."},
-				},
-			},
-		},
-		{
-			Name:        "env_setup",
-			Description: "Configure .env (services, DBs, APP_KEY, APP_URL). Call after site_link, then ALWAYS follow with setup to run migrations. For sqlite DB_CONNECTION, pick db_set first if you want mysql/postgres instead.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-				},
-			},
-		},
-		{
-			Name:        "setup",
-			Description: "Run the framework's post-install steps (migrations, storage:link, etc.). MANDATORY after env_setup on new or cloned projects — otherwise migrations never run. Idempotent.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-				},
-			},
-		},
-		{
-			Name:        "db_set",
-			Description: "Pick the project database: sqlite, mysql, postgres, or an installed family alternate (mariadb, postgres-pgvector, …). Persists to .lerd.yaml, rewrites DB_ keys, starts service, creates DB + _testing.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path":     {Type: "string", Description: "Project root."},
-					"database": {Type: "string"},
-				},
-				Required: []string{"database"},
-			},
-		},
-		{
-			Name:        "env_check",
-			Description: "Compare .env against .env.example; flag missing/extra keys.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-				},
-			},
-		},
-		{
-			Name:        "env_override",
-			Description: "Manage the personal, gitignored .env.lerd_override; its KEY=VALUE pairs win over lerd's defaults on env_setup. LERD_EXTERNAL_SERVICES=<svc,svc> marks services lerd writes vars for but won't start. No 'set' scaffolds and shows the file.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-					"set":  {Type: "array", Description: "KEY=VALUE entries to write, e.g. DB_USERNAME=postgres or LERD_EXTERNAL_SERVICES=postgres. Quote values with spaces."},
-				},
-			},
-		},
-		{
-			Name:        "site_link",
-			Description: "Register a directory as a lerd site. Non-PHP sites need .lerd.yaml container.port + Containerfile first.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project directory. Defaults to cwd."},
-					"name": {Type: "string", Description: "Without .test TLD. Defaults to dir name."},
-				},
-			},
-		},
-		{
-			Name:        "site_unlink",
-			Description: "Unregister a site and remove its nginx vhost. Project files are kept.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project directory. Defaults to cwd."},
-				},
-			},
-		},
-		{
-			Name:        "site_domain",
-			Description: "Add or remove a site domain (no .test TLD). Can't remove the last one.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action": {Type: "string", Enum: []string{"add", "remove"}},
-					"path":   {Type: "string", Description: "Project directory."},
-					"domain": {Type: "string", Description: "Without .test TLD."},
-				},
-				Required: []string{"action", "domain"},
-			},
-		},
-		{
-			Name:        "site_tls",
-			Description: "Toggle HTTPS for a site (mkcert). Syncs APP_URL + VITE_REVERB_* in .env, reloads nginx, restarts Stripe listener and LAN share.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action": {Type: "string", Enum: []string{"enable", "disable"}},
-					"site":   {Type: "string"},
-				},
-				Required: []string{"action", "site"},
-			},
-		},
-		{
-			Name:        "xdebug",
-			Description: "Xdebug control on port 9003. on/off restarts FPM; status reports all versions.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action":  {Type: "string", Enum: []string{"on", "off", "status"}},
-					"version": {Type: "string", Description: "PHP version. Ignored for status."},
-					"mode":    {Type: "string", Description: "debug (default) | coverage | develop | profile | trace | gcstats. Combinable."},
-				},
-				Required: []string{"action"},
-			},
-		},
-		{
-			Name:        "db_export",
-			Description: "Export the project database to a SQL dump.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path":     {Type: "string", Description: "Project root."},
-					"database": {Type: "string", Description: "Defaults to DB_DATABASE."},
-					"output":   {Type: "string", Description: "Defaults to <database>.sql in project root."},
-				},
-			},
-		},
-		{
-			Name:        "db_import",
-			Description: "Import a SQL dump into the project database.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path":     {Type: "string", Description: "Project root."},
-					"file":     {Type: "string", Description: "SQL dump file path."},
-					"database": {Type: "string", Description: "Defaults to DB_DATABASE."},
-				},
-				Required: []string{"file"},
-			},
-		},
-		{
-			Name:        "db_create",
-			Description: "Create the project database (and a _testing variant). Starts service if needed.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-					"name": {
-						Type:        "string",
-						Description: "Database name (defaults to DB_DATABASE, then project dir name).",
-					},
-				},
-			},
-		},
-		{
-			Name:        "db_snapshot",
-			Description: "Snapshot the project database (named, restorable). MySQL/MariaDB/PostgreSQL only.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path":          {Type: "string", Description: "Project root. Defaults to cwd."},
-					"service":       {Type: "string", Description: "Lerd DB service override (e.g. mysql, postgres)."},
-					"database":      {Type: "string", Description: "Database name. Defaults to DB_DATABASE."},
-					"name":          {Type: "string", Description: "Snapshot name. Auto-timestamped when omitted."},
-					"all_databases": {Type: "boolean", Description: "Snapshot every database in the service."},
-				},
-			},
-		},
-		{
-			Name:        "db_snapshots",
-			Description: "List stored database snapshots.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path":     {Type: "string", Description: "Project root. Defaults to cwd."},
-					"service":  {Type: "string", Description: "Lerd DB service override."},
-					"database": {Type: "string", Description: "Database name. Defaults to DB_DATABASE."},
-					"all":      {Type: "boolean", Description: "List across every database on the service."},
-				},
-			},
-		},
-		{
-			Name:        "db_restore",
-			Description: "Restore the project database from a snapshot. Destructive: drops and recreates the database.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path":          {Type: "string", Description: "Project root. Defaults to cwd."},
-					"service":       {Type: "string", Description: "Lerd DB service override."},
-					"database":      {Type: "string", Description: "Database name. Defaults to DB_DATABASE."},
-					"name":          {Type: "string", Description: "Snapshot name to restore."},
-					"all_databases": {Type: "boolean", Description: "Restore an all-databases snapshot."},
-				},
-				Required: []string{"name"},
-			},
-		},
-		{
-			Name:        "db_snapshot_delete",
-			Description: "Delete a stored database snapshot.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path":          {Type: "string", Description: "Project root. Defaults to cwd."},
-					"service":       {Type: "string", Description: "Lerd DB service override."},
-					"database":      {Type: "string", Description: "Database name. Defaults to DB_DATABASE."},
-					"name":          {Type: "string", Description: "Snapshot name to delete."},
-					"all_databases": {Type: "boolean", Description: "Target an all-databases snapshot."},
-				},
-				Required: []string{"name"},
-			},
-		},
-		{
-			Name:        "php_list",
-			Description: "List installed PHP versions (global default marked).",
-			InputSchema: mcpSchema{
-				Type:       "object",
-				Properties: map[string]mcpProp{},
-			},
-		},
-		{
-			Name:        "php_ext",
-			Description: "Manage custom PHP extensions. add/remove rebuild FPM (slow).",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action":    {Type: "string", Enum: []string{"list", "add", "remove"}},
-					"extension": {Type: "string", Description: "Required for add/remove (e.g. imagick, redis, swoole)."},
-					"version":   {Type: "string", Description: "PHP version. Defaults to project/global."},
-					"apk_deps":  {Type: "string", Description: "Optional (add only): extra Alpine build packages, space-separated."},
-				},
-				Required: []string{"action"},
-			},
-		},
-		{
-			Name:        "park",
-			Description: "Register a parent directory as a park (auto-registers all PHP projects under it).",
-			InputSchema: mcpSchema{
-				Type:       "object",
-				Properties: map[string]mcpProp{"path": {Type: "string", Description: "Parent directory."}},
-			},
-		},
-		{
-			Name:        "unpark",
-			Description: "Remove a parked directory and unlink sites under it. Project files are kept.",
-			InputSchema: mcpSchema{
-				Type:       "object",
-				Properties: map[string]mcpProp{"path": {Type: "string", Description: "Parked directory path."}},
-				Required:   []string{"path"},
-			},
-		},
-		{
-			Name:        "which",
-			Description: "Show resolved PHP/Node versions, docroot, and nginx config path for a site.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-				},
-			},
-		},
-		{
-			Name:        "check",
-			Description: "Validate .lerd.yaml (syntax, PHP, framework, services, workers, container, db). Reports OK/WARN/FAIL per field.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-				},
-			},
-		},
-	}
-
-	if siteHasConsole() {
-		tools = append(tools,
-			mcpTool{
-				Name:        "artisan",
-				Description: "Run `php artisan` in the project's PHP-FPM container.",
-				InputSchema: mcpSchema{
-					Type: "object",
-					Properties: map[string]mcpProp{
-						"path": {
-							Type:        "string",
-							Description: "Project root (defaults to LERD_SITE_PATH or cwd).",
-						},
-						"args": {
-							Type:        "array",
-							Description: `Artisan arguments, e.g. ["migrate"], ["make:model", "Post", "-m"].`,
-						},
-					},
-					Required: []string{"args"},
-				},
-			},
-			mcpTool{
-				Name:        "queue",
-				Description: "Start or stop a Laravel queue:work worker (systemd user service) for a site.",
-				InputSchema: mcpSchema{
-					Type: "object",
-					Properties: map[string]mcpProp{
-						"action": {Type: "string", Enum: []string{"start", "stop"}},
-						"site":   {Type: "string", Description: "Site name (from sites)."},
-						"queue": {
-							Type:        "string",
-							Description: `Queue name for action=start (default "default").`,
-						},
-						"tries": {
-							Type:        "integer",
-							Description: "Max attempts for action=start (default 3).",
-						},
-						"timeout": {
-							Type:        "integer",
-							Description: "Job timeout seconds for action=start (default 60).",
-						},
-					},
-					Required: []string{"action", "site"},
-				},
-			},
-			mcpTool{
-				Name:        "reverb",
-				Description: "Start or stop Laravel Reverb (WebSocket server) for a site.",
-				InputSchema: mcpSchema{
-					Type: "object",
-					Properties: map[string]mcpProp{
-						"action": {Type: "string", Enum: []string{"start", "stop"}},
-						"site":   {Type: "string", Description: "Site name (from sites)."},
-					},
-					Required: []string{"action", "site"},
-				},
-			},
-			mcpTool{
-				Name:        "horizon",
-				Description: "Start or stop Laravel Horizon for a site (requires laravel/horizon; replaces queue:work).",
-				InputSchema: mcpSchema{
-					Type: "object",
-					Properties: map[string]mcpProp{
-						"action": {Type: "string", Enum: []string{"start", "stop"}},
-						"site":   {Type: "string", Description: "Site name (from sites)."},
-					},
-					Required: []string{"action", "site"},
-				},
-			},
-			mcpTool{
-				Name:        "schedule",
-				Description: "Start or stop the Laravel scheduler (schedule:work) for a site.",
-				InputSchema: mcpSchema{
-					Type: "object",
-					Properties: map[string]mcpProp{
-						"action": {Type: "string", Enum: []string{"start", "stop"}},
-						"site":   {Type: "string", Description: "Site name (from sites)."},
-					},
-					Required: []string{"action", "site"},
-				},
-			},
-			mcpTool{
-				Name:        "stripe",
-				Description: "Start or stop a Stripe webhook listener. Reads STRIPE_SECRET from .env.",
-				InputSchema: mcpSchema{
-					Type: "object",
-					Properties: map[string]mcpProp{
-						"action":       {Type: "string", Enum: []string{"start", "stop"}},
-						"site":         {Type: "string"},
-						"api_key":      {Type: "string", Description: "Defaults to STRIPE_SECRET."},
-						"webhook_path": {Type: "string", Description: "Default /stripe/webhook."},
-					},
-					Required: []string{"action", "site"},
-				},
-			},
-		)
-	}
-
-	if fw, ok := siteFramework(); ok && fw.Console != "" && fw.Console != "artisan" {
-		tools = append(tools, mcpTool{
-			Name:        "console",
-			Description: fmt.Sprintf("Run `php %s` in the project's PHP-FPM container.", fw.Console),
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path": {Type: "string", Description: "Project root. Defaults to cwd."},
-					"args": {
-						Type:        "array",
-						Description: fmt.Sprintf(`Console arguments, e.g. ["%s", "cache:clear"].`, fw.Console),
-					},
-				},
-				Required: []string{"args"},
-			},
-		})
-	}
-
-	tools = append(tools,
-		mcpTool{
-			Name:        "worker",
-			Description: "Start or stop a framework-defined worker. Call worker_list first. Pass branch=<name> to target a per-worktree unit (lerd-<worker>-<site>-<branch>) for workers with per_worktree:true (e.g. vite). Without branch, the parent site's unit is targeted.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action": {Type: "string", Enum: []string{"start", "stop"}},
-					"site":   {Type: "string"},
-					"worker": {Type: "string", Description: "e.g. messenger, horizon, vite."},
-					"branch": {Type: "string", Description: "Optional. Worktree branch name. Required to start a per_worktree:true worker on a specific worktree."},
-				},
-				Required: []string{"action", "site", "worker"},
-			},
-		},
-		mcpTool{
-			Name:        "worker_list",
-			Description: "List workers defined for a site's framework, including running status. Pass branch=<name> to see per-worktree unit status; without branch, parent-site units are reported.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site":   {Type: "string", Description: "Site name (from sites)."},
-					"branch": {Type: "string", Description: "Optional. Worktree branch — reports lerd-<worker>-<site>-<branch> unit state and host/per_worktree/replaces_build flags."},
-				},
-				Required: []string{"site"},
-			},
-		},
-		mcpTool{
-			Name:        "worker_add",
-			Description: "Add or update a custom worker. Saves to .lerd.yaml (global=true → user overlay). Start via worker.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site":               {Type: "string", Description: "Site name (from sites)."},
-					"name":               {Type: "string", Description: "Worker slug."},
-					"command":            {Type: "string", Description: "Command run in PHP-FPM container."},
-					"label":              {Type: "string", Description: "Human-readable label."},
-					"restart":            {Type: "string", Description: "always (default) | on-failure."},
-					"check_file":         {Type: "string", Description: "Show only if this file exists."},
-					"check_composer":     {Type: "string", Description: "Show only if this Composer package is installed."},
-					"conflicts_with":     {Type: "array", Description: "Workers to stop before starting this one."},
-					"proxy_path":         {Type: "string", Description: "URL path to proxy (e.g. /app)."},
-					"proxy_port_env_key": {Type: "string", Description: "Env key holding the worker port."},
-					"proxy_default_port": {Type: "number", Description: "Fallback port when env key is unset."},
-					"global":             {Type: "boolean", Description: "Save to user overlay."},
-				},
-				Required: []string{"site", "name", "command"},
-			},
-		},
-		mcpTool{
-			Name:        "worker_remove",
-			Description: "Remove a custom worker. Stops if running.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site":   {Type: "string"},
-					"name":   {Type: "string", Description: "Worker name."},
-					"global": {Type: "boolean", Description: "Target user overlay."},
-				},
-				Required: []string{"site", "name"},
-			},
-		},
-		mcpTool{
-			Name:        "workers_health",
-			Description: "Failed worker units, grouped per site. Read-only.",
-			InputSchema: mcpSchema{Type: "object", Properties: map[string]mcpProp{}},
-		},
-		mcpTool{
-			Name:        "workers_heal",
-			Description: "Reset failed and restart every failed worker. Pass `unit` for one. Never writes .lerd.yaml or unit files.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"unit": {Type: "string", Description: "Full unit name (lerd-<worker>-<site>). Omit to heal all."},
-				},
-			},
-		},
-		mcpTool{
-			Name:        "workers_mode",
-			Description: "Show or set the macOS worker runtime mode. exec=one podman exec per worker, supervised by launchd (default; lower memory). container=one detached container per worker (1:1 supervisor boundary). Linux always uses exec under systemd, this setting is a no-op there. Setting on macOS restarts active workers in the new shape.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action": {Type: "string", Enum: []string{"get", "set"}, Description: "get reports current mode; set switches to `mode`."},
-					"mode":   {Type: "string", Enum: []string{"exec", "container"}, Description: "Required for set. exec or container."},
-				},
-				Required: []string{"action"},
-			},
-		},
-		mcpTool{
-			Name:        "commands_list",
-			Description: "List on-demand framework commands available for a site (framework defaults merged with the project's .lerd.yaml commands: block).",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site": {Type: "string", Description: "Site name (from sites)."},
-				},
-				Required: []string{"site"},
-			},
-		},
-		mcpTool{
-			Name:        "commands_run",
-			Description: "Run a framework command on a site by name (same names as commands_list). Returns combined stdout/stderr and exit code. Confirm-gated commands require force: true.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site":  {Type: "string", Description: "Site name (from sites)."},
-					"name":  {Type: "string", Description: "Command name (e.g. optimize:clear, drush uli)."},
-					"force": {Type: "boolean", Description: "Required for commands with confirm: true. Skips the safety prompt."},
-				},
-				Required: []string{"site", "name"},
-			},
-		},
-		mcpTool{
-			Name:        "command_add",
-			Description: "Add or update a project command in .lerd.yaml's commands: block. Same name as a framework default replaces it.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site":           {Type: "string", Description: "Site name (from sites)."},
-					"name":           {Type: "string", Description: "Stable identifier (e.g. deploy, optimize:clear). Also the lerd run argument."},
-					"command":        {Type: "string", Description: "Shell command, passed to sh -c. Required unless disabled: true."},
-					"label":          {Type: "string", Description: "Human label shown in the dashboard."},
-					"description":    {Type: "string", Description: "Tooltip / one-line description."},
-					"output":         {Type: "string", Enum: []string{"silent", "text", "url", "terminal"}, Description: "silent | text | url | terminal (default: silent)."},
-					"confirm":        {Type: "boolean", Description: "Gate behind a confirm modal (destructive commands)."},
-					"icon":           {Type: "string", Description: "Icon name (broom, database, refresh, link, check, list, key, edit, arrow-down, arrow-up, play, terminal)."},
-					"cwd":            {Type: "string", Description: "Working dir relative to project root (default: .)."},
-					"check_file":     {Type: "string", Description: "Hide unless this file exists."},
-					"check_composer": {Type: "string", Description: "Hide unless this composer package is installed."},
-					"disabled":       {Type: "boolean", Description: "Suppress a framework default of the same name without replacing it."},
-				},
-				Required: []string{"site", "name"},
-			},
-		},
-		mcpTool{
-			Name:        "command_remove",
-			Description: "Remove a project command from .lerd.yaml by name. Does not affect framework defaults (use command_add with disabled: true to hide a framework command).",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site": {Type: "string", Description: "Site name (from sites)."},
-					"name": {Type: "string", Description: "Command name to remove."},
-				},
-				Required: []string{"site", "name"},
-			},
-		},
-		mcpTool{
-			Name:        "bug_report",
-			Description: "Generate a plain-text diagnostic report (lerd doctor + config + systemd / podman state + recent logs + env vars) for attaching to a GitHub issue. Site names, domains and parked-directory paths are anonymised by default. Returns the file path.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"output":          {Type: "string", Description: "Output file path. Defaults to ./lerd-bug-report-<timestamp>.txt"},
-					"log_lines":       {Type: "integer", Description: "Lines per service / container log. Default 200."},
-					"show_real_names": {Type: "boolean", Description: "Skip anonymisation. Use only for local debugging."},
-				},
-			},
-		},
-		mcpTool{
-			Name:        "framework_list",
-			Description: "List framework definitions (built-in + user YAMLs), with their workers and setup commands.",
-			InputSchema: mcpSchema{Type: "object", Properties: map[string]mcpProp{}},
-		},
-		mcpTool{
-			Name:        "framework_add",
-			Description: "Create or update a framework definition. name=laravel merges workers/setup into the built-in.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name":                {Type: "string", Description: `Framework slug (e.g. "laravel", "symfony", "wordpress").`},
-					"label":               {Type: "string", Description: "Human-readable name."},
-					"public_dir":          {Type: "string", Description: "Document root."},
-					"detect_files":        {Type: "array", Description: "Filenames that signal this framework."},
-					"detect_packages":     {Type: "array", Description: "Composer packages that signal this framework."},
-					"env_file":            {Type: "string", Description: `Primary env file (default ".env").`},
-					"env_format":          {Type: "string", Description: "dotenv (default) or php-const."},
-					"env_fallback_file":   {Type: "string", Description: `Secondary env file (e.g. "wp-config.php").`},
-					"env_fallback_format": {Type: "string", Description: "Format for the fallback file."},
-					"workers":             {Type: "object", Description: "Map of name → {label, command, restart, check?}."},
-					"setup":               {Type: "array", Description: "{label, command, default?, check?} entries."},
-					"logs":                {Type: "array", Description: `{path, format?: "monolog"|"raw"} entries.`},
-				},
-				Required: []string{"name"},
-			},
-		},
-		mcpTool{
-			Name:        "framework_remove",
-			Description: "Delete a framework. For laravel, removes only custom additions.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name":    {Type: "string", Description: "Framework slug."},
-					"version": {Type: "string", Description: "Optional. Omit to remove all versions."},
-				},
-				Required: []string{"name"},
-			},
-		},
-		mcpTool{
-			Name:        "framework_search",
-			Description: "Search the community framework store.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"query": {
-						Type:        "string",
-						Description: "Query (matches name or label, case-insensitive).",
-					},
-				},
-				Required: []string{"query"},
-			},
-		},
-		mcpTool{
-			Name:        "framework_install",
-			Description: "Install a framework from the community store. Auto-detects version from composer.lock if omitted.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"name": {
-						Type:        "string",
-						Description: "Framework name (e.g. symfony, wordpress).",
-					},
-					"version": {
-						Type:        "string",
-						Description: "Major version (e.g. 11, 7). Omit to auto-detect.",
-					},
-				},
-				Required: []string{"name"},
-			},
-		},
-		mcpTool{
-			Name:        "project_new",
-			Description: "Scaffold a new PHP project via framework create command (default laravel). Follow with site_link.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"path":      {Type: "string", Description: "New project directory."},
-					"framework": {Type: "string", Description: `Defaults to "laravel".`},
-					"args":      {Type: "array", Description: "Extra args for the scaffold command."},
-				},
-				Required: []string{"path"},
-			},
-		},
-		mcpTool{
-			Name:        "site_php",
-			Description: "Change a site's PHP version. Writes .php-version and regenerates the nginx vhost. Pass branch=<name> to pin the version on a specific worktree (writes .php-version + .lerd.yaml override inside the worktree's checkout, regenerates only that worktree's vhost) instead of the parent site.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site": {Type: "string", Description: "Site name (from sites)."},
-					"version": {
-						Type:        "string",
-						Description: "PHP version (e.g. 8.4, 8.3).",
-					},
-					"branch": {Type: "string", Description: "Optional. Worktree branch — writes .php-version inside the worktree and persists php_version to its .lerd.yaml so the override travels with the branch."},
-				},
-				Required: []string{"site", "version"},
-			},
-		},
-		mcpTool{
-			Name:        "site_node",
-			Description: "Change a site's Node.js version. Writes .node-version; installs via fnm if needed. Pass branch=<name> to pin the version on a specific worktree (writes .node-version + .lerd.yaml override inside the worktree's checkout) instead of the parent site.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site": {Type: "string", Description: "Site name (from sites)."},
-					"version": {
-						Type:        "string",
-						Description: "Node.js version (e.g. 22, 20, lts).",
-					},
-					"branch": {Type: "string", Description: "Optional. Worktree branch — writes .node-version inside the worktree and persists node_version to its .lerd.yaml."},
-				},
-				Required: []string{"site", "version"},
-			},
-		},
-		mcpTool{
-			Name:        "site_control",
-			Description: "pause (stop workers + landing vhost), unpause, restart (no rebuild), rebuild (image rebuild + restart; custom containers only).",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"action": {Type: "string", Enum: []string{"pause", "unpause", "restart", "rebuild"}},
-					"site":   {Type: "string"},
-				},
-				Required: []string{"action", "site"},
-			},
-		},
-		mcpTool{
-			Name:        "site_runtime",
-			Description: "Switch between fpm (shared container) and frankenphp (per-site, keeps PHP resident). worker=true enables framework-aware worker mode.",
-			InputSchema: mcpSchema{
-				Type: "object",
-				Properties: map[string]mcpProp{
-					"site":    {Type: "string"},
-					"runtime": {Type: "string", Enum: []string{"fpm", "frankenphp"}},
-					"worker":  {Type: "boolean", Description: "frankenphp worker mode. Ignored for fpm."},
-				},
-				Required: []string{"site", "runtime"},
-			},
-		},
-		worktreeTool(),
-		dnsDiagnoseTool(),
-	)
-	tools = append(tools, dumpToolDefs()...)
-	tools = append(tools, profilerToolDefs()...)
-
-	return tools
-}
-
 // ---- Tool dispatch ----
 
 type callParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
-}
-
-func handleToolCall(params json.RawMessage) (any, *rpcError) {
-	var p callParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, &rpcError{Code: -32602, Message: "invalid params"}
-	}
-
-	var args map[string]any
-	if len(p.Arguments) > 0 {
-		_ = json.Unmarshal(p.Arguments, &args)
-	}
-	if args == nil {
-		args = map[string]any{}
-	}
-
-	action := strArg(args, "action")
-	unknownAction := func(tool string) (any, *rpcError) {
-		return toolErr(fmt.Sprintf("unknown action %q for tool %q", action, tool)), nil
-	}
-
-	switch p.Name {
-	case "artisan":
-		return execArtisan(args)
-	case "console":
-		return execArtisan(args)
-	case "sites":
-		return execSites()
-
-	case "site_nginx":
-		switch action {
-		case "read", "":
-			return execSiteNginxRead(args)
-		case "write":
-			return execSiteNginxWrite(args)
-		case "reset":
-			return execSiteNginxReset(args)
-		default:
-			return unknownAction("site_nginx")
-		}
-
-	case "service_control":
-		switch action {
-		case "start":
-			return execServiceStart(args)
-		case "stop":
-			return execServiceStop(args)
-		case "restart":
-			return execServiceRestart(args)
-		case "pin":
-			return execServicePin(args)
-		case "unpin":
-			return execServiceUnpin(args)
-		case "update":
-			return execServiceUpdate(args)
-		case "rollback":
-			return execServiceRollback(args)
-		case "migrate":
-			return execServiceMigrate(args)
-		case "remove":
-			return execServiceRemove(args)
-		case "reinstall":
-			return execServiceReinstall(args)
-		default:
-			return unknownAction("service_control")
-		}
-
-	case "service_config":
-		// Default to read so the most common operation works without an
-		// explicit action — matches the CLI's `lerd service config --path`
-		// where the bare invocation is also a read.
-		if action == "" {
-			action = "read"
-		}
-		switch action {
-		case "read":
-			return execServiceConfigRead(args)
-		case "write":
-			return execServiceConfigWrite(args)
-		case "list_backups":
-			return execServiceConfigListBackups(args)
-		case "restore":
-			return execServiceConfigRestore(args)
-		case "reset":
-			return execServiceConfigReset(args)
-		default:
-			return unknownAction("service_config")
-		}
-
-	case "queue":
-		switch action {
-		case "start":
-			return execQueueStart(args)
-		case "stop":
-			return execQueueStop(args)
-		default:
-			return unknownAction("queue")
-		}
-
-	case "reverb":
-		switch action {
-		case "start":
-			return execReverbStart(args)
-		case "stop":
-			return execReverbStop(args)
-		default:
-			return unknownAction("reverb")
-		}
-
-	case "horizon":
-		switch action {
-		case "start":
-			return execHorizonStart(args)
-		case "stop":
-			return execHorizonStop(args)
-		default:
-			return unknownAction("horizon")
-		}
-
-	case "schedule":
-		switch action {
-		case "start":
-			return execScheduleStart(args)
-		case "stop":
-			return execScheduleStop(args)
-		default:
-			return unknownAction("schedule")
-		}
-
-	case "stripe":
-		switch action {
-		case "start":
-			return execStripeListen(args)
-		case "stop":
-			return execStripeListenStop(args)
-		default:
-			return unknownAction("stripe")
-		}
-
-	case "worker":
-		switch action {
-		case "start":
-			return execWorkerStart(args)
-		case "stop":
-			return execWorkerStop(args)
-		default:
-			return unknownAction("worker")
-		}
-	case "worker_add":
-		return execWorkerAdd(args)
-	case "worker_remove":
-		return execWorkerRemove(args)
-	case "worker_list":
-		return execWorkerList(args)
-	case "workers_health":
-		return execWorkersHealth()
-	case "workers_heal":
-		return execWorkersHeal(args)
-	case "workers_mode":
-		return execWorkersMode(args)
-	case "commands_list":
-		return execCommandsList(args)
-	case "commands_run":
-		return execCommandsRun(args)
-	case "command_add":
-		return execCommandAdd(args)
-	case "command_remove":
-		return execCommandRemove(args)
-	case "bug_report":
-		return execBugReport(args)
-
-	case "logs":
-		return execLogs(args)
-	case "composer":
-		return execComposer(args)
-	case "vendor_bins":
-		return execVendorBins(args)
-	case "vendor_run":
-		return execVendorRun(args)
-
-	case "node":
-		switch action {
-		case "install":
-			return execNodeInstall(args)
-		case "uninstall":
-			return execNodeUninstall(args)
-		default:
-			return unknownAction("node")
-		}
-
-	case "runtime_versions":
-		return execRuntimeVersions()
-	case "status":
-		return execStatus()
-	case "doctor":
-		return execDoctor()
-	case "which":
-		return execWhich(args)
-	case "check":
-		return execCheck(args)
-	case "service_env":
-		return execServiceEnv(args)
-	case "service_add":
-		return execServiceAdd(args)
-	case "service_expose":
-		return execServiceExpose(args)
-	case "service_preset_list":
-		return execServicePresetList(args)
-	case "service_preset_install":
-		return execServicePresetInstall(args)
-	case "service_check_updates":
-		return execServiceCheckUpdates(args)
-	case "env_setup":
-		return execEnvSetup(args)
-	case "db_set":
-		return execDbSet(args)
-	case "env_check":
-		return execEnvCheck(args)
-	case "env_override":
-		return execEnvOverride(args)
-	case "site_link":
-		return execSiteLink(args)
-	case "site_unlink":
-		return execSiteUnlink(args)
-
-	case "site_domain":
-		switch action {
-		case "add":
-			return execSiteDomainAdd(args)
-		case "remove":
-			return execSiteDomainRemove(args)
-		default:
-			return unknownAction("site_domain")
-		}
-
-	case "site_tls":
-		switch action {
-		case "enable":
-			return execSecure(args)
-		case "disable":
-			return execUnsecure(args)
-		default:
-			return unknownAction("site_tls")
-		}
-
-	case "xdebug":
-		switch action {
-		case "on":
-			return execXdebugToggle(args, true)
-		case "off":
-			return execXdebugToggle(args, false)
-		case "status":
-			return execXdebugStatus()
-		default:
-			return unknownAction("xdebug")
-		}
-
-	case "db_export":
-		return execDBExport(args)
-	case "framework_list":
-		return execFrameworkList()
-	case "framework_add":
-		return execFrameworkAdd(args)
-	case "framework_remove":
-		return execFrameworkRemove(args)
-	case "framework_search":
-		return execFrameworkSearch(args)
-	case "framework_install":
-		return execFrameworkInstall(args)
-	case "project_new":
-		return execProjectNew(args)
-	case "setup":
-		return execSetup(args)
-	case "site_php":
-		return execSitePHP(args)
-	case "site_node":
-		return execSiteNode(args)
-
-	case "site_control":
-		switch action {
-		case "pause":
-			return execSitePause(args)
-		case "unpause":
-			return execSiteUnpause(args)
-		case "restart":
-			return execSiteRestart(args)
-		case "rebuild":
-			return execSiteRebuild(args)
-		default:
-			return unknownAction("site_control")
-		}
-
-	case "site_runtime":
-		return execSiteRuntime(args)
-
-	case "worktree":
-		return dispatchWorktree(args)
-	case "dns_diagnose":
-		return execDNSDiagnose(args)
-
-	case "db_import":
-		return execDBImport(args)
-	case "db_create":
-		return execDBCreate(args)
-	case "db_snapshot":
-		return execDBSnapshot(args)
-	case "db_snapshots":
-		return execDBSnapshots(args)
-	case "db_restore":
-		return execDBRestore(args)
-	case "db_snapshot_delete":
-		return execDBSnapshotDelete(args)
-	case "php_list":
-		return execPHPList()
-
-	case "php_ext":
-		switch action {
-		case "list":
-			return execPHPExtList(args)
-		case "add":
-			return execPHPExtAdd(args)
-		case "remove":
-			return execPHPExtRemove(args)
-		default:
-			return unknownAction("php_ext")
-		}
-
-	case "park":
-		return execPark(args)
-	case "unpark":
-		return execUnpark(args)
-
-	case "dumps_recent":
-		return execDumpsRecent(args)
-	case "dumps_status":
-		return execDumpsStatus(args)
-	case "dumps_clear":
-		return execDumpsClear(args)
-	case "dumps_toggle":
-		return execDumpsToggle(args)
-	case "analyze_queries":
-		return execAnalyzeQueries(args)
-
-	case "profiler_toggle":
-		return execProfilerToggle(args)
-	case "profiler_status":
-		return execProfilerStatus(args)
-	case "profiler_clear":
-		return execProfilerClear(args)
-
-	default:
-		return toolErr("unknown tool: " + p.Name), nil
-	}
 }
 
 // ---- Helpers ----
@@ -1491,7 +201,7 @@ func toolErr(text string) map[string]any {
 }
 
 func stripANSI(s string) string {
-	return ansiRe.ReplaceAllString(s, "")
+	return logsource.StripANSI(s)
 }
 
 func strArg(args map[string]any, key string) string {
@@ -1817,6 +527,12 @@ func execQueueStart(args map[string]any) (any, *rpcError) {
 	if queue == "" {
 		queue = "default"
 	}
+	// The queue name is interpolated into the worker unit's ExecStart line;
+	// whitespace would add stray artisan arguments and a newline would inject a
+	// systemd directive, so reject both.
+	if strings.ContainsAny(queue, " \t\r\n") {
+		return toolErr("invalid queue name: must not contain whitespace"), nil
+	}
 	tries := intArg(args, "tries", 3)
 	timeout := intArg(args, "timeout", 60)
 
@@ -2073,15 +789,31 @@ func execStripeListen(args map[string]any) (any, *rpcError) {
 		return toolErr("site not found: " + siteName), nil
 	}
 	apiKey := strArg(args, "api_key")
-	if apiKey == "" {
-		apiKey = envfile.ReadKey(filepath.Join(site.Path, ".env"), "STRIPE_SECRET")
+	if apiKey != "" && strings.ContainsAny(apiKey, " \t\r\n") {
+		// Interpolated into the listener unit's ExecStart line alongside
+		// --forward-to; whitespace/newline would inject a stripe-cli argument
+		// or a systemd directive, the same vector the webhook path guards.
+		return toolErr("invalid api_key: must not contain whitespace"), nil
 	}
 	if apiKey == "" {
-		return toolErr("Stripe API key required: pass api_key or set STRIPE_SECRET in the site's .env"), nil
+		_, apiKey = config.ResolveStripeSecret(site.Path)
+	}
+	if apiKey == "" {
+		return toolErr("Stripe API key required: pass api_key or set one of " +
+			strings.Join(config.StripeSecretEnvCandidates, ", ") + " in the site's .env"), nil
 	}
 	webhookPath := strArg(args, "webhook_path")
 	if webhookPath == "" {
-		webhookPath = "/stripe/webhook"
+		webhookPath = config.StripeWebhookPath(site.Path)
+	} else {
+		// Validate as the CLI does: an unchecked path interpolates straight
+		// into the unit's ExecStart, where a space adds a stripe-cli argument
+		// and a newline ends the systemd directive.
+		validated, vErr := config.ValidateStripeWebhookPath(webhookPath)
+		if vErr != nil {
+			return toolErr(vErr.Error()), nil
+		}
+		webhookPath = validated
 	}
 	scheme := "http"
 	if site.Secured {
@@ -2134,59 +866,38 @@ func execStripeListenStop(args map[string]any) (any, *rpcError) {
 	return toolOK("Stripe listener stopped for " + siteName), nil
 }
 
-func execLogs(args map[string]any) (any, *rpcError) {
-	target := strArg(args, "target")
-	lines := intArg(args, "lines", 50)
-
-	// When no target is given, derive the FPM container from the current site path.
-	if target == "" {
-		projectPath := resolvedPath(args)
-		if projectPath == "" {
-			return toolErr("target is required (or set LERD_SITE_PATH via mcp:inject)"), nil
-		}
-		site, err := config.FindSiteByPath(projectPath)
-		if err != nil {
-			return toolErr("could not find site for path: " + projectPath), nil
-		}
-		target = site.Name
+func execStripeConfig(args map[string]any) (any, *rpcError) {
+	siteName := strArg(args, "site")
+	if siteName == "" {
+		return toolErr("site is required"), nil
 	}
-
-	container, err := resolveLogsContainer(target)
+	site, err := config.FindSite(siteName)
 	if err != nil {
-		return toolErr(err.Error()), nil
+		return toolErr("site not found: " + siteName), nil
 	}
+	webhookPath := strArg(args, "webhook_path")
+	secretEnvKey := strArg(args, "secret_env_key")
 
-	var out bytes.Buffer
-	cmd := podman.Cmd("logs", "--tail", fmt.Sprintf("%d", lines), container)
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	_ = cmd.Run() // non-zero exit if container not running is fine — we return what we have
-
-	return toolOK(stripANSI(strings.TrimSpace(out.String()))), nil
-}
-
-func resolveLogsContainer(target string) (string, error) {
-	if target == "nginx" {
-		return "lerd-nginx", nil
-	}
-	if isKnownService(target) {
-		return "lerd-" + target, nil
-	}
-	// PHP version like "8.4" — match digits.digits only, not domain names
-	if phpVersionRe.MatchString(target) {
-		short := strings.ReplaceAll(target, ".", "")
-		return "lerd-php" + short + "-fpm", nil
-	}
-	// Site name — look up PHP version from registry
-	if site, err := config.FindSite(target); err == nil {
-		phpVersion := site.PHPVersion
-		if detected, err := phpDet.DetectVersion(site.Path); err == nil && detected != "" {
-			phpVersion = detected
+	// No fields: report current settings instead of writing.
+	if webhookPath == "" && secretEnvKey == "" {
+		key, _ := config.ResolveStripeSecret(site.Path)
+		if key == "" {
+			key = "(none found; looked for " + strings.Join(config.StripeSecretEnvCandidates, ", ") + ")"
 		}
-		short := strings.ReplaceAll(phpVersion, ".", "")
-		return "lerd-php" + short + "-fpm", nil
+		return toolOK(fmt.Sprintf("Stripe config for %s\nWebhook path: %s\nSecret env key: %s",
+			siteName, config.StripeWebhookPath(site.Path), key)), nil
 	}
-	return "", fmt.Errorf("unknown log target %q — valid: nginx, service name, PHP version (e.g. 8.4), or site name", target)
+
+	if err := config.SetProjectStripe(site.Path, webhookPath, secretEnvKey); err != nil {
+		return toolErr("saving stripe config: " + err.Error()), nil
+	}
+	// Re-forward a running listener to the new route by rewriting + restarting
+	// its unit; the start path reads the freshly saved path from .lerd.yaml.
+	if lerdSystemd.IsServiceActive("lerd-stripe-" + siteName) {
+		return execStripeListen(args)
+	}
+	return toolOK(fmt.Sprintf("Updated Stripe config for %s\nWebhook path: %s",
+		siteName, config.StripeWebhookPath(site.Path))), nil
 }
 
 func execComposer(args map[string]any) (any, *rpcError) {
@@ -3491,6 +2202,42 @@ func execDbSet(args map[string]any) (any, *rpcError) {
 	return toolOK(summary + "\n\n" + strings.TrimSpace(out.String())), nil
 }
 
+func execDbMove(args map[string]any) (any, *rpcError) {
+	from := strings.TrimSpace(strArg(args, "from"))
+	to := strings.TrimSpace(strArg(args, "to"))
+	if from == "" || to == "" {
+		return toolErr("from and to are required (e.g. from=postgres, to=postgres-18)"), nil
+	}
+	sites := strSliceArg(args, "sites")
+	all := boolArg(args, "all")
+	if !all && len(sites) == 0 {
+		return toolErr("pass sites (a list of site names) or all=true"), nil
+	}
+
+	// Re-exec the CLI so the move runs through the same code path as
+	// `lerd db:move`. --force skips the prompt; output is captured rather than
+	// written to the MCP stdio channel.
+	self, err := os.Executable()
+	if err != nil {
+		return toolErr("could not resolve lerd executable: " + err.Error()), nil
+	}
+	cmdArgs := []string{"db:move", "--from", from, "--to", to, "--force"}
+	if all {
+		cmdArgs = append(cmdArgs, "--all")
+	}
+	for _, s := range sites {
+		cmdArgs = append(cmdArgs, "--site", s)
+	}
+	var out bytes.Buffer
+	cmd := exec.Command(self, cmdArgs...)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return toolErr(fmt.Sprintf("db_move failed (%v):\n%s", err, strings.TrimSpace(out.String()))), nil
+	}
+	return toolOK(strings.TrimSpace(out.String())), nil
+}
+
 func execEnvCheck(args map[string]any) (any, *rpcError) {
 	projectPath := resolvedPath(args)
 	if projectPath == "" {
@@ -3812,7 +2559,7 @@ func execSiteDomainRemove(args map[string]any) (any, *rpcError) {
 		return toolErr("updating site: " + err.Error()), nil
 	}
 
-	_ = config.SyncProjectDomains(site.Path, site.Domains, cfg.DNS.TLD)
+	_ = config.ReplaceProjectDomain(site.Path, site.Domains, fullDomain, cfg.DNS.TLD)
 
 	if err := siteops.RegenerateSiteVhost(site, oldPrimary); err != nil {
 		return toolErr("regenerating vhost: " + err.Error()), nil
@@ -5113,6 +3860,9 @@ func execSitePHP(args map[string]any) (any, *rpcError) {
 	if site.IsCustomContainer() {
 		return toolErr("custom container sites do not use PHP versions — the container defines its own runtime"), nil
 	}
+	if site.IsHostProxy() {
+		return toolErr("host-proxy sites do not use PHP versions — they run your dev command on the host"), nil
+	}
 
 	if branch := strArg(args, "branch"); branch != "" {
 		cwd, errResp := resolveWorkerCwd(site, branch)
@@ -5282,6 +4032,9 @@ func execSiteRuntime(args map[string]any) (any, *rpcError) {
 	}
 	if site.IsCustomContainer() {
 		return toolErr("site uses a custom Containerfile; runtime is defined by Containerfile.lerd"), nil
+	}
+	if site.IsHostProxy() {
+		return toolErr("host-proxy sites run your dev command on the host, not a PHP runtime"), nil
 	}
 
 	if runtime == "fpm" {

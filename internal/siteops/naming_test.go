@@ -19,7 +19,7 @@ func TestSiteNameAndDomain(t *testing.T) {
 		{"dots.in.name", "test", "dots-in-name", "dots-in-name.test"},
 
 		// ccTLDs handled by the 2-letter regex, no enumeration needed.
-		{"astrolov.ro", "test", "astrolov", "astrolov.test"},
+		{"starlane.ro", "test", "starlane", "starlane.test"},
 		{"mysite.nl", "test", "mysite", "mysite.test"},
 		{"mysite.be", "test", "mysite", "mysite.test"},
 		{"project.pl", "test", "project", "project.test"},
@@ -33,6 +33,12 @@ func TestSiteNameAndDomain(t *testing.T) {
 
 		// Unknown longer suffix is left alone.
 		{"backup.old", "test", "backup-old", "backup-old.test"},
+
+		// Characters that would inject a systemd directive or escape the unit
+		// path are stripped so the handle is safe to use in unit names/bodies.
+		{"app\nExecStartPre=evil", "test", "appexecstartpre=evil", "appexecstartpre=evil.test"},
+		{"a/b", "test", "ab", "ab.test"},
+		{"x\x00y", "test", "xy", "xy.test"},
 	}
 
 	for _, c := range cases {

@@ -19,6 +19,8 @@ func TestWriteHostWorkerUnitFile_useFnmExec(t *testing.T) {
 	binDir := filepath.Join(tmp, "lerd", "bin")
 	os.MkdirAll(binDir, 0755)
 	os.WriteFile(filepath.Join(binDir, "fnm"), []byte("#!/bin/sh"), 0755)
+	// node shim present => lerd manages Node, so host workers route through fnm.
+	os.WriteFile(filepath.Join(binDir, "node"), []byte("#!/bin/sh"), 0755)
 
 	sitePath := t.TempDir()
 	os.WriteFile(filepath.Join(sitePath, ".node-version"), []byte("20"), 0644)
@@ -62,6 +64,147 @@ func TestWriteHostWorkerUnitFile_useFnmExec(t *testing.T) {
 	}
 	if strings.Contains(unit, "BindsTo=") {
 		t.Error("host worker must not bind to FPM container")
+	}
+	// Boot ordering: host tools like Vite run wayfinder (php artisan) at
+	// startup and crash if the FPM container isn't up yet. After+Wants
+	// orders Vite behind FPM and pulls it up, without BindsTo's teardown.
+	if !strings.Contains(unit, "After=network.target lerd-php84-fpm.service") {
+		t.Errorf("host worker must order after the FPM unit; got:\n%s", unit)
+	}
+	if !strings.Contains(unit, "Wants=lerd-php84-fpm.service") {
+		t.Errorf("host worker must pull up the FPM unit at boot; got:\n%s", unit)
+	}
+}
+
+// A bun project (bun.lockb present, bun installed at ~/.bun/bin) must run its
+// Vite worker through bun directly, rewriting `npm run dev` to `bun run dev`,
+// with the bun bin dir on PATH and no fnm wrapping.
+func TestWriteHostWorkerUnitFile_useBun(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bunBinDir := filepath.Join(home, ".bun", "bin")
+	os.MkdirAll(bunBinDir, 0755)
+	os.WriteFile(filepath.Join(bunBinDir, "bun"), []byte("#!/bin/sh"), 0755)
+
+	binDir := filepath.Join(tmp, "lerd", "bin")
+	os.MkdirAll(binDir, 0755)
+	os.WriteFile(filepath.Join(binDir, "fnm"), []byte("#!/bin/sh"), 0755)
+
+	sitePath := t.TempDir()
+	os.WriteFile(filepath.Join(sitePath, "bun.lockb"), []byte("x"), 0644)
+
+	if _, err := writeWorkerUnitFile(
+		"lerd-vite-bunsite", "Vite", "bunsite",
+		sitePath, "8.4", "npm run dev",
+		"on-failure", "", "lerd-php84-fpm", true,
+	); err != nil {
+		t.Fatalf("writeWorkerUnitFile (host): %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmp, "systemd", "user", "lerd-vite-bunsite.service"))
+	if err != nil {
+		t.Fatalf("read unit: %v", err)
+	}
+	unit := string(data)
+
+	if !strings.Contains(unit, "bun run dev") {
+		t.Errorf("bun project must rewrite npm to bun; got:\n%s", unit)
+	}
+	if strings.Contains(unit, "fnm") {
+		t.Errorf("bun project must not use fnm; got:\n%s", unit)
+	}
+	if !strings.Contains(unit, bunBinDir) {
+		t.Errorf("bun bin dir must be on PATH; got:\n%s", unit)
+	}
+}
+
+// When lerd is NOT managing Node (no node shim) and there is no system Node on
+// PATH, but bun is installed, an npm project's Vite worker falls back to bun
+// (the node:unmanage path) instead of a dead `fnm exec`.
+func TestWriteHostWorkerUnitFile_bunFallbackWhenNodeUnmanaged(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bunBinDir := filepath.Join(home, ".bun", "bin")
+	os.MkdirAll(bunBinDir, 0755)
+	os.WriteFile(filepath.Join(bunBinDir, "bun"), []byte("#!/bin/sh"), 0755)
+
+	binDir := filepath.Join(tmp, "lerd", "bin")
+	os.MkdirAll(binDir, 0755)
+	os.WriteFile(filepath.Join(binDir, "fnm"), []byte("#!/bin/sh"), 0755)
+	// No node shim => Node unmanaged. Pin PATH to a dir without `node` so the
+	// system-node probe fails and the bun fallback fires deterministically.
+	t.Setenv("PATH", binDir)
+
+	// npm project (package.json, no bun.lockb): not a bun project by detection.
+	sitePath := t.TempDir()
+	os.WriteFile(filepath.Join(sitePath, "package.json"), []byte("{}"), 0644)
+
+	if _, err := writeWorkerUnitFile(
+		"lerd-vite-npmsite", "Vite", "npmsite",
+		sitePath, "8.4", "npm run dev",
+		"on-failure", "", "lerd-php84-fpm", true,
+	); err != nil {
+		t.Fatalf("writeWorkerUnitFile (host): %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmp, "systemd", "user", "lerd-vite-npmsite.service"))
+	if err != nil {
+		t.Fatalf("read unit: %v", err)
+	}
+	unit := string(data)
+	if !strings.Contains(unit, "bun run dev") {
+		t.Errorf("unmanaged Node + bun should fall back to bun run dev; got:\n%s", unit)
+	}
+	if strings.Contains(unit, "fnm") {
+		t.Errorf("fallback must not reference fnm; got:\n%s", unit)
+	}
+}
+
+// A host-proxy site in a non-Node language (no package.json / .nvmrc /
+// .node-version) must run its command directly, not through fnm, so it doesn't
+// depend on Node being installed.
+func TestWriteHostWorkerUnitFile_nonNodeRunsDirectly(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	binDir := filepath.Join(tmp, "lerd", "bin")
+	os.MkdirAll(binDir, 0755)
+	os.WriteFile(filepath.Join(binDir, "fnm"), []byte("#!/bin/sh"), 0755)
+
+	// A Python project: no Node markers at all.
+	sitePath := t.TempDir()
+	os.WriteFile(filepath.Join(sitePath, "manage.py"), []byte("# django"), 0644)
+
+	if _, err := writeWorkerUnitFile(
+		"lerd-app-pysite", "Dev Server", "pysite",
+		sitePath, "", "python manage.py runserver 0.0.0.0:8000",
+		"always", "", "", true,
+	); err != nil {
+		t.Fatalf("writeWorkerUnitFile (host): %v", err)
+	}
+
+	unit, err := os.ReadFile(filepath.Join(tmp, "systemd", "user", "lerd-app-pysite.service"))
+	if err != nil {
+		t.Fatalf("read unit: %v", err)
+	}
+	s := string(unit)
+	if strings.Contains(s, "fnm") {
+		t.Errorf("non-Node host worker must not route through fnm:\n%s", s)
+	}
+	if !strings.Contains(s, "python manage.py runserver") {
+		t.Errorf("command missing from unit:\n%s", s)
+	}
+	if !strings.Contains(s, "/bin/sh -c") {
+		t.Errorf("command should still be wrapped in /bin/sh -c:\n%s", s)
 	}
 }
 
@@ -110,6 +253,8 @@ func TestWriteHostWorkerUnitFile_shellCommandPreserved(t *testing.T) {
 	binDir := filepath.Join(tmp, "lerd", "bin")
 	os.MkdirAll(binDir, 0755)
 	os.WriteFile(filepath.Join(binDir, "fnm"), []byte("#!/bin/sh"), 0755)
+	// node shim present => lerd manages Node, so host workers route through fnm.
+	os.WriteFile(filepath.Join(binDir, "node"), []byte("#!/bin/sh"), 0755)
 
 	sitePath := t.TempDir()
 	os.WriteFile(filepath.Join(sitePath, ".node-version"), []byte("20"), 0644)
@@ -180,6 +325,8 @@ func TestWriteHostWorkerUnitFile_pathLeadsWithLerdBinDir(t *testing.T) {
 	binDir := filepath.Join(tmp, "lerd", "bin")
 	os.MkdirAll(binDir, 0755)
 	os.WriteFile(filepath.Join(binDir, "fnm"), []byte("#!/bin/sh"), 0755)
+	// node shim present => lerd manages Node, so host workers route through fnm.
+	os.WriteFile(filepath.Join(binDir, "node"), []byte("#!/bin/sh"), 0755)
 
 	sitePath := t.TempDir()
 	os.WriteFile(filepath.Join(sitePath, ".node-version"), []byte("20"), 0644)

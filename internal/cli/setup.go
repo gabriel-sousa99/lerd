@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/huh"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
@@ -101,6 +103,8 @@ func runSetup(allSteps, skipOpen bool) error {
 	}
 
 	_, vendorMissing := os.Stat(cwd + "/vendor")
+	_, composerJSONErr := os.Stat(cwd + "/composer.json")
+	hasComposerJSON := composerJSONErr == nil
 	_, nodeModulesMissing := os.Stat(cwd + "/node_modules")
 	_, pkgJSONErr := os.Stat(cwd + "/package.json")
 	hasPackageJSON := pkgJSONErr == nil
@@ -118,22 +122,50 @@ func runSetup(allSteps, skipOpen bool) error {
 	// runSetupInit -> applyProjectConfig already ran `lerd env`; do not
 	// duplicate it here.
 
-	steps := []setupStep{
-		{
+	// Resolve the PHP version backing this site so a bun project can have bun
+	// auto-installed into its container without the user running a second
+	// command.
+	bunPHPVersion := ""
+	if site != nil {
+		bunPHPVersion = site.PHPVersion
+	}
+	if bunPHPVersion == "" {
+		if v, err := phpDet.DetectVersion(cwd); err == nil {
+			bunPHPVersion = v
+		}
+	}
+
+	steps := []setupStep{}
+	// composer install only makes sense for a PHP project; skip it entirely for
+	// Node-only / host-proxy sites that have no composer.json.
+	if hasComposerJSON {
+		steps = append(steps, setupStep{
 			label:   "composer install",
 			enabled: os.IsNotExist(vendorMissing),
 			run: func() error {
 				return composerInContainer(cwd, "install")
 			},
-		},
+		})
+	}
+	// Labels reflect the JS runtime lerd will actually drive (bun for bun
+	// projects when bun is on the host, npm otherwise); the run funcs dispatch
+	// the same way via runJSInstall/runJSScript.
+	jsRuntime := "npm"
+	if nodeDet.UsesBun(cwd) && nodeDet.BunPath() != "" {
+		jsRuntime = "bun"
+	}
+	installLabel := "npm install/ci"
+	buildLabel := "npm run " + buildScript
+	if jsRuntime == "bun" {
+		installLabel = "bun install"
+		buildLabel = "bun run " + buildScript
+	}
+	steps = append(steps, []setupStep{
 		{
-			label:   "npm install/ci",
+			label:   installLabel,
 			enabled: os.IsNotExist(nodeModulesMissing) && hasPackageJSON,
 			run: func() error {
-				if hasLockFile {
-					return runWithFnm("npm", []string{"ci"})
-				}
-				return runWithFnm("npm", []string{"install"})
+				return runJSInstall(cwd, hasLockFile)
 			},
 		},
 		{
@@ -144,32 +176,76 @@ func runSetup(allSteps, skipOpen bool) error {
 			},
 		},
 		{
-			label:   "npm run " + buildScript,
+			label:   buildLabel,
 			enabled: hasPackageJSON && buildScript != "" && !buildReplaced,
 			run: func() error {
 				if _, err := os.Stat(cwd + "/node_modules"); os.IsNotExist(err) {
 					fmt.Println("  node_modules not found.")
-					fmt.Print("  Run npm install first? [Y/n]: ")
+					fmt.Printf("  Run %s install first? [Y/n]: ", jsRuntime)
 					scanner := bufio.NewScanner(os.Stdin)
 					if scanner.Scan() {
 						answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
 						if answer == "" || answer == "y" || answer == "yes" {
-							installCmd := "install"
-							if hasLockFile {
-								installCmd = "ci"
-							}
-							fmt.Printf("\n→ Running: npm %s\n", installCmd)
-							if err := runWithFnm("npm", []string{installCmd}); err != nil {
-								return fmt.Errorf("npm %s failed: %w", installCmd, err)
+							fmt.Printf("\n→ Running: %s install\n", jsRuntime)
+							if err := runJSInstall(cwd, hasLockFile); err != nil {
+								return fmt.Errorf("%s install failed: %w", jsRuntime, err)
 							}
 						} else {
 							return fmt.Errorf("node_modules not found — skipping build")
 						}
 					}
 				}
-				return runWithFnm("npm", []string{"run", buildScript})
+				return runJSScript(cwd, buildScript)
 			},
 		},
+		{
+			// Mirror the host's bun into the PHP-FPM container so `lerd shell`
+			// has a working (musl) bun, with no extra command. lerd never
+			// installs bun on the host; this only fires when the user already
+			// has bun installed there. Idempotent: skips when the container bun
+			// is already present, and installContainerBun only restarts the
+			// container if the volume isn't mounted yet. Non-fatal.
+			label:   "bun (container)",
+			enabled: nodeDet.BunPath() != "" && bunPHPVersion != "",
+			run: func() error {
+				// Cheap exec check deferred to run time so setup planning never
+				// blocks on podman; installContainerBun is the no-op fast path.
+				if bunInstalledInContainer(bunPHPVersion) {
+					return nil
+				}
+				if err := installContainerBun(bunPHPVersion, "", os.Stdout); err != nil {
+					fmt.Printf("  [WARN] could not install bun in the container: %v\n", err)
+				}
+				return nil
+			},
+		},
+	}...)
+
+	// Offer in-container Pest browser testing when the project depends on the
+	// Playwright-based browser plugin and isn't set up yet. Left unchecked by
+	// default: selecting it triggers a multi-minute image rebuild + browser
+	// download, too heavy to run on a blind Enter. Runs after the JS install step
+	// so playwright is in node_modules. Non-fatal: installPestBrowser fails fast
+	// (before any rebuild) when playwright is missing, surfaced here as a warning.
+	if hasComposerJSON && bunPHPVersion != "" &&
+		pestBrowserSupportedVersion(bunPHPVersion) == nil &&
+		config.ComposerHasPackage(cwd, "pestphp/pest-plugin-browser") {
+		alreadyBaked := false
+		if gcfg, err := config.LoadGlobal(); err == nil {
+			alreadyBaked = slices.Contains(gcfg.GetPackages(bunPHPVersion), pestBrowserPkg)
+		}
+		if !alreadyBaked {
+			steps = append(steps, setupStep{
+				label:   "pest:browser (container)",
+				enabled: false,
+				run: func() error {
+					if err := installPestBrowser(bunPHPVersion, os.Stdout); err != nil {
+						fmt.Printf("  [WARN] could not set up Pest browser testing: %v\n", err)
+					}
+					return nil
+				},
+			})
+		}
 	}
 
 	// Framework setup commands (one-off bootstrap steps like migrations, storage:link, etc.)
@@ -414,10 +490,16 @@ func siteNeedsStorageLink(cwd string) bool {
 	return true // FILESYSTEM_DISK unset → defaults to local
 }
 
-// siteHasStripeSecret returns true if STRIPE_SECRET is present in .env or .env.example.
+// siteHasStripeSecret returns true if a Stripe secret is present for the
+// project. The live .env is resolved through config.StripeSecretSet so a pinned
+// secret_env_key is honoured (matching what StripeStartForSite will read);
+// .env.example is probed against the candidate keys as a scaffold fallback.
 func siteHasStripeSecret(cwd string) bool {
-	for _, name := range []string{".env", ".env.example"} {
-		if envfile.ReadKey(filepath.Join(cwd, name), "STRIPE_SECRET") != "" {
+	if config.StripeSecretSet(cwd) {
+		return true
+	}
+	for _, key := range config.StripeSecretEnvCandidates {
+		if envfile.ReadKey(filepath.Join(cwd, ".env.example"), key) != "" {
 			return true
 		}
 	}
@@ -433,8 +515,7 @@ func composerInContainer(dir string, args ...string) error {
 		cfg, _ := config.LoadGlobal()
 		version = cfg.PHP.DefaultVersion
 	}
-	short := strings.ReplaceAll(version, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := fpmContainerForDir(dir, version)
 
 	podman.EnsurePathMounted(dir, version)
 
@@ -461,8 +542,7 @@ func execInContainer(dir, command string) error {
 		cfg, _ := config.LoadGlobal()
 		version = cfg.PHP.DefaultVersion
 	}
-	short := strings.ReplaceAll(version, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := fpmContainerForDir(dir, version)
 	podman.EnsurePathMounted(dir, version)
 	parts := strings.Fields(command)
 	if len(parts) == 0 {

@@ -9,7 +9,7 @@ import "fmt"
 //	-X github.com/gabriel-sousa99/lerd/internal/version.Commit=<sha>
 //	-X github.com/gabriel-sousa99/lerd/internal/version.Date=<iso8601>
 var (
-	Version = "1.23.1"
+	Version = "1.24.1"
 	Commit  = "none"
 	Date    = "unknown"
 )

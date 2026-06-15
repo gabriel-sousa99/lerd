@@ -16,6 +16,52 @@ func TestBuildCustomExtBlock_Empty(t *testing.T) {
 	}
 }
 
+func TestBuildCustomPackagesBlock(t *testing.T) {
+	if got := buildCustomPackagesBlock(nil); got != "" {
+		t.Errorf("expected empty block for no packages, got:\n%s", got)
+	}
+	// Valid packages are deduped; invalid names (shell metachars) are dropped so
+	// they can't break out of the apk command.
+	block := buildCustomPackagesBlock([]string{"htop", "vim", "htop", "bad;rm -rf"})
+	if !strings.Contains(block, "RUN apk add --no-cache htop vim &&") {
+		t.Errorf("block must apk add the valid deduped packages:\n%s", block)
+	}
+	if strings.Contains(block, "bad") {
+		t.Errorf("invalid package name must be dropped:\n%s", block)
+	}
+	if !strings.Contains(block, "rm -rf /var/cache/apk/*") {
+		t.Errorf("block must clean the apk cache:\n%s", block)
+	}
+	// Without chromium, no Playwright env is baked.
+	if strings.Contains(block, "PLAYWRIGHT_BROWSERS_PATH") {
+		t.Errorf("non-chromium block must not bake PLAYWRIGHT_BROWSERS_PATH:\n%s", block)
+	}
+}
+
+// Opting chromium in (lerd pest:browser install) must pin Playwright's browser
+// path to the cache volume, since `lerd test` execs with the host HOME.
+func TestBuildCustomPackagesBlock_ChromiumBakesPlaywrightEnv(t *testing.T) {
+	block := buildCustomPackagesBlock([]string{"chromium"})
+	if !strings.Contains(block, "ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright") {
+		t.Errorf("chromium block must bake PLAYWRIGHT_BROWSERS_PATH:\n%s", block)
+	}
+}
+
+func TestBaseContainerfileHash_StripsCustomPackages(t *testing.T) {
+	// The {{.CustomPackages}} marker must be stripped when hashing the canonical
+	// base, or per-user packages would drift the published base image tag.
+	tmpl, err := GetQuadletTemplate("lerd-php-fpm.Containerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tmpl, "{{.CustomPackages}}") {
+		t.Fatal("Containerfile is missing the {{.CustomPackages}} marker")
+	}
+	if _, err := baseContainerfileHash(); err != nil {
+		t.Fatalf("baseContainerfileHash: %v", err)
+	}
+}
+
 func TestBuildCustomExtBlock_BuiltinDeps(t *testing.T) {
 	// imap's PECL build needs Alpine packages that aren't in the base image
 	// (otherwise "U8T_CANONICAL is missing"), and it asks interactive prompts.

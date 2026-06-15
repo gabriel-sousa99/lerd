@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"net/http"
 
+	"github.com/gabriel-sousa99/lerd/internal/activityping"
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/cli"
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -90,6 +91,9 @@ func main() {
 	root.AddCommand(cli.NewNodeInstallCmd())
 	root.AddCommand(cli.NewNodeUninstallCmd())
 	root.AddCommand(cli.NewNodeUseCmd())
+	root.AddCommand(cli.NewNodeManageCmd())
+	root.AddCommand(cli.NewNodeUnmanageCmd())
+	root.AddCommand(cli.NewJSRuntimeCmd())
 	root.AddCommand(cli.NewPhpListCmd())
 	root.AddCommand(cli.NewPhpInstallCmd())
 	root.AddCommand(cli.NewPhpRebuildCmd())
@@ -117,6 +121,7 @@ func main() {
 	root.AddCommand(cli.NewWhatsnewCmd())
 	root.AddCommand(cli.NewManCmd())
 	root.AddCommand(cli.NewDoctorCmd())
+	root.AddCommand(cli.NewMachineCmd())
 	root.AddCommand(cli.NewBugReportCmd())
 	root.AddCommand(cli.NewLogsCmd())
 	root.AddCommand(cli.NewOpenCmd())
@@ -134,6 +139,8 @@ func main() {
 	root.AddCommand(cli.NewHorizonStartCmd())
 	root.AddCommand(cli.NewHorizonStopCmd())
 	root.AddCommand(cli.NewHorizonReloadCmd())
+	root.AddCommand(cli.NewOctaneCmd())
+	root.AddCommand(cli.NewOctaneReloadCmd())
 	root.AddCommand(cli.NewAutostartCmd())
 	root.AddCommand(cli.NewMCPCmd())
 	root.AddCommand(cli.NewMCPInjectCmd())
@@ -148,18 +155,24 @@ func main() {
 	root.AddCommand(cli.NewDbSnapshotsCmd())
 	root.AddCommand(cli.NewDbRestoreCmd())
 	root.AddCommand(cli.NewDbSnapshotRmCmd())
+	root.AddCommand(cli.NewDbMoveCmd())
 	root.AddCommand(cli.NewXdebugCmd())
 	root.AddCommand(cli.NewDumpCmd())
+	root.AddCommand(cli.NewIdleCmd())
 	root.AddCommand(cli.NewWSLSetupCmd())
 	root.AddCommand(cli.NewProfileCmd())
 	root.AddCommand(cli.NewNotifyCmd())
 	root.AddCommand(cli.NewPhpExtCmd())
+	root.AddCommand(cli.NewPhpBunCmd())
+	root.AddCommand(cli.NewPhpPkgCmd())
+	root.AddCommand(cli.NewPestBrowserCmd())
 	root.AddCommand(cli.NewPhpIniCmd())
 	for _, cmd := range cli.NewStripeCmds() {
 		root.AddCommand(cmd)
 	}
 	root.AddCommand(cli.NewShareCmd())
 	root.AddCommand(cli.NewDomainCmd())
+	root.AddCommand(cli.NewGroupCmd())
 	root.AddCommand(cli.NewFrameworkCmd())
 	root.AddCommand(cli.NewWorkerCmd())
 	root.AddCommand(cli.NewWorkersCmd())
@@ -452,7 +465,10 @@ func newWatchCmd() *cobra.Command {
 			// LAN IP for host.containers.internal in the shared /etc/hosts,
 			// and Xdebug silently times out until the next lerd start. The
 			// watcher verifies the current entry every tick and reprobes
-			// only when it stops responding.
+			// only when it stops responding. On a change, host-proxy vhosts
+			// (which bake the gateway IP into proxy_pass on Linux) are
+			// regenerated so they don't point at the old, now-dead address.
+			watcher.OnGatewayIPChange = cli.RegenerateHostProxyVhostsOnGatewayChange
 			go watcher.WatchHostGateway(30 * time.Second)
 
 			// Self-heal exec-mode framework workers on macOS. Container mode
@@ -485,10 +501,10 @@ func newWatchCmd() *cobra.Command {
 						}
 						siteChanged := false
 
-						// Custom container sites don't use PHP/Node version
-						// detection — skip re-detection to avoid overwriting
+						// Custom container and host-proxy sites don't use PHP/Node
+						// version detection — skip re-detection to avoid overwriting
 						// the empty values with defaults.
-						if !site.IsCustomContainer() {
+						if !site.IsCustomContainer() && !site.IsHostProxy() {
 							// Re-detect PHP version in case .lerd.yaml or .php-version changed.
 							{
 								phpMin, phpMax := "", ""
@@ -534,6 +550,45 @@ func newWatchCmd() *cobra.Command {
 				)
 				if err != nil {
 					fmt.Printf("[WARN] site file watcher: %v\n", err)
+				}
+			}()
+
+			// Watch each site's (and worktree's) source tree and report a save as
+			// activity, so editing keeps a site awake under idle-suspend even when
+			// no HTTP request hits nginx (e.g. a Vite HMR session, where the browser
+			// talks to the dev server directly). This is the primary idle signal on
+			// macOS, where the nginx access feed isn't reachable from the host.
+			go func() {
+				err := watcher.WatchSourceFiles(
+					func() []watcher.SourceTarget {
+						reg, err := config.LoadSites()
+						if err != nil {
+							return nil
+						}
+						var targets []watcher.SourceTarget
+						for _, s := range reg.Sites {
+							if s.Ignored || s.Paused {
+								continue
+							}
+							fw, _ := config.GetFrameworkForDir(s.Framework, s.Path)
+							if dirs := config.SourceWatchRoots(fw, s.Path); len(dirs) > 0 {
+								targets = append(targets, watcher.SourceTarget{Key: s.Name, Dirs: dirs})
+							}
+							wts, _ := gitpkg.DetectWorktrees(s.Path, s.PrimaryDomain())
+							for _, wt := range wts {
+								key := s.Name + "/" + config.WorktreeUnitSlug(filepath.Base(wt.Path))
+								if dirs := config.SourceWatchRoots(fw, wt.Path); len(dirs) > 0 {
+									targets = append(targets, watcher.SourceTarget{Key: key, Dirs: dirs})
+								}
+							}
+						}
+						return targets
+					},
+					5*time.Second,
+					activityping.Site,
+				)
+				if err != nil {
+					fmt.Printf("[WARN] source file watcher: %v\n", err)
 				}
 			}()
 
@@ -615,7 +670,9 @@ func scanWorktrees() bool {
 		// the watcher was offline (event-driven cleanup needs fsnotify).
 		site := s
 		cli.DropOrphanedWorktreeDBs(&site)
-		worktrees, err := gitpkg.DetectWorktrees(s.Path, s.PrimaryDomain())
+		// ServableWorktrees excludes any worktree whose subdomain is owned by a
+		// group secondary: the secondary serves that exact host already.
+		worktrees, err := gitpkg.ServableWorktrees(s.Path, s.PrimaryDomain())
 		if err != nil {
 			continue
 		}
@@ -644,6 +701,17 @@ func scanWorktrees() bool {
 			if release, ok, _ := gitpkg.TryLockInstall(wt.Path); ok {
 				gitpkg.EnsureWorktreeDeps(s.Path, wt.Path, wt.Domain, s.Secured, nil)
 				release()
+			}
+			// Host-proxy sites mirror the parent dev command on a per-worktree
+			// port behind the worktree domain; no PHP vhost or framework workers.
+			if site.IsHostProxy() {
+				if err := cli.SetupHostProxyWorktree(site, wt.Path, wt.Domain); err != nil {
+					fmt.Printf("[WARN] worktree host-proxy for %s: %v\n", wt.Domain, err)
+					continue
+				}
+				fmt.Printf("Worktree vhost: %s -> %s (host proxy)\n", wt.Branch, wt.Domain)
+				generated = true
+				continue
 			}
 			vhostErr := nginx.GenerateWorktreeVhostFor(wt.Domain, wt.Path, s.PHPVersion, s.PrimaryDomain(), s.Name, wt.Branch, s.Secured)
 			if vhostErr != nil {
@@ -708,7 +776,7 @@ func syncWorktree(sitePath, worktreeName, action string, pruneStale bool) bool {
 	if site.Paused {
 		return false
 	}
-	worktrees, err := gitpkg.DetectWorktrees(sitePath, site.PrimaryDomain())
+	worktrees, err := gitpkg.ServableWorktrees(sitePath, site.PrimaryDomain())
 	if err != nil {
 		return false
 	}
@@ -725,6 +793,21 @@ func syncWorktree(sitePath, worktreeName, action string, pruneStale bool) bool {
 		if release, ok, _ := gitpkg.TryLockInstall(wt.Path); ok {
 			gitpkg.EnsureWorktreeDeps(sitePath, wt.Path, wt.Domain, site.Secured, nil)
 			release()
+		}
+		// Host-proxy worktrees run their own dev server behind the worktree
+		// domain; wire that instead of a PHP vhost + framework workers.
+		if site.IsHostProxy() {
+			if err := cli.SetupHostProxyWorktree(*site, wt.Path, wt.Domain); err != nil {
+				fmt.Printf("[WARN] worktree host-proxy for %s: %v\n", wt.Domain, err)
+				return false
+			}
+			if site.Secured {
+				if reissueErr := certs.ReissueCertForWorktree(*site); reissueErr != nil {
+					fmt.Printf("[WARN] reissue cert for worktree %s: %v\n", wt.Domain, reissueErr)
+				}
+			}
+			fmt.Printf("Worktree %s: %s -> %s (host proxy)\n", action, wt.Branch, wt.Domain)
+			return true
 		}
 		effectivePHP := config.WorktreePHPVersion(wt.Path, site.PHPVersion)
 		vhostErr := nginx.GenerateWorktreeVhostFor(wt.Domain, wt.Path, effectivePHP, site.PrimaryDomain(), site.Name, wt.Branch, site.Secured)
@@ -833,6 +916,13 @@ func removeStaleWorktreeVhosts(site *config.Site, worktrees []gitpkg.Worktree) b
 	changed := false
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), suffix) && !current[e.Name()] {
+			// A conf whose domain belongs to a separately-registered site (e.g. a
+			// group secondary at <label>.<primary>) is not a stale worktree vhost;
+			// leave it alone.
+			domain := strings.TrimSuffix(e.Name(), ".conf")
+			if _, err := config.FindSiteByDomain(domain); err == nil {
+				continue
+			}
 			_ = os.Remove(filepath.Join(confD, e.Name()))
 			changed = true
 		}
@@ -852,8 +942,15 @@ func removeWorktreeVhosts(site *config.Site) []string {
 	var removed []string
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), suffix) {
+			// A conf whose domain belongs to a separately-registered site (e.g. a
+			// group secondary at <label>.<primary>) is not a worktree vhost; never
+			// delete it, or the secondary stops being served.
+			domain := strings.TrimSuffix(e.Name(), ".conf")
+			if _, err := config.FindSiteByDomain(domain); err == nil {
+				continue
+			}
 			_ = os.Remove(filepath.Join(confD, e.Name()))
-			removed = append(removed, strings.TrimSuffix(e.Name(), ".conf"))
+			removed = append(removed, domain)
 		}
 	}
 	return removed
@@ -878,8 +975,26 @@ func removeStale(_ *config.GlobalConfig) bool {
 		}
 		if _, statErr := os.Stat(site.Path); os.IsNotExist(statErr) {
 			fmt.Printf("Removing stale site: %s (%s)\n", site.Name, site.Path)
-			_ = nginx.RemoveVhost(site.PrimaryDomain())
-			_ = config.RemoveSite(site.Name)
+			s := site
+			// Tear down the site's workers and any per-site container before
+			// dropping the vhost and registry entry. Without this a host-proxy
+			// site's always-restart dev server (and a custom-container/FrankenPHP
+			// container) keeps running after the project directory is gone. The
+			// nginx reload is batched by the caller.
+			if siteops.StopSiteWorkers != nil {
+				siteops.StopSiteWorkers(&s)
+			}
+			if s.IsCustomContainer() {
+				_ = podman.StopUnit(podman.CustomContainerName(s.Name))
+				podman.RemoveCustomContainer(s.Name)
+				_ = podman.RemoveCustomContainerQuadlet(s.Name)
+			}
+			if s.IsFrankenPHP() {
+				_ = podman.StopUnit(podman.FrankenPHPContainerName(s.Name))
+				_ = podman.RemoveFrankenPHPQuadlet(s.Name)
+			}
+			_ = nginx.RemoveVhost(s.PrimaryDomain())
+			_ = config.RemoveSite(s.Name)
 			removed = true
 		}
 	}

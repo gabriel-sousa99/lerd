@@ -2,6 +2,7 @@ package siteops
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -158,17 +159,19 @@ func FinishLink(site config.Site, phpVersion string) error {
 // quadlet that runs the framework's entrypoint, generate an nginx proxy
 // vhost, update container hosts, and reload nginx.
 func FinishFrankenPHPLink(site config.Site) error {
-	fw, _ := config.GetFrameworkForDir(site.Framework, site.Path)
-	entrypoint := fw.FrankenPHPEntrypoint(site.RuntimeWorker)
-	env := fw.FrankenPHPEnv(site.RuntimeWorker)
+	entrypoint, env := site.FrankenPHPQuadletSpec()
 
 	_ = podman.WriteContainerHosts()
 
-	image := podman.FrankenPHPImage(site.PHPVersion)
-	if err := podman.PullImageIfMissing(image); err != nil {
-		fmt.Printf("[WARN] pulling %s: %v\n", image, err)
+	// Build the derived image (dunglas base + lerd's standard extension set) so
+	// the site has redis/gd/pdo/... instead of the bare base. The build pulls the
+	// base itself; a failure leaves the site registered to retry on next start.
+	if err := podman.BuildFrankenPHPImage(site.PHPVersion, false, os.Stdout); err != nil {
+		fmt.Printf("[WARN] building FrankenPHP image: %v\n", err)
 	}
 
+	// WriteFrankenPHPQuadletDiff ensures the debug-tooling bind-mount sources
+	// (user ini, xdebug, dump, devtools) exist before referencing them.
 	unitName := podman.FrankenPHPContainerName(site.Name)
 	changed, err := podman.WriteFrankenPHPQuadletDiff(site.Name, site.Path, site.PHPVersion, entrypoint, env)
 	if err != nil {
@@ -200,6 +203,81 @@ func FinishFrankenPHPLink(site config.Site) error {
 	}
 
 	_ = podman.WriteContainerHosts()
+
+	if err := nginx.Reload(); err != nil {
+		return fmt.Errorf("nginx reload: %w", err)
+	}
+
+	if podman.AfterUnitChange != nil {
+		podman.AfterUnitChange("site:" + site.Name)
+	}
+
+	return nil
+}
+
+// FinishCustomFPMLink performs post-registration steps for a PHP site whose
+// runtime is "fpm-custom": build the per-site image from the project's
+// Containerfile (FROM the lerd base, so it keeps php-fpm and the extensions),
+// write a per-site FPM quadlet that reuses every lerd mount, start the
+// container, and generate a normal fastcgi vhost pointing at it.
+func FinishCustomFPMLink(site config.Site, containerCfg *config.ContainerConfig) error {
+	_ = podman.WriteContainerHosts()
+
+	fmt.Printf("Building custom FPM image for %s...\n", site.Name)
+	if err := podman.BuildCustomImage(site.Name, site.Path, containerCfg); err != nil {
+		return fmt.Errorf("building custom FPM image: %w", err)
+	}
+	podman.StoreContainerfileHash(site.Name, site.Path, containerCfg)
+
+	if err := podman.WriteCustomFPMQuadlet(site.Name, site.PHPVersion); err != nil {
+		return fmt.Errorf("writing custom FPM quadlet: %w", err)
+	}
+	// Start first so the freshly generated unit is loaded (RestartUnit on a
+	// not-yet-active unit races the quadlet generator), then restart so a
+	// rebuilt image is picked up instead of the container lingering on the old
+	// build. StartUnit is a no-op when already running.
+	unitName := podman.CustomFPMContainerName(site.Name)
+	if err := podman.StartUnit(unitName); err != nil {
+		fmt.Printf("[WARN] starting custom FPM container: %v\n", err)
+	} else {
+		_ = podman.RestartUnit(unitName)
+	}
+
+	if site.Secured {
+		if err := certs.SecureSite(site); err != nil {
+			return fmt.Errorf("securing site: %w", err)
+		}
+	} else if err := nginx.GenerateVhost(site, site.PHPVersion); err != nil {
+		return fmt.Errorf("generating vhost: %w", err)
+	}
+
+	_ = podman.WriteContainerHosts()
+	if err := nginx.Reload(); err != nil {
+		return fmt.Errorf("nginx reload: %w", err)
+	}
+	if podman.AfterUnitChange != nil {
+		podman.AfterUnitChange("site:" + site.Name)
+	}
+	return nil
+}
+
+// FinishHostProxyLink performs the post-registration steps for a host-proxy
+// site: no container is built or started. It refreshes the host.containers.internal
+// mapping (so nginx can reach the host), generates the proxy vhost, and reloads
+// nginx. The dev-server process is started separately by the caller (in the cli
+// package) because siteops must not import cli.
+func FinishHostProxyLink(site config.Site) error {
+	_ = podman.WriteContainerHosts()
+
+	if site.Secured {
+		if err := certs.SecureSite(site); err != nil {
+			return fmt.Errorf("securing site: %w", err)
+		}
+	} else {
+		if err := nginx.GenerateHostProxyVhost(site); err != nil {
+			return fmt.Errorf("generating host-proxy vhost: %w", err)
+		}
+	}
 
 	if err := nginx.Reload(); err != nil {
 		return fmt.Errorf("nginx reload: %w", err)

@@ -612,6 +612,8 @@ export function serviceLabel(name: string): string {
     pgadmin: 'pgAdmin',
     mysql: 'MySQL',
     postgres: 'PostgreSQL',
+    'postgres-pgvector': 'PostgreSQL + pgvector',
+    'postgres-postgis': 'PostgreSQL + PostGIS',
     meilisearch: 'Meilisearch',
     mailpit: 'Mailpit',
     rustfs: 'RustFS',

@@ -74,6 +74,17 @@ func PauseSite(name string) error {
 	if site.IsFrankenPHP() {
 		_ = podman.StopUnit(podman.FrankenPHPContainerName(site.Name))
 	}
+	if site.IsCustomFPM() {
+		_ = podman.StopUnit(podman.CustomFPMContainerName(site.Name))
+	}
+
+	// Strip the container's quadlet [Install] so a paused runtime site's
+	// container doesn't come back at the next login via the podman generator.
+	// StopUnit above only stops the running instance; the generator re-wires an
+	// [Install]-bearing quadlet into default.target.wants on every boot.
+	if setSiteContainerAutostart(site, false) {
+		_ = podman.DaemonReloadFn()
+	}
 
 	// Release the LAN share port while paused. The site's stored LANPort is
 	// preserved so unpause restores the same address.
@@ -107,6 +118,48 @@ func PauseSite(name string) error {
 	return nil
 }
 
+// siteContainerUnit returns the per-site container unit name for a
+// runtime-backed site (FrankenPHP, custom container, custom FPM), or "" for a
+// plain FPM site that runs in the shared container and has no dedicated unit.
+func siteContainerUnit(site *config.Site) string {
+	switch {
+	case site.IsCustomContainer():
+		return podman.CustomContainerName(site.Name)
+	case site.IsFrankenPHP():
+		return podman.FrankenPHPContainerName(site.Name)
+	case site.IsCustomFPM():
+		return podman.CustomFPMContainerName(site.Name)
+	}
+	return ""
+}
+
+// setSiteContainerAutostart strips (on=false) or restores (on=true) the
+// [Install] section of a site container's quadlet, the same lever `lerd
+// autostart` uses globally, so a paused runtime site's container stops
+// autostarting at boot. Restoring is gated on the global autostart flag so
+// unpause never re-arms a container the user disabled globally. Returns whether
+// the file changed. No-op when the site has no container quadlet (plain FPM, or
+// the macOS plist path). Caller daemon-reloads when it returns true.
+func setSiteContainerAutostart(site *config.Site, on bool) bool {
+	unit := siteContainerUnit(site)
+	if unit == "" {
+		return false
+	}
+	path := filepath.Join(config.QuadletDir(), unit+".container")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	out := podman.StripInstallSection(string(raw), true)
+	if on && lerdSystemd.IsAutostartEnabled() {
+		out = strings.TrimRight(out, "\n") + "\n\n" + quadletInstallBlock
+	}
+	if out == string(raw) {
+		return false
+	}
+	return os.WriteFile(path, []byte(out), 0644) == nil
+}
+
 // UnpauseSite restores the site's nginx vhost, restarts any workers that were
 // running when the site was paused, and clears the paused state.
 func UnpauseSite(name string) error {
@@ -120,6 +173,13 @@ func UnpauseSite(name string) error {
 	}
 
 	phpVersion := site.PHPVersion
+
+	// Re-arm the container's quadlet [Install] that PauseSite stripped, before
+	// starting it, so it autostarts at login again. Gated on the global autostart
+	// flag inside the helper, so unpause never re-arms a globally-disabled site.
+	if setSiteContainerAutostart(site, true) {
+		_ = podman.DaemonReloadFn()
+	}
 
 	switch {
 	case site.IsCustomContainer():
@@ -140,6 +200,28 @@ func UnpauseSite(name string) error {
 				return fmt.Errorf("generating custom vhost: %w", err)
 			}
 		}
+	case site.IsHostProxy():
+		// No container; the dev-server worker is restarted below from
+		// PausedWorkers. Just restore the proxy vhost.
+		if site.Secured {
+			if err := nginx.GenerateHostProxySSLVhost(*site); err != nil {
+				return fmt.Errorf("generating host-proxy SSL vhost: %w", err)
+			}
+			sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
+			mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
+			_ = os.Remove(mainConf)
+			if err := os.Rename(sslConf, mainConf); err != nil {
+				return fmt.Errorf("installing host-proxy SSL vhost: %w", err)
+			}
+		} else {
+			if err := nginx.GenerateHostProxyVhost(*site); err != nil {
+				return fmt.Errorf("generating host-proxy vhost: %w", err)
+			}
+		}
+		// pauseWorktrees swapped each worktree to the paused page; the PHP
+		// unpauseWorktrees below never runs for host-proxy sites, so restore
+		// their host-proxy vhosts and dev servers here.
+		unpauseHostProxyWorktrees(site)
 	case site.IsFrankenPHP():
 		_ = podman.StartUnit(podman.FrankenPHPContainerName(site.Name))
 		if site.Secured {
@@ -162,7 +244,10 @@ func UnpauseSite(name string) error {
 			phpVersion = detected
 		}
 
-		if phpVersion != "" {
+		if site.IsCustomFPM() {
+			// Per-site FPM container; the shared lerd-php<ver>-fpm is not used.
+			_ = podman.StartUnit(podman.CustomFPMContainerName(site.Name))
+		} else if phpVersion != "" {
 			if err := ensureFPMQuadlet(phpVersion); err != nil {
 				fmt.Printf("[WARN] ensuring FPM for PHP %s: %v\n", phpVersion, err)
 			}
@@ -186,6 +271,11 @@ func UnpauseSite(name string) error {
 
 		unpauseWorktrees(site, phpVersion)
 	}
+
+	// Restart the per-worktree workers PauseSite stopped (Vite). Universal across
+	// runtimes; a no-op for host-proxy, whose worktree dev servers are restored by
+	// unpauseHostProxyWorktrees above.
+	restartWorktreeWorkers(site, phpVersion)
 
 	nginx.ReloadOrWarn("")
 
@@ -308,6 +398,14 @@ func collectRunningWorkers(site *config.Site) []string {
 		active = append(active, "stripe")
 	}
 
+	// Host-proxy sites supervise a single "app" dev-server worker that is
+	// neither a framework worker nor in proj.Workers, and on macOS lives as a
+	// launchd plist rather than a SystemdUserDir .service file (so the orphan
+	// scan below won't see it). Check it explicitly.
+	if site.IsHostProxy() && unitIsActiveOrActivating(hostProxyWorkerUnit(site.Name)) {
+		active = append(active, hostProxyWorkerName)
+	}
+
 	// Detect orphaned workers — running units with no framework definition.
 	known := make(map[string]bool, len(active))
 	for _, a := range active {
@@ -315,6 +413,34 @@ func collectRunningWorkers(site *config.Site) []string {
 	}
 	active = append(active, lerdSystemd.FindOrphanedWorkers(site.Name, known)...)
 
+	return active
+}
+
+// collectRunningWorktreeWorkers returns the active per-worktree workers for the
+// worktree checkout at wtPath, checked by their worktree unit names
+// (lerd-<w>-<site>-<wtBase>). Only workers a framework marks per_worktree:true
+// run per worktree (for Laravel, just vite), so only those are enumerated.
+func collectRunningWorktreeWorkers(site *config.Site, wtPath string) []string {
+	fw, ok := config.GetFrameworkForDir(site.Framework, site.Path)
+	if !ok || fw.Workers == nil {
+		return nil
+	}
+	wtBase := config.WorktreeUnitSlug(filepath.Base(wtPath))
+	names := make([]string, 0, len(fw.Workers))
+	for wName, w := range fw.Workers {
+		if w.IsPerWorktree() {
+			names = append(names, wName)
+		}
+	}
+	sort.Strings(names)
+
+	var active []string
+	for _, wName := range names {
+		unit := "lerd-" + wName + "-" + site.Name + "-" + wtBase
+		if unitIsActiveOrActivating(unit) || lerdSystemd.IsTimerActive(unit) {
+			active = append(active, wName)
+		}
+	}
 	return active
 }
 
@@ -336,14 +462,27 @@ func stopWorkerByName(site *config.Site, workerName string) {
 	WorkerStopForSite(site.Name, site.Path, workerName) //nolint:errcheck
 }
 
-// resumeWorkerByName restarts a single named worker for the site.
+// resumeWorkerByName restarts a single named worker for the site. It gates on
+// idleWorkerResumable so the set of workers it can bring back is identical to the
+// set idle-suspend is allowed to stop — keeping the two in lockstep means a
+// worker can never be suspended-but-unresumable (stranded). A new resumable
+// worker kind must be taught to idleWorkerResumable or this gate blocks it.
 func resumeWorkerByName(site *config.Site, workerName, phpVersion string) {
+	if !idleWorkerResumable(site, workerName) {
+		return
+	}
 	if workerName == "stripe" {
 		scheme := "http"
 		if site.Secured {
 			scheme = "https"
 		}
 		StripeStartForSite(site.Name, site.Path, scheme+"://"+site.PrimaryDomain()) //nolint:errcheck
+		return
+	}
+	if workerName == hostProxyWorkerName {
+		if proj, _ := config.LoadProjectConfig(site.Path); proj != nil && proj.Proxy != nil {
+			startHostProxyWorker(*site, proj.Proxy)
+		}
 		return
 	}
 	fw, ok := config.GetFrameworkForDir(site.Framework, site.Path)
@@ -490,12 +629,35 @@ func pauseWorktrees(site *config.Site) {
 		return
 	}
 	for _, wt := range worktrees {
+		// Stop the worktree's own workers so a paused site does no background work,
+		// matching the main checkout. Covers per-worktree workers (Vite) and a
+		// host-proxy worktree's dev server (which also frees its host port). The
+		// unit suffix is the slugged checkout basename, so pass that.
+		if err := StopAllWorkersForWorktree(site.Name, filepath.Base(wt.Path)); err != nil {
+			fmt.Printf("  [WARN] stopping worktree workers %s: %v\n", wt.Domain, err)
+		}
 		if err := writePausedWorktreeHTML(wt, site); err != nil {
 			fmt.Printf("  [WARN] paused page for worktree %s: %v\n", wt.Domain, err)
 			continue
 		}
 		if err := nginx.GeneratePausedWorktreeVhost(wt.Domain, site.PrimaryDomain(), config.PausedDir(), site.Secured); err != nil {
 			fmt.Printf("  [WARN] paused vhost for worktree %s: %v\n", wt.Domain, err)
+		}
+	}
+}
+
+// unpauseHostProxyWorktrees restores the host-proxy vhost and dev server for
+// every worktree of a site that has just been unpaused. SetupHostProxyWorktree
+// mirrors the parent's proxy config (registry fallback), so it works even when
+// the worktree checkout has no .lerd.yaml of its own.
+func unpauseHostProxyWorktrees(site *config.Site) {
+	worktrees, err := gitpkg.DetectWorktrees(site.Path, site.PrimaryDomain())
+	if err != nil || len(worktrees) == 0 {
+		return
+	}
+	for _, wt := range worktrees {
+		if err := SetupHostProxyWorktree(*site, wt.Path, wt.Domain); err != nil {
+			fmt.Printf("  [WARN] restoring worktree %s: %v\n", wt.Domain, err)
 		}
 	}
 }
@@ -518,6 +680,19 @@ func unpauseWorktrees(site *config.Site, phpVersion string) {
 		if vhostErr != nil {
 			fmt.Printf("  [WARN] restoring worktree vhost %s: %v\n", wt.Domain, vhostErr)
 		}
+	}
+}
+
+// restartWorktreeWorkers restarts every worktree's per-worktree workers (e.g.
+// Vite) that PauseSite stopped, using the same opt-in path that started them on
+// worktree add. No-op for worktrees with no framework per-worktree workers.
+func restartWorktreeWorkers(site *config.Site, phpVersion string) {
+	worktrees, err := gitpkg.DetectWorktrees(site.Path, site.PrimaryDomain())
+	if err != nil || len(worktrees) == 0 {
+		return
+	}
+	for _, wt := range worktrees {
+		AutoStartOptedInWorktreeWorkers(site, wt.Path, config.WorktreePHPVersion(wt.Path, phpVersion))
 	}
 }
 

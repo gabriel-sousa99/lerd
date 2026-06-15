@@ -31,8 +31,14 @@ func removeWorkerExecArtifacts(_ string) {}
 // `php artisan schedule:run`, which exit immediately and would otherwise
 // restart-loop every 5s under Restart=always.
 func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, command, restart, schedule, fpmUnit string, host bool) (bool, error) {
+	// Generation-boundary guard so every caller is covered (incl. the boot
+	// restore path): a newline in the command would inject a second systemd
+	// directive from a cloned repo's .lerd.yaml custom_workers entry.
+	if config.ContainsUnitInjectionChars(command) {
+		return false, fmt.Errorf("worker unit %q: command must not contain newline or NUL", unitName)
+	}
 	if host {
-		return writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart)
+		return writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart, fpmUnit)
 	}
 	container := fpmUnit
 
@@ -97,37 +103,58 @@ WantedBy=default.target
 const defaultNodeVersion = "22"
 
 // writeHostWorkerUnitFile writes a systemd service unit for a worker that runs
-// on the host via fnm rather than inside a container. Used for Node.js tools
-// like Vite that need direct host access for HMR.
-func writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart string) (bool, error) {
-	fnm := filepath.Join(config.BinDir(), "fnm")
-	nodeVersion, err := nodeDet.DetectVersion(sitePath)
-	if err != nil {
-		if cfg, _ := config.LoadGlobal(); cfg != nil {
-			nodeVersion = cfg.Node.DefaultVersion
-		}
-		if nodeVersion == "" {
-			nodeVersion = defaultNodeVersion
-		}
-	}
-
-	// Wrap the framework worker command in /bin/sh -c so shell features
-	// (&&, |, env-var expansion, redirects) work. systemd's ExecStart
-	// performs argv-style splitting on whitespace and execve's the result
-	// directly — without the wrapper, `npm run build && npm run preview`
-	// passes "&&" to fnm as a literal argument and silently fails. Single
-	// quotes inside the command are escaped via the standard '"'"' idiom
-	// so the wrapper survives any user-provided string verbatim.
-	shellCommand := fmt.Sprintf("%s exec --using=%s -- %s", fnm, nodeVersion, command)
-	escaped := strings.ReplaceAll(shellCommand, "'", `'"'"'`)
+// on the host rather than inside a container. Node projects run through fnm so
+// the right Node version is used (Vite, Nest, etc.); a host-proxy site in any
+// other language (Python, Ruby, Go, …) runs its command directly. When the
+// worker backs a PHP site (fpmUnit set) the unit is ordered after and pulls up
+// that FPM container; host-proxy sites have no FPM and omit the dependency.
+func writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart, fpmUnit string) (bool, error) {
+	// Wrap the command in /bin/sh -c so shell features (&&, |, env-var
+	// expansion, redirects) work. systemd's ExecStart performs argv-style
+	// splitting on whitespace and execve's the result directly, so without the
+	// wrapper `npm run build && npm run preview` would pass "&&" as a literal
+	// argument. Single quotes are escaped via the standard '"'"' idiom so the
+	// wrapper survives any user-provided string verbatim.
+	home, _ := os.UserHomeDir()
 	// lerd's shim must lead PATH so wayfinder + friends find `php`; we
 	// rebuild the path systemd's user default would have supplied so
 	// `~/.local/bin` stays reachable — issue #375.
-	home, _ := os.UserHomeDir()
 	envPath := config.BinDir() + ":" + filepath.Join(home, ".local", "bin") + ":/usr/local/bin:/usr/bin:/bin"
+
+	shellCommand := command
+	if bun := bunRunnerFor(sitePath); bun != "" {
+		// bun is self-contained: rewrite npm/npx/node to bun/bunx and run it
+		// directly, no fnm wrap. Put ~/.bun/bin on PATH so a bare `bun` resolves.
+		shellCommand = nodeDet.Bunify(command)
+		envPath = filepath.Dir(bun) + ":" + envPath
+	} else if isNodeProject(sitePath) && lerdManagesNode() {
+		// Only route through fnm when lerd is actually managing Node; otherwise
+		// run the command directly so the user's system node/npm on PATH is used
+		// (after node:unmanage there is no fnm Node to exec into).
+		fnm := filepath.Join(config.BinDir(), "fnm")
+		nodeVersion, err := nodeDet.DetectVersion(sitePath)
+		if err != nil {
+			if cfg, _ := config.LoadGlobal(); cfg != nil {
+				nodeVersion = cfg.Node.DefaultVersion
+			}
+			if nodeVersion == "" {
+				nodeVersion = defaultNodeVersion
+			}
+		}
+		shellCommand = fmt.Sprintf("%s exec --using=%s -- %s", fnm, nodeVersion, command)
+	}
+	escaped := strings.ReplaceAll(shellCommand, "'", `'"'"'`)
+	// Order after and pull up the site's FPM container: host tools like Vite
+	// run wayfinder (php artisan) at startup, which fails if FPM isn't up yet
+	// at boot. Wants, not BindsTo, so a transient FPM restart can't kill Vite.
+	// Host-proxy sites in non-PHP languages have no FPM unit, so skip it.
+	fpmOrder := ""
+	if fpmUnit != "" {
+		fpmOrder = fmt.Sprintf("After=network.target %s.service\nWants=%s.service\n", fpmUnit, fpmUnit)
+	}
 	unit := fmt.Sprintf(`[Unit]
 Description=Lerd %s (%s)
-
+%s
 [Service]
 Type=simple
 Restart=%s
@@ -139,7 +166,7 @@ ExecStart=/bin/sh -c '%s'
 
 [Install]
 WantedBy=default.target
-`, label, siteName, restart, sitePath, envPath, escaped)
+`, label, siteName, fpmOrder, restart, sitePath, envPath, escaped)
 
 	_ = services.Mgr.RemoveTimerUnit(unitName)
 	return services.Mgr.WriteServiceUnitIfChanged(unitName, unit)

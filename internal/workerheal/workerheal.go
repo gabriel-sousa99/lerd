@@ -62,6 +62,7 @@ var (
 	unitEnabledFn = isUnitEnabled
 	healFn        = podman.StartUnit
 	lastErrorFn   = readLastError
+	isStoppedFn   = config.IsStopped
 )
 
 // HumanState renders an UnhealthyWorker.State for end-user copy. The machine
@@ -141,16 +142,35 @@ func Enrich(in []UnhealthyWorker) []UnhealthyWorker {
 // timer-driven oneshots (a .timer sibling owns the lifecycle) are normally idle
 // between ticks, so they're left alone to avoid false positives.
 func Detect() ([]UnhealthyWorker, error) {
+	// When lerd was intentionally stopped, its workers are meant to be down, so
+	// reporting them as failing/expected-but-stopped is noise: the fix is `lerd
+	// start`, not a heal. Suppress detection (and the notifications, banners, and
+	// heals that read it) until the next start clears the marker.
+	if isStoppedFn() {
+		return nil, nil
+	}
 	reg, err := config.LoadSites()
 	if err != nil {
 		return nil, err
 	}
 	siteSet := make(map[string]bool, len(reg.Sites))
+	// Workers a site has intentionally idle-suspended must never be reported as
+	// failing or drifted — they are asleep on purpose and resume on the next
+	// request, so flagging or healing them would be noise (and a heal would wake
+	// the site). Index them so detection can skip them.
+	suspended := make(map[string]map[string]bool, len(reg.Sites))
 	for _, s := range reg.Sites {
 		if s.Paused || s.Ignored {
 			continue
 		}
 		siteSet[s.Name] = true
+		if len(s.IdleSuspendedWorkers) > 0 {
+			set := make(map[string]bool, len(s.IdleSuspendedWorkers))
+			for _, w := range s.IdleSuspendedWorkers {
+				set[w] = true
+			}
+			suspended[s.Name] = set
+		}
 	}
 	if len(siteSet) == 0 {
 		return nil, nil
@@ -203,6 +223,9 @@ func Detect() ([]UnhealthyWorker, error) {
 		}
 		if nonWorkerPerSitePrefixes[worker] {
 			continue
+		}
+		if suspended[site][worker] {
+			continue // intentionally idle-suspended, not a failure
 		}
 		out = append(out, UnhealthyWorker{
 			Site:   site,

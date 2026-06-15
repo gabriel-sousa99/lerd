@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -249,7 +250,7 @@ func BuildFPMImage(version string, local bool) error {
 	if err != nil {
 		return err
 	}
-	return buildFPMImage(version, false, local, cfg.GetExtensions(version), cfg.AllExtApkDeps(), os.Stdout)
+	return buildFPMImage(version, false, local, cfg.GetExtensions(version), cfg.AllExtApkDeps(), cfg.GetPackages(version), os.Stdout)
 }
 
 // BuildFPMImageTo builds the PHP-FPM image writing output to w.
@@ -259,7 +260,7 @@ func BuildFPMImageTo(version string, local bool, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return buildFPMImage(version, false, local, cfg.GetExtensions(version), cfg.AllExtApkDeps(), w)
+	return buildFPMImage(version, false, local, cfg.GetExtensions(version), cfg.AllExtApkDeps(), cfg.GetPackages(version), w)
 }
 
 // RebuildFPMImage force-removes and rebuilds the PHP-FPM image for the given version.
@@ -269,7 +270,7 @@ func RebuildFPMImage(version string, local bool) error {
 	if err != nil {
 		return err
 	}
-	return buildFPMImage(version, true, local, cfg.GetExtensions(version), cfg.AllExtApkDeps(), os.Stdout)
+	return buildFPMImage(version, true, local, cfg.GetExtensions(version), cfg.AllExtApkDeps(), cfg.GetPackages(version), os.Stdout)
 }
 
 // RebuildFPMImageTo force-rebuilds the PHP-FPM image writing output to w.
@@ -279,7 +280,7 @@ func RebuildFPMImageTo(version string, local bool, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return buildFPMImage(version, true, local, cfg.GetExtensions(version), cfg.AllExtApkDeps(), w)
+	return buildFPMImage(version, true, local, cfg.GetExtensions(version), cfg.AllExtApkDeps(), cfg.GetPackages(version), w)
 }
 
 // baseContainerfileHash returns a 12-character SHA-256 prefix of the Containerfile
@@ -292,6 +293,7 @@ func baseContainerfileHash() (string, error) {
 	}
 	base := strings.ReplaceAll(tmpl, "{{.CustomExtensions}}", "")
 	base = strings.ReplaceAll(base, "{{.CustomExtensionsRuntime}}", "")
+	base = strings.ReplaceAll(base, "{{.CustomPackages}}", "")
 	base = strings.ReplaceAll(base, "{{.MkcertCA}}", "")
 	sum := sha256.Sum256([]byte(base))
 	return fmt.Sprintf("%x", sum)[:12], nil
@@ -336,7 +338,7 @@ func tryPullBaseImage(version string, w io.Writer) string {
 	return ref
 }
 
-func buildFPMImage(version string, force, local bool, customExts []string, extDeps map[string][]string, w io.Writer) error {
+func buildFPMImage(version string, force, local bool, customExts []string, extDeps map[string][]string, packages []string, w io.Writer) error {
 	imageName := FPMImageName(version)
 
 	if !force {
@@ -371,6 +373,7 @@ func buildFPMImage(version string, force, local bool, customExts []string, extDe
 			containerfile = "FROM " + baseRef + "\n" +
 				"RUN mkdir -p /etc/my.cnf.d && printf '[client]\\nssl=0\\n' > /etc/my.cnf.d/lerd-no-ssl.cnf\n" +
 				buildCustomExtBlock(customExts, extDeps) +
+				buildCustomPackagesBlock(packages) +
 				mkcertCABlock(tmp)
 			goto build
 		}
@@ -392,6 +395,7 @@ func buildFPMImage(version string, force, local bool, customExts []string, extDe
 		containerfile = strings.ReplaceAll(tmpl, "{{.Version}}", version)
 		containerfile = strings.ReplaceAll(containerfile, "{{.CustomExtensions}}", buildCustomExtBlock(customExts, extDeps))
 		containerfile = strings.ReplaceAll(containerfile, "{{.CustomExtensionsRuntime}}", buildCustomExtRuntimeDeps(customExts, extDeps))
+		containerfile = strings.ReplaceAll(containerfile, "{{.CustomPackages}}", buildCustomPackagesBlock(packages))
 		containerfile = strings.ReplaceAll(containerfile, "{{.MkcertCA}}", mkcertCABlock(tmp))
 	}
 
@@ -518,6 +522,39 @@ func buildCustomExtBlock(exts []string, userDeps map[string][]string) string {
 	return sb.String()
 }
 
+// buildCustomPackagesBlock emits an apk RUN line installing user-requested
+// extra Alpine packages (lerd php:pkg) into the runtime stage, deduped and in a
+// stable order. Names are validated so a bad entry can't break out of the apk
+// command; invalid ones are dropped. Empty when there are no packages.
+func buildCustomPackagesBlock(packages []string) string {
+	seen := map[string]bool{}
+	var valid []string
+	for _, p := range packages {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] || !validApkPkgName.MatchString(p) {
+			continue
+		}
+		seen[p] = true
+		valid = append(valid, p)
+	}
+	if len(valid) == 0 {
+		return ""
+	}
+	block := "# User-requested extra packages (lerd php:pkg)\nRUN apk add --no-cache " +
+		strings.Join(valid, " ") + " && rm -rf /var/cache/apk/*\n"
+	// When chromium is present (the package lerd pest:browser install adds), pin
+	// Playwright's browser path to the persistent cache volume. `lerd test`/`lerd
+	// pest` exec with the host HOME, so without this Playwright would look under
+	// the host home instead of the volume where the registry and shims live. The
+	// env is inert for anyone not running Playwright, so deriving it from the
+	// chromium package (rather than a separate flag threaded through every build
+	// caller) keeps the image contract in one place.
+	if slices.Contains(valid, "chromium") {
+		block += "ENV PLAYWRIGHT_BROWSERS_PATH=" + PlaywrightCachePath + "\n"
+	}
+	return block
+}
+
 // phpExtensionLoaded reports whether ext appears in `php -m` output (case-insensitive).
 func phpExtensionLoaded(moduleOutput, ext string) bool {
 	want := strings.ToLower(strings.TrimSpace(ext))
@@ -601,7 +638,8 @@ func NormaliseXdebugMode(raw string) (string, error) {
 // The file is volume-mounted into the FPM container at /usr/local/etc/php/conf.d/99-xdebug.ini.
 // An empty mode writes xdebug.mode=off (extension loaded but inactive); any other value
 // is emitted as-is, so callers can pass "debug", "coverage", "debug,coverage", etc.
-func WriteXdebugIni(version, mode string) error {
+// start is the xdebug.start_with_request value (yes | trigger | no); empty defaults to "trigger" (Oracle fork).
+func WriteXdebugIni(version, mode, start string) error {
 	path := config.PHPConfFile(version)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -614,14 +652,16 @@ func WriteXdebugIni(version, mode string) error {
 	if mode == "" {
 		mode = "off"
 	}
-	// Oracle fork: start_with_request=trigger (not yes) so xdebug only fires
-	// when the user explicitly opts in per-request via the XDEBUG_TRIGGER
-	// cookie/header/query param. The upstream default of `yes` makes every
-	// CLI command + every web request attempt a TCP connect to 9003 — when
-	// no IDE is listening, that produces "Could not connect to debugging
-	// client" spam on every artisan call. Users who want always-on debug
-	// can flip it back via `lerd php:ini <v>`.
-	content := fmt.Sprintf("[xdebug]\nxdebug.mode=%s\nxdebug.start_with_request=trigger\nxdebug.client_host=host.containers.internal\nxdebug.client_port=9003\n", mode)
+	// Oracle fork: default start_with_request=trigger (not upstream's "yes") so
+	// xdebug only fires when the user explicitly opts in per-request via the
+	// XDEBUG_TRIGGER cookie/header/query param. Upstream's "yes" makes every CLI
+	// command + web request attempt a TCP connect to 9003 — when no IDE listens,
+	// that spams "Could not connect to debugging client" on every artisan call.
+	// An explicit start value (set via `lerd php:ini <v>`) still wins.
+	if start == "" {
+		start = "trigger"
+	}
+	content := fmt.Sprintf("[xdebug]\nxdebug.mode=%s\nxdebug.start_with_request=%s\nxdebug.client_host=host.containers.internal\nxdebug.client_port=9003\n", mode, start)
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
@@ -675,7 +715,7 @@ func EnsureXdebugIni(version string) error {
 	if cfgErr != nil {
 		return cfgErr
 	}
-	return WriteXdebugIni(version, cfg.GetXdebugMode(version))
+	return WriteXdebugIni(version, cfg.GetXdebugMode(version), cfg.GetXdebugStart(version))
 }
 
 // WriteFPMQuadlet writes the systemd quadlet for a PHP-FPM version and reloads the
@@ -704,23 +744,10 @@ func WriteFPMQuadlet(version string) error {
 		return err
 	}
 
-	tmplContent, err := GetQuadletTemplate("lerd-php-fpm.container.tmpl")
+	content, err := renderFPMQuadletContent(version)
 	if err != nil {
 		return err
 	}
-	content := strings.ReplaceAll(tmplContent, "{{.Version}}", version)
-	content = strings.ReplaceAll(content, "{{.VersionShort}}", short)
-	content = strings.ReplaceAll(content, "{{.XdebugIniPath}}", config.PHPConfFile(version))
-	content = strings.ReplaceAll(content, "{{.UserIniPath}}", config.PHPUserIniFile(version))
-	content = strings.ReplaceAll(content, "{{.DumpsDir}}", config.DumpsAssetsDir())
-	content = strings.ReplaceAll(content, "{{.DumpsIniPath}}", config.DumpsIniFile())
-	content = strings.ReplaceAll(content, "{{.DevtoolsIniPath}}", config.DevtoolsIniFile())
-	content = strings.ReplaceAll(content, "{{.SpxIniPath}}", config.SpxIniFile())
-	content = strings.ReplaceAll(content, "{{.SpxDataDir}}", config.SpxDataDir())
-	content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
-	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
-	content = applyShellMounts(content, short)
-	content = InjectExtraVolumes(content, ExtraVolumePaths())
 
 	// Skip the write and daemon-reload if the quadlet is already up to date.
 	// Unnecessary daemon-reloads cause Podman's quadlet generator to regenerate
@@ -754,6 +781,33 @@ func WriteFPMQuadlet(version string) error {
 		}
 	}
 	return nil
+}
+
+// renderFPMQuadletContent renders the PHP-FPM container template for a version
+// with every substitution and mount applied. Shared by the per-version shared
+// image quadlet and the per-site custom-image quadlet (see customfpm.go), which
+// reuses it and overrides only Image/ContainerName so it inherits xdebug,
+// dumps, devtools, the bun volume, and the shell mounts.
+func renderFPMQuadletContent(version string) (string, error) {
+	short := strings.ReplaceAll(version, ".", "")
+	tmplContent, err := GetQuadletTemplate("lerd-php-fpm.container.tmpl")
+	if err != nil {
+		return "", err
+	}
+	content := strings.ReplaceAll(tmplContent, "{{.Version}}", version)
+	content = strings.ReplaceAll(content, "{{.VersionShort}}", short)
+	content = strings.ReplaceAll(content, "{{.XdebugIniPath}}", config.PHPConfFile(version))
+	content = strings.ReplaceAll(content, "{{.UserIniPath}}", config.PHPUserIniFile(version))
+	content = strings.ReplaceAll(content, "{{.DumpsDir}}", config.DumpsAssetsDir())
+	content = strings.ReplaceAll(content, "{{.DumpsIniPath}}", config.DumpsIniFile())
+	content = strings.ReplaceAll(content, "{{.DevtoolsIniPath}}", config.DevtoolsIniFile())
+	content = strings.ReplaceAll(content, "{{.SpxIniPath}}", config.SpxIniFile())
+	content = strings.ReplaceAll(content, "{{.SpxDataDir}}", config.SpxDataDir())
+	content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
+	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
+	content = applyShellMounts(content, short)
+	content = InjectExtraVolumes(content, ExtraVolumePaths())
+	return content, nil
 }
 
 // RewriteFPMQuadlets regenerates the quadlet files for all installed PHP-FPM
@@ -880,7 +934,35 @@ func hostNameLine() string {
 
 // applyShellMounts substitutes shell-related template fields.
 func applyShellMounts(content, versionShort string) string {
-	return strings.ReplaceAll(content, "{{.ZshHistoryDir}}", zshHistoryDir(versionShort))
+	content = strings.ReplaceAll(content, "{{.ZshHistoryDir}}", zshHistoryDir(versionShort))
+	content = strings.ReplaceAll(content, "{{.BunVolumeDir}}", BunVolumeDir())
+	content = strings.ReplaceAll(content, "{{.PlaywrightVolumeDir}}", PlaywrightVolumeDir())
+	return content
+}
+
+// BunVolumeDir is the host directory backing the container's /root/.bun mount,
+// where an opt-in in-container musl bun lives (lerd php:bun install). Shared
+// across PHP versions and created so the bind mount succeeds on first start.
+func BunVolumeDir() string {
+	dir := filepath.Join(config.DataDir(), "bun")
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
+}
+
+// PlaywrightCachePath is the in-container path where the Playwright registry and
+// lerd's musl-chromium shims live (the mount target of PlaywrightVolumeDir). It
+// is baked into the image as PLAYWRIGHT_BROWSERS_PATH and is the single source of
+// truth shared with the cli package's pest:browser command.
+const PlaywrightCachePath = "/root/.cache/ms-playwright"
+
+// PlaywrightVolumeDir is the host directory backing the container's
+// /root/.cache/ms-playwright mount, where opt-in Pest browser testing keeps the
+// Playwright registry and lerd's musl-chromium shims (lerd pest:browser
+// install). Shared across PHP versions and created so the bind mount succeeds.
+func PlaywrightVolumeDir() string {
+	dir := filepath.Join(config.DataDir(), "playwright")
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
 }
 
 // listInstalledPHPVersions returns PHP versions that have a quadlet installed.
@@ -1085,6 +1167,32 @@ func EnsureUserIni(version string) error {
 	content := "; Lerd per-version PHP settings for PHP " + version + "\n" +
 		"; Edit this file, then restart: systemctl --user restart lerd-php" +
 		strings.ReplaceAll(version, ".", "") + "-fpm\n" +
+		";\n" +
+		"; memory_limit = 512M\n" +
+		"; upload_max_filesize = 64M\n" +
+		"; post_max_size = 64M\n" +
+		"; max_execution_time = 60\n"
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// EnsureSitePHPUserIni creates a FrankenPHP site's own per-site user php.ini with
+// defaults if it doesn't exist, healing a stale podman-auto-created directory at
+// the bind-mount path the same way EnsureUserIni does for the per-version file.
+func EnsureSitePHPUserIni(siteName string) error {
+	path := config.SitePHPUserIniFile(siteName)
+	if info, err := os.Stat(path); err == nil {
+		if !info.IsDir() {
+			return nil
+		}
+		if rmErr := os.Remove(path); rmErr != nil {
+			return fmt.Errorf("removing stale user ini directory: %w", rmErr)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	content := "; Lerd per-site PHP settings for " + siteName + " (FrankenPHP)\n" +
+		"; Applies only to this site's container. Edit, then restart the site.\n" +
 		";\n" +
 		"; memory_limit = 512M\n" +
 		"; upload_max_filesize = 64M\n" +

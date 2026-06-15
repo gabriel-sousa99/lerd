@@ -165,6 +165,19 @@ func PHPUserIniFile(version string) string {
 	return filepath.Join(DataDir(), "php", version, "98-user.ini")
 }
 
+// SitePHPUserIniFile is the per-site user php.ini for a runtime site that runs
+// its own container (FrankenPHP). Unlike PHPUserIniFile (shared by every site on
+// a PHP version), this is scoped to one site so its php.ini is independent.
+func SitePHPUserIniFile(siteName string) string {
+	return filepath.Join(DataDir(), "php", "sites", siteName, "98-user.ini")
+}
+
+// SitePHPUserIniBkpDir holds timestamped backups of a site's per-site user ini,
+// next to (not inside) the file so the container's conf.d scan never loads them.
+func SitePHPUserIniBkpDir(siteName string) string {
+	return filepath.Join(DataDir(), "php", "sites", siteName, "ini.bkp")
+}
+
 // PHPUserIniBkpDir holds timestamped backups of the per-version user ini
 // produced by the web UI editor. It sits next to (not inside) the version
 // directory's ini scan path so the FPM container does not load backup files
@@ -410,6 +423,53 @@ func RunDir() string {
 // UISocketPath returns the path to the lerd-ui unix domain socket.
 func UISocketPath() string {
 	return filepath.Join(RunDir(), "lerd-ui.sock")
+}
+
+// IdleActivityFile is where lerd-ui persists the per-site last-active times so a
+// restart (deploy, `lerd start`) restores the idle countdowns instead of
+// re-seeding everything to now. Lives in RunDir alongside the other runtime
+// state.
+func IdleActivityFile() string {
+	return filepath.Join(RunDir(), "idle-activity.json")
+}
+
+// AccessSocketPath is the unix datagram socket lerd-ui binds to receive the
+// nginx access feed (one "$host" line per request) that drives idle-suspend's
+// per-site last-active tracking. It lives in RunDir, which is bind-mounted into
+// the lerd-nginx container at the same path, so nginx's syslog access_log can
+// reach it without container→host TCP routing.
+func AccessSocketPath() string {
+	return filepath.Join(RunDir(), "lerd-access.sock")
+}
+
+// stoppedMarkerPath is the sentinel `lerd stop` writes and `lerd start` clears.
+// It lets long-running loops (the worker health watcher, heal notifications)
+// tell an intentional shutdown from worker drift.
+func stoppedMarkerPath() string {
+	return filepath.Join(RunDir(), "stopped")
+}
+
+// MarkStopped records that lerd was intentionally stopped, so background
+// watchers suppress worker heal/notification noise until the next start.
+func MarkStopped() error {
+	if err := os.MkdirAll(RunDir(), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(stoppedMarkerPath(), []byte("stopped\n"), 0644)
+}
+
+// ClearStopped clears the intentional-stop marker (lerd is starting or running).
+func ClearStopped() error {
+	if err := os.Remove(stoppedMarkerPath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// IsStopped reports whether lerd was intentionally stopped via `lerd stop`.
+func IsStopped() bool {
+	_, err := os.Stat(stoppedMarkerPath())
+	return err == nil
 }
 
 // ContainerHostsFile returns the path to the shared hosts file mounted into PHP containers.

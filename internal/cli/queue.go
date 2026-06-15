@@ -168,11 +168,10 @@ func QueueStartForSite(siteName, sitePath, phpVersion string) error {
 }
 
 // buildQueueUnit renders the systemd unit body for a queue worker. Pure
-// function so the dep wiring can be exercised in tests.
-func buildQueueUnit(siteName, sitePath, phpVersion, queue string, tries, timeout int) string {
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
+// function: fpmUnit (the container to exec into) is resolved by the caller,
+// so the dep wiring can be exercised in tests without the live site registry.
+func buildQueueUnit(siteName, sitePath, fpmUnit, queue string, tries, timeout int) string {
+	container := fpmUnit
 	artisanArgs := fmt.Sprintf("queue:work --queue=%s --tries=%d --timeout=%d", queue, tries, timeout)
 
 	// Wants= the backing service so systemd pulls it in; Restart=always covers
@@ -243,8 +242,10 @@ func QueueRestartForSite(siteName, sitePath, phpVersion string) error {
 		}
 	}
 
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	container := "lerd-php" + versionShort + "-fpm"
+	container := resolveWorkerFPMUnit(siteName, phpVersion)
+	if container == "" {
+		container = "lerd-php" + strings.ReplaceAll(phpVersion, ".", "") + "-fpm"
+	}
 
 	if running, _ := podman.ContainerRunning(container); !running {
 		return nil

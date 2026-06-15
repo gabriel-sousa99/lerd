@@ -56,6 +56,32 @@ func TestSaveCustomService_RejectsNewlineInEnv(t *testing.T) {
 	}
 }
 
+func TestSaveCustomService_RejectsNewlineInQuadletFields(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// Each of these fields is written into the generated .container quadlet, so
+	// a newline must be rejected to stop directive injection (e.g. a repo's
+	// inline service smuggling PodmanArgs=--privileged / Volume=/:/host).
+	cases := []func(*CustomService){
+		func(s *CustomService) { s.Exec = "redis-server\nPodmanArgs=--privileged" },
+		func(s *CustomService) { s.Image = "alpine\nVolume=/:/host:rw" },
+		func(s *CustomService) { s.Userns = "keep-id\nPodmanArgs=--pid=host" },
+		func(s *CustomService) { s.DataDir = "/data\nExec=/bin/sh -c pwned" },
+		func(s *CustomService) { s.Description = "x\nExecStartPost=/bin/sh -c pwned" },
+		func(s *CustomService) { s.Ports = []string{"8080:80\nVolume=/:/host"} },
+	}
+	for i, mutate := range cases {
+		svc := &CustomService{Name: "evil", Image: "alpine"}
+		mutate(svc)
+		if err := SaveCustomService(svc); err == nil {
+			t.Errorf("case %d: expected rejection of a newline-bearing quadlet field", i)
+		}
+	}
+	// A clean service still saves.
+	if err := SaveCustomService(&CustomService{Name: "good", Image: "alpine", Exec: "redis-server"}); err != nil {
+		t.Errorf("clean service should save: %v", err)
+	}
+}
+
 func TestLoadCustomServiceFromFile_StripsLegacyFilesField(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "phpmyadmin.yaml")
@@ -125,5 +151,34 @@ func TestMaterializeServiceFiles_OverwritesReadOnlyFile(t *testing.T) {
 
 	if got, want := filepath.Dir(path), ServiceFilesDir(svc.Name); got != want {
 		t.Errorf("dir = %q, want %q", got, want)
+	}
+}
+
+func TestValidateCustomService_rejectsEnvInjection(t *testing.T) {
+	svc := &CustomService{Name: "evil", Image: "alpine",
+		Environment: map[string]string{"X": "ok\nPodmanArgs=--privileged"}}
+	if err := ValidateCustomService(svc); err == nil {
+		t.Error("expected error for newline in environment value")
+	}
+}
+
+func TestValidateCustomService_rejectsResolvedDynamicEnvInjection(t *testing.T) {
+	// The injected directive rides in the dynamic_env KEY; after ResolveDynamicEnv
+	// copies it into Environment, the generation-boundary validation must catch it.
+	svc := &CustomService{Name: "evil", Image: "alpine",
+		DynamicEnv: map[string]string{"X=safe\nPodmanArgs=--privileged\nY": "discover_family:mysql"}}
+	if err := ResolveDynamicEnv(svc); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := ValidateCustomService(svc); err == nil {
+		t.Error("expected error for injection char in resolved dynamic_env key")
+	}
+}
+
+func TestValidateCustomService_allowsClean(t *testing.T) {
+	svc := &CustomService{Name: "ok", Image: "alpine",
+		Environment: map[string]string{"FOO": "bar"}}
+	if err := ValidateCustomService(svc); err != nil {
+		t.Errorf("clean service rejected: %v", err)
 	}
 }

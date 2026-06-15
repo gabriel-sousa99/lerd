@@ -17,7 +17,11 @@ export interface StatusResponse {
   php_default: string;
   node_default: string;
   node_managed_by_lerd: boolean;
+  bun_available: boolean;
+  bun_version: string;
+  using_system_bun: boolean;
   watcher_running: boolean;
+  frankenphp_php_versions: string[];
 }
 
 const empty: StatusResponse = {
@@ -27,7 +31,11 @@ const empty: StatusResponse = {
   php_default: '',
   node_default: '',
   node_managed_by_lerd: true,
-  watcher_running: false
+  bun_available: false,
+  bun_version: '',
+  using_system_bun: false,
+  watcher_running: false,
+  frankenphp_php_versions: []
 };
 
 export const status = writable<StatusResponse>(empty);

@@ -132,3 +132,33 @@ func svcNames(ss []ServiceRow) []string {
 	}
 	return out
 }
+
+func TestGroupSecondariesUnderMains(t *testing.T) {
+	list := []siteinfo.EnrichedSite{
+		{Name: "admin-starlane", Domains: []string{"admin.starlane.test"}, Group: "starlane", GroupSubdomain: "admin"},
+		{Name: "starlane", Domains: []string{"starlane.test"}, Group: "starlane"},
+		{Name: "blog", Domains: []string{"blog.test"}},
+	}
+	got := groupSecondariesUnderMains(list)
+	want := []string{"starlane", "admin-starlane", "blog"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i, n := range want {
+		if got[i].Name != n {
+			t.Errorf("pos %d = %q, want %q (full: %v)", i, got[i].Name, n, names(got))
+		}
+	}
+}
+
+func TestGroupSecondariesUnderMains_orphanKeepsPlace(t *testing.T) {
+	// Secondary whose main is absent (e.g. filtered out) must still appear.
+	list := []siteinfo.EnrichedSite{
+		{Name: "admin-starlane", Domains: []string{"admin.starlane.test"}, Group: "starlane", GroupSubdomain: "admin"},
+		{Name: "blog", Domains: []string{"blog.test"}},
+	}
+	got := groupSecondariesUnderMains(list)
+	if len(got) != 2 {
+		t.Fatalf("orphan secondary dropped: %v", names(got))
+	}
+}

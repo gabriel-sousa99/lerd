@@ -36,14 +36,18 @@ type Framework struct {
 	// Version is the framework major version this definition targets (e.g. "11", "7").
 	Version string `yaml:"version,omitempty"`
 	// PHP defines the supported PHP version range for this framework version.
-	PHP       FrameworkPHP               `yaml:"php,omitempty"`
-	Detect    []FrameworkRule            `yaml:"detect,omitempty"`
-	PublicDir string                     `yaml:"public_dir"`
-	Env       FrameworkEnvConf           `yaml:"env,omitempty"`
-	Composer  string                     `yaml:"composer,omitempty"` // auto | true | false
-	NPM       string                     `yaml:"npm,omitempty"`      // auto | true | false
-	Workers   map[string]FrameworkWorker `yaml:"workers,omitempty"`
-	Setup     []FrameworkSetupCmd        `yaml:"setup,omitempty"`
+	PHP       FrameworkPHP    `yaml:"php,omitempty"`
+	Detect    []FrameworkRule `yaml:"detect,omitempty"`
+	PublicDir string          `yaml:"public_dir"`
+	// SourceDirs overrides which project directories the activity watcher treats
+	// as source for idle-suspend (a save there keeps the site awake). When empty,
+	// config.DefaultSourceDirs applies. Paths are relative to the project root.
+	SourceDirs []string                   `yaml:"source_dirs,omitempty"`
+	Env        FrameworkEnvConf           `yaml:"env,omitempty"`
+	Composer   string                     `yaml:"composer,omitempty"` // auto | true | false
+	NPM        string                     `yaml:"npm,omitempty"`      // auto | true | false
+	Workers    map[string]FrameworkWorker `yaml:"workers,omitempty"`
+	Setup      []FrameworkSetupCmd        `yaml:"setup,omitempty"`
 	// Commands are on-demand actions surfaced in the dashboard "Run command"
 	// dropdown. See FrameworkCommand for the schema. Projects extend or
 	// override this list in .lerd.yaml; use ResolveCommands to merge.
@@ -81,6 +85,16 @@ type FrameworkFrankenPHP struct {
 	// WorkerEntrypoint, when set and the site opts into worker mode, is used
 	// instead of Entrypoint. When SupportsWorker is false the flag is ignored.
 	WorkerEntrypoint []string `yaml:"worker_entrypoint,omitempty"`
+	// WorkerReloadEntrypoint, when set, is the watch-enabled variant of
+	// WorkerEntrypoint, selected instead of it when the project opts the
+	// "octane" worker into auto-reload (restart on file changes) for
+	// development. Keeping the watch flag in the framework definition rather
+	// than rewriting WorkerEntrypoint in Go means the store stays the single
+	// source of truth for what runs; core only appends the platform polling
+	// flag on hosts where the container can't observe filesystem events (see
+	// ResolveFrankenPHPWorkerEntrypoint). Laravel sets it to the octane:start
+	// command with --watch.
+	WorkerReloadEntrypoint []string `yaml:"worker_reload_entrypoint,omitempty"`
 	// SupportsWorker declares whether the framework ships a FrankenPHP worker
 	// script. If false, `--worker` is a no-op and the regular entrypoint is used.
 	SupportsWorker bool `yaml:"supports_worker,omitempty"`
@@ -271,6 +285,14 @@ type FrameworkEnvConf struct {
 	// URLKey is the env key that holds the application URL (default: APP_URL).
 	URLKey string `yaml:"url_key,omitempty"`
 
+	// Vars are unconditional KEY=VALUE env defaults the framework always wants
+	// applied during `lerd env`, regardless of which services are detected
+	// (e.g. CodeIgniter's CI_ENVIRONMENT=development for local dev). They
+	// support the same {{...}} template placeholders as service vars and are
+	// applied as defaults, so detected-service values and personal
+	// .env.lerd_override entries still win over them.
+	Vars []string `yaml:"vars,omitempty"`
+
 	// Services defines per-service detection rules and env vars to apply.
 	// Keys match the built-in service names: mysql, postgres, redis, meilisearch, rustfs, mailpit.
 	Services map[string]FrameworkServiceDef `yaml:"services,omitempty"`
@@ -282,7 +304,7 @@ type FrameworkEnvConf struct {
 // EnvKeyGeneration describes how to generate an application encryption key.
 type EnvKeyGeneration struct {
 	EnvKey         string `yaml:"env_key"`                   // env var to check/set (e.g. "APP_KEY")
-	Command        string `yaml:"command,omitempty"`         // artisan command to run if vendor/ exists (e.g. "key:generate")
+	Command        string `yaml:"command,omitempty"`         // console command to run if vendor/ exists, via the framework's console binary (e.g. "key:generate")
 	FallbackPrefix string `yaml:"fallback_prefix,omitempty"` // prefix for random key fallback (e.g. "base64:")
 }
 
@@ -488,11 +510,19 @@ var laravelFramework = &Framework{
 		// Non-worker serves via plain frankenphp php-server so code edits take effect
 		// immediately (fresh request lifecycle), same UX as FPM.
 		Entrypoint: []string{"frankenphp", "php-server", "-l", ":8000", "-r", "public/"},
-		// Worker runs Octane; pcntl is installed at boot since dunglas/frankenphp
-		// doesn't ship it. Code edits need `lerd restart` until we add --watch.
+		// Worker runs Octane. pcntl and nodejs are baked into lerd's derived
+		// FrankenPHP image now (see podman.BuildFrankenPHPImage), so the entrypoint
+		// no longer installs them at container start. By default code edits need
+		// `lerd restart`; opting the octane worker into reload (lerd octane:reload
+		// on) selects the watch variant below so the server restarts on changes.
 		WorkerEntrypoint: []string{"sh", "-c",
-			`install-php-extensions pcntl >/dev/null && ` +
-				`exec php artisan octane:start --server=frankenphp --host=0.0.0.0 --port=8000 --workers=auto`},
+			`exec php artisan octane:start --server=frankenphp --host=0.0.0.0 --port=8000 --workers=auto`},
+		// Watch variant: same command plus --watch. Octane's watcher runs
+		// vendor/laravel/octane/bin/file-watcher.cjs under node (baked into the
+		// image) and resolves the chokidar npm package from the project. Core
+		// appends --poll on hosts where the container can't see host fs events.
+		WorkerReloadEntrypoint: []string{"sh", "-c",
+			`exec php artisan octane:start --server=frankenphp --host=0.0.0.0 --port=8000 --workers=auto --watch`},
 		SupportsWorker: true,
 	},
 	// Oracle fork: built-in commands intentionally exclude destructive

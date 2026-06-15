@@ -20,6 +20,11 @@ import (
 // is called from within lerd setup / lerd init (prevents infinite recursion).
 var linkSkipSetupPrompt bool
 
+// linkAssumeYes approves a host-proxy dev command without the interactive
+// confirmation prompt. Set by `lerd link --yes` and by the UI link flow, where
+// the user's explicit action is the consent.
+var linkAssumeYes bool
+
 // presetVersionSuffix returns " (5.7)" for a non-empty version, otherwise "".
 func presetVersionSuffix(version string) string {
 	if version == "" {
@@ -30,7 +35,7 @@ func presetVersionSuffix(version string) string {
 
 // NewLinkCmd returns the link command.
 func NewLinkCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "link [domain]",
 		Short: "Link the current directory as a site",
 		Long:  "Register the current directory as a lerd site. The optional argument is the domain name without the TLD (e.g. 'myapp' becomes myapp.test). Defaults to the directory name.",
@@ -39,6 +44,8 @@ func NewLinkCmd() *cobra.Command {
 			return runLink(args)
 		},
 	}
+	cmd.Flags().BoolVar(&linkAssumeYes, "yes", false, "Approve a host-proxy dev command without the confirmation prompt")
+	return cmd
 }
 
 func runLink(args []string) error {
@@ -161,6 +168,41 @@ func runLink(args []string) error {
 		return linkApplyServices(cwd, proj)
 	}
 
+	// Host-proxy path: the project runs a dev server on the host and nginx
+	// reverse-proxies to it. No container, no PHP/framework detection.
+	if proj != nil && proj.Proxy != nil && proj.Proxy.Port > 0 {
+		// Gate supervising a dev command on the host behind explicit consent: a
+		// re-link with the same approved command, --yes, or the wizard's own
+		// choice passes silently; a fresh repo-authored command prompts.
+		approved := linkAssumeYes
+		if existing, err := config.FindSite(name); err == nil && existing.HostCommand == proj.Proxy.Command {
+			approved = true
+		}
+		if err := approveHostProxyCommand(name, proj.Proxy.Command, approved); err != nil {
+			return err
+		}
+		secured := siteops.CleanupRelink(cwd, name) || proj.Secured
+		site := config.Site{
+			Name:        name,
+			Domains:     domains,
+			Path:        cwd,
+			Secured:     secured,
+			HostPort:    proj.Proxy.Port,
+			HostSSL:     proj.Proxy.SSL,
+			HostCommand: proj.Proxy.Command,
+		}
+		if err := config.AddSite(site); err != nil {
+			return fmt.Errorf("registering site: %w", err)
+		}
+		_ = config.SyncProjectDomains(cwd, site.Domains, cfg.DNS.TLD)
+		if err := siteops.FinishHostProxyLink(site); err != nil {
+			return err
+		}
+		startHostProxyWorker(site, proj.Proxy)
+		fmt.Printf("Linked: %s -> %s (host proxy, port %d)\n", name, strings.Join(domains, ", "), proj.Proxy.Port)
+		return linkApplyServices(cwd, proj)
+	}
+
 	framework, ok := resolveFramework(cwd)
 	detectedPublicDir := ""
 	if proj != nil && proj.PublicDir != "" {
@@ -230,12 +272,29 @@ func runLink(args []string) error {
 		site.Runtime = proj.Runtime
 		site.RuntimeWorker = proj.RuntimeWorker
 	}
+	// A container: config with no port on a PHP project means the site is served
+	// by fastcgi from its own image, built from the project's Containerfile.
+	if proj != nil && proj.Container != nil && proj.Container.Port == 0 {
+		site.Runtime = "fpm-custom"
+	}
 
 	if err := config.AddSite(site); err != nil {
 		return fmt.Errorf("registering site: %w", err)
 	}
 
+	// A re-link of a site that dropped its frankenphp runtime leaves the old
+	// per-site FrankenPHP quadlet behind; reconcile it to the site's real type.
+	reconcileStaleFrankenPHP(site)
+
 	_ = config.SyncProjectDomains(cwd, site.Domains, cfg.DNS.TLD)
+
+	if site.IsCustomFPM() {
+		if err := siteops.FinishCustomFPMLink(site, proj.Container); err != nil {
+			return err
+		}
+		fmt.Printf("Linked: %s -> %s (custom FPM image, PHP %s, Framework: %s)\n", name, strings.Join(domains, ", "), phpVersion, framework)
+		return linkApplyServices(cwd, proj)
+	}
 
 	if site.IsFrankenPHP() {
 		if err := siteops.FinishFrankenPHPLink(site); err != nil {
@@ -319,6 +378,27 @@ func runLink(args []string) error {
 
 // linkApplyServices installs and starts services declared in .lerd.yaml.
 // Shared by both the standard PHP link path and the custom container path.
+// approveInlineService surfaces a brand-new inline service defined in a
+// project's .lerd.yaml and confirms it before lerd installs and runs it as a
+// container, since the image and command come from the (possibly cloned) repo.
+// A scripted or UI link (--yes) and a non-interactive run proceed; an
+// interactive run prompts.
+func approveInlineService(svc *config.CustomService) bool {
+	if linkAssumeYes || !isInteractive() {
+		return true
+	}
+	fmt.Printf("\nThis project defines a service lerd will run as a container:\n")
+	fmt.Printf("  name:  %s\n", svc.Name)
+	fmt.Printf("  image: %s\n", svc.Image)
+	if svc.Exec != "" {
+		fmt.Printf("  exec:  %s\n", svc.Exec)
+	}
+	if len(svc.Ports) > 0 {
+		fmt.Printf("  ports: %s\n", strings.Join(svc.Ports, ", "))
+	}
+	return promptConfirm("Install and start it?")
+}
+
 func linkApplyServices(cwd string, proj *config.ProjectConfig) error {
 	if proj == nil {
 		return nil
@@ -336,6 +416,15 @@ func linkApplyServices(cwd string, proj *config.ProjectConfig) error {
 			svc.Custom.Name = svc.Name
 			existing, loadErr := config.LoadCustomService(svc.Name)
 			shouldSave := true
+			if loadErr != nil {
+				// Brand-new inline service from the project's .lerd.yaml: its
+				// image and command come from the (possibly cloned) repo, so
+				// show what it will run and confirm before installing it.
+				if !approveInlineService(svc.Custom) {
+					fmt.Printf("  Skipped service %s\n", svc.Name)
+					continue
+				}
+			}
 			if loadErr == nil {
 				action, err := confirmReplace("service", svc.Name, existing, svc.Custom)
 				if err != nil {

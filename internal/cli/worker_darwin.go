@@ -39,6 +39,12 @@ const defaultMacOSNodeVersion = "22"
 // launchd's StartCalendarInterval would work but the unit translation
 // isn't wired through services.Mgr yet.
 func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, command, restart, schedule, fpmUnit string, host bool) (bool, error) {
+	// Generation-boundary guard so every caller is covered (incl. boot
+	// restore): a newline would break out of the launchd guard-script line
+	// from a cloned repo's .lerd.yaml custom_workers entry.
+	if config.ContainsUnitInjectionChars(command) {
+		return false, fmt.Errorf("worker unit %q: command must not contain newline or NUL", unitName)
+	}
 	if schedule != "" {
 		fmt.Printf("[WARN] worker %s has schedule=%q which is not yet supported on macOS — skipping\n", unitName, schedule)
 		return false, nil
@@ -77,9 +83,22 @@ func writeWorkerHostUnit(unitName, sitePath, command, restart string) (bool, err
 	scriptPath := filepath.Join(workersDir, unitName+".sh")
 
 	fnmBin := filepath.Join(config.BinDir(), "fnm")
-	nodeVersion := resolveNodeVersionForHostWorker(sitePath)
+	// bun projects rewrite npm/npx/node to bun and run it directly (no fnm),
+	// with ~/.bun/bin added to PATH; Node projects resolve a version via fnm;
+	// host-proxy sites in any other language run the command directly.
+	nodeVersion := ""
+	bunDir := ""
+	if bun := bunRunnerFor(sitePath); bun != "" {
+		command = nodeDet.Bunify(command)
+		bunDir = filepath.Dir(bun)
+	} else if isNodeProject(sitePath) && lerdManagesNode() {
+		// Only pin via fnm when lerd manages Node; otherwise nodeVersion stays
+		// empty and the guard script runs the command directly against the
+		// user's system node (after node:unmanage there is no fnm Node).
+		nodeVersion = resolveNodeVersionForHostWorker(sitePath)
+	}
 
-	script := buildDarwinHostWorkerGuardScript(fnmBin, config.BinDir(), nodeVersion, sitePath, command)
+	script := buildDarwinHostWorkerGuardScript(fnmBin, config.BinDir(), nodeVersion, sitePath, command, bunDir)
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
 		return false, fmt.Errorf("writing host worker guard script: %w", err)
 	}

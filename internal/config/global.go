@@ -41,14 +41,23 @@ type GlobalConfig struct {
 	// known GUI editor (code/cursor/phpstorm/subl/zed), then xdg-open/open.
 	Editor string `yaml:"editor,omitempty" mapstructure:"editor"`
 	PHP    struct {
-		DefaultVersion string              `yaml:"default_version" mapstructure:"default_version"`
-		XdebugEnabled  map[string]bool     `yaml:"xdebug_enabled"  mapstructure:"xdebug_enabled"`
-		XdebugMode     map[string]string   `yaml:"xdebug_mode,omitempty" mapstructure:"xdebug_mode"`
-		Extensions     map[string][]string `yaml:"extensions"      mapstructure:"extensions"`
+		DefaultVersion string            `yaml:"default_version" mapstructure:"default_version"`
+		XdebugEnabled  map[string]bool   `yaml:"xdebug_enabled"  mapstructure:"xdebug_enabled"`
+		XdebugMode     map[string]string `yaml:"xdebug_mode,omitempty" mapstructure:"xdebug_mode"`
+		// XdebugStart maps a PHP version to its xdebug.start_with_request value
+		// (yes | trigger | no). Absent means the default "yes" (connect on every
+		// request). "trigger"/"no" support on-demand debugging via the control
+		// socket without flooding the IDE from every request and worker.
+		XdebugStart map[string]string   `yaml:"xdebug_start,omitempty" mapstructure:"xdebug_start"`
+		Extensions  map[string][]string `yaml:"extensions"      mapstructure:"extensions"`
 		// ExtApkDeps maps a custom extension name to extra Alpine packages its
 		// build needs. Keyed by extension (deps don't vary by PHP version).
 		// lerd already knows the deps for some extensions; this is for the rest.
 		ExtApkDeps map[string][]string `yaml:"ext_apk_deps,omitempty" mapstructure:"ext_apk_deps"`
+		// Packages maps a PHP version to extra Alpine packages to install in the
+		// FPM image's runtime stage (lerd php:pkg). For CLI tools and runtime
+		// libraries users want available in the container; re-applied on rebuild.
+		Packages map[string][]string `yaml:"packages,omitempty" mapstructure:"packages"`
 	} `yaml:"php" mapstructure:"php"`
 	Node struct {
 		DefaultVersion string `yaml:"default_version" mapstructure:"default_version"`
@@ -169,8 +178,45 @@ type GlobalConfig struct {
 		// installs on. Toggled via `lerd notify on/off` and the tray.
 		Disabled bool `yaml:"disabled,omitempty" mapstructure:"disabled"`
 	} `yaml:"notifications,omitempty" mapstructure:"notifications"`
+	HostProxy struct {
+		// Disabled refuses to set up or start any host-proxy dev-server unit,
+		// for users who never want lerd supervising a process on the host.
+		// Inverted so the zero value keeps the feature available.
+		Disabled bool `yaml:"disabled,omitempty" mapstructure:"disabled"`
+		// SkipConfirmation runs a newly-linked host-proxy command without the
+		// interactive "start this on your host?" prompt. Off by default so a
+		// command from a cloned repo never runs unconfirmed.
+		SkipConfirmation bool `yaml:"skip_confirmation,omitempty" mapstructure:"skip_confirmation"`
+	} `yaml:"host_proxy,omitempty" mapstructure:"host_proxy"`
+	IdleSuspend struct {
+		// Enabled turns on activity-driven worker suspension: when a site sees
+		// no activity for Timeout, its suspendable workers (queue, horizon, ...)
+		// are gracefully stopped and resumed on the next request. Off by default
+		// so a quiet dev box reclaims worker memory only once the user opts in.
+		// Idle-suspend is a single global policy, not configured per site.
+		Enabled bool `yaml:"enabled,omitempty" mapstructure:"enabled"`
+		// Timeout is how long a site must be idle before its workers suspend, as
+		// a Go duration string ("30m"). Empty or unparseable falls back to
+		// DefaultIdleSuspendTimeout; read it via IdleSuspendTimeout.
+		Timeout string `yaml:"timeout,omitempty" mapstructure:"timeout"`
+	} `yaml:"idle_suspend,omitempty" mapstructure:"idle_suspend"`
 	ParkedDirectories []string                 `yaml:"parked_directories" mapstructure:"parked_directories"`
 	Services          map[string]ServiceConfig `yaml:"services"           mapstructure:"services"`
+}
+
+// DefaultIdleSuspendTimeout is how long a site stays idle before its
+// suspendable workers are stopped, when no explicit timeout is configured.
+const DefaultIdleSuspendTimeout = 30 * time.Minute
+
+// IdleSuspendTimeout returns the effective global idle timeout, falling back to
+// DefaultIdleSuspendTimeout when unset, unparseable, or non-positive.
+func (c *GlobalConfig) IdleSuspendTimeout() time.Duration {
+	if c.IdleSuspend.Timeout != "" {
+		if d, err := time.ParseDuration(c.IdleSuspend.Timeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return DefaultIdleSuspendTimeout
 }
 
 // DefaultRequestTimeout is nginx's built-in fastcgi/proxy read-timeout default
@@ -203,6 +249,15 @@ func (c *GlobalConfig) WorkerExecMode() string {
 		return WorkerExecModeContainer
 	}
 	return WorkerExecModeExec
+}
+
+// DNSManaged reports whether lerd is managing local DNS, which is the
+// prerequisite for HTTPS (mkcert CA, *.test resolution). A nil receiver counts
+// as managed, matching how the rest of the codebase treats an absent config
+// (an unconfigured install behaves as if DNS is enabled). It is the single
+// predicate the install wizard, `lerd secure`, and the cert layer all share.
+func (c *GlobalConfig) DNSManaged() bool {
+	return c == nil || c.DNS.Enabled
 }
 
 func defaultConfig() *GlobalConfig {
@@ -283,6 +338,16 @@ func invalidateGlobalCache() {
 	globalCacheMu.Unlock()
 }
 
+// EffectiveTLD returns the configured DNS TLD, falling back to "test" when the
+// global config can't be loaded or leaves it empty. Single source of truth for
+// the many callers that need the active TLD with that default.
+func EffectiveTLD() string {
+	if cfg, err := LoadGlobal(); err == nil && cfg.DNS.TLD != "" {
+		return cfg.DNS.TLD
+	}
+	return "test"
+}
+
 // LoadGlobal reads config.yaml via viper, returning defaults if the file is absent.
 func LoadGlobal() (*GlobalConfig, error) {
 	cfgFile := GlobalConfigFile()
@@ -349,6 +414,12 @@ func cloneGlobalConfig(in *GlobalConfig) *GlobalConfig {
 		out.PHP.XdebugMode = make(map[string]string, len(in.PHP.XdebugMode))
 		for k, v := range in.PHP.XdebugMode {
 			out.PHP.XdebugMode[k] = v
+		}
+	}
+	if in.PHP.XdebugStart != nil {
+		out.PHP.XdebugStart = make(map[string]string, len(in.PHP.XdebugStart))
+		for k, v := range in.PHP.XdebugStart {
+			out.PHP.XdebugStart[k] = v
 		}
 	}
 	if in.PHP.Extensions != nil {
@@ -498,6 +569,28 @@ func (c *GlobalConfig) SetXdebugMode(version, mode string) {
 	c.PHP.XdebugMode[version] = mode
 }
 
+// GetXdebugStart returns the xdebug.start_with_request value for version,
+// defaulting to "yes" (connect on every request) when unset.
+func (c *GlobalConfig) GetXdebugStart(version string) string {
+	if v, ok := c.PHP.XdebugStart[version]; ok && v != "" {
+		return v
+	}
+	return "yes"
+}
+
+// SetXdebugStart records the xdebug.start_with_request value for version. An
+// empty value (or "yes", the default) clears the entry so the config stays lean.
+func (c *GlobalConfig) SetXdebugStart(version, value string) {
+	if value == "" || value == "yes" {
+		delete(c.PHP.XdebugStart, version)
+		return
+	}
+	if c.PHP.XdebugStart == nil {
+		c.PHP.XdebugStart = map[string]string{}
+	}
+	c.PHP.XdebugStart[version] = value
+}
+
 // GetExtensions returns the custom extensions configured for the given PHP version.
 func (c *GlobalConfig) GetExtensions(version string) []string {
 	if c.PHP.Extensions == nil {
@@ -550,6 +643,47 @@ func (c *GlobalConfig) RemoveExtension(version, ext string) {
 		if len(c.PHP.ExtApkDeps) == 0 {
 			c.PHP.ExtApkDeps = nil
 		}
+	}
+}
+
+// GetPackages returns the extra Alpine packages configured for the given PHP
+// version's FPM image.
+func (c *GlobalConfig) GetPackages(version string) []string {
+	if c.PHP.Packages == nil {
+		return nil
+	}
+	return c.PHP.Packages[version]
+}
+
+// AddPackage adds pkg to the extra-packages list for version (no-op if present).
+func (c *GlobalConfig) AddPackage(version, pkg string) {
+	if c.PHP.Packages == nil {
+		c.PHP.Packages = map[string][]string{}
+	}
+	for _, p := range c.PHP.Packages[version] {
+		if p == pkg {
+			return
+		}
+	}
+	c.PHP.Packages[version] = append(c.PHP.Packages[version], pkg)
+}
+
+// RemovePackage removes pkg from the extra-packages list for version.
+func (c *GlobalConfig) RemovePackage(version, pkg string) {
+	if c.PHP.Packages == nil {
+		return
+	}
+	pkgs := c.PHP.Packages[version]
+	filtered := pkgs[:0]
+	for _, p := range pkgs {
+		if p != pkg {
+			filtered = append(filtered, p)
+		}
+	}
+	if len(filtered) == 0 {
+		delete(c.PHP.Packages, version)
+	} else {
+		c.PHP.Packages[version] = filtered
 	}
 }
 

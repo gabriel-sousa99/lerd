@@ -91,6 +91,19 @@ func ensureImages() {
 				Run:   func(w io.Writer) error { return podman.BuildFPMImageTo(v, false, w) },
 			})
 
+		case strings.HasPrefix(img, "localhost/lerd-frankenphp") && strings.HasSuffix(img, ":local"):
+			// Build the derived FrankenPHP image, e.g.
+			// localhost/lerd-frankenphp84:local → 8.4
+			short := strings.TrimSuffix(strings.TrimPrefix(img, "localhost/lerd-frankenphp"), ":local")
+			if len(short) < 2 {
+				continue // malformed tag with no version digits; skip rather than panic
+			}
+			v := short[:1] + "." + short[1:]
+			jobs = append(jobs, BuildJob{
+				Label: "FrankenPHP " + v,
+				Run:   func(w io.Writer) error { return podman.BuildFrankenPHPImage(v, false, w) },
+			})
+
 		case strings.HasPrefix(img, "lerd-custom-") && strings.HasSuffix(img, ":local"):
 			// Rebuild custom container from the site's Containerfile.
 			siteName := strings.TrimSuffix(strings.TrimPrefix(img, "lerd-custom-"), ":local")
@@ -229,6 +242,8 @@ func installedCustomContainerUnits() []string {
 			unitName = podman.CustomContainerName(site.Name)
 		case site.IsFrankenPHP():
 			unitName = podman.FrankenPHPContainerName(site.Name)
+		case site.IsCustomFPM():
+			unitName = podman.CustomFPMContainerName(site.Name)
 		default:
 			continue
 		}
@@ -461,6 +476,10 @@ func lerdDNSAnswering() bool {
 }
 
 func runStart(_ *cobra.Command, _ []string) error {
+	// Clear the intentional-stop marker up front: we're bringing lerd up, so the
+	// worker health watcher should resume reporting real drift once units are back.
+	_ = config.ClearStopped()
+
 	// Pre-ensure LastUp lets healMachineRestartIfNeeded distinguish an
 	// external podman-machine restart (which orphans gvproxy port forwards)
 	// from a stop+start the ensure itself performs. No-op on Linux.
@@ -567,6 +586,12 @@ func runStart(_ *cobra.Command, _ []string) error {
 	workerUnits = append(workerUnits, registeredFrameworkWorkerUnits()...)
 	workerUnits = append(workerUnits, registeredTimerUnits()...)
 	workerUnits = collapseTimerSiblings(dedupeStrings(workerUnits))
+	// Don't resurrect workers the idle engine has gracefully suspended. Without
+	// this, a boot or a manual start after stop would start a deliberately-asleep
+	// worker while the registry still records it suspended, drifting the dashboard
+	// (site shown asleep, workers actually running) and making workerheal skip it.
+	// Mirrors the worktree autostart filter; real activity wakes it via the engine.
+	workerUnits = dropIdleSuspendedUnits(workerUnits)
 
 	fmt.Println("Starting Lerd...")
 
@@ -588,7 +613,23 @@ func runStart(_ *cobra.Command, _ []string) error {
 		return jobs
 	}
 
-	RunParallel(makeJobs(serviceUnits)) //nolint:errcheck
+	serviceErr := RunParallel(makeJobs(serviceUnits))
+	// When the Podman Machine's container storage is left corrupt after an
+	// unclean host shutdown, every container start fails. Remount storage and
+	// rebuild the stale containers (data is host bind-mounted, so this is safe),
+	// then retry the start pass once.
+	if healOverlayCorruptionIfNeeded(serviceErr) {
+		serviceErr = RunParallel(makeJobs(serviceUnits))
+	}
+	// If the storage is still corrupt the heal couldn't fix it; every worker
+	// (and the DNS and tray steps below) would fail the same way and bury the
+	// recovery guidance. reportOverlayHealOutcome prints the guidance and
+	// reports true only on the platform where this error occurs (macOS), so we
+	// stop there; on every other platform it is a no-op that returns false and
+	// the start continues as normal.
+	if reportOverlayHealOutcome(serviceErr) {
+		return nil
+	}
 	if len(workerUnits) > 0 {
 		RunParallel(makeJobs(workerUnits)) //nolint:errcheck
 	}
@@ -795,8 +836,26 @@ func restoreSiteInfrastructure() {
 			}
 		}
 
-		// Restore FPM quadlet for this site's PHP version (PHP sites only).
-		if !s.IsCustomContainer() {
+		// Restore the per-site quadlet (and image, if missing) for custom-FPM
+		// PHP sites, so they come back up on `lerd start` after a reinstall.
+		if s.IsCustomFPM() {
+			unitName := podman.CustomFPMContainerName(s.Name)
+			if !services.Mgr.ContainerUnitInstalled(unitName) {
+				proj, _ := config.LoadProjectConfig(s.Path)
+				if proj != nil && proj.Container != nil {
+					if !podman.CustomImageExists(s.Name) {
+						_ = podman.BuildCustomImage(s.Name, s.Path, proj.Container)
+					}
+					if err := podman.WriteCustomFPMQuadlet(s.Name, s.PHPVersion); err != nil {
+						fmt.Printf("[WARN] restoring custom FPM unit for %s: %v\n", s.Name, err)
+					}
+				}
+			}
+		}
+
+		// Restore FPM quadlet for this site's PHP version (shared-FPM PHP sites
+		// only; custom-FPM sites use their per-site container handled above).
+		if !s.IsCustomContainer() && !s.IsHostProxy() && !s.IsCustomFPM() {
 			phpVer := s.PHPVersion
 			if phpVer == "" {
 				cfg, _ := config.LoadGlobal()
@@ -812,6 +871,19 @@ func restoreSiteInfrastructure() {
 		proj, _ := config.LoadProjectConfig(s.Path)
 		if proj == nil {
 			continue
+		}
+
+		// Restore the host-proxy dev-server worker unit. Phase 2 of runStart
+		// launches it (it is enumerated by registeredFrameworkWorkerUnits).
+		// Bind to the command the user approved at link time: if .lerd.yaml's
+		// dev command drifted since (e.g. a git pull), don't silently run the
+		// new one, warn and wait for a re-link to re-approve it.
+		if s.IsHostProxy() && proj.Proxy != nil {
+			if s.HostCommand != "" && proj.Proxy.Command != s.HostCommand {
+				fmt.Printf("[WARN] %s: dev command in .lerd.yaml changed since link; not auto-starting. Run `lerd link` to review and approve.\n", s.Name)
+			} else if w, ok := hostProxyWorker(proj.Proxy); ok && !services.Mgr.IsEnabled(hostProxyWorkerUnit(s.Name)) {
+				restoreWorker(s.Name, s.Path, "", hostProxyWorkerName, w)
+			}
 		}
 
 		// Resolve() returns the rendered CustomService for inline + preset
@@ -980,6 +1052,59 @@ func registeredFrameworkWorkerUnits() []string {
 			}
 			out = append(out, "lerd-"+w+"-"+s.Name)
 		}
+		// Enumerate the dev-server unit unconditionally: this list also drives
+		// stop/quit, so a drifted unit must stay visible to be stoppable. The
+		// drift guard lives in restoreSiteInfrastructure, which won't write the
+		// drifted command, so start can only ever launch the approved one.
+		if s.IsHostProxy() && proj.Proxy != nil && proj.Proxy.Command != "" {
+			out = append(out, hostProxyWorkerUnit(s.Name))
+		}
+	}
+	return out
+}
+
+// suspendedWorkerUnitSet returns the worker unit names (without any .timer
+// suffix) the idle engine currently has suspended across all sites, covering
+// both main-site workers (lerd-{worker}-{site}) and per-worktree workers
+// (lerd-{worker}-{site}-{wtslug}). Naming matches workerNames.
+func suspendedWorkerUnitSet() map[string]bool {
+	reg, err := config.LoadSites()
+	if err != nil || reg == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, s := range reg.Sites {
+		for _, w := range s.IdleSuspendedWorkers {
+			out["lerd-"+w+"-"+s.Name] = true
+		}
+		for wtBase, workers := range s.WorktreeIdleSuspended {
+			for _, w := range workers {
+				out["lerd-"+w+"-"+s.Name+"-"+wtBase] = true
+			}
+		}
+	}
+	return out
+}
+
+// dropIdleSuspendedUnits removes idle-suspended worker units from a start list,
+// matching on the unit name with any .timer suffix stripped so a suspended
+// scheduled worker's timer is dropped too.
+func dropIdleSuspendedUnits(units []string) []string {
+	return filterSuspendedUnits(units, suspendedWorkerUnitSet())
+}
+
+// filterSuspendedUnits is the pure filter behind dropIdleSuspendedUnits: it
+// removes any unit whose .timer-stripped name is in suspended.
+func filterSuspendedUnits(units []string, suspended map[string]bool) []string {
+	if len(suspended) == 0 {
+		return units
+	}
+	out := make([]string, 0, len(units))
+	for _, u := range units {
+		if suspended[strings.TrimSuffix(u, ".timer")] {
+			continue
+		}
+		out = append(out, u)
 	}
 	return out
 }
@@ -1040,6 +1165,11 @@ func runStop(_ *cobra.Command, _ []string) error {
 	units = append(units, registeredTimerUnits()...)
 
 	fmt.Println("Stopping Lerd...")
+
+	// Mark the intentional shutdown before tearing anything down, so the worker
+	// health watcher (which keeps running) suppresses heal/notification noise for
+	// the workers we're about to stop. They stay enabled and come back on start.
+	_ = config.MarkStopped()
 
 	// On macOS: stop all containers in one podman call before the parallel
 	// per-unit jobs run. This avoids serialising N individual podman stop
