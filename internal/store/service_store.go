@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/origin"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/origin"
 )
 
 // The service-preset store mirrors the framework store but targets the dedicated

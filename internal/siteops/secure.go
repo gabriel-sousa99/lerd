@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/geodro/lerd/internal/certs"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/envfile"
-	"github.com/geodro/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
 )
 
 // Indirection points so tests can swap in inert stubs without touching mkcert,

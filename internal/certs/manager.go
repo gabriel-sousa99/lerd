@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // certReissueWindow is how close to NotAfter a leaf cert may drift before the

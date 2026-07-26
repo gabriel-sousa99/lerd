@@ -5,7 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/geodro/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 )
 
 // Modal overlays: centered floating boxes that replace the rendered view

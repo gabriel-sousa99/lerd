@@ -3,10 +3,10 @@ package watcher
 import (
 	"time"
 
-	"github.com/geodro/lerd/internal/cli"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/power"
+	"github.com/gabriel-sousa99/lerd/internal/cli"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/power"
 )
 
 // powerRestartCooldown is the shortest gap between two power-driven restart

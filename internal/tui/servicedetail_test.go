@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 )
 
 func TestServiceDetail_ShowsPortsLine(t *testing.T) {

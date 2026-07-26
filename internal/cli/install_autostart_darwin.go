@@ -5,9 +5,9 @@ package cli
 import (
 	"os"
 
-	"github.com/geodro/lerd/internal/feedback"
-	"github.com/geodro/lerd/internal/services"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/services"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 )
 
 // installAutostart enables the lerd-autostart launchd service on macOS so that

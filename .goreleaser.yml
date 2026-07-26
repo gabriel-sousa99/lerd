@@ -20,9 +20,9 @@ builds:
       - amd64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
   - id: lerd-arm64
     main: ./cmd/lerd
@@ -37,9 +37,9 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
   - id: lerd-darwin-amd64
     main: ./cmd/lerd
@@ -54,9 +54,9 @@ builds:
       - amd64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
   - id: lerd-darwin-arm64
     main: ./cmd/lerd
@@ -71,9 +71,9 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
   # lerd-tray is a separate CGO binary that links libayatana-appindicator.
   # lerd (nogui) execs it at runtime; if the library is missing the tray
@@ -89,9 +89,9 @@ builds:
       - amd64
     ldflags:
       - -s -w
-      - -X github.com/geodro/lerd/internal/version.Version={{.Version}}
-      - -X github.com/geodro/lerd/internal/version.Commit={{.Commit}}
-      - -X github.com/geodro/lerd/internal/version.Date={{.Date}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Version={{.Version}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Commit={{.Commit}}
+      - -X github.com/gabriel-sousa99/lerd/internal/version.Date={{.Date}}
 
 archives:
   - id: lerd-amd64

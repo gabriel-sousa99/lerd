@@ -4,10 +4,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/imgledger"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/registry"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/imgledger"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/registry"
 )
 
 // serviceRepos and protectedImages are the seams tests override. serviceRepos

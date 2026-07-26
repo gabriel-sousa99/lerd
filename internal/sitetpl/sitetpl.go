@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/grouping"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/grouping"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 )
 
 // Ctx holds the values available to placeholders. An empty field leaves its

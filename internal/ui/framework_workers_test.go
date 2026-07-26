@@ -4,8 +4,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	gitpkg "github.com/geodro/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 )
 
 // fakeStatus returns a status function that maps unit name to "active" or "inactive".

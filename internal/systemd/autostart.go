@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // AutostartUserUnits returns the lerd-* systemd user units (NOT podman

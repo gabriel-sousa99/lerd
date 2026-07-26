@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/cleanup"
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
 )
 
 // The daily sweep must run the managed tier so upgraded service images are

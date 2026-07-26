@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dns"
-	"github.com/geodro/lerd/internal/eventbus"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/systemd"
 )
 
 // idleSkipEveryN controls how aggressively to back off polling when the

@@ -7,9 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/geodro/lerd/internal/activityping"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/activityping"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 )
 
 // NewIdleCmd returns the parent `lerd idle` command: a global on/off toggle, a

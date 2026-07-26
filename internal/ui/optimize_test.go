@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dumps"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 func aqRouteEvent(rid, request, sql string) dumps.Event {

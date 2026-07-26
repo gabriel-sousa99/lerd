@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
 )
 
 // debugRouteForContext returns the dashboard route a debug notification opens.

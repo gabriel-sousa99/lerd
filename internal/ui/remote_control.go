@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	lerdcli "github.com/geodro/lerd/internal/cli"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/nginx"
+	lerdcli "github.com/gabriel-sousa99/lerd/internal/cli"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	"golang.org/x/crypto/bcrypt"
 )
 

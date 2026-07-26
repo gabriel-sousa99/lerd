@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/idle"
+	"github.com/gabriel-sousa99/lerd/internal/idle"
 )
 
 // listenAccessSock binds a unix datagram socket with a short relative name.

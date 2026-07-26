@@ -3,7 +3,7 @@
 package cli
 
 import (
-	"github.com/geodro/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 )
 
 // healOverlayCorruptionIfNeeded recovers from the overlay-storage error (see

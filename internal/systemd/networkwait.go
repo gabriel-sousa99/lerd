@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // podmanNetworkWaitUnit is the unit podman's quadlet generator makes every

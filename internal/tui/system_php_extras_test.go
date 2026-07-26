@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // installPHPVersion makes a version look installed to phpPkg.ListInstalled,

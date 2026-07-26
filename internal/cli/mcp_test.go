@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/mcp"
+	"github.com/gabriel-sousa99/lerd/internal/mcp"
 )
 
 // TestEveryMCPToolIsDocumented guards against doc drift: the single canonical

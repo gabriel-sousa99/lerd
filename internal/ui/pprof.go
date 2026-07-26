@@ -5,7 +5,7 @@ import (
 	"net/http/pprof"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // handlePprof serves the Go runtime profiling endpoints under /debug/pprof/,

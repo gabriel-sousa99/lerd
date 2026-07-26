@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // TestHasNonZeroExitCode covers the failure-detection helper for both

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // Seams so the report can be driven without podman in tests.

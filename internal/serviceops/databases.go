@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // introspectTimeout caps a single list-databases exec so a wedged engine can't

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/geodro/lerd/internal/logcolor"
+	"github.com/gabriel-sousa99/lerd/internal/logcolor"
 )
 
 // These builders are kept in a non-build-tagged file so they can be unit-

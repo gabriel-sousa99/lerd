@@ -5,10 +5,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	"github.com/geodro/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/spf13/cobra"
 )
 

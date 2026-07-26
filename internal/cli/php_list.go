@@ -3,8 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/config"
-	phpPkg "github.com/geodro/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/spf13/cobra"
 )
 

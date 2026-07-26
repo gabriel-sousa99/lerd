@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/phpantom"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/phpantom"
 )
 
 // handleLSPPhp bridges a browser WebSocket to a phpantom_lsp process so Monaco

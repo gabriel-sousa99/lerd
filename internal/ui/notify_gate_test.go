@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // notifyGateConfigDir points config to a fresh per-test directory.

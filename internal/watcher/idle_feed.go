@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/idle"
-	"github.com/geodro/lerd/internal/push"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/idle"
+	"github.com/gabriel-sousa99/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // activityTracker records per-site last-active times fed by the access feed and

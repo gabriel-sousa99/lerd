@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
 )
 
 // setupGlobalNginx prepares an isolated data/config home and pre-writes the

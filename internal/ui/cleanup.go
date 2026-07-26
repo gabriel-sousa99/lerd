@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/cleanup"
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
 )
 
 // diskCacheTTL bounds how often the dashboard triggers a full podman image

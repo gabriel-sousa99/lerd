@@ -3,8 +3,8 @@ package ui
 import (
 	"net/http"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // statsRoute serves the request-timing view for a site: its typical response

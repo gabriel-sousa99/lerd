@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // A project under a path with a space renders a `root` directive with three

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // Fallback for podman rootless + pasta/netavark/slirp4netns when no other

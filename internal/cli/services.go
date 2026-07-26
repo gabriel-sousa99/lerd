@@ -10,14 +10,14 @@ import (
 	"strings"
 
 	"charm.land/huh/v2"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	phpPkg "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/serviceops"
-	"github.com/geodro/lerd/internal/services"
-	"github.com/geodro/lerd/internal/shims"
-	"github.com/geodro/lerd/internal/store"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/shims"
+	"github.com/gabriel-sousa99/lerd/internal/store"
 	"github.com/spf13/cobra"
 )
 

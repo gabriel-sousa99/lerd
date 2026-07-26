@@ -3,7 +3,7 @@ package cleanup
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // SweepRefs reaps exactly the refs lerd hands it, skipping any the protected set

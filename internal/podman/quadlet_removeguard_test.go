@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // A test that forgot to isolate XDG deleted the developer's real lerd-dns quadlet,

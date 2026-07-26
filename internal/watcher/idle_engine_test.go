@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	"github.com/geodro/lerd/internal/idle"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/idle"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // stubUnitStatus reports the named units as running and everything else stopped,

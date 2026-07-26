@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // healthDialTimeout bounds one reachability probe so a hung dev server can't

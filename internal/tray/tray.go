@@ -16,11 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/desktopnotify"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
-	lerdUpdate "github.com/geodro/lerd/internal/update"
-	"github.com/geodro/lerd/internal/version"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/desktopnotify"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
+	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
+	"github.com/gabriel-sousa99/lerd/internal/version"
 	"github.com/getlantern/systray"
 )
 

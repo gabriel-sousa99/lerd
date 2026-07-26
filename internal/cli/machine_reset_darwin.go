@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/geodro/lerd/internal/feedback"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // runMachineReset stops and removes lerd's Podman Machine, then recreates it.

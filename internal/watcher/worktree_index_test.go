@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // seedSiteWithWorktree registers one site and stands in a single worktree for it,

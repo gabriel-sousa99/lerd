@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // The declared set is what drives a version's image content, so its fingerprint

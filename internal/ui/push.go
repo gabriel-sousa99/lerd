@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // handlePushVAPIDPublicKey returns the per-install VAPID public key for

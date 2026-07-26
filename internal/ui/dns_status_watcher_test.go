@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
 )
 
 func resetDNSObs() {

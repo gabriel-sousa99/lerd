@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	"github.com/geodro/lerd/internal/store"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/store"
 	"github.com/pmezard/go-difflib/difflib"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"

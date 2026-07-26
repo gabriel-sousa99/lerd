@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // stopTrackingMgr extends fakeServiceMgr with call tracking for the stop /

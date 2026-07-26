@@ -1,8 +1,8 @@
 package mcp
 
 import (
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
 )
 
 func execDNSDiagnose(args map[string]any) (any, *rpcError) {

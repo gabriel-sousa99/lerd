@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // inactiveLifecycle reports every unit as inactive so ensureServiceRunning walks

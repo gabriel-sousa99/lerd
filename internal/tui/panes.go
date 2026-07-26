@@ -8,8 +8,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 	zone "github.com/lrstanley/bubblezone/v2"
 )
 

@@ -3,7 +3,7 @@ package watcher
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 func snapWithSlow(routes ...string) []reqstats.SiteStats {

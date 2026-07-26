@@ -5,10 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/envfile"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	"github.com/geodro/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
 )
 
 // ErrDNSDisabled signals that the operation requires the lerd-managed DNS /

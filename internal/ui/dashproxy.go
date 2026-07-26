@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 )
 
 // Bundled admin dashboards (rabbitmq, redisinsight) set session/consent cookies

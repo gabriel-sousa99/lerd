@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // stopRecorder records Stop calls so reconcileStaleFrankenPHP's teardown can be

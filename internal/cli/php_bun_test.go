@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // bunFPMContainer must target a custom-FPM site's per-site container when run from

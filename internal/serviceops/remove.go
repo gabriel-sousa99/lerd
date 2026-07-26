@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/geodro/lerd/internal/cleanup"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // RemoveOptions controls optional side effects of RemoveService.

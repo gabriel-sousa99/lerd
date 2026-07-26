@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/idle"
+	"github.com/gabriel-sousa99/lerd/internal/idle"
 )
 
 // TestPublishSitesChanged_nonBlockingAndCoalesces proves a burst of refresh

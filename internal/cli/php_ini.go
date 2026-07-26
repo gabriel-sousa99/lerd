@@ -3,8 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/feedback"
-	"github.com/geodro/lerd/internal/phpini"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/phpini"
 	"github.com/spf13/cobra"
 )
 

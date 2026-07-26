@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // Version pins the phpantom_lsp release lerd installs. Bump alongside a

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // CustomFPMContainerName returns the per-site PHP-FPM container name for a site

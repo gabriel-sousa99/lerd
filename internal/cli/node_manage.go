@@ -8,12 +8,12 @@ import (
 	"regexp"
 	"sync"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	nodeDet "github.com/geodro/lerd/internal/node"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/spf13/cobra"
 )
 

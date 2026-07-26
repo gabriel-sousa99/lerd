@@ -3,7 +3,7 @@ package systemd
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // TestUnitBelongsToLongerSite guards the group-secondary leak: a unit named for

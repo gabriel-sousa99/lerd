@@ -5,9 +5,9 @@ import "fmt"
 
 // These variables are set at build time via:
 //
-//	-X github.com/geodro/lerd/internal/version.Version=<tag>
-//	-X github.com/geodro/lerd/internal/version.Commit=<sha>
-//	-X github.com/geodro/lerd/internal/version.Date=<iso8601>
+//	-X github.com/gabriel-sousa99/lerd/internal/version.Version=<tag>
+//	-X github.com/gabriel-sousa99/lerd/internal/version.Commit=<sha>
+//	-X github.com/gabriel-sousa99/lerd/internal/version.Date=<iso8601>
 var (
 	Version = "1.30.1"
 	Commit  = "none"

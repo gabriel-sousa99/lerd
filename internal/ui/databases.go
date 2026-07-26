@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/envfile"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/serviceops"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 // dbEngineResponse is one database engine with the databases it holds. The tab

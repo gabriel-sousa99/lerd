@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // The CLI SAPI never reads a project's .user.ini, so a framework whose commands

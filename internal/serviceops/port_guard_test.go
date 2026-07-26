@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // The dual-stack bind probe and first-free search the guard builds on now live

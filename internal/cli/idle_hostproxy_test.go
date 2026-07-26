@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // TestWakingPageHTML_autoRefreshes guards the wake mechanism: the page a sleeping

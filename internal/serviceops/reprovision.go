@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
 )
 
 // reprovDB and reprovBucket are the seams ReprovisionLinkedSites uses to talk

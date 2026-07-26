@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/envfile"
-	"github.com/geodro/lerd/internal/feedback"
-	nodeDet "github.com/geodro/lerd/internal/node"
-	phpDet "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/sitetpl"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/sitetpl"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/spf13/cobra"
 )
 

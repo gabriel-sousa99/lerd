@@ -15,10 +15,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/geodro/lerd/internal/cfgedit"
-	"github.com/geodro/lerd/internal/config"
-	phpPkg "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/cfgedit"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // SharedScope is the editor scope for the version-agnostic shared php.ini.

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // sudoersMarkerPath is a user-owned record of the sudoers drop-in lerd last

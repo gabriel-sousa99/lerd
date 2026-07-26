@@ -6,7 +6,7 @@ import (
 	"testing"
 	"text/template"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 func renderVhostForTest(t *testing.T, name string, data VhostData) string {

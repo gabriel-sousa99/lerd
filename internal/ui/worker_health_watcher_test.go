@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/workerheal"
+	"github.com/gabriel-sousa99/lerd/internal/workerheal"
 )
 
 // testHealthDeps returns a deps set wired to counters plus pointers to them,

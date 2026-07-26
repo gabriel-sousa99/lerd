@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 // stubEnv stages a sites.yaml with the given names in a temp XDG_DATA_HOME

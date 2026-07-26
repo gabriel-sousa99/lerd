@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
 )
 
 // groupSetup stubs the cert/nginx/daemon side effects and forces DNS on, so the

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // phpVersionTestSite registers an unsecured site in a temp registry and returns

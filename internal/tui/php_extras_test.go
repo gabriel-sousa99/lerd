@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // The System view rebuilds every frame, so this summary reads only config: what

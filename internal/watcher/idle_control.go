@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // startControlSocket binds the idle-suspend control datagram socket and serves

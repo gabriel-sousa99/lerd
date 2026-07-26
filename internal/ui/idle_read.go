@@ -3,8 +3,8 @@ package ui
 import (
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/idle"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/idle"
 )
 
 // wtKey is the idle/activity key for a worktree: its parent site name and the

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/cleanup"
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // autoCleanupInterval is the minimum gap between automatic sweeps. Orphaned and

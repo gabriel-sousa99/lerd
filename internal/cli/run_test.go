@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // projectWithCommands writes a .lerd.yaml containing only a commands: block

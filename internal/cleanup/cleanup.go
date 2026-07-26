@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // lerdLabelPrefix is stamped (as a hash label) on every image lerd builds. Its

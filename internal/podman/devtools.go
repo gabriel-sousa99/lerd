@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // lerd_devtools C source, compiled into every FPM image by the Containerfile's

@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 )
 
 // presetSuggestions mirrors internal/ui/web/src/stores/presetSuggestions.ts:

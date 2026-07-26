@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // resetPathMountAttempts clears the debounce cache so tests can drive the

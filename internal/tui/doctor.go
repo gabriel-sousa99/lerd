@@ -7,9 +7,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/sitedoctor"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/sitedoctor"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 // doctorResultMsg carries a finished doctor run back into the model. site keys

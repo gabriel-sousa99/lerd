@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	lerdUpdate "github.com/geodro/lerd/internal/update"
+	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 )
 
 // TestBuildVersionResponse_StripsLeadingV pins the fix for "Lerd vv1.19.2

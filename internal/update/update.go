@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/geodro/lerd/internal/origin"
+	"github.com/gabriel-sousa99/lerd/internal/origin"
 )
 
 // ReleaseBaseURLs returns the GitHub releases bases in priority order, read live

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/power"
+	"github.com/gabriel-sousa99/lerd/internal/power"
 )
 
 // fwWithOctane builds a minimal Laravel-like framework with a FrankenPHP worker

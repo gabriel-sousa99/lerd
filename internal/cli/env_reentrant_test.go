@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/geodro/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 )
 
 // runEnvLive must save and restore the previous live line rather than nilling

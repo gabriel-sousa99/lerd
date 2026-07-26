@@ -3,8 +3,8 @@ package mcp
 import (
 	"encoding/json"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/logsource"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/logsource"
 )
 
 func logsTool() mcpTool {

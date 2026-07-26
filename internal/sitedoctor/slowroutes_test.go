@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // seedSlowSnapshot registers a site at dir and writes a request-timing snapshot

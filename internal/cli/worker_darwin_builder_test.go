@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // These builder tests are platform-agnostic — they exercise pure string

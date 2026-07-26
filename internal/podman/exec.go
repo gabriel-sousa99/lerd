@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/imgledger"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/imgledger"
 )
 
 // execCommand and execCommandContext are the single seam every podman

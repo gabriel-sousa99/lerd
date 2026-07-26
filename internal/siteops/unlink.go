@@ -4,12 +4,12 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/geodro/lerd/internal/activityping"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/idle"
-	"github.com/geodro/lerd/internal/nginx"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/activityping"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/idle"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // IsParkedSite checks whether a site's path is inside one of the parked directories.

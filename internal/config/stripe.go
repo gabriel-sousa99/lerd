@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/geodro/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
 )
 
 // DefaultStripeWebhookPath is the route a Stripe listener forwards events to

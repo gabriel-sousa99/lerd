@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/geodro/lerd/internal/activityping"
-	"github.com/geodro/lerd/internal/config"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	phpDet "github.com/geodro/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/activityping"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 )
 
 // recordCwdActivity tells lerd-ui that the site containing dir is being worked

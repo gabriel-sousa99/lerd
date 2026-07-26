@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // ErrFPMNotInstalled is returned (wrapped) by StartFPM when the requested

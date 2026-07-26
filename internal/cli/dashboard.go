@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/desktopnotify"
+	"github.com/gabriel-sousa99/lerd/internal/desktopnotify"
 	"github.com/spf13/cobra"
 )
 

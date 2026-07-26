@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 var (

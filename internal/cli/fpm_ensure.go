@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	phpDet "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	"golang.org/x/term"
 )
 

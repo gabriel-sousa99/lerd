@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/profiler"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/profiler"
 )
 
 // handleProfilerToggle turns the SPX profiler on or off globally. Loopback-

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // StepStatus is the outcome of a single rung in the layered DNS check.

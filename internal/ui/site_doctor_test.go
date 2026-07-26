@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // TestDoctorRoute_unknownBranchRefused: a branch that doesn't resolve to a

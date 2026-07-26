@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // workspaceEnv points the global config and the site registry at temp dirs and

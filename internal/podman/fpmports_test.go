@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // stubFPMUnit makes the FPM unit look installed and active, with a no-op quadlet

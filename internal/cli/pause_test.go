@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // TestSetSiteContainerAutostart_stripAndRestore guards the fix for a paused

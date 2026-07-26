@@ -3,8 +3,8 @@ package ui
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
 )
 
 func TestDebugRouteForContext_ResolvesNameToDomain(t *testing.T) {

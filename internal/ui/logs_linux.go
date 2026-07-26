@@ -12,7 +12,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/geodro/lerd/internal/unitlog"
+	"github.com/gabriel-sousa99/lerd/internal/unitlog"
 )
 
 func serviceRecentLogs(unit string) string {

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/geodro/lerd/internal/imgledger"
+	"github.com/gabriel-sousa99/lerd/internal/imgledger"
 )
 
 // withImages swaps the image-scan and layer-inspect seams for fixtures and

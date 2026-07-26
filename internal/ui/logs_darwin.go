@@ -11,8 +11,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/unitlog"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/unitlog"
 )
 
 func lerdLogPath(unit string) string { return unitlog.LogPath(unit) }

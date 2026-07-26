@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/cfgedit"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/nginx"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/cfgedit"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 )
 
 // nginxQuadletRestartTimeout bounds the readiness wait after a quadlet-changing

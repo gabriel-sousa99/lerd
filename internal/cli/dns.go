@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dns"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // lanExposureContainers is the canonical list of lerd containers whose

@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/geodro/lerd/internal/applog"
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/applog"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // handleAppLogsClear deletes the project's application log files (the same set

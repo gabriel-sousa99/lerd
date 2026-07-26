@@ -3,7 +3,7 @@ package cli
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // TestCollectPortChecks_usesPublishedPortOverride covers the PublishedPort > 0

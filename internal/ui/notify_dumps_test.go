@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dumps"
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // fakeSubscriber feeds a fixed set of events to runDumpsNotifier then closes.

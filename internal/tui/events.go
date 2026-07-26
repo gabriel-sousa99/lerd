@@ -4,7 +4,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/geodro/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 )
 
 // refreshMsg arrives on every tick. Update's handler reloads the snapshot

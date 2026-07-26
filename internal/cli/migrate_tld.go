@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/geodro/lerd/internal/certs"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/envfile"
-	"github.com/geodro/lerd/internal/feedback"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	"github.com/geodro/lerd/internal/nginx"
-	"github.com/geodro/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 )
 
 // sitesWithTLD returns the names of registered sites that have at least one

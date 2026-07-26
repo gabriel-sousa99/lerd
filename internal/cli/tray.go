@@ -3,9 +3,9 @@ package cli
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	"github.com/geodro/lerd/internal/tray"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/tray"
 	"github.com/spf13/cobra"
 )
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // errNotLinked is the single message every directory-scoped command shows when

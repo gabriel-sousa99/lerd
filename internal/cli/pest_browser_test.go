@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // The shim is the whole mechanism: Playwright's glibc browser can't run on

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/dumps"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 func TestSiteTabsHeader_HighlightsActive(t *testing.T) {

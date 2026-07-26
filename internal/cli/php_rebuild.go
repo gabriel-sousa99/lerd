@@ -6,11 +6,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	phpPkg "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/spf13/cobra"
 )
 

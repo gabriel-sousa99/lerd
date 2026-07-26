@@ -6,8 +6,8 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/geodro/lerd/internal/feedback"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 )
 
 // Automatic fix keys. Each is attached to a finding by the doctor and dispatched

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // isolateLerdHome points both XDG roots at temp dirs so the command's

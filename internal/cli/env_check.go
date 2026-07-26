@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/envfile"
-	"github.com/geodro/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/pmezard/go-difflib/difflib"
 	"github.com/spf13/cobra"
 )

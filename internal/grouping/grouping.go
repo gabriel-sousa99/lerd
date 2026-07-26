@@ -14,13 +14,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/geodro/lerd/internal/certs"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/envfile"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	"github.com/geodro/lerd/internal/nginx"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 )
 
 // ComputeSecondaryDomain returns the domain a secondary occupies on the group

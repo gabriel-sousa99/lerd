@@ -9,11 +9,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/geodro/lerd/internal/config"
-	gitpkg "github.com/geodro/lerd/internal/git"
-	"github.com/geodro/lerd/internal/nginx"
-	phpPkg "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 )
 
 // SpxUIURL is the standalone SPX profiler web UI, served by the

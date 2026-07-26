@@ -5,11 +5,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	"github.com/geodro/lerd/internal/logsource"
-	phpDet "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/logsource"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
 )
 

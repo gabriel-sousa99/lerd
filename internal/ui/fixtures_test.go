@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/presetfixtures"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/presetfixtures"
 )
 
 // Add-ons ship in the external store, not the binary. Tests resolve them through

@@ -2,7 +2,7 @@
 
 package logsource
 
-import "github.com/geodro/lerd/internal/unitlog"
+import "github.com/gabriel-sousa99/lerd/internal/unitlog"
 
 // readJournal has no journald on macOS. Units that actually run as detached
 // podman containers are read with `podman logs`; the launchd-supervised ones

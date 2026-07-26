@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // writeDNSDisabledConfig writes a global config with DNS management off so the

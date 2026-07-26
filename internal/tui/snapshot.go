@@ -4,12 +4,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dns"
-	phpPkg "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/siteinfo"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 )
 
 // Snapshot is the full view-model the TUI renders from. Produced by

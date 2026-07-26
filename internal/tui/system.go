@@ -7,12 +7,12 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dns"
-	lerdNode "github.com/geodro/lerd/internal/node"
-	phpPkg "github.com/geodro/lerd/internal/php"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
-	lerdUpdate "github.com/geodro/lerd/internal/update"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
+	lerdNode "github.com/gabriel-sousa99/lerd/internal/node"
+	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
+	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 )
 
 // systemKind identifies each row in the System detail mode. Non-actionable

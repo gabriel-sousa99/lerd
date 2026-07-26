@@ -4,8 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 // siteSortMode picks the ordering for the sites pane.

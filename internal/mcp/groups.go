@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/activityping"
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/activityping"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // recordToolActivity marks the site a tool call targets as active under

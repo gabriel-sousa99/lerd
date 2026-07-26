@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/geodro/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"golang.org/x/term"
 )
 

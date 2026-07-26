@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // captureWriteMgr records every WriteServiceUnitIfChanged call so a test can

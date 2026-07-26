@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // opNotification builds the op_done / op_failed notification for a long-running

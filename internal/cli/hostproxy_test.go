@@ -6,8 +6,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 )
 
 // pinHostGatewayBindIP pins the host-gateway resolver (and treats the result as a

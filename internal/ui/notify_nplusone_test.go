@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/geodro/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
 )
 
 func qEvent(rid, request, sql string) dumps.Event {

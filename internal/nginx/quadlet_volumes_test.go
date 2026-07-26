@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // RewriteNginxQuadlet must preserve the Volume= lines for paths outside $HOME.

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/siteinfo"
-	"github.com/geodro/lerd/internal/stats"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/stats"
 )
 
 // TestDashboardGrid_RendersAllCards ensures every promised card title is

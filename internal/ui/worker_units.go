@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/geodro/lerd/internal/unitlog"
+import "github.com/gabriel-sousa99/lerd/internal/unitlog"
 
 // isFrameworkWorkerUnit reports whether unit looks like a built-in framework
 // worker (queue, schedule, horizon, reverb). Used by handleLogs to decide

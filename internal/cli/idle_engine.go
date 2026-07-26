@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/nginx"
-	phpDet "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/siteinfo"
-	"github.com/geodro/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 )
 
 // unitStatesOKFn snapshots every lerd-* unit's state plus a trust flag; a var so

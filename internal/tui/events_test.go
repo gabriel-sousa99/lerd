@@ -6,7 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/geodro/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 )
 
 // TestBusMsg_rechainsBusCmd pins the regression-prone wiring where Update

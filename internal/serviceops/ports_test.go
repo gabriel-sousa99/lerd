@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // The guard's shift hook is silenced only while a SetPublishedPort window is

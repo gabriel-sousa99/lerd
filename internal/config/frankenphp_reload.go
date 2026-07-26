@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/geodro/lerd/internal/power"
-	"github.com/geodro/lerd/internal/wsl"
+	"github.com/gabriel-sousa99/lerd/internal/power"
+	"github.com/gabriel-sousa99/lerd/internal/wsl"
 )
 
 // WatcherNeedsPolling reports whether a file-change watcher has to poll because

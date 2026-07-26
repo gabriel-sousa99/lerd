@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/geodro/lerd/internal/certs"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/phpantom"
+	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/phpantom"
 )
 
 func downloadBinaries(w io.Writer) error {

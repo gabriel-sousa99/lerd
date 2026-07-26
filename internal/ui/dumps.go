@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dumps"
-	"github.com/geodro/lerd/internal/dumpsops"
-	"github.com/geodro/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/dumpsops"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 )
 
 // dumpsServer is the singleton dump receiver started by ui.Start. It's nil

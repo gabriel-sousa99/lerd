@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/origin"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/origin"
 )
 
 // WriteContainerUnitFn writes a container unit file for the given name and content.

@@ -4,8 +4,8 @@ import (
 	"os"
 	"os/exec"
 
-	phpDet "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
 )
 

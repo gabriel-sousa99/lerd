@@ -3,9 +3,9 @@ package ui
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/desktopnotify"
-	"github.com/geodro/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/desktopnotify"
+	"github.com/gabriel-sousa99/lerd/internal/push"
 )
 
 // notifyAppName is the app_name native notifications are posted under.

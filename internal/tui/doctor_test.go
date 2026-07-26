@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/sitedoctor"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/sitedoctor"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 func TestSiteDoctorContent_PromptsToRunWhenNoResult(t *testing.T) {

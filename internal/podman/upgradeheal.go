@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // PodmanEnv fingerprints the host podman that lerd last installed against.

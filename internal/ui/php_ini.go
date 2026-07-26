@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/geodro/lerd/internal/cfgedit"
-	"github.com/geodro/lerd/internal/phpini"
+	"github.com/gabriel-sousa99/lerd/internal/cfgedit"
+	"github.com/gabriel-sousa99/lerd/internal/phpini"
 )
 
 // phpIniValid reports whether a php.ini editor scope is valid: "shared", a bare

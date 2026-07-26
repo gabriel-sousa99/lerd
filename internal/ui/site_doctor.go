@@ -3,8 +3,8 @@ package ui
 import (
 	"net/http"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/sitedoctor"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/sitedoctor"
 )
 
 // doctorRoute handles the doctor subroutes for a site. Loopback-only: checks and

@@ -7,11 +7,11 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/geodro/lerd/internal/agentenv"
-	"github.com/geodro/lerd/internal/config"
-	phpDet "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/profiler"
+	"github.com/gabriel-sousa99/lerd/internal/agentenv"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/profiler"
 )
 
 func execProfilerToggle(args map[string]any) (any, *rpcError) {

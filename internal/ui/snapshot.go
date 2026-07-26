@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 )
 
 // snapshotTTL bounds how long a cached snapshot is reused before the next

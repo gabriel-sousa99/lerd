@@ -3,7 +3,7 @@ package cli
 import (
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // Regression for the host-worker consent bypass: the gate must authorize the

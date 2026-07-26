@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	nodeDet "github.com/geodro/lerd/internal/node"
-	phpDet "github.com/geodro/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/spf13/cobra"
 )
 

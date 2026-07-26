@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // buildWorkerGuard wraps runCmd in a shell snippet that prevents duplicate

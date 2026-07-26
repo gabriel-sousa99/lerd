@@ -10,8 +10,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	lerddumps "github.com/geodro/lerd/internal/dumps"
-	"github.com/geodro/lerd/internal/siteinfo"
+	lerddumps "github.com/gabriel-sousa99/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 	zone "github.com/lrstanley/bubblezone/v2"
 )
 

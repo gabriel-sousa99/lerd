@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // workerStartPreflight gates a WorkerStartForSite call on the framework's

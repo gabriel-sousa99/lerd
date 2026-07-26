@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/geodro/lerd/internal/composer"
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/composer"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/spf13/cobra"
 )
 

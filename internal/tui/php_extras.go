@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // phpExtrasSummary describes what a PHP version's image carries of the declared

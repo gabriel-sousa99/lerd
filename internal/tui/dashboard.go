@@ -10,7 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/geodro/lerd/internal/stats"
+	"github.com/gabriel-sousa99/lerd/internal/stats"
 	zone "github.com/lrstanley/bubblezone/v2"
 )
 

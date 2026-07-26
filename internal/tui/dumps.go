@@ -11,8 +11,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/geodro/lerd/internal/config"
-	lerddumps "github.com/geodro/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	lerddumps "github.com/gabriel-sousa99/lerd/internal/dumps"
 )
 
 // toggleString returns "" when current already equals target (clearing

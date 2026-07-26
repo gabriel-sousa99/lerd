@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/freeport"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/freeport"
 )
 
 // fpmPortsBindable is the port-bindability probe, swapped in tests so the shift

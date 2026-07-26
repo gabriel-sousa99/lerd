@@ -1,6 +1,6 @@
 package cli
 
-import "github.com/geodro/lerd/internal/workerheal"
+import "github.com/gabriel-sousa99/lerd/internal/workerheal"
 
 // Re-exports of internal/workerheal so existing CLI / UI server callers
 // can keep importing from internal/cli. The MCP package can't import cli

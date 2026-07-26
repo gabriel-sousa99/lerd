@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/geodro/lerd/internal/config"
-	nodeDet "github.com/geodro/lerd/internal/node"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 )
 
 // CopyTree copies src to dst recursively. It first tries a reflink-aware

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // Hotspot is one function's share of a request's wall time. Exclusive time (self,

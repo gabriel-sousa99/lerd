@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	nodeDet "github.com/geodro/lerd/internal/node"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // defaultMacOSNodeVersion is the version `fnm exec --using=…` falls

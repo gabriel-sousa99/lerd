@@ -70,9 +70,9 @@ jobs:
           mkdir -p dist/lerd-tray_darwin_${{ matrix.arch }}
           CGO_ENABLED=1 go build \
             -ldflags="-s -w \
-              -X github.com/geodro/lerd/internal/version.Version=${VERSION} \
-              -X github.com/geodro/lerd/internal/version.Commit=${COMMIT} \
-              -X github.com/geodro/lerd/internal/version.Date=${DATE}" \
+              -X github.com/gabriel-sousa99/lerd/internal/version.Version=${VERSION} \
+              -X github.com/gabriel-sousa99/lerd/internal/version.Commit=${COMMIT} \
+              -X github.com/gabriel-sousa99/lerd/internal/version.Date=${DATE}" \
             -o dist/lerd-tray_darwin_${{ matrix.arch }}/lerd-tray \
             ./cmd/lerd-tray
 

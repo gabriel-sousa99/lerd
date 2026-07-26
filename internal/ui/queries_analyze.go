@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/geodro/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
 )
 
 // defaultSlowQueryMS mirrors the dashboard's slow-query tag threshold.

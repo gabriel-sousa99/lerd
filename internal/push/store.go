@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 const subsFile = "push-subscriptions.json"

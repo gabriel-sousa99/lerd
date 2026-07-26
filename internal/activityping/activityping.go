@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // Site records activity for the named site so a terminal php/composer/npm run

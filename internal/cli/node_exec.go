@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	nodeDet "github.com/geodro/lerd/internal/node"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	"github.com/spf13/cobra"
 )
 

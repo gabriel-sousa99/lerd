@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/feedback"
-	gitpkg "github.com/geodro/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/spf13/cobra"
 )
 

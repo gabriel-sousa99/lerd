@@ -5,12 +5,12 @@ package dns
 import (
 	"bytes"
 	"fmt"
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
 
-	"github.com/geodro/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 )
 
 // resolverDir is the macOS per-TLD resolver directory. A var so tests can point

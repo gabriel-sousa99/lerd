@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/reqstats"
-	"github.com/geodro/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 func timingSite() *siteinfo.EnrichedSite {

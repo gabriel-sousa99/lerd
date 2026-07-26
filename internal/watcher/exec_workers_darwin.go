@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/cli"
-	"github.com/geodro/lerd/internal/config"
-	gitpkg "github.com/geodro/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/cli"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 )
 
 // WatchExecWorkers self-heals macOS framework workers when the configured

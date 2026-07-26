@@ -11,7 +11,7 @@ import (
 	"sync"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 const (
@@ -21,7 +21,7 @@ const (
 
 // VAPIDSubject identifies this app in the JWT "sub" claim. HTTPS URLs are
 // accepted by every push service; mailto: with non-routable hosts isn't.
-const VAPIDSubject = "https://github.com/geodro/lerd"
+const VAPIDSubject = "https://github.com/gabriel-sousa99/lerd"
 
 var (
 	vapidMu     sync.Mutex

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/geodro/lerd/internal/dumps"
-	"github.com/geodro/lerd/internal/push"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
+	"github.com/gabriel-sousa99/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // nPlusOneThreshold is the number of structurally-identical queries within one

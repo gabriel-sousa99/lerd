@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/devtoolsops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/devtoolsops"
 )
 
 // handleDevtoolsStatus reports whether the lerd_devtools collector is armed.

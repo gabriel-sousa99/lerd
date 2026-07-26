@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // ContainerStat is one row of resource usage for a single lerd-prefixed

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/geodro/lerd/internal/cleanup"
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
 )
 
 func stubDisk(t *testing.T, inspect func() (cleanup.Plan, error), apply func(cleanup.Plan) (int, int64)) {

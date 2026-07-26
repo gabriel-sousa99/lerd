@@ -9,13 +9,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/envfile"
-	"github.com/geodro/lerd/internal/feedback"
-	"github.com/geodro/lerd/internal/logcolor"
-	nodeDet "github.com/geodro/lerd/internal/node"
-	"github.com/geodro/lerd/internal/podman"
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/logcolor"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // removeWorkerExecArtifacts is a no-op on Linux: workers run as systemd

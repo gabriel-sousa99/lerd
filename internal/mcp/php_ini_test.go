@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/phpini"
+	"github.com/gabriel-sousa99/lerd/internal/phpini"
 )
 
 // A read against the shared scope must resolve without a version and hand back

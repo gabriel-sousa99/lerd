@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
 )
 
 // A group main serves "<main> *.<main>". nginx prefers an exact server_name over

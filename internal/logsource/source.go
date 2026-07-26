@@ -12,10 +12,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/applog"
-	"github.com/geodro/lerd/internal/config"
-	phpDet "github.com/geodro/lerd/internal/php"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/applog"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 var phpVerRe = regexp.MustCompile(`^\d+\.\d+$`)

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // A host-proxy site whose .lerd.yaml dev command has drifted from the approved

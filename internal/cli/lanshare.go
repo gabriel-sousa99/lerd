@@ -18,7 +18,7 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 var (

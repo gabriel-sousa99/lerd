@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // FrankenPHPContainerName returns the Podman container name for a site's

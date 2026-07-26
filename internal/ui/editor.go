@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // handleOpenEditor opens a file at a line in the user's editor, for the

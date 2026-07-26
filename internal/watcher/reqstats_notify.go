@@ -3,9 +3,9 @@ package watcher
 import (
 	"fmt"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/push"
-	"github.com/geodro/lerd/internal/reqstats"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // slowRouteClearAfter is how many consecutive snapshots a warned route must be

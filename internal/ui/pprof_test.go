@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // isolatePprofState points the marker at a temp run dir. Without it these

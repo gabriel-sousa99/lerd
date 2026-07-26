@@ -3,8 +3,8 @@
 package ui
 
 import (
-	"github.com/geodro/lerd/internal/cli"
-	"github.com/geodro/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/cli"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // init registers the worker-mode migration hooks the daemon needs to keep

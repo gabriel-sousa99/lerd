@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geodro/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 )
 
 func TestHumanSize(t *testing.T) {

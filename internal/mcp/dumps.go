@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/dumpsops"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dumpsops"
 )
 
 // execDumpsRecent calls lerd-ui's /api/dumps endpoint over the local transport

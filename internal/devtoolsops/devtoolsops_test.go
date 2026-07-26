@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // isolate pins HOME and the XDG dirs to temp dirs so the toggle writes its

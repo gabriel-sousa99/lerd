@@ -18,8 +18,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 	"gopkg.in/yaml.v3"
 )
 

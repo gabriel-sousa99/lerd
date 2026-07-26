@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // stubPreflightSeams installs configurable pre-flight seams plus permissive

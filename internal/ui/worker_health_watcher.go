@@ -7,9 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/geodro/lerd/internal/config"
-	"github.com/geodro/lerd/internal/eventbus"
-	"github.com/geodro/lerd/internal/workerheal"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/workerheal"
 )
 
 // healthWatchInterval is how often the watcher re-runs the detector while a

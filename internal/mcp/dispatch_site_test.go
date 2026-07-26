@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geodro/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // callToolRaw invokes handleToolCall the way an MCP client would: a tool name
