@@ -7,6 +7,45 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.30.1-oracle.2] — 2026-07-26
+
+Fork (Oracle Edition). **As imagens base com Oracle finalmente existem no
+GHCR.** O workflow que as constrói nunca havia rodado neste fork; ao rodar pela
+primeira vez, 15 dos 21 jobs falharam. Esta versão corrige as causas e publica
+as 7 imagens.
+
+> **Atualize para esta versão se quer install rápido.** O Containerfile é
+> embutido no binário e mudou, então a `1.30.1-oracle.1` procura um hash
+> (`2a8f49a1`) diferente do que foi publicado (`5d6af92d`) e continuaria
+> compilando tudo localmente.
+
+### Fixed
+
+- **PHP 8.1 não compilava.** O Containerfile agrupava `8.1|8.2|8.3` em
+  `oci8-3.3.0`, cujo `package.xml` declara suportar 8.1 — mas o
+  `oci8_arginfo.h` gerado usa `ZEND_STR_SENSITIVEPARAMETER` e
+  `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, que só existem a partir do 8.2. O 8.1
+  passa a usar `oci8-3.2.1`.
+- **O manifesto nunca era criado.** Ele exigia amd64 **e** arm64; como todo
+  job arm64 falhava, nenhuma versão ganhava tag pullável — nem as 6 que
+  compilavam bem em amd64. Na prática, todo `lerd install` caía em build local.
+- O trigger de push do workflow nomeava `main`, então uma mudança no
+  Containerfile nunca teria reconstruído as imagens.
+
+### Changed
+
+- **Imagens base são x86_64.** A Oracle não publica Instant Client `linux.arm64`
+  para 21.x (só 19.x), e linkar o oci8 contra a lib x64 no aarch64 falha com
+  `skipping incompatible libclntsh.so`. Usar 19.x no ARM contradiria em
+  silêncio o 21.18 anunciado, então hosts arm64 seguem compilando do zero,
+  como já faziam.
+- As fixtures de `php -m` passam a ser capturas reais **das imagens deste
+  fork**, e não do upstream. Isso removeu a exclusão temporária das extensões
+  Oracle na comparação e permitiu um teste que exige `oci8`, `amqp` e
+  `memcached` em toda imagem publicada.
+
+---
+
 ## [1.30.1-oracle.1] — 2026-07-26
 
 Fork (Oracle Edition). Correções de URLs que apontavam para o lugar errado —

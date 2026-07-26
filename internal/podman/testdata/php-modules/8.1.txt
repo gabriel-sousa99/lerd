@@ -1,4 +1,5 @@
 [PHP Modules]
+amqp
 bcmath
 bz2
 calendar
@@ -24,9 +25,11 @@ ldap
 lerd_devtools
 libxml
 mbstring
+memcached
 mongodb
 mysqli
 mysqlnd
+oci8
 openssl
 pcntl
 pcov

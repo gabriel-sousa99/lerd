@@ -9,36 +9,37 @@ import (
 
 var publishedPHPVersions = []string{"7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"}
 
-// forkAddedExtensions are the extensions the Oracle fork's Containerfile layers
-// on top of upstream's. The php -m fixtures below are captures of *upstream's*
-// published bases, so they cannot speak to these three, and doctoring them would
-// turn a real capture into a fabricated one. They are excluded here and covered
-// instead by TestImageReportsAdvertisedExtensions, which base-images.yml runs
-// against the freshly built fork image — a stronger check than any fixture.
-var forkAddedExtensions = map[string]bool{"oci8": true, "amqp": true, "memcached": true}
-
-// dropForkAdded removes the fork-layered names from a MissingBundledExtensions
-// result, leaving the upstream extensions the fixtures can actually vouch for.
-func dropForkAdded(missing []string) []string {
-	out := make([]string, 0, len(missing))
-	for _, ext := range missing {
-		if !forkAddedExtensions[ext] {
-			out = append(out, ext)
-		}
-	}
-	return out
-}
-
 // TestPublishedImagesReportBundledExtensions is the direction no Containerfile
 // parse can reach: a name BundledExtensions advertises that nothing in the image
-// loads. Fixtures are real output from the published bases, refreshed after a
-// rebuild with: podman run --rm ghcr.io/gabriel-sousa99/lerd-php<nn>-fpm-base:<hash> php -m
+// loads. Fixtures are real output from *this fork's* published bases, refreshed
+// after a rebuild with:
+//
+//	podman run --rm ghcr.io/gabriel-sousa99/lerd-php<nn>-fpm-base:<hash> php -m
+//
+// They therefore cover the Oracle layer (oci8, amqp, memcached) as well as the
+// upstream set — a name that stops loading fails here, whichever side added it.
 func TestPublishedImagesReportBundledExtensions(t *testing.T) {
 	for _, version := range publishedPHPVersions {
 		t.Run(version, func(t *testing.T) {
 			modules := readModuleFixture(t, version)
-			if missing := dropForkAdded(MissingBundledExtensions(version, modules)); len(missing) > 0 {
+			if missing := MissingBundledExtensions(version, modules); len(missing) > 0 {
 				t.Errorf("PHP %s advertises extensions its image never loads: %v", version, missing)
+			}
+		})
+	}
+}
+
+// The Oracle layer is the reason this fork exists, so pin it explicitly rather
+// than leaving it implicit in the set above: every published image must load
+// oci8, amqp and memcached.
+func TestPublishedImagesCarryTheOracleLayer(t *testing.T) {
+	for _, version := range publishedPHPVersions {
+		t.Run(version, func(t *testing.T) {
+			modules := phpModules(readModuleFixture(t, version))
+			for _, ext := range []string{"oci8", "amqp", "memcached"} {
+				if !modules[CanonicalExtension(ext)] {
+					t.Errorf("PHP %s image does not load %q", version, ext)
+				}
 			}
 		})
 	}
@@ -83,7 +84,7 @@ func TestMissingBundledExtensionsReportsAbsent(t *testing.T) {
 	modules := readModuleFixture(t, "8.4")
 	stripped := strings.ReplaceAll(modules, "\nftp\n", "\n")
 
-	missing := dropForkAdded(MissingBundledExtensions("8.4", stripped))
+	missing := MissingBundledExtensions("8.4", stripped)
 	if len(missing) != 1 || missing[0] != "ftp" {
 		t.Fatalf("MissingBundledExtensions = %v, want [ftp]", missing)
 	}
