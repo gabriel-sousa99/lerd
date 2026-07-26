@@ -3,7 +3,7 @@ package podman
 import (
 	"embed"
 	"fmt"
-	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -45,6 +45,119 @@ func CurrentImage(content string) string {
 		}
 	}
 	return ""
+}
+
+// SetPrimaryHostPort rewrites the host (published) side of the first port spec
+// in ports to hostPort, preserving the container port and any /proto suffix.
+// The primary mapping is index 0 (the preset's own port; extra ports follow),
+// so this moves where the service is reachable on the host without touching the
+// container-internal port. A spec may be "host:container" or "ip:host:container".
+// Returns ports unchanged when empty, hostPort is non-positive, or the first
+// spec is unrecognised. Pure; operates on the pre-render svc.Ports form (before
+// BindForLAN/PairIPv6Binds add the loopback/IPv6 prefixes).
+func SetPrimaryHostPort(ports []string, hostPort int) []string {
+	if len(ports) == 0 || hostPort <= 0 {
+		return ports
+	}
+	spec := ports[0]
+	proto := ""
+	if slash := strings.IndexByte(spec, '/'); slash >= 0 {
+		proto, spec = spec[slash:], spec[:slash]
+	}
+	segs := strings.Split(spec, ":")
+	switch len(segs) {
+	case 2: // host:container
+		segs[0] = strconv.Itoa(hostPort)
+	case 3: // ip:host:container
+		segs[1] = strconv.Itoa(hostPort)
+	default:
+		return ports
+	}
+	out := append([]string(nil), ports...)
+	out[0] = strings.Join(segs, ":") + proto
+	return out
+}
+
+// PrimaryHostPort returns the host (published) port of the first port spec in
+// ports — the read side of SetPrimaryHostPort. A spec may be "host:container"
+// or "ip:host:container", optionally with a /proto suffix. Returns 0 when ports
+// is empty or the first spec has no parseable host port (e.g. a bare container
+// port or an empty host segment for podman auto-assignment).
+func PrimaryHostPort(ports []string) int {
+	if len(ports) == 0 {
+		return 0
+	}
+	spec := ports[0]
+	if slash := strings.IndexByte(spec, '/'); slash >= 0 {
+		spec = spec[:slash]
+	}
+	segs := strings.Split(spec, ":")
+	var host string
+	switch len(segs) {
+	case 2: // host:container
+		host = segs[0]
+	case 3: // ip:host:container
+		host = segs[1]
+	default:
+		return 0
+	}
+	n, err := strconv.Atoi(host)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// ContainerPort returns the container (internal) port of a port spec — the last
+// numeric segment of "host:container" or "ip:host:container", ignoring any
+// /proto suffix. Returns 0 for a bare host port or an unparseable spec.
+func ContainerPort(spec string) int {
+	if slash := strings.IndexByte(spec, '/'); slash >= 0 {
+		spec = spec[:slash]
+	}
+	segs := strings.Split(spec, ":")
+	if len(segs) < 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(segs[len(segs)-1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// SetHostPortForContainerPort rewrites the host (published) side of whichever
+// spec in ports maps to containerPort, leaving the container-internal port and
+// every other mapping untouched. It generalises SetPrimaryHostPort past the
+// index-0 primary so a service's secondary published port (mailpit's 8025 UI,
+// rustfs' 9001 console) can be remapped too. Returns ports unchanged when empty,
+// hostPort is non-positive, or no spec maps to containerPort. Pure.
+func SetHostPortForContainerPort(ports []string, containerPort, hostPort int) []string {
+	if len(ports) == 0 || hostPort <= 0 || containerPort <= 0 {
+		return ports
+	}
+	for i, spec := range ports {
+		if ContainerPort(spec) != containerPort {
+			continue
+		}
+		body, proto := spec, ""
+		if slash := strings.IndexByte(spec, '/'); slash >= 0 {
+			body, proto = spec[:slash], spec[slash:]
+		}
+		segs := strings.Split(body, ":")
+		switch len(segs) {
+		case 2: // host:container
+			segs[0] = strconv.Itoa(hostPort)
+		case 3: // ip:host:container
+			segs[1] = strconv.Itoa(hostPort)
+		default:
+			return ports
+		}
+		out := append([]string(nil), ports...)
+		out[i] = strings.Join(segs, ":") + proto
+		return out
+	}
+	return ports
 }
 
 // ApplyExtraPorts appends extra PublishPort lines to quadlet content.
@@ -133,13 +246,17 @@ func InjectPodmanArgs(content, arg string) string {
 // InjectExtraVolumes adds Volume= lines for paths that are not already covered
 // by the %h:%h mount. Each path is bind-mounted read-write at the same location
 // inside the container. Existing Volume= lines for the same host path are not
-// duplicated.
+// duplicated. Paths that cannot be bind-mounted are skipped: this is the one
+// place that formats a Volume=path:path line, so the guard belongs here (#884).
 func InjectExtraVolumes(content string, paths []string) string {
 	if len(paths) == 0 {
 		return content
 	}
 	var extra []string
 	for _, p := range paths {
+		if !bindMountable(p) {
+			continue
+		}
 		// Check if this path is already mounted (with any flags).
 		prefix := fmt.Sprintf("Volume=%s:%s:", p, p)
 		if strings.Contains(content, prefix) {
@@ -166,7 +283,7 @@ func InjectExtraVolumes(content string, paths []string) string {
 
 // OCIRuntime returns the name of the OCI runtime podman is currently configured to use.
 func OCIRuntime() string {
-	out, err := exec.Command(PodmanBin(), "info", "--format", "{{.Host.OCIRuntime.Name}}").Output()
+	out, err := execCommand(PodmanBin(), "info", "--format", "{{.Host.OCIRuntime.Name}}").Output()
 	if err != nil {
 		return ""
 	}

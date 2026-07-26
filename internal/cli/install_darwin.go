@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/phpantom"
 )
 
 func downloadBinaries(w io.Writer) error {
@@ -62,6 +65,15 @@ func downloadBinaries(w io.Writer) error {
 		}
 	}
 
+	// phpantom_lsp powers tinker autocomplete in the web UI. Best-effort:
+	// the UI also fetches it lazily on first tinker connect, so a failure
+	// here (offline install, unsupported arch) must not abort setup.
+	if !phpantom.Installed() {
+		if err := phpantom.EnsureBinary(context.Background(), w); err != nil {
+			feedback.WarnOn(w, "phpantom_lsp download failed (%v); tinker autocomplete loads on first use instead", err)
+		}
+	}
+
 	return nil
 }
 
@@ -74,30 +86,47 @@ func downloadBinaries(w io.Writer) error {
 //
 // If the helper is not found or already installed, this is a no-op.
 func ensurePortForwarding() error {
-	// Check whether the LaunchDaemon is already installed.
-	const daemonPlist = "/Library/LaunchDaemons/com.github.containers.podman.helper.plist"
-	if _, err := os.Stat(daemonPlist); err == nil {
-		return nil // already installed
+	// Skip (and avoid the sudo prompt) if the LaunchDaemon is already installed.
+	if podmanHelperInstalled("/Library/LaunchDaemons", currentUsername(os.Getenv("HOME"))) {
+		return nil
 	}
 
 	// Locate the podman-mac-helper binary.
 	helperPath, err := findPodmanMacHelper()
 	if err != nil {
-		fmt.Printf("    WARN: podman-mac-helper not found — ports 80/443 may not work.\n")
-		fmt.Printf("    Install Podman via Homebrew and re-run 'lerd install'.\n")
+		feedback.Warn("podman-mac-helper not found — ports 80/443 may not work.")
+		feedback.Note("Install Podman via Homebrew and re-run 'lerd install'.")
 		return nil // not fatal; containers still work on non-privileged ports
 	}
 
-	fmt.Println("  [sudo required] Installing podman-mac-helper for ports 80/443")
+	feedback.Sudo("Installing podman-mac-helper for ports 80/443")
 	cmd := exec.Command("sudo", helperPath, "install")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("    WARN: podman-mac-helper install: %v\n", err)
-		fmt.Printf("    Ports 80/443 may not work — run manually: sudo %s install\n", helperPath)
+		feedback.Warn("podman-mac-helper install: %v", err)
+		feedback.Note(fmt.Sprintf("Ports 80/443 may not work — run manually: sudo %s install", helperPath))
 	}
 	return nil
+}
+
+// podmanHelperInstalled reports whether the podman-mac-helper LaunchDaemon is
+// already present. Recent Podman names the plist per-user
+// (com.github.containers.podman.helper-<user>.plist); older releases used an
+// unsuffixed name. Checking both lets us skip the sudo prompt when the helper
+// is already installed.
+func podmanHelperInstalled(daemonDir, username string) bool {
+	candidates := []string{
+		"com.github.containers.podman.helper-" + username + ".plist",
+		"com.github.containers.podman.helper.plist",
+	}
+	for _, name := range candidates {
+		if _, err := os.Stat(filepath.Join(daemonDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // findPodmanMacHelper returns the path to podman-mac-helper if found.

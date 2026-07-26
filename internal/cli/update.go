@@ -1,29 +1,28 @@
 package cli
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/origin"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/gabriel-sousa99/lerd/internal/store"
-	"github.com/gabriel-sousa99/lerd/internal/systemd"
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 	"github.com/spf13/cobra"
 )
 
-const githubRepo = "gabriel-sousa99/lerd"
-
-// These vars are overridden in tests to point at an httptest server.
-var (
-	githubDownloadBase = "https://github.com/" + githubRepo + "/releases/download"
-)
+// githubDownloadBases returns release-asset download bases in priority order,
+// read live. Overridden in tests to point at an httptest server.
+var githubDownloadBases = origin.ReleaseDownloadBases
 
 // NewUpdateCmd returns the update command.
 func NewUpdateCmd(currentVersion string) *cobra.Command {
@@ -48,7 +47,8 @@ func NewUpdateCmd(currentVersion string) *cobra.Command {
 }
 
 func runUpdate(currentVersion string, beta bool) error {
-	fmt.Println("==> Checking for updates")
+	feedback.Begin()
+	feedback.Line("checking for updates")
 
 	var latest string
 	var err error
@@ -71,38 +71,36 @@ func runUpdate(currentVersion string, beta bool) error {
 	lat := lerdUpdate.StripV(latest)
 
 	if !lerdUpdate.VersionGreaterThan(lat, cur) {
-		fmt.Printf("  Already on latest: v%s\n", cur)
+		feedback.Done("already on latest v" + cur)
 		return nil
 	}
 
-	fmt.Printf("  Current: v%s\n", cur)
-	fmt.Printf("  Latest:  v%s\n", lat)
+	feedback.Note("current v" + cur + " · latest " + feedback.Val("v"+lat))
 
 	// Show what's new between the current and latest version.
-	fmt.Println("\n==> What's new")
+	feedback.Line("what's new")
 	changelog, _ := lerdUpdate.FetchChangelog(cur, lat)
 	if changelog != "" {
 		for _, line := range strings.Split(changelog, "\n") {
 			fmt.Println("  " + line)
 		}
 	} else {
-		fmt.Printf("  https://github.com/%s/releases/tag/v%s\n", githubRepo, lat)
+		fmt.Printf("  %s/tag/v%s\n", origin.ReleaseBaseURLs()[0], lat)
 	}
 
-	// On macOS, Homebrew manages the binary — instruct the user rather than
-	// attempting a self-replace which would overwrite Homebrew's managed files.
+	// A Homebrew-managed binary lives under a Cellar prefix; self-replacing it
+	// would fight `brew`, so defer to it. Curl-installed binaries (the default
+	// on macOS now) live in ~/.local/bin and self-update like Linux does below.
 	if runtime.GOOS == "darwin" {
-		fmt.Printf("\nTo update, run:\n\n  brew upgrade lerd\n\n")
-		return nil
+		if self, err := selfPath(); err == nil && isHomebrewManaged(self) {
+			fmt.Printf("\nThis is a Homebrew install. To update, run:\n\n  brew upgrade lerd\n\n")
+			return nil
+		}
 	}
 
 	// Ask for confirmation.
-	fmt.Printf("\nUpdate to v%s? [Y/n] ", lat)
-	reader := bufio.NewReader(os.Stdin)
-	answer, _ := reader.ReadString('\n')
-	answer = strings.TrimSpace(strings.ToLower(answer))
-	if answer == "n" || answer == "no" {
-		fmt.Println("Update cancelled.")
+	if !feedback.Confirm("Update to v"+lat+"?", true) {
+		feedback.Line("update cancelled")
 		return nil
 	}
 
@@ -114,13 +112,14 @@ func runUpdate(currentVersion string, beta bool) error {
 	// Back up current binary for rollback.
 	backupBinary(self, currentVersion)
 
-	fmt.Printf("  --> Downloading lerd v%s ... ", lat)
+	dl := feedback.Start("downloading lerd v" + lat)
 	extracted, cleanup, err := downloadReleaseBinary(latest)
 	if err != nil {
+		dl.Fail(err)
 		return err
 	}
 	defer cleanup()
-	fmt.Println("OK")
+	dl.OK("")
 
 	// Atomically replace lerd.
 	tmp := self + ".tmp"
@@ -145,7 +144,9 @@ func runUpdate(currentVersion string, beta bool) error {
 	// Update the cache so lerd status / doctor stop showing a stale notice.
 	lerdUpdate.WriteUpdateCache(lat)
 
-	fmt.Printf("\nLerd updated to v%s — applying infrastructure changes...\n\n", lat)
+	feedback.Done("lerd updated to v" + lat)
+	feedback.Line("applying infrastructure changes")
+	fmt.Println()
 
 	// Re-exec the new binary with `install` to reapply quadlet files,
 	// DNS config, sysctl, etc. lerd install is idempotent. Pass
@@ -166,13 +167,9 @@ func runUpdate(currentVersion string, beta bool) error {
 	// minio container is still running (skip if already migrated to RustFS).
 	minioRunning, _ := podman.ContainerRunning("lerd-minio")
 	if _, err := os.Stat(config.DataSubDir("minio")); err == nil && minioRunning {
-		fmt.Print("\n==> MinIO detected — migrate to RustFS? [y/N] ")
-		migrateReader := bufio.NewReader(os.Stdin)
-		migrateAnswer, _ := migrateReader.ReadString('\n')
-		migrateAnswer = strings.TrimSpace(strings.ToLower(migrateAnswer))
-		if migrateAnswer == "y" || migrateAnswer == "yes" {
+		if feedback.Confirm("MinIO detected — migrate to RustFS?", false) {
 			if err := runMinioMigrate(nil, nil); err != nil {
-				fmt.Fprintf(os.Stderr, "  warn: migration failed: %v\n", err)
+				feedback.Warn("migration failed: %v", err)
 			}
 		}
 	}
@@ -212,24 +209,58 @@ func refreshStoreFrameworks() {
 	if len(targets) == 0 {
 		return
 	}
-	fmt.Printf("\n==> Refreshing %d framework definition%s\n", len(targets), pluralS(len(targets)))
+	feedback.Header(fmt.Sprintf("Refreshing %d framework%s", len(targets), pluralS(len(targets))))
 	client := store.NewClient()
 	for _, t := range targets {
 		label := t.name
 		if t.version != "" {
 			label = t.name + "@" + t.version
 		}
-		fmt.Printf("  --> %s ... ", label)
+		step := feedback.Start(label)
 		fw, err := client.FetchFramework(t.name, t.version)
 		if err != nil {
-			fmt.Printf("WARN (%v)\n", err)
+			step.Fail(err)
 			continue
 		}
 		if err := config.SaveStoreFramework(fw); err != nil {
-			fmt.Printf("WARN (%v)\n", err)
+			step.Fail(err)
 			continue
 		}
-		fmt.Println("OK")
+		step.OK("")
+	}
+}
+
+// refreshStorePresets re-fetches the store preset backing every installed
+// service so its definition and file mounts keep resolving offline after an
+// upgrade, mirroring refreshStoreFrameworks. Best-effort: a failed fetch leaves
+// the existing cached (or still-embedded) copy in place.
+func refreshStorePresets() {
+	customs, err := config.ListCustomServices()
+	if err != nil {
+		return
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, svc := range customs {
+		if svc.Preset == "" || seen[svc.Preset] {
+			continue
+		}
+		seen[svc.Preset] = true
+		names = append(names, svc.Preset)
+	}
+	if len(names) == 0 {
+		return
+	}
+	sort.Strings(names)
+	feedback.Header(fmt.Sprintf("Refreshing %d service preset%s", len(names), pluralS(len(names))))
+	client := store.NewServiceClient()
+	for _, name := range names {
+		step := feedback.Start(name)
+		if _, err := client.FetchServicePreset(name); err != nil {
+			step.Fail(err)
+			continue
+		}
+		step.OK("")
 	}
 }
 
@@ -247,12 +278,15 @@ func refreshGlobalMCPSkills() {
 	if !mcpEnabledGlobally(home) {
 		return
 	}
-	fmt.Println("\n==> Refreshing global MCP skills and guidelines")
+	feedback.Header("Refreshing global AI skills")
 	if err := RefreshGlobalAISkills(home, true); err != nil {
-		fmt.Fprintf(os.Stderr, "  warn: could not refresh global AI skills: %v\n", err)
+		feedback.Warn("could not refresh global AI skills: %v", err)
+	}
+	if sweepLegacySharedAIMCP(home) {
+		feedback.Note("cleaned ~/" + legacySharedAIMCP + " (no longer written)")
 	}
 	if !IsMCPGloballyRegistered() {
-		fmt.Println("  Re-registering lerd with Claude Code (was missing)")
+		feedback.Note("re-registering lerd with Claude Code (was missing)")
 		ensureClaudeMCPRegistered()
 	}
 }
@@ -276,13 +310,14 @@ func refreshProjectMCPSkills() {
 		return
 	}
 
-	fmt.Printf("\n==> Refreshing project MCP skills (%d project%s)\n", len(opted), pluralS(len(opted)))
+	feedback.Header(fmt.Sprintf("Refreshing project AI skills (%d)", len(opted)))
 	for _, p := range opted {
+		s := feedback.Start(p)
 		if err := RefreshProjectAISkills(p, false); err != nil {
-			fmt.Fprintf(os.Stderr, "  warn: %s: %v\n", p, err)
+			s.Fail(err)
 			continue
 		}
-		fmt.Printf("  refreshed %s\n", p)
+		s.OK("")
 	}
 }
 
@@ -365,31 +400,33 @@ func mcpEnabledGlobally(home string) bool {
 	return false
 }
 
-// restartLerdUserServices restarts the long-running lerd user units so they
-// pick up the freshly replaced binary. Linux keeps the old inode alive for
-// processes that have the binary open, so without an explicit restart the
-// daemons keep executing the pre-update code and report the old version.
-// Only currently-active units are restarted, so disabled services are left
-// alone.
+// restartLerdUserServices restarts the long-running lerd user units (systemd on
+// Linux, launchd on macOS) so they pick up the freshly replaced binary. Both
+// keep the old executable alive for processes that already have it open, so
+// without an explicit restart the daemons keep running the pre-update code and
+// report the old version. Only currently-active units are restarted, so
+// disabled services are left alone.
 func restartLerdUserServices() {
-	units := []string{"lerd-ui.service", "lerd-watcher.service", "lerd-tray.service"}
+	units := []string{"lerd-ui", "lerd-watcher", "lerd-tray"}
 	var active []string
 	for _, u := range units {
-		if systemd.IsServiceActive(u) {
+		if services.Mgr.IsActive(u) {
 			active = append(active, u)
 		}
 	}
 	if len(active) == 0 {
 		return
 	}
-	fmt.Println("\n==> Restarting lerd services to pick up the new binary")
+	feedback.Header("Restarting lerd services to pick up the new binary")
 	for _, u := range active {
-		fmt.Printf("  --> %s ... ", u)
-		if err := systemd.RestartService(u); err != nil {
-			fmt.Printf("WARN (%v)\n", err)
-		} else {
-			fmt.Println("OK")
+		s := feedback.Start(u)
+		if err := services.Mgr.Restart(u); err != nil {
+			// Best-effort: the binary swap already succeeded, so a restart that
+			// didn't take is a warning, not a failure of the update itself.
+			s.Warn(err)
+			continue
 		}
+		s.OK("")
 	}
 }
 
@@ -401,8 +438,7 @@ func downloadReleaseBinary(version string) (string, func(), error) {
 	arch := runtime.GOARCH // "amd64" or "arm64"
 	ver := stripV(version)
 
-	filename := fmt.Sprintf("lerd_%s_linux_%s.tar.gz", ver, arch)
-	url := fmt.Sprintf("%s/v%s/%s", githubDownloadBase, ver, filename)
+	filename := fmt.Sprintf("lerd_%s_%s_%s.tar.gz", ver, runtime.GOOS, arch)
 
 	tmp, err := os.MkdirTemp("", "lerd-update-*")
 	if err != nil {
@@ -411,9 +447,9 @@ func downloadReleaseBinary(version string) (string, func(), error) {
 	cleanup := func() { os.RemoveAll(tmp) }
 
 	archive := filepath.Join(tmp, filename)
-	if err := downloadFile(url, archive, 0644, io.Discard); err != nil {
+	if err := downloadArchive(ver, filename, archive); err != nil {
 		cleanup()
-		return "", func() {}, fmt.Errorf("download failed (%s): %w", url, err)
+		return "", func() {}, err
 	}
 
 	cmd := exec.Command("tar", "--no-same-owner", "-xzf", archive, "-C", tmp)
@@ -427,6 +463,28 @@ func downloadReleaseBinary(version string) (string, func(), error) {
 		return "", func() {}, fmt.Errorf("binary not found in archive")
 	}
 	return tmp, cleanup, nil
+}
+
+// downloadArchive fetches the release archive, trying each download base in
+// order until one succeeds, and returns an aggregated error if none do.
+func downloadArchive(ver, filename, archive string) error {
+	var errs []string
+	for _, base := range githubDownloadBases() {
+		url := fmt.Sprintf("%s/v%s/%s", base, ver, filename)
+		if err := downloadFile(url, archive, 0644, io.Discard); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", url, err))
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("download failed: %s", strings.Join(errs, "; "))
+}
+
+// isHomebrewManaged reports whether the resolved binary path lives inside a
+// Homebrew Cellar, in which case `lerd update` defers to `brew upgrade` rather
+// than self-replacing files brew owns.
+func isHomebrewManaged(path string) bool {
+	return strings.Contains(path, "/Cellar/")
 }
 
 func selfPath() (string, error) {
@@ -463,7 +521,7 @@ func stripV(v string) string { return lerdUpdate.StripV(v) }
 // backupBinary copies the current binary and version to backup locations for rollback.
 func backupBinary(self, currentVersion string) {
 	if err := copyFile(self, config.BackupBinaryFile(), 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "  warn: could not back up binary for rollback: %v\n", err)
+		feedback.Warn("could not back up binary for rollback: %v", err)
 		return
 	}
 
@@ -471,7 +529,7 @@ func backupBinary(self, currentVersion string) {
 	trayPath := filepath.Join(filepath.Dir(self), "lerd-tray")
 	if _, err := os.Stat(trayPath); err == nil {
 		if err := copyFile(trayPath, config.BackupTrayFile(), 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "  warn: could not back up lerd-tray: %v\n", err)
+			feedback.Warn("could not back up lerd-tray: %v", err)
 		}
 	}
 
@@ -495,7 +553,7 @@ func runRollback() error {
 		return err
 	}
 
-	fmt.Printf("==> Rolling back to v%s\n", prevVersion)
+	feedback.Header(fmt.Sprintf("Rolling back to v%s", prevVersion))
 
 	// Atomically replace lerd.
 	tmp := self + ".tmp"
@@ -529,7 +587,7 @@ func runRollback() error {
 	// `lerd install` starts from a known-good state. The current
 	// binary's probe logic decides v4-only vs dual-stack; the old
 	// binary's EnsureNetwork will accept whatever schema it finds.
-	fmt.Println("  --> Resetting lerd network for rollback")
+	feedback.Line("Resetting lerd network for rollback")
 	if attached, _, err := podman.RecreateNetwork("lerd", nil); err == nil {
 		for _, c := range attached {
 			_ = podman.StartUnit(c)
@@ -542,7 +600,7 @@ func runRollback() error {
 	// the cache picks up Type=simple immediately.
 	prepUserUnitsForRollback("lerd-ui.service", "lerd-watcher.service")
 
-	fmt.Printf("\nRolled back to v%s — applying infrastructure changes...\n\n", prevVersion)
+	feedback.Note(fmt.Sprintf("Rolled back to v%s, applying infrastructure changes...", prevVersion))
 
 	// Re-exec the new binary with `install`, same as a normal update.
 	installCmd := exec.Command(self, "install")

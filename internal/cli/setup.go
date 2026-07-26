@@ -8,13 +8,16 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/sitetpl"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/spf13/cobra"
 )
@@ -23,7 +26,10 @@ import (
 type setupStep struct {
 	label   string
 	enabled bool // default selection
-	run     func() error
+	// optional marks a non-essential step whose failure is surfaced as a warning
+	// and skipped rather than aborting setup (e.g. the in-container bun install).
+	optional bool
+	run      func() error
 }
 
 // NewSetupCmd returns the setup command.
@@ -71,6 +77,42 @@ mode with no .lerd.yaml, site registration falls back to auto-detection.`,
 	return cmd
 }
 
+// siteServedByPHPFPM reports whether a site has a PHP-FPM container an
+// in-container bun install can target. That covers plain PHP sites (shared FPM),
+// custom-FPM sites (a per-site FPM image built from a Containerfile), and
+// FrankenPHP; it excludes host-proxy and custom-(non-PHP)-container sites, whose
+// runtime lives elsewhere. A nil site is a bare-linked plain PHP site, which
+// qualifies. Driven off the resolved site (which setup folds a worktree back to
+// its parent for) rather than cwd's .lerd.yaml, so a worktree of a proxy site is
+// classified by its parent.
+func siteServedByPHPFPM(site *config.Site) bool {
+	if site == nil {
+		return true
+	}
+	return !site.IsHostProxy() && !site.IsCustomContainer()
+}
+
+// declaredFalse reports a framework definition explicitly opting a package
+// manager out (`composer: false`, `npm: false`). Empty and "auto" mean "detect".
+func declaredFalse(v string) bool { return strings.EqualFold(strings.TrimSpace(v), "false") }
+
+// frameworkForSetup resolves the site's framework definition, falling back to
+// detection. Returns a zero Framework rather than nil so callers can read its
+// fields unconditionally.
+func frameworkForSetup(site *config.Site, cwd string) *config.Framework {
+	name := ""
+	if site != nil {
+		name = site.Framework
+	}
+	if name == "" {
+		name, _ = config.DetectFrameworkForDir(cwd)
+	}
+	if fw, ok := config.GetFrameworkForDir(name, cwd); ok {
+		return fw
+	}
+	return &config.Framework{}
+}
+
 func runSetup(allSteps, skipOpen bool) error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -78,10 +120,15 @@ func runSetup(allSteps, skipOpen bool) error {
 	}
 
 	// Run init wizard (or apply saved .lerd.yaml) before any other step so
-	// PHP version, HTTPS, and services are configured first.
-	fmt.Println("→ Configuring site...")
+	// PHP version, HTTPS, and services are configured first. When a link already
+	// ran in this process (the "Run lerd setup?" prompt), the configure phase is
+	// a no-op, so skip the header and go straight to the steps.
+	feedback.Begin()
+	if !linkApplied {
+		feedback.Line("configuring site")
+	}
 	if err := runSetupInit(cwd, allSteps); err != nil {
-		fmt.Printf("  [WARN] %v\n", err)
+		feedback.Warn("%v", err)
 	}
 
 	site, _ := config.FindSiteByPath(cwd)
@@ -135,10 +182,17 @@ func runSetup(allSteps, skipOpen bool) error {
 		}
 	}
 
+	// A definition may opt out of a package manager (`npm: false` for Magento,
+	// Drupal, WordPress). Honour it, and never offer a JS step to a project with
+	// no package.json at all.
+	setupFW := frameworkForSetup(site, cwd)
+	wantComposer := hasComposerJSON && !declaredFalse(setupFW.Composer)
+	wantJS := hasPackageJSON && !declaredFalse(setupFW.NPM)
+
 	steps := []setupStep{}
 	// composer install only makes sense for a PHP project; skip it entirely for
 	// Node-only / host-proxy sites that have no composer.json.
-	if hasComposerJSON {
+	if wantComposer {
 		steps = append(steps, setupStep{
 			label:   "composer install",
 			enabled: os.IsNotExist(vendorMissing),
@@ -153,31 +207,34 @@ func runSetup(allSteps, skipOpen bool) error {
 	jsRuntime := "npm"
 	if nodeDet.UsesBun(cwd) && nodeDet.BunPath() != "" {
 		jsRuntime = "bun"
+	} else if pm := nodeDet.PackageManager(cwd); pm == "pnpm" || pm == "yarn" {
+		jsRuntime = pm
 	}
 	installLabel := "npm install/ci"
-	buildLabel := "npm run " + buildScript
-	if jsRuntime == "bun" {
-		installLabel = "bun install"
-		buildLabel = "bun run " + buildScript
+	buildLabel := jsRuntime + " run " + buildScript
+	if jsRuntime != "npm" {
+		installLabel = jsRuntime + " install"
 	}
-	steps = append(steps, []setupStep{
-		{
+	if wantJS {
+		steps = append(steps, setupStep{
 			label:   installLabel,
-			enabled: os.IsNotExist(nodeModulesMissing) && hasPackageJSON,
+			enabled: os.IsNotExist(nodeModulesMissing),
 			run: func() error {
 				return runJSInstall(cwd, hasLockFile)
 			},
+		})
+	}
+	steps = append(steps, setupStep{
+		label:   "lerd mcp:inject",
+		enabled: false,
+		run: func() error {
+			return runMCPInject("")
 		},
-		{
-			label:   "lerd mcp:inject",
-			enabled: false,
-			run: func() error {
-				return runMCPInject("")
-			},
-		},
-		{
+	})
+	if wantJS {
+		steps = append(steps, setupStep{
 			label:   buildLabel,
-			enabled: hasPackageJSON && buildScript != "" && !buildReplaced,
+			enabled: buildScript != "" && !buildReplaced,
 			run: func() error {
 				if _, err := os.Stat(cwd + "/node_modules"); os.IsNotExist(err) {
 					fmt.Println("  node_modules not found.")
@@ -197,29 +254,36 @@ func runSetup(allSteps, skipOpen bool) error {
 				}
 				return runJSScript(cwd, buildScript)
 			},
-		},
-		{
-			// Mirror the host's bun into the PHP-FPM container so `lerd shell`
-			// has a working (musl) bun, with no extra command. lerd never
-			// installs bun on the host; this only fires when the user already
-			// has bun installed there. Idempotent: skips when the container bun
-			// is already present, and installContainerBun only restarts the
-			// container if the volume isn't mounted yet. Non-fatal.
-			label:   "bun (container)",
-			enabled: nodeDet.BunPath() != "" && bunPHPVersion != "",
+		})
+	}
+
+	// Mirror the host's bun into the PHP-FPM container so `lerd shell` has a
+	// working (musl) bun, with no extra command. lerd never installs bun on the
+	// host; this only fires when the user already has it there. Only PHP-FPM
+	// sites have that container — host-proxy and custom-container sites run their
+	// runtime elsewhere — so the step is omitted entirely for them, not just left
+	// unchecked, since `lerd setup -a` runs every listed step. Idempotent and
+	// non-fatal: skips when the container bun is already present.
+	// Mirror bun into the container only when it isn't already there. The volume
+	// is host-backed at BunVolumeDir(), so a plain stat of its bun binary tells us
+	// this without a podman exec, keeping setup planning off podman. Once bun is
+	// present, updates go through `bun upgrade`, so there's nothing to offer here.
+	_, bunStatErr := os.Stat(filepath.Join(podman.BunVolumeDir(), "bin", "bun"))
+	if siteServedByPHPFPM(site) && nodeDet.BunPath() != "" && bunPHPVersion != "" && os.IsNotExist(bunStatErr) {
+		steps = append(steps, setupStep{
+			label:    "bun (container)",
+			enabled:  true,
+			optional: true,
 			run: func() error {
-				// Cheap exec check deferred to run time so setup planning never
-				// blocks on podman; installContainerBun is the no-op fast path.
+				// Exec check deferred to run time as a final guard; installContainerBun
+				// is the no-op fast path if bun appeared since planning.
 				if bunInstalledInContainer(bunPHPVersion) {
 					return nil
 				}
-				if err := installContainerBun(bunPHPVersion, "", os.Stdout); err != nil {
-					fmt.Printf("  [WARN] could not install bun in the container: %v\n", err)
-				}
-				return nil
+				return installContainerBun(bunPHPVersion, "", os.Stdout)
 			},
-		},
-	}...)
+		})
+	}
 
 	// Offer in-container Pest browser testing when the project depends on the
 	// Playwright-based browser plugin and isn't set up yet. Left unchecked by
@@ -232,17 +296,15 @@ func runSetup(allSteps, skipOpen bool) error {
 		config.ComposerHasPackage(cwd, "pestphp/pest-plugin-browser") {
 		alreadyBaked := false
 		if gcfg, err := config.LoadGlobal(); err == nil {
-			alreadyBaked = slices.Contains(gcfg.GetPackages(bunPHPVersion), pestBrowserPkg)
+			alreadyBaked = slices.Contains(gcfg.GetPackages(), pestBrowserPkg)
 		}
 		if !alreadyBaked {
 			steps = append(steps, setupStep{
-				label:   "pest:browser (container)",
-				enabled: false,
+				label:    "pest:browser (container)",
+				enabled:  false,
+				optional: true,
 				run: func() error {
-					if err := installPestBrowser(bunPHPVersion, os.Stdout); err != nil {
-						fmt.Printf("  [WARN] could not set up Pest browser testing: %v\n", err)
-					}
-					return nil
+					return installPestBrowser(bunPHPVersion, os.Stdout)
 				},
 			})
 		}
@@ -255,12 +317,14 @@ func runSetup(allSteps, skipOpen bool) error {
 			fwName, _ = config.DetectFrameworkForDir(cwd)
 		}
 		if fw, ok := config.GetFrameworkForDir(fwName, cwd); ok {
+			tplCtx := sitetpl.ForSite(site)
 			for _, sc := range fw.Setup {
 				// Skip commands whose check doesn't pass.
 				if sc.Check != nil && !config.MatchesRule(cwd, *sc.Check) {
 					continue
 				}
 				setupCmd := sc
+				setupCmd.Command = sitetpl.Apply(setupCmd.Command, tplCtx)
 				enabled := setupCmd.Default
 				steps = append(steps, setupStep{
 					label:   setupCmd.Label,
@@ -387,6 +451,7 @@ func runSetup(allSteps, skipOpen bool) error {
 	// Determine which steps to run.
 	var selected []string
 	if allSteps {
+		feedback.Begin()
 		for _, s := range steps {
 			selected = append(selected, s.label)
 		}
@@ -401,6 +466,7 @@ func runSetup(allSteps, skipOpen bool) error {
 		}
 
 		selected = defaults // pre-select enabled steps
+		feedback.Begin()
 		if err := huh.NewForm(
 			huh.NewGroup(
 				huh.NewMultiSelect[string]().
@@ -408,7 +474,7 @@ func runSetup(allSteps, skipOpen bool) error {
 					Options(huh.NewOptions(options...)...).
 					Value(&selected),
 			),
-		).WithTheme(huh.ThemeCatppuccin()).Run(); err != nil {
+		).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin)).Run(); err != nil {
 			return err
 		}
 	}
@@ -424,21 +490,40 @@ func runSetup(allSteps, skipOpen bool) error {
 		selectedSet[s] = true
 	}
 
-	// Execute steps in order.
+	// Execute steps in order. Each step's own output is captured behind a single
+	// feedback line and only surfaced when the step fails, matching the link
+	// flow's "action … ✓" styling. The separating blank line was already printed
+	// before the step selector (or the --all branch below).
+	start := time.Now()
 	for _, s := range steps {
 		if !selectedSet[s.label] {
 			continue
 		}
-		fmt.Printf("\n→ Running: %s\n", s.label)
-		if err := s.run(); err != nil {
-			fmt.Printf("✗ %s failed: %v\n", s.label, err)
+		// Animate the spinner on the real stdout (StartOn) while runCapturingStdout
+		// swaps the global os.Stdout to capture the step's own verbose output. The
+		// spinner targets the fixed writer, so the swap can't leak frames into the
+		// captured buffer and long steps still show live progress.
+		prev := os.Stdout
+		step := feedback.StartOn(prev, s.label)
+		out, err := runCapturingStdout(s.run)
+		if err != nil {
+			if s.optional {
+				step.Info("skipped")
+				feedback.Warn("%s: %v", s.label, err)
+				continue
+			}
+			step.Fail(err)
+			_, _ = os.Stdout.Write(out)
 			if !promptContinue() {
 				return fmt.Errorf("setup aborted after %q failed", s.label)
 			}
+			continue
 		}
+		step.OK("")
 	}
 
-	fmt.Println("\nSetup complete.")
+	feedback.Success("setup complete", time.Since(start))
+	feedback.Begin()
 	return nil
 }
 
@@ -544,6 +629,9 @@ func execInContainer(dir, command string) error {
 	}
 	container := fpmContainerForDir(dir, version)
 	podman.EnsurePathMounted(dir, version)
+	// This execs php in the container directly, bypassing the shim, so the
+	// framework's cli_ini has to be folded in here too.
+	command = injectPHPIniIntoCommand(command, phpIniArgsForDir(dir))
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
 		return fmt.Errorf("empty setup command")

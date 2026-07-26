@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
@@ -83,10 +84,12 @@ func newHorizonReloadCmd(use string) *cobra.Command {
 				return err
 			}
 
+			feedback.Begin()
 			if enable {
-				fmt.Println("Horizon auto-reload enabled, Horizon will restart workers on file changes.")
+				feedback.Done("Horizon auto-reload enabled")
+				feedback.Note("Horizon restarts workers on file changes")
 			} else {
-				fmt.Println("Horizon auto-reload disabled, Horizon runs in standard mode.")
+				feedback.Done("Horizon auto-reload disabled")
 			}
 			return nil
 		},
@@ -229,7 +232,7 @@ ExecStart=%s exec -w %s %s php artisan horizon
 
 [Install]
 WantedBy=default.target
-`, siteName, fpmUnit, fpmUnit, fpmUnit, podman.PodmanBin(), sitePath, container)
+`, siteName, fpmUnit, fpmUnit, fpmUnit, podman.PodmanBin(), podman.ShellQuote(sitePath), container)
 }
 
 // HorizonStopForSite stops and removes the Horizon unit for the named site.

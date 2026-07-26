@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/spf13/cobra"
@@ -126,7 +126,8 @@ func runDbSnapshot(name, service, database string, allDatabases bool) error {
 	if snap.AllDatabases {
 		scope = "all databases"
 	}
-	fmt.Printf("Snapshot %q created for %s (%s).\n", snap.Name, scope, humanSize(snap.SizeBytes))
+	feedback.Begin()
+	feedback.Done(fmt.Sprintf("snapshot %s created for %s (%s)", snap.Name, scope, humanSize(snap.SizeBytes)))
 	return nil
 }
 
@@ -148,10 +149,11 @@ func runDbSnapshots(service, database string, all bool) error {
 		return err
 	}
 	if len(snaps) == 0 {
+		feedback.Begin()
 		if listDatabase == "" {
-			fmt.Printf("No snapshots for service %q.\n", env.service)
+			feedback.Line("no snapshots for service " + env.service)
 		} else {
-			fmt.Printf("No snapshots for %q.\n", listDatabase)
+			feedback.Line("no snapshots for " + listDatabase)
 		}
 		return nil
 	}
@@ -184,10 +186,7 @@ func runDbRestore(name, service, database string, allDatabases, force bool) erro
 		if !isInteractive() {
 			return fmt.Errorf("restoring %q overwrites %s — rerun with --force to confirm", name, scope)
 		}
-		fmt.Printf("Restore snapshot %q into %s? This overwrites the current data. [y/N] ", name, scope)
-		var answer string
-		fmt.Scanln(&answer) //nolint:errcheck
-		if !strings.EqualFold(strings.TrimSpace(answer), "y") && !strings.EqualFold(strings.TrimSpace(answer), "yes") {
+		if !feedback.Confirm(fmt.Sprintf("Restore snapshot %q into %s? This overwrites the current data.", name, scope), false) {
 			return fmt.Errorf("restore cancelled")
 		}
 	}
@@ -195,10 +194,16 @@ func runDbRestore(name, service, database string, allDatabases, force bool) erro
 	if err := ensureServiceRunning(env.service); err != nil {
 		return fmt.Errorf("could not start %s: %w", env.service, err)
 	}
-	if err := serviceops.RestoreSnapshot(target, name, snapshotEmit()); err != nil {
+	rep, err := serviceops.RestoreSnapshot(target, name, snapshotEmit())
+	if err != nil {
 		return err
 	}
-	fmt.Printf("Snapshot %q restored.\n", name)
+	feedback.Begin()
+	if rep.Errors > 0 {
+		feedback.Warn("snapshot %s restored but %s", name, rep.Summary())
+		return nil
+	}
+	feedback.Done("snapshot " + name + " restored")
 	return nil
 }
 
@@ -214,7 +219,8 @@ func runDbSnapshotRm(name, service, database string, allDatabases bool) error {
 	if err := serviceops.DeleteSnapshot(env.service, env.database, name, allDatabases); err != nil {
 		return err
 	}
-	fmt.Printf("Snapshot %q deleted.\n", name)
+	feedback.Begin()
+	feedback.Done("snapshot " + name + " deleted")
 	return nil
 }
 
@@ -267,8 +273,7 @@ func snapshotGitBranch(cwd string) string {
 }
 
 func printSnapshotTable(snaps []serviceops.Snapshot) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tCREATED\tDATABASE\tSIZE\tBRANCH")
+	rows := make([][]string, 0, len(snaps))
 	for _, s := range snaps {
 		db := s.Database
 		if s.AllDatabases {
@@ -278,10 +283,11 @@ func printSnapshotTable(snaps []serviceops.Snapshot) {
 		if branch == "" {
 			branch = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			s.Name, s.Created.Local().Format("2006-01-02 15:04"), db, humanSize(s.SizeBytes), branch)
+		rows = append(rows, []string{
+			s.Name, s.Created.Local().Format("2006-01-02 15:04"), db, humanSize(s.SizeBytes), branch,
+		})
 	}
-	_ = w.Flush()
+	feedback.Table([]string{"NAME", "CREATED", "DATABASE", "SIZE", "BRANCH"}, rows)
 }
 
 // humanSize renders a byte count in binary units.

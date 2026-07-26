@@ -3,13 +3,12 @@
 package cli
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
@@ -24,7 +23,7 @@ func machineLastUpFile() string {
 // (default-marked, else first) so inspect targets the VM lerd actually
 // uses. Returns "" when no machine exists yet.
 func selectedMachineName() string {
-	out, err := exec.Command(podman.PodmanBin(), "machine", "list",
+	out, err := podman.Cmd("machine", "list",
 		"--format", "{{.Name}}").Output()
 	if err != nil {
 		return ""
@@ -58,7 +57,7 @@ func currentMachineLastUp() string {
 	if name == "" {
 		return ""
 	}
-	out, err := exec.Command(podman.PodmanBin(), "machine", "inspect",
+	out, err := podman.Cmd("machine", "inspect",
 		"--format", "{{.LastUp}}", name).Output()
 	if err != nil {
 		return ""
@@ -115,7 +114,7 @@ func healMachineRestartIfNeeded(preEnsureLastUp string) {
 // the host and gvproxy re-registers the host port forwards.
 func removeLerdContainersForGvproxyHeal() {
 	forceRemoveLerdContainers(false,
-		"  --> Podman Machine was restarted; recreating containers to restore host port forwards ...")
+		"Podman Machine was restarted; recreating containers to restore host port forwards…")
 }
 
 // forceRemoveLerdContainers force-removes lerd-* containers so the next
@@ -141,9 +140,12 @@ func forceRemoveLerdContainers(includeStopped bool, announce string) {
 	if len(names) == 0 {
 		return
 	}
-	fmt.Println(announce)
+	feedback.Line(announce)
 	args := append([]string{"rm", "-f"}, names...)
-	if out, err := exec.Command(podman.PodmanBin(), args...).CombinedOutput(); err != nil {
-		fmt.Printf("       WARN: podman rm -f failed: %v\n%s\n", err, strings.TrimSpace(string(out)))
+	if out, err := podman.Cmd(args...).CombinedOutput(); err != nil {
+		feedback.Warn("podman rm -f failed: %v", err)
+		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+			feedback.Note(trimmed)
+		}
 	}
 }

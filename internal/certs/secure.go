@@ -90,22 +90,37 @@ func ReissueCertForWorktree(site config.Site) error {
 	return issueCertWithWorktrees(site)
 }
 
-// issueCertWithWorktrees detects all worktrees for the site and issues a
-// certificate covering the site's own domains plus *.worktreeDomain for each
-// worktree, so that deep subdomains (e.g. app.branch.domain.test) work. The
-// reissue is atomic: a transient mkcert failure leaves the existing cert
-// intact rather than tripping RepairVhosts into flipping the site to HTTP.
-func issueCertWithWorktrees(site config.Site) error {
-	certsDir := filepath.Join(config.CertsDir(), "sites")
+// EnsureCert reuses the site's existing certificate when it is still valid and
+// clear of the reissue window, otherwise reissues one covering the site's own
+// domains plus every current worktree domain. Unlike ReissueCertForWorktree it
+// never forces, so it is cheap to call on every boot/watcher pass as the routine
+// self-heal that keeps a long-lived secured site's leaf cert from expiring.
+func EnsureCert(site config.Site) error {
+	certsDir, domains := siteCertDomains(site)
+	return IssueCert(site.PrimaryDomain(), domains, certsDir)
+}
 
+// siteCertDomains assembles the cert output directory and the full SAN list (the
+// site's own domains plus every current worktree domain) shared by the reuse and
+// force reissue paths so they cannot drift.
+func siteCertDomains(site config.Site) (certsDir string, domains []string) {
+	certsDir = filepath.Join(config.CertsDir(), "sites")
 	var wtDomains []string
 	if worktrees, err := gitpkg.ServableWorktrees(site.Path, site.PrimaryDomain()); err == nil {
 		for _, wt := range worktrees {
 			wtDomains = append(wtDomains, wt.Domain)
 		}
 	}
-	domains := WorktreeCertDomains(site.Domains, wtDomains)
+	return certsDir, WorktreeCertDomains(site.Domains, wtDomains)
+}
 
+// issueCertWithWorktrees detects all worktrees for the site and issues a
+// certificate covering the site's own domains plus *.worktreeDomain for each
+// worktree, so that deep subdomains (e.g. app.branch.domain.test) work. The
+// reissue is atomic: a transient mkcert failure leaves the existing cert
+// intact rather than tripping RepairVhosts into flipping the site to HTTP.
+func issueCertWithWorktrees(site config.Site) error {
+	certsDir, domains := siteCertDomains(site)
 	return IssueCertForce(site.PrimaryDomain(), domains, certsDir)
 }
 

@@ -5,7 +5,68 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
+
+func TestShimLeadingEnv_PrependsBinDirToPath(t *testing.T) {
+	binDir := config.BinDir()
+	sep := string(os.PathListSeparator)
+
+	out := shimLeadingEnv([]string{"FOO=bar", "PATH=/usr/bin" + sep + "/bin", "BAZ=qux"})
+
+	var path string
+	for _, kv := range out {
+		if name, val, ok := strings.Cut(kv, "="); ok && name == "PATH" {
+			path = val
+		}
+	}
+	want := binDir + sep + "/usr/bin" + sep + "/bin"
+	if path != want {
+		t.Errorf("PATH = %q, want %q", path, want)
+	}
+	if !strings.HasPrefix(path, binDir+sep) {
+		t.Errorf("lerd bin dir must lead PATH so the php shim wins; got %q", path)
+	}
+	// non-PATH vars pass through untouched
+	if !envHas(out, "FOO=bar") || !envHas(out, "BAZ=qux") {
+		t.Errorf("non-PATH vars were not preserved: %v", out)
+	}
+}
+
+func TestShimLeadingEnv_AddsPathWhenAbsent(t *testing.T) {
+	out := shimLeadingEnv([]string{"FOO=bar"})
+	if !envHas(out, "PATH="+config.BinDir()) {
+		t.Errorf("expected PATH to be added with bin dir, got %v", out)
+	}
+}
+
+func TestShimLeadingEnv_MatchesPathCaseInsensitively(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	out := shimLeadingEnv([]string{"Path=/usr/bin"})
+	// only one PATH-ish entry should exist, with the bin dir prepended
+	count := 0
+	for _, kv := range out {
+		if name, _, ok := strings.Cut(kv, "="); ok && strings.EqualFold(name, "PATH") {
+			count++
+			if !strings.HasPrefix(kv, "Path="+config.BinDir()+sep) {
+				t.Errorf("existing key casing not preserved or bin dir missing: %q", kv)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly one PATH entry, got %d in %v", count, out)
+	}
+}
+
+func envHas(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
 
 func TestSyncNodeGlobalBins_CreatesWrappers(t *testing.T) {
 	root := t.TempDir()
@@ -155,5 +216,25 @@ func TestSyncNodeGlobalBins_MissingSourceIsNoOp(t *testing.T) {
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Errorf("expected orphan removed when source missing, err=%v", err)
+	}
+}
+
+// TestRunBun_FailureReturnsErrorWhenNotExiting guards the lerd link/setup
+// regression where a failed `npm run production` / `bun run build` killed the
+// whole process via os.Exit, bypassing the step loop's failure feedback. With
+// exitOnFail false the non-zero child exit must come back as an error so the
+// caller can report it, not terminate lerd.
+func TestRunBun_FailureReturnsErrorWhenNotExiting(t *testing.T) {
+	// /bin/sh stands in for the bun binary; the script exits non-zero.
+	err := runBun(t.TempDir(), "/bin/sh", []string{"-c", "exit 3"}, false)
+	if err == nil {
+		t.Fatal("expected an error from a non-zero child exit, got nil")
+	}
+}
+
+// TestRunBun_SuccessReturnsNil confirms the happy path still returns nil.
+func TestRunBun_SuccessReturnsNil(t *testing.T) {
+	if err := runBun(t.TempDir(), "/bin/sh", []string{"-c", "exit 0"}, false); err != nil {
+		t.Fatalf("expected nil on success, got %v", err)
 	}
 }

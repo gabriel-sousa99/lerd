@@ -1,6 +1,6 @@
 # Framework commands
 
-Every PHP site in the lerd dashboard exposes a **Commands ▾** dropdown in the site controls band, alongside the version pickers and worker toggles. It surfaces a curated set of one-shot admin actions for the detected framework, plus anything the project adds in its `.lerd.yaml`. The same set is reachable from the command palette (`⌘K` / `/`) and from the terminal via `lerd run <name>`.
+Every PHP site in the lerd dashboard exposes a **Commands ▾** dropdown in the site Overview's Runtime & workers row, alongside the version pickers and worker toggles. It surfaces a curated set of one-shot admin actions for the detected framework, plus anything the project adds in its `.lerd.yaml`. The same set is reachable from the command palette (`⌘K` / `/`) and from the terminal via `lerd run <name>`.
 
 The feature exists for the actions you'd otherwise ssh in for: clearing caches, applying migrations, generating an admin login link, exporting the database before a risky change.
 
@@ -14,17 +14,18 @@ The feature exists for the actions you'd otherwise ssh in for: clearing caches, 
 | Symfony | `cache:clear`, `doctrine:migrations:migrate`, `doctrine:fixtures:load` |
 | CakePHP | `cache:clear`, `migrate`, `schema:cache:clear` |
 | Statamic | `cache:clear`, `stache:warm`, `search:update` |
+| Magento | `setup:install`, `cache:flush`, `cache:clean`, `setup:upgrade`, `setup:di:compile`, `indexer:reindex`, `deploy:mode:developer`, `maintenance:enable`, `maintenance:disable` |
 
 Destructive commands (`migrate:fresh`, `cim`, `doctrine:fixtures:load`) are gated by a confirmation modal before running.
 
-Some commands include a `check:` rule and only surface when the relevant package is installed (`doctrine:migrations:migrate` requires `doctrine/doctrine-migrations-bundle`, CakePHP `migrate` requires `cakephp/migrations`).
+Some commands include a `check:` rule and only surface when the relevant package or file is present (`doctrine:migrations:migrate` requires `doctrine/doctrine-migrations-bundle`, CakePHP `migrate` requires `cakephp/migrations`). Magento uses this to hide every command that needs a deployment config until the store is installed, so a fresh checkout offers only `setup:install`.
 
 ## How a run works
 
 Clicking a command (or pressing Enter on a palette entry, or running `lerd run <name>`) executes the shell command in the project's directory, with stdio routed depending on the command's `output:` value:
 
-- **`silent`** (default) — runs, captures output, shows a brief success or failure indicator in the modal.
-- **`text`** — same as silent but with the captured stdout rendered in a scrollable monospace block. Use for commands whose output you'd want to read (test runs, route lists, config diffs).
+- **`text`** (default) — streams stdout and stderr into the modal as a scrollable monospace block, and leaves it open on the exit code. Use for commands whose output you'd want to read (test runs, route lists, config diffs).
+- **`silent`** — runs without opening the modal and toasts when it's done, so a cache clear doesn't cost you a click. A failure still opens the modal with the captured output, since that's the only thing that explains it.
 - **`url`** — captures stdout, scans it for the first `http(s)://...` URL, and surfaces it with Copy and Open buttons. The killer feature for `drush uli` and similar one-time-login generators.
 - **`terminal`** — spawns the user's terminal emulator (kitty, foot, alacritty, wezterm, ghostty, ptyxis, konsole, gnome-terminal, xterm; on macOS iTerm or Terminal.app) with the command running inside. Use for interactive commands like `php artisan tinker`, `bin/cake bake`, `wp shell` that need a real TTY. The lerd-ui modal stays closed.
 
@@ -64,6 +65,8 @@ The merge rules are:
 
 Validation runs as part of `lerd check`. Invalid `output:` values, unknown icons, duplicate names, and missing commands all surface there.
 
+Because a `.lerd.yaml` `commands:` entry comes from the project (an untrusted cloned repo), lerd asks before running one on your host: the first run via `lerd run` or the dashboard shows the exact command and prompts, and the approval is remembered per site so later runs don't re-prompt. `lerd run --yes` bypasses the prompt, and `host_commands.skip_confirmation: true` (or `host_commands.disabled: true` to refuse them) in the global config changes the default. Framework-provided commands (store, built-in, user overlay) run without this prompt.
+
 ## Schema
 
 ```yaml
@@ -72,7 +75,7 @@ commands:
     label: Clear all caches       # UI label
     command: php artisan optimize:clear   # shell, passed to `sh -c`
     description: Clear config, route, view, event, and compiled caches
-    output: silent                # silent | text | url | terminal
+    output: silent                # silent | text | url | terminal (default: text)
     confirm: false                # ask before running
     icon: broom                   # from the known icon set
     cwd: .                        # optional, relative to project root
@@ -83,7 +86,7 @@ commands:
 
 **Known icons**: `broom`, `database`, `refresh`, `link`, `check`, `list`, `key`, `edit`, `arrow-down`, `arrow-up`, `play`, `terminal`. An unknown icon falls back to a generic glyph; `lerd check` warns.
 
-**Output values:** invalid values fail `lerd check`. Defaults to `silent`.
+**Output values:** invalid values fail `lerd check`. Defaults to `text`.
 
 **Check rules**: reuse `FrameworkRule`. The two common forms are `composer: <package>` (the package must be in `composer.json`) and `file: <path>` (the file must exist relative to the project root).
 

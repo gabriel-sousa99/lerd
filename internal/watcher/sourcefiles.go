@@ -19,14 +19,32 @@ type SourceTarget struct {
 	Dirs []string
 }
 
+// maxSourceDirEntries caps how many direct entries a directory may have before
+// the source watcher skips it. fsnotify's macOS (kqueue) backend opens a file
+// descriptor per file in every watched directory, so a generated or vendored
+// asset dump checked into a source root (e.g. a Font Awesome icon set with
+// thousands of SVGs) can exhaust the per-process fd limit. Such a directory is
+// not hand-edited source, so skipping it costs nothing for activity detection
+// while keeping fd use bounded. Real source dirs hold tens to a few hundred
+// files; this is far above that and far below an asset dump.
+const maxSourceDirEntries = 2000
+
+// maxWatchedSourceFiles is a hard ceiling on the files the source watcher will
+// register across every target, a backstop under the per-directory cap so no
+// combination of trees can drive the watcher into EMFILE (kern.maxfilesperproc
+// is ~92k on macOS). Once reached, further trees are left to the nginx access
+// feed for activity, which is the primary signal anyway.
+const maxWatchedSourceFiles = 32768
+
 // WatchSourceFiles watches each target's source directories recursively and
 // calls onActivity(key), debounced per key, when a source file under them is
 // written, created, or renamed — i.e. when you save while coding. Heavy or
 // generated subtrees (node_modules, vendor, hidden dirs, ...) are never
 // descended, so the watch set stays small, which also keeps macOS kqueue
 // descriptor use bounded. Targets are re-scanned periodically so new
-// sites/worktrees and newly-created subdirectories are picked up.
-func WatchSourceFiles(getTargets func() []SourceTarget, debounce time.Duration, onActivity func(key string)) error {
+// sites/worktrees and newly-created subdirectories are picked up. It runs until
+// stop is closed (idle-suspend disabled), then releases all fsnotify watches.
+func WatchSourceFiles(getTargets func() []SourceTarget, debounce time.Duration, onActivity func(key string), stop <-chan struct{}) error {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -36,9 +54,13 @@ func WatchSourceFiles(getTargets func() []SourceTarget, debounce time.Duration, 
 	var mu sync.Mutex
 	dirKey := map[string]string{}      // watched directory → activity key
 	timers := map[string]*time.Timer{} // pending debounce timer per key
+	skipped := map[string]bool{}       // oversized dirs already logged as skipped
+	watchedFiles := 0                  // running estimate of fds the watch set holds
 
-	// addTree recursively watches root and its subdirs (skipping excludes),
-	// tagging each watched directory with key.
+	// addTree recursively watches root and its subdirs (skipping excludes and
+	// oversized asset dumps), tagging each watched directory with key. It bounds
+	// the total files watched so a pathological tree can't exhaust the process fd
+	// limit (see maxSourceDirEntries / maxWatchedSourceFiles).
 	addTree := func(root, key string) {
 		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 			if err != nil || !d.IsDir() {
@@ -49,16 +71,54 @@ func WatchSourceFiles(getTargets func() []SourceTarget, debounce time.Duration, 
 			}
 			mu.Lock()
 			_, already := dirKey[p]
+			wasSkipped := skipped[p]
 			mu.Unlock()
 			if already {
 				return nil
 			}
+			// Already known oversized on a prior pass: skip without re-reading its
+			// (potentially 150k-entry) tree, so rescans stay off it entirely.
+			if wasSkipped {
+				return filepath.SkipDir
+			}
+			entries, derr := os.ReadDir(p)
+			if derr != nil {
+				return nil
+			}
+			// A directory dense enough to be a generated/vendored asset dump is
+			// not source: skip it (and its subtree) so kqueue's per-file fds don't
+			// pile up. Log once per dir so 30s rescans don't spam.
+			if len(entries) > maxSourceDirEntries {
+				mu.Lock()
+				firstTime := !skipped[p]
+				skipped[p] = true
+				mu.Unlock()
+				if firstTime {
+					logger.Warn("source watcher: skipping oversized dir (assets, not source)", "path", p, "entries", len(entries))
+				}
+				return filepath.SkipDir
+			}
+			files := 0
+			for _, e := range entries {
+				if !e.IsDir() {
+					files++
+				}
+			}
+			mu.Lock()
+			if watchedFiles+files > maxWatchedSourceFiles {
+				mu.Unlock()
+				// Hard fd budget reached: stop adding trees this pass. The nginx
+				// access feed still drives activity for the unwatched remainder.
+				return filepath.SkipAll
+			}
+			mu.Unlock()
 			if err := w.Add(p); err != nil {
 				logger.Error("failed to watch source dir", "path", p, "err", err)
 				return nil
 			}
 			mu.Lock()
 			dirKey[p] = key
+			watchedFiles += files
 			mu.Unlock()
 			return nil
 		})
@@ -78,6 +138,9 @@ func WatchSourceFiles(getTargets func() []SourceTarget, debounce time.Duration, 
 
 	for {
 		select {
+		case <-stop:
+			return nil
+
 		case <-ticker.C:
 			scan()
 

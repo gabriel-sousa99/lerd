@@ -1,13 +1,9 @@
 package cli
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 
-	"github.com/gabriel-sousa99/lerd/internal/config"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
@@ -23,30 +19,38 @@ func NewPhpShellCmd() *cobra.Command {
 	}
 }
 
+// shellWorkDir resolves the directory the shell opens in: the worktree checkout
+// when cwd is inside one, otherwise the registered site root, otherwise cwd. A
+// worktree nested under its parent path-prefix-matches the parent in
+// SiteRootFor, so without the worktree check the shell would open the parent
+// tree while running the worktree's own PHP version and FPM image, mixing two
+// sites in one session. It resolves the site the same way version detection does.
+func shellWorkDir(cwd string) string {
+	if wt, _, ok := phpDet.WorktreeRootFor(cwd); ok {
+		return wt
+	}
+	return phpDet.SiteRootFor(cwd)
+}
+
 func runPhpShell(_ *cobra.Command, _ []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 
-	version, err := phpDet.DetectVersion(cwd)
+	version, err := phpVersionForDir(cwd)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return fmt.Errorf("cannot detect PHP version: %w", err)
-		}
-		version = cfg.PHP.DefaultVersion
+		return err
 	}
 
 	container := fpmContainerForDir(cwd, version)
 
-	if running, _ := podman.ContainerRunning(container); !running {
-		return fmt.Errorf("PHP %s FPM container is not running — start it with: %s", version, serviceStartHint(container))
+	version, container, err = ensureFPMRunning(cwd, version, container)
+	if err != nil {
+		return err
 	}
 
-	// Use the registered site root as the working directory if cwd is inside one,
-	// otherwise fall back to cwd.
-	workDir := siteRootFor(cwd)
+	workDir := shellWorkDir(cwd)
 
 	podman.EnsurePathMounted(workDir, version)
 	ensureServicesForCwd(workDir)
@@ -65,30 +69,4 @@ func runPhpShell(_ *cobra.Command, _ []string) error {
 		return err
 	}
 	return nil
-}
-
-// siteRootFor returns the registered site path that contains dir, or dir itself
-// if no registered site matches.
-func siteRootFor(dir string) string {
-	reg, err := config.LoadSites()
-	if err != nil {
-		return dir
-	}
-	// Normalise to clean absolute path for prefix matching.
-	dir = filepath.Clean(dir)
-	best := ""
-	for _, s := range reg.Sites {
-		sitePath := filepath.Clean(s.Path)
-		// dir == sitePath or dir is underneath sitePath
-		if dir == sitePath || strings.HasPrefix(dir, sitePath+string(filepath.Separator)) {
-			// Prefer the longest (most-specific) match.
-			if len(sitePath) > len(best) {
-				best = sitePath
-			}
-		}
-	}
-	if best != "" {
-		return best
-	}
-	return dir
 }

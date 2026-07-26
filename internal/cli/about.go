@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -17,15 +18,18 @@ func NewAboutCmd() *cobra.Command {
 }
 
 func runAbout(_ *cobra.Command, _ []string) error {
-	fmt.Println("Lerd Oracle Edition — Podman-powered local PHP dev environment with baked-in Oracle Database support")
-	fmt.Println()
-	fmt.Printf("  Version  %s\n", version.Version)
-	fmt.Printf("  Commit   %s\n", version.Commit)
-	fmt.Printf("  Built    %s\n", version.Date)
-	fmt.Println()
-	fmt.Println("  Fork     https://github.com/gabriel-sousa99/lerd (Oracle Instant Client 21.18 + oci8)")
-	fmt.Println("  Upstream https://github.com/gabriel-sousa99/lerd")
-	fmt.Println()
-	fmt.Println("  Oracle additions by Gabriel Sousa — built on lerd by George Dumitrescu")
+	feedback.Begin()
+	fmt.Println("  " + feedback.Title("lerd Oracle Edition"))
+	fmt.Println("  " + feedback.Dim("Podman-powered local PHP development with baked-in Oracle Database support"))
+	feedback.NewSummary().
+		Row("Version", feedback.Val(version.Version)).
+		Row("Commit", version.Commit).
+		Row("Built", version.Date).
+		Row("Fork", feedback.Val("https://github.com/gabriel-sousa99/lerd")).
+		Row("Oracle", "Instant Client 21.18 + oci8").
+		Row("Upstream", "https://github.com/lerd-env/lerd").
+		Print()
+	feedback.Begin()
+	fmt.Println("  " + feedback.Dim("Oracle additions by Gabriel Sousa — built on lerd, © George Dumitrescu"))
 	return nil
 }

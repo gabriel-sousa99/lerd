@@ -33,10 +33,17 @@
   // gets a soft red prefix, meta (lerd's own [error] / [aborted] markers)
   // gets a yellow prefix. The ANSI renderer handles the inline escapes
   // alongside any colors the command itself emitted.
+  // An SGR that sets something, so a line ending in a bare reset still counts
+  // as uncolored and keeps the stderr tint.
+  const styledRe = /\x1b\[[\d;]*[1-9][\d;]*m/;
+
   function renderLines(lines: RunLine[]): string {
     return lines
       .map((l) => {
-        if (l.stream === 'stderr') return '\x1b[31m' + l.text + '\x1b[0m';
+        // A line that already colors itself keeps its own escapes; tinting it
+        // red on top would flatten the tool's palette.
+        if (l.stream === 'stderr')
+          return styledRe.test(l.text) ? l.text : '\x1b[31m' + l.text + '\x1b[0m';
         if (l.stream === 'meta') return '\x1b[33m' + l.text + '\x1b[0m';
         return l.text;
       })
@@ -109,7 +116,7 @@
       <div class="mt-5 flex items-center justify-end gap-2">
         <button onclick={closeRun} class="px-3 py-1.5 rounded-md text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5">{m.common_cancel()}</button>
         <button
-          onclick={() => $currentRun.kind === 'confirm' && executeCommand($currentRun.domain, cmd)}
+          onclick={() => $currentRun.kind === 'confirm' && executeCommand($currentRun.domain, cmd, $currentRun.branch, true)}
           class="px-3 py-1.5 rounded-md text-xs font-medium bg-lerd-red hover:bg-lerd-redhov text-white"
         >{m.cmdrun_runAnyway()}</button>
       </div>

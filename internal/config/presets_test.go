@@ -2,6 +2,7 @@ package config
 
 import (
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -11,24 +12,25 @@ func TestListPresets_IncludesShippedPresets(t *testing.T) {
 		t.Fatalf("ListPresets() error = %v", err)
 	}
 	want := map[string]bool{
-		"phpmyadmin":          false,
-		"pgadmin":             false,
-		"mongo":               false,
-		"mongo-express":       false,
-		"selenium":            false,
-		"stripe-mock":         false,
-		"mysql":               false,
-		"memcached":           false,
-		"rabbitmq":            false,
-		"elasticsearch":       false,
-		"elasticvue":          false,
-		"typesense":           false,
-		"typesense-dashboard": false,
-		"valkey":              false,
-		"soketi":              false,
-		"opensearch":          false,
-		"redisinsight":        false,
-		"beanstalkd":          false,
+		"phpmyadmin":            false,
+		"pgadmin":               false,
+		"mongo":                 false,
+		"mongo-express":         false,
+		"selenium":              false,
+		"stripe-mock":           false,
+		"mysql":                 false,
+		"memcached":             false,
+		"rabbitmq":              false,
+		"elasticsearch":         false,
+		"elasticvue":            false,
+		"typesense":             false,
+		"typesense-dashboard":   false,
+		"valkey":                false,
+		"soketi":                false,
+		"opensearch":            false,
+		"opensearch-dashboards": false,
+		"redisinsight":          false,
+		"beanstalkd":            false,
 	}
 	for _, p := range presets {
 		if _, ok := want[p.Name]; ok {
@@ -277,6 +279,31 @@ func TestLoadPreset_MySQL_MultiVersion(t *testing.T) {
 	}
 	if !p.Init {
 		t.Error("mysql preset must set init: true so PID 1 catches SIGTERM (issue #380)")
+	}
+}
+
+func TestLoadPreset_MariaDB_Versions(t *testing.T) {
+	p, err := LoadPreset("mariadb")
+	if err != nil {
+		t.Fatalf("LoadPreset(mariadb) error = %v", err)
+	}
+	if p.DefaultVersion != "11.8" {
+		t.Errorf("DefaultVersion = %q, want 11.8 (the pinned LTS default)", p.DefaultVersion)
+	}
+	// Issue #704: every member of a family defaults to the family's canonical
+	// host port (3306 for the MySQL-compatible mariadb) rather than a pre-spaced
+	// unique port. The runtime port-ownership guard shifts a sibling off the
+	// canonical only when another installed service already holds it, so the
+	// common single-database case lands on the familiar port.
+	for _, v := range p.Versions {
+		if v.HostPort != 3306 {
+			t.Errorf("version %q host_port = %d, want 3306 (family canonical, #704)", v.Tag, v.HostPort)
+		}
+	}
+	// The bare "11" tag is retained so installs created before the LTS split
+	// (preset_version: "11") still resolve on reinstall instead of erroring.
+	if _, err := p.Resolve("11"); err != nil {
+		t.Errorf("Resolve(11) must still work for legacy installs: %v", err)
 	}
 }
 
@@ -547,6 +574,94 @@ func TestLoadPreset_OpenSearch(t *testing.T) {
 	}
 }
 
+// A preset declares its own discovery metadata, so adding one to the store
+// never requires editing a name-keyed map in the UI.
+func TestListPresets_CarriesDiscoveryMetadata(t *testing.T) {
+	// readPresetBytes prefers the machine's fetched store cache over the test
+	// fixtures, so point XDG_DATA_HOME at an empty dir and drop the parse memo.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	presetCache = sync.Map{}
+	t.Cleanup(func() { presetCache = sync.Map{} })
+
+	presets, err := ListPresets()
+	if err != nil {
+		t.Fatalf("ListPresets() error = %v", err)
+	}
+	byName := map[string]PresetMeta{}
+	for _, p := range presets {
+		byName[p.Name] = p
+	}
+	for _, name := range []string{"mysql", "redis", "opensearch", "opensearch-dashboards"} {
+		p, ok := byName[name]
+		if !ok {
+			t.Fatalf("ListPresets() missing %q", name)
+		}
+		if p.Category == "" {
+			t.Errorf("%s must declare a category so the UI can group it without a hardcoded map", name)
+		}
+		if p.Icon == "" {
+			t.Errorf("%s must declare an icon so the UI can draw it without a hardcoded map", name)
+		}
+	}
+	// admin_for is what an admin UI administers, which is not depends_on:
+	// phpMyAdmin starts after mysql but administers mariadb too, and
+	// RedisInsight administers valkey without ever depending on it.
+	if got := byName["phpmyadmin"].AdminFor; len(got) != 2 || got[0] != "mysql" || got[1] != "mariadb" {
+		t.Errorf("phpmyadmin must declare admin_for [mysql mariadb], got %v", got)
+	}
+	if got := byName["redisinsight"].AdminFor; len(got) != 2 || got[0] != "redis" || got[1] != "valkey" {
+		t.Errorf("redisinsight must declare admin_for [redis valkey], got %v", got)
+	}
+	if got := byName["opensearch-dashboards"].AdminFor; len(got) != 1 || got[0] != "opensearch" {
+		t.Errorf("opensearch-dashboards must declare admin_for [opensearch], got %v", got)
+	}
+	if got := byName["opensearch"].AdminFor; len(got) != 0 {
+		t.Errorf("a plain engine preset administers nothing, got admin_for %v", got)
+	}
+}
+
+// imageTag returns the tag portion of an OCI reference, or "" if untagged.
+func imageTag(image string) string {
+	i := strings.LastIndex(image, ":")
+	if i < 0 || strings.Contains(image[i+1:], "/") {
+		return ""
+	}
+	return image[i+1:]
+}
+
+func TestLoadPreset_OpenSearchDashboards(t *testing.T) {
+	p, err := LoadPreset("opensearch-dashboards")
+	if err != nil {
+		t.Fatalf("LoadPreset(opensearch-dashboards) error = %v", err)
+	}
+	if len(p.DependsOn) != 1 || p.DependsOn[0] != "opensearch" {
+		t.Errorf("opensearch-dashboards should depend on opensearch, got %v", p.DependsOn)
+	}
+	if p.Dashboard == "" {
+		t.Errorf("opensearch-dashboards must expose its UI as dashboard")
+	}
+	// Reaches the engine over the podman network on 9200; the 9201 publish is
+	// a host-side shift to dodge elasticsearch and must not leak in here.
+	if got := p.Environment["OPENSEARCH_HOSTS"]; got != `["http://lerd-opensearch:9200"]` {
+		t.Errorf("opensearch-dashboards must point at the lerd OpenSearch container via OPENSEARCH_HOSTS, got %q", got)
+	}
+	if p.Environment["DISABLE_SECURITY_DASHBOARDS_PLUGIN"] != "true" {
+		t.Errorf("opensearch-dashboards must disable its security plugin to match the engine preset, got %q", p.Environment["DISABLE_SECURITY_DASHBOARDS_PLUGIN"])
+	}
+	// Dashboards refuses to talk to an engine on a different version, so the
+	// two image tags have to be bumped together.
+	engine, err := LoadPreset("opensearch")
+	if err != nil {
+		t.Fatalf("LoadPreset(opensearch) error = %v", err)
+	}
+	if imageTag(p.Image) != imageTag(engine.Image) {
+		t.Errorf("opensearch-dashboards %q must be pinned to the opensearch engine tag %q", p.Image, engine.Image)
+	}
+	if p.Default {
+		t.Errorf("opensearch-dashboards is an opt-in add-on preset and must not be default")
+	}
+}
+
 func TestLoadPreset_RedisInsight(t *testing.T) {
 	p, err := LoadPreset("redisinsight")
 	if err != nil {
@@ -743,16 +858,16 @@ func TestLoadPreset_DefaultsHaveFlag(t *testing.T) {
 }
 
 func TestPresetResolve_AlternatesUseHostPort(t *testing.T) {
-	// Regression: when the canonical version of a multi-version preset is added,
-	// non-canonical alternates must keep their dedicated host_port so they don't
-	// collide with the canonical container on the same port.
+	// Issue #704: non-canonical alternates now resolve to the family's canonical
+	// host port too. Two members no longer pre-space themselves; the runtime
+	// port-ownership guard shifts a later sibling off the shared port at install.
 	p, err := LoadPreset("mysql")
 	if err != nil {
 		t.Fatalf("LoadPreset: %v", err)
 	}
 	cases := map[string]string{
-		"5.7": "3357:3306",
-		"9.7": "3397:3306",
+		"5.7": "3306:3306",
+		"9.7": "3306:3306",
 	}
 	for tag, wantPort := range cases {
 		svc, err := p.Resolve(tag)
@@ -1017,8 +1132,8 @@ func TestPresetResolve_PostgresAlternates(t *testing.T) {
 		wantName string
 		wantPort string
 	}{
-		"18": {"postgres-18", "5418:5432"},
-		"17": {"postgres-17", "5417:5432"},
+		"18": {"postgres-18", "5432:5432"},
+		"17": {"postgres-17", "5432:5432"},
 	}
 	for tag, want := range cases {
 		svc, err := p.Resolve(tag)
@@ -1087,10 +1202,10 @@ func TestPresetResolve_PostgresPgvectorCanonical(t *testing.T) {
 	if svc.Name != "postgres-pgvector" {
 		t.Errorf("canonical postgres-pgvector Name = %q, want bare postgres-pgvector", svc.Name)
 	}
-	if len(svc.Ports) != 1 || svc.Ports[0] != "5518:5432" {
-		t.Errorf("canonical postgres-pgvector Ports = %v, want [5518:5432]", svc.Ports)
+	if len(svc.Ports) != 1 || svc.Ports[0] != "5432:5432" {
+		t.Errorf("canonical postgres-pgvector Ports = %v, want [5432:5432] (family canonical, #704)", svc.Ports)
 	}
-	if svc.ConnectionURL != "postgresql://postgres:lerd@127.0.0.1:5518/lerd" {
+	if svc.ConnectionURL != "postgresql://postgres:lerd@127.0.0.1:5432/lerd" {
 		t.Errorf("canonical postgres-pgvector ConnectionURL = %q", svc.ConnectionURL)
 	}
 	wantHost := "DB_HOST=lerd-postgres-pgvector"
@@ -1115,8 +1230,8 @@ func TestPresetResolve_PostgresPgvectorAlternates(t *testing.T) {
 		wantName string
 		wantPort string
 	}{
-		"17": {"postgres-pgvector-17", "5517:5432"},
-		"16": {"postgres-pgvector-16", "5516:5432"},
+		"17": {"postgres-pgvector-17", "5432:5432"},
+		"16": {"postgres-pgvector-16", "5432:5432"},
 	}
 	for tag, want := range cases {
 		svc, err := p.Resolve(tag)
@@ -1156,6 +1271,32 @@ func TestDefaultPresetMeta_Caches(t *testing.T) {
 	}
 	if DefaultPresetConnectionURL("postgres") != "postgresql://postgres:lerd@127.0.0.1:5432/lerd" {
 		t.Errorf("DefaultPresetConnectionURL(postgres) wrong")
+	}
+}
+
+// PresetPorts must return the same ports as DefaultPresetMeta without the deep
+// copy for a default-stack preset, the declared ports for an optional preset
+// (gotenberg), and nil for a name we don't ship, so the services snapshot can
+// read any preset's ports without cloning the whole struct on every refresh.
+func TestPresetPorts(t *testing.T) {
+	meta, err := DefaultPresetMeta("mysql")
+	if err != nil {
+		t.Fatalf("DefaultPresetMeta(mysql): %v", err)
+	}
+	got := PresetPorts("mysql")
+	if len(got) != len(meta.Ports) {
+		t.Fatalf("PresetPorts(mysql) = %v, want %v", got, meta.Ports)
+	}
+	for i := range got {
+		if got[i] != meta.Ports[i] {
+			t.Errorf("port %d = %q, want %q", i, got[i], meta.Ports[i])
+		}
+	}
+	if goten := PresetPorts("gotenberg"); len(goten) != 1 || goten[0] != "3000:3000" {
+		t.Errorf("PresetPorts(gotenberg) = %v, want [3000:3000] for an optional preset", goten)
+	}
+	if PresetPorts("sqlite") != nil {
+		t.Error("PresetPorts(sqlite) must be nil for a name we don't ship as a preset")
 	}
 }
 

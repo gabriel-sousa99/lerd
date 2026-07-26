@@ -15,6 +15,12 @@ import (
 
 const defaultLines = 50
 
+// maxLines caps Opts.Lines so a caller-supplied value (the MCP logs tool exposes
+// it directly) can't drive a huge slice preallocation — make([]Entry, 0, n) with
+// a billion would OOM the process, an unrecoverable fatal error. The byte tail is
+// already capped at applog.MaxReadBytes, so no real source yields more than this.
+const maxLines = 10000
+
 // Opts are the filters applied to a fetch. Empty fields are ignored.
 type Opts struct {
 	Since string // relative ("15m", "2h30m"), absolute timestamp, or a prior Cursor
@@ -55,6 +61,9 @@ func (r Result) Lines() []string {
 func Read(src Source, opts Opts) (Result, error) {
 	if opts.Lines <= 0 {
 		opts.Lines = defaultLines
+	}
+	if opts.Lines > maxLines {
+		opts.Lines = maxLines
 	}
 	switch src.Kind {
 	case KindFile:
@@ -164,14 +173,26 @@ func readPodman(src Source, opts Opts) (Result, error) {
 	_ = cmd.Run() // non-zero when the container isn't running — return what we have
 
 	matcher := compileGrep(opts.Grep)
+	// `podman logs --since` is inclusive and only second-granular, and the cursor we
+	// hand back is a full-precision timestamp, so polling with since=<cursor> would
+	// otherwise re-emit the boundary line (and its same-second siblings) every call.
+	// Drop entries at or before `since` here, mirroring the file path's exclusive
+	// cursor so a poll yields only genuinely newer lines.
+	since, sinceOK := parseSince(opts.Since)
+	rawLines := strings.Split(strings.TrimRight(StripANSI(buf.String()), "\n"), "\n")
 	var out []Entry
-	for _, line := range strings.Split(strings.TrimRight(StripANSI(buf.String()), "\n"), "\n") {
+	for _, line := range rawLines {
 		if line == "" {
 			continue
 		}
 		ts, text := splitPodmanTimestamp(line)
 		if matcher != nil && !matcher(text) {
 			continue
+		}
+		if sinceOK {
+			if t, ok := parseAbs(ts); ok && !t.After(since) {
+				continue
+			}
 		}
 		out = append(out, Entry{Time: ts, Text: text})
 	}
@@ -183,7 +204,11 @@ func readPodman(src Source, opts Opts) (Result, error) {
 	if len(out) > 0 {
 		cursor = out[len(out)-1].Time
 	}
-	return Result{Entries: out, Cursor: cursor}, nil
+	// When filtering we capped the scan at podmanScanCap; if podman returned a
+	// full cap's worth of lines, older matching history was dropped, so report it
+	// truncated like the file path does past MaxReadBytes.
+	truncated := tail == podmanScanCap && len(rawLines) >= podmanScanCap
+	return Result{Entries: out, Cursor: cursor, Truncated: truncated}, nil
 }
 
 // ---- shared filter helpers ----
@@ -207,6 +232,12 @@ func parseSince(s string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	if d, err := time.ParseDuration(s); err == nil {
+		// "since" is always a look-back, so a negative duration (a natural typo,
+		// "-15m") means the same as its positive form rather than a future time
+		// that would silently match nothing.
+		if d < 0 {
+			d = -d
+		}
 		return time.Now().Add(-d), true
 	}
 	return parseAbs(s)
@@ -242,7 +273,9 @@ func parseEntryTime(s string) (time.Time, bool) {
 func podmanTime(s string) string {
 	s = strings.TrimSpace(s)
 	if _, err := time.ParseDuration(s); err == nil {
-		return s
+		// podman --since reads a bare duration as a look-back; normalize a "-15m"
+		// typo to its positive magnitude so it isn't rejected or misread.
+		return strings.TrimLeft(s, "+-")
 	}
 	if t, ok := parseAbs(s); ok {
 		return t.Format(time.RFC3339)

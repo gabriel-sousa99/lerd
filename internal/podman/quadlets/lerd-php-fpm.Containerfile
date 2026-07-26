@@ -46,6 +46,7 @@ RUN apk update && apk add --no-cache \
         intl \
         pcntl \
         exif \
+        ftp \
         sockets \
         gmp \
         bz2 \
@@ -142,7 +143,7 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
 # rebuilds the base; TestDevtoolsSourceMarkerInSync keeps the marker honest.
 # No-op at runtime on PHP < 8.0 (no zend_observer); the || true degrades a
 # compile failure to "Debug window unavailable" rather than bricking the image.
-# lerd_devtools-src-sha256: 0afa730e05b7
+# lerd_devtools-src-sha256: 4d7c5e0c3032
 COPY internal/podman/devtools /tmp/lerd-devtools
 RUN { cd /tmp/lerd-devtools && phpize && ./configure --enable-lerd-devtools && make -j$(nproc) && make install && docker-php-ext-enable lerd_devtools; } || true; \
     rm -rf /tmp/lerd-devtools /var/cache/apk/*
@@ -162,6 +163,7 @@ RUN apk update && apk add --no-cache \
         libgomp \
         ffmpeg \
         git \
+        openssh-client \
         mysql-client \
         nodejs \
         npm \

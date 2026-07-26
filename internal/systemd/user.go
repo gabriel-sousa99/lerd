@@ -17,6 +17,7 @@ func WriteService(name, content string) error {
 		return err
 	}
 	path := filepath.Join(dir, name+".service")
+	config.GuardRealWrite(path)
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
@@ -32,6 +33,7 @@ func WriteServiceIfChanged(name, content string) (bool, error) {
 	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
 		return false, nil
 	}
+	config.GuardRealWrite(path)
 	return true, os.WriteFile(path, []byte(content), 0644)
 }
 
@@ -47,12 +49,14 @@ func WriteTimerIfChanged(name, content string) (bool, error) {
 	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
 		return false, nil
 	}
+	config.GuardRealWrite(path)
 	return true, os.WriteFile(path, []byte(content), 0644)
 }
 
 // RemoveTimer removes a systemd user timer unit file.
 func RemoveTimer(name string) error {
 	path := filepath.Join(config.SystemdUserDir(), name+".timer")
+	config.GuardRealWrite(path)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}

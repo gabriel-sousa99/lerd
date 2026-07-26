@@ -20,6 +20,7 @@
   import { nodeVersions } from '$stores/nodeVersions';
   import { status } from '$stores/status';
   import WorktreeDBIsolateModal from './WorktreeDBIsolateModal.svelte';
+  import WorktreeDBDropModal from './WorktreeDBDropModal.svelte';
   import HorizonControl from './HorizonControl.svelte';
   import HorizonReloadWatcherModal from './HorizonReloadWatcherModal.svelte';
   import OctaneControl from './OctaneControl.svelte';
@@ -29,6 +30,8 @@
   import SiteDoctorModal from './SiteDoctorModal.svelte';
   import Dropdown from '$components/Dropdown.svelte';
   import ToggleButton from '$components/ToggleButton.svelte';
+  import { tooltip } from '$lib/tooltip';
+  import { openErrorModal } from '$stores/modals';
   import { m } from '../../paraglide/messages.js';
 
   interface Props {
@@ -49,8 +52,19 @@
   const effectiveNode = $derived(activeWorktree?.node_version ?? site.node_version ?? '');
   const phpInherited = $derived(Boolean(activeWorktree) && !activeWorktree?.php_version_override);
   const nodeInherited = $derived(Boolean(activeWorktree) && !activeWorktree?.node_version_override);
+  // Framework PHP range (empty when guessed), used to disable out-of-range
+  // versions in the picker. A worktree carries the parent's range.
+  const effectivePhpMin = $derived(activeWorktree?.php_min ?? site.php_min);
+  const effectivePhpMax = $derived(activeWorktree?.php_max ?? site.php_max);
   const phpOptions = $derived(
-    phpOptionsForSite(site.runtime, $phpVersions, $status.frankenphp_php_versions, effectivePhp)
+    phpOptionsForSite(
+      site.runtime,
+      $phpVersions,
+      $status.frankenphp_php_versions,
+      effectivePhp,
+      effectivePhpMin,
+      effectivePhpMax
+    )
   );
   // When host bun is available, the Node dropdown offers a "bun" entry that
   // pins .lerd.yaml js_runtime (project-level), leaving node_version intact.
@@ -71,30 +85,30 @@
   const dbIsolated = $derived(Boolean(activeWorktree?.db_isolated));
   let dbBusy = $state(false);
   let isolateModalOpen = $state(false);
+  let dropModalOpen = $state(false);
 
-  // Laravel Doctor lives behind an on-demand button next to Commands rather than
-  // a permanent tab: its checks (including a migrate:status exec) only run when
-  // the modal is opened, so a healthy site carries no extra weight.
-  const canDoctor = $derived(Boolean(site.is_laravel));
+  // The doctor lives behind an on-demand button next to Commands rather than a
+  // permanent tab: its checks (command and audit execs) only run when the modal
+  // is opened, so a healthy site carries no extra weight. Hidden when no check
+  // can apply (a host-proxy Python/Ruby/Go site with nothing to inspect); a
+  // missing flag defaults to showing it so older snapshots aren't caught out.
+  const canDoctor = $derived(site.doctor_applicable !== false);
   let doctorOpen = $state(false);
 
   function onDBIsolatedChange() {
     if (!activeWorktreeBranch || dbBusy) return;
     if (dbIsolated) {
-      void disableIsolation();
+      dropModalOpen = true;
     } else {
       isolateModalOpen = true;
     }
   }
 
   async function disableIsolation() {
-    if (!confirm(m.sites_controls_dbDropConfirm())) {
-      return;
-    }
     dbBusy = true;
     try {
       const res = await setWorktreeDBIsolated(site.domain, activeWorktreeBranch, false);
-      if (!res.ok) alert(m.sites_controls_dbToggleFailed({ error: res.error || '' }));
+      if (!res.ok) openErrorModal(m.sites_controls_dbToggleFailed({ error: res.error || '' }));
       await loadSites();
     } finally {
       dbBusy = false;
@@ -105,7 +119,7 @@
     dbBusy = true;
     try {
       const res = await setWorktreeDBIsolated(site.domain, activeWorktreeBranch, true, source);
-      if (!res.ok) alert(m.sites_controls_dbIsolateFailed({ error: res.error || '' }));
+      if (!res.ok) openErrorModal(m.sites_controls_dbIsolateFailed({ error: res.error || '' }));
       await loadSites();
     } finally {
       dbBusy = false;
@@ -198,7 +212,7 @@
     try {
       const r = await setHorizonReload(site, desired);
       if (!r.ok) {
-        alert(m.sites_controls_horizonReloadFailed({ error: r.error || '' }));
+        openErrorModal(m.sites_controls_horizonReloadFailed({ error: r.error || '' }));
         return;
       }
       await Promise.all([loadSites(), loadServices()]);
@@ -234,7 +248,7 @@
     try {
       const r = await setOctaneReload(site, desired);
       if (!r.ok) {
-        alert(m.sites_controls_octaneReloadFailed({ error: r.error || '' }));
+        openErrorModal(m.sites_controls_octaneReloadFailed({ error: r.error || '' }));
         return;
       }
       await Promise.all([loadSites(), loadServices()]);
@@ -257,7 +271,7 @@
     versionBusy = true;
     try {
       const r = await setSiteVersion(site, 'php', v, activeWorktreeBranch);
-      if (!r.ok) alert(m.sites_controls_versionChangeFailed({ error: r.error || '' }));
+      if (!r.ok) openErrorModal(m.sites_controls_versionChangeFailed({ error: r.error || '' }));
       await loadSites();
     } finally {
       versionBusy = false;
@@ -269,7 +283,7 @@
     versionBusy = true;
     try {
       const r = await setSiteVersion(site, 'node', v, activeWorktreeBranch);
-      if (!r.ok) alert(m.sites_controls_versionChangeFailed({ error: r.error || '' }));
+      if (!r.ok) openErrorModal(m.sites_controls_versionChangeFailed({ error: r.error || '' }));
       await loadSites();
     } finally {
       versionBusy = false;
@@ -277,7 +291,7 @@
   }
 </script>
 
-<div class="px-3 pt-3 shrink-0">
+<div class="shrink-0">
   <div class="flex items-center gap-3">
   <div class="flex items-center gap-3 overflow-x-auto flex-1 min-w-0">
     {#if site.custom_container}
@@ -290,7 +304,7 @@
       </span>
     {:else if site.runtime === 'fpm-custom'}
       <span class="text-xs text-violet-500 dark:text-violet-400 border border-violet-200 dark:border-violet-500/30 rounded-sm px-2 py-1">
-        PHP {effectivePhp} · custom image
+        PHP {effectivePhp} · {m.sites_controls_customImageBadge()}
       </span>
     {:else if site.uses_php}
       {#if phpOptions.length > 0}
@@ -356,6 +370,7 @@
             label={w.label || w.name}
             on={Boolean(w.running)}
             failing={Boolean(w.failing)}
+            unreachable={Boolean(w.unreachable)}
             loading={isPending('worker:' + w.name)}
             disabled={isPending('worker:' + w.name)}
             onclick={() => transition('worker:' + w.name, !w.running, () => toggleWorker(site, w, activeWorktreeBranch))}
@@ -435,6 +450,7 @@
           on={Boolean(w.running)}
           asleep={asleepWorkers.has(w.name)}
           failing={Boolean(w.failing)}
+          unreachable={Boolean(w.unreachable)}
           loading={isPending('worker:' + w.name)}
           disabled={isPending('worker:' + w.name)}
           onclick={() => transition('worker:' + w.name, !w.running, () => toggleWorker(site, w))}
@@ -448,25 +464,28 @@
         />
       {/each}
     {/if}
-  </div>
+
+    <div class="flex-grow-1"></div>
 
     {#if canDoctor}
       <button
-        type="button"
-        onclick={() => (doctorOpen = true)}
-        class="shrink-0 inline-flex items-center justify-center h-7 w-7 rounded-md border border-gray-200 dark:border-lerd-border bg-white dark:bg-lerd-card hover:border-lerd-red hover:text-lerd-red transition-colors text-gray-700 dark:text-gray-200"
-        title={m.sites_doctor_title()}
-        aria-label={m.sites_doctor_button()}
+              type="button"
+              onclick={() => (doctorOpen = true)}
+              class="shrink-0 inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-gray-200 dark:border-lerd-border bg-white dark:bg-lerd-card hover:border-lerd-red hover:text-lerd-red transition-colors text-xs font-medium text-gray-700 dark:text-gray-200"
+              use:tooltip={m.sites_doctor_title()}
+              aria-label={m.sites_doctor_button()}
       >
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 00-2 2v5a6 6 0 006 6 6 6 0 006-6V4a2 2 0 00-2-2h-1a.3.3 0 10.2.3" />
           <path d="M8 15v1a6 6 0 006 6 6 6 0 006-6v-4" />
           <circle cx="20" cy="10" r="2" />
         </svg>
+        <span>{m.sites_doctor_title()}</span>
       </button>
     {/if}
 
     <CommandsDropdown domain={site.domain} branch={activeWorktreeBranch} />
+  </div>
   </div>
 </div>
 
@@ -488,6 +507,16 @@
     onconfirm={(source) => {
       isolateModalOpen = false;
       void enableIsolation(source);
+    }}
+  />
+  <WorktreeDBDropModal
+    open={dropModalOpen}
+    branch={activeWorktreeBranch}
+    database={activeWorktree?.db_database ?? ''}
+    onclose={() => (dropModalOpen = false)}
+    onconfirm={() => {
+      dropModalOpen = false;
+      void disableIsolation();
     }}
   />
 {/if}

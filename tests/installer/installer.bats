@@ -87,9 +87,61 @@ teardown() {
 @test "distro_family returns unknown for unrecognised distro" {
   function detect_distro() { echo "slackware"; }
   export -f detect_distro
+  function detect_distro_like() { echo ""; }
+  export -f detect_distro_like
 
   run distro_family
   [ "$output" = "unknown" ]
+}
+
+@test "distro_family falls back to ID_LIKE for derivatives (bazzite -> fedora)" {
+  function detect_distro() { echo "bazzite"; }
+  export -f detect_distro
+  function detect_distro_like() { echo "fedora"; }
+  export -f detect_distro_like
+
+  run distro_family
+  [ "$output" = "fedora" ]
+}
+
+@test "distro_family reads a multi-value ID_LIKE" {
+  function detect_distro() { echo "somespin"; }
+  export -f detect_distro
+  function detect_distro_like() { echo "rhel fedora"; }
+  export -f detect_distro_like
+
+  run distro_family
+  [ "$output" = "fedora" ]
+}
+
+# ── check_certutil ────────────────────────────────────────────────────────────
+
+@test "check_certutil guides without queuing nss-tools on atomic images" {
+  function command() { if [ "$1" = "-v" ] && [ "$2" = "certutil" ]; then return 1; fi; builtin command "$@"; }
+  export -f command
+  function distro_family() { echo "fedora"; }
+  export -f distro_family
+  function is_atomic() { return 0; }
+  export -f is_atomic
+
+  MISSING_PKGS=()
+  check_certutil >"$BATS_TMPDIR/cc-$$.out" 2>&1
+  [ "${#MISSING_PKGS[@]}" -eq 0 ]
+  grep -q "rpm-ostree install nss-tools" "$BATS_TMPDIR/cc-$$.out"
+}
+
+@test "check_certutil queues nss-tools on ordinary distros" {
+  function command() { if [ "$1" = "-v" ] && [ "$2" = "certutil" ]; then return 1; fi; builtin command "$@"; }
+  export -f command
+  function distro_family() { echo "fedora"; }
+  export -f distro_family
+  function is_atomic() { return 1; }
+  export -f is_atomic
+
+  MISSING_PKGS=()
+  check_certutil >/dev/null 2>&1
+  [ "${#MISSING_PKGS[@]}" -eq 1 ]
+  [ "${MISSING_PKGS[0]}" = "nss-tools" ]
 }
 
 # ── _download_tool ────────────────────────────────────────────────────────────
@@ -221,13 +273,40 @@ teardown() {
   export PATH="$OLD_PATH"
 }
 
+# ── installed_version_raw / version_is_dev ────────────────────────────────────
+
+@test "installed_version_raw keeps the git-describe suffix" {
+  FAKE_BIN="$BATS_TMPDIR/fake-bin-$$"
+  mkdir -p "$FAKE_BIN"
+  printf '#!/bin/sh\necho "lerd version v1.25.0-6-g7d030096-dirty (commit 7d030096)"\n' > "$FAKE_BIN/lerd"
+  chmod +x "$FAKE_BIN/lerd"
+
+  OLD_PATH="$PATH"
+  export PATH="$FAKE_BIN:$PATH"
+
+  run installed_version_raw
+  [ "$output" = "1.25.0-6-g7d030096-dirty" ]
+
+  export PATH="$OLD_PATH"
+}
+
+@test "version_is_dev is true for a git-describe build" {
+  run version_is_dev "1.25.0-6-g7d030096-dirty"
+  [ "$status" -eq 0 ]
+}
+
+@test "version_is_dev is false for a clean release" {
+  run version_is_dev "1.25.0"
+  [ "$status" -ne 0 ]
+}
+
 # ── latest_version ────────────────────────────────────────────────────────────
 
 @test "latest_version parses version from redirect Location header" {
   # Mock curl -fsSLI to return headers containing a Location pointing to the tag
   function curl() {
     echo "HTTP/2 302"
-    echo "location: https://github.com/gabriel-sousa99/lerd/releases/tag/v2.0.0"
+    echo "location: https://github.com/lerd-env/lerd/releases/tag/v2.0.0"
     echo ""
   }
   export -f curl
@@ -340,4 +419,112 @@ teardown() {
   DNS_MODE="managed"
   run check_prerequisites
   [[ "$output" == *"certutil not found"* ]]
+}
+
+# ── offer_desktop_app ─────────────────────────────────────────────────────────
+
+_fake_lerd_dir() {
+  local d="$BATS_TMPDIR/fakebin-$$"
+  mkdir -p "$d"
+  cat > "$d/lerd" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$d/calls"
+EOF
+  chmod +x "$d/lerd"
+  rm -f "$d/calls"
+  echo "$d"
+}
+
+@test "offer_desktop_app yes enables native and prints the install command" {
+  local d; d="$(_fake_lerd_dir)"
+  INSTALL_DIR="$d"; BINARY="lerd"
+  ask() { return 0; }
+  run offer_desktop_app
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$DESKTOP_INSTALL_CMD"* ]]
+  grep -q "notify target native" "$d/calls"
+}
+
+@test "offer_desktop_app no selects browser and still prints the install command" {
+  local d; d="$(_fake_lerd_dir)"
+  INSTALL_DIR="$d"; BINARY="lerd"
+  ask() { return 1; }
+  run offer_desktop_app
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$DESKTOP_INSTALL_CMD"* ]]
+  grep -q "notify target browser" "$d/calls"
+}
+
+# ── uninstall_linux_dns ───────────────────────────────────────────────────────
+
+_stub_dns_files() {
+  local d="$BATS_TMPDIR/dnsconf-$$"
+  mkdir -p "$d"
+  : > "$d/lerd-dns-link.service"
+  LERD_DNS_FILES=("$d/lerd-dns-link.service")
+}
+
+@test "uninstall_linux_dns runs the teardown when accepted" {
+  local d; d="$(_fake_lerd_dir)"
+  PATH="$d:$PATH"
+  _stub_dns_files
+  ask() { return 0; }
+  run uninstall_linux_dns
+  [ "$status" -eq 0 ]
+  grep -q "dns:disable" "$d/calls"
+}
+
+@test "uninstall_linux_dns prints the manual removal when declined" {
+  local d; d="$(_fake_lerd_dir)"
+  PATH="$d:$PATH"
+  _stub_dns_files
+  ask() { return 1; }
+  run uninstall_linux_dns
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"lerd-dns-link.service"* ]]
+  [[ "$output" == *"systemd-resolved"* ]]
+  [ ! -f "$d/calls" ]
+}
+
+@test "uninstall_linux_dns falls back to the manual removal when the binary is gone" {
+  function command() {
+    case "$2" in
+      lerd) return 1 ;;
+      *) builtin command "$@" ;;
+    esac
+  }
+  export -f command
+  _stub_dns_files
+  ask() { return 0; }
+  run uninstall_linux_dns
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"only root can remove it"* ]]
+}
+
+@test "lerd_dns_cleanup_hint lists the sudoers grant for hand removal" {
+  # The passwordless DNS grant is a root-owned file the setup writes; left
+  # behind it is a standing NOPASSWD root grant for a tool being removed.
+  [[ " ${LERD_DNS_FILES[*]} " == *" /etc/sudoers.d/lerd "* ]]
+  run lerd_dns_cleanup_hint
+  [[ "$output" == *"/etc/sudoers.d/lerd"* ]]
+}
+
+@test "uninstall_linux_dns stays quiet when lerd never configured DNS" {
+  local d; d="$(_fake_lerd_dir)"
+  PATH="$d:$PATH"
+  LERD_DNS_FILES=("$BATS_TMPDIR/nope-$$/lerd-dns-link.service")
+  ask() { return 0; }
+  run uninstall_linux_dns
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+  [ ! -f "$d/calls" ]
+}
+
+@test "cmd_uninstall_linux tears the DNS down before removing the binary" {
+  local body; body="$(declare -f cmd_uninstall_linux)"
+  local dns_at; dns_at="$(echo "$body" | grep -n 'uninstall_linux_dns' | head -1 | cut -d: -f1)"
+  local bin_at; bin_at="$(echo "$body" | grep -n 'INSTALL_DIR' | head -1 | cut -d: -f1)"
+  [ -n "$dns_at" ]
+  [ -n "$bin_at" ]
+  [ "$dns_at" -lt "$bin_at" ]
 }

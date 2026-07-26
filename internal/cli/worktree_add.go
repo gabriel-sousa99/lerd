@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/spf13/cobra"
 )
@@ -58,38 +59,53 @@ func newWorktreeAddCmd() *cobra.Command {
 			}
 
 			gitArgs := append([]string{"worktree", "add"}, args...)
-			fmt.Printf("Running: git %s\n", strings.Join(gitArgs, " "))
+			feedback.Begin()
+			feedback.Line("git " + strings.Join(gitArgs, " "))
 			if err := gitpkg.RunTTY("", gitArgs...); err != nil {
 				return fmt.Errorf("git worktree add: %w", err)
 			}
 
 			worktreePath, branch, err := newestWorktree(cwd)
 			if err != nil {
-				fmt.Printf("[WARN] could not locate the new worktree on disk: %v\n", err)
+				feedback.Warn("could not locate the new worktree on disk: %v", err)
 				return nil
 			}
 
-			fmt.Println("Waiting for lerd to install dependencies (composer + JS)...")
+			deps := feedback.Start("installing dependencies (composer + JS)")
 			if err := WaitForWorktreeReady(worktreePath, 5*time.Minute); err != nil {
-				fmt.Printf("[WARN] %v, you can rerun setup later by editing the worktree.\n", err)
+				deps.Fail(err)
+				feedback.Note("you can rerun setup later by editing the worktree")
 			} else {
-				fmt.Println("Dependencies installed.")
+				deps.OK("")
 			}
 
 			if optedIn := OptedInHostWorkers(site, worktreePath); len(optedIn) > 0 {
-				fmt.Printf("Auto-starting opted-in workers: %s\n", strings.Join(optedIn, ", "))
+				feedback.Note("auto-starting opted-in workers: " + strings.Join(optedIn, ", "))
 			}
 			ApplyWorktreeBuildChoice(site, worktreePath, promptWorktreeBuild(site, worktreePath), os.Stdout)
 
-			if err := promptDBIsolation(site, branch); err != nil {
-				fmt.Printf("[WARN] DB setup skipped: %v\n", err)
+			fw, hasFramework := config.GetFrameworkForDir(site.Framework, site.Path)
+
+			// A framework whose deployment state lives in the database cannot share
+			// the parent's, so its definition picks the choice instead of prompting.
+			if forced := requiredWorktreeDBChoice(fw); hasFramework && forced != "" {
+				feedback.Note(site.Framework + " worktrees need their own database; using " + forced)
+				if err := ApplyWorktreeDBChoice(site, branch, forced, os.Stdout); err != nil {
+					feedback.Warn("DB setup failed: %v", err)
+				}
+			} else if err := promptDBIsolation(site, branch); err != nil {
+				feedback.Warn("DB setup skipped: %v", err)
+			}
+
+			if hasFramework {
+				runWorktreeSetupCommands(fw, worktreePath, os.Stdout)
 			}
 
 			scheme := "http"
 			if site.Secured {
 				scheme = "https"
 			}
-			fmt.Printf("\nWorktree ready: %s://%s.%s\n", scheme, branch, site.PrimaryDomain())
+			feedback.Done("worktree ready: " + feedback.Val(scheme+"://"+branch+"."+site.PrimaryDomain()))
 			return nil
 		},
 	}
@@ -584,9 +600,18 @@ func AutoStartOptedInWorktreeWorkers(site *config.Site, worktreePath, phpVersion
 			continue
 		}
 		if err := WorkerStartForSite(site.Name, worktreePath, phpVersion, name, w, false); err != nil {
-			fmt.Printf("[WARN] auto-start %s for worktree %s: %v\n", name, filepath.Base(worktreePath), err)
+			feedback.Warn("auto-start %s for worktree %s: %v", name, filepath.Base(worktreePath), err)
 		}
 	}
+}
+
+// worktreeWorkerIdleSuspended reports whether the idle engine has suspended the
+// named worker for the worktree at wtPath (keyed by its unit-slug base), so the
+// restore/autostart paths can leave it down rather than re-enabling a unit a
+// later boot's default.target would then resurrect.
+func worktreeWorkerIdleSuspended(site *config.Site, wtPath, worker string) bool {
+	wtBase := config.WorktreeUnitSlug(filepath.Base(wtPath))
+	return containsString(site.WorktreeIdleSuspended[wtBase], worker)
 }
 
 // worktreeWorkersToStart drops any worker the idle engine has suspended for the

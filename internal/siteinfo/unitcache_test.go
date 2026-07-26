@@ -1,6 +1,7 @@
 package siteinfo
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -139,6 +140,47 @@ func TestUnitStatusCachedSystemctlFailure(t *testing.T) {
 	got, _ := unitStatusCached("lerd-anything")
 	if got != "unknown" {
 		t.Fatalf("want unknown on systemctl failure, got %q", got)
+	}
+}
+
+func TestParseUnitMeta(t *testing.T) {
+	activated := time.Date(2026, 7, 10, 9, 0, 5, 0, time.UTC)
+	raw := "Id=lerd-vite-app.service\nActiveEnterTimestamp=@" + strconv.FormatInt(activated.Unix(), 10) + "\nWorkingDirectory=/home/u/app\n\n" +
+		"Id=lerd-queue-app.service\nActiveEnterTimestamp=\nWorkingDirectory=\n"
+
+	m := parseUnitMeta(raw)
+
+	v, ok := m["lerd-vite-app"] // .service suffix aliased
+	if !ok {
+		t.Fatal("expected the .service-stripped alias to be present")
+	}
+	if v.WorkingDir != "/home/u/app" {
+		t.Errorf("WorkingDir = %q, want /home/u/app", v.WorkingDir)
+	}
+	if !v.ActiveEnter.Equal(activated) {
+		t.Errorf("ActiveEnter = %v, want %v", v.ActiveEnter, activated)
+	}
+	// A unit that has never been active reports an empty stamp: ActiveEnter stays zero.
+	if q := m["lerd-queue-app"]; !q.ActiveEnter.IsZero() {
+		t.Errorf("never-active ActiveEnter = %v, want zero", q.ActiveEnter)
+	}
+}
+
+func TestRefreshPopulatesMetaWorkingDir(t *testing.T) {
+	prevList, prevShow := unitCacheListFn, unitShowFn
+	unitCacheListFn = func() (string, error) { return "lerd-vite-app.service loaded active running Vite\n", nil }
+	unitShowFn = func([]string) (string, error) {
+		return "Id=lerd-vite-app.service\nActiveEnterTimestampMonotonic=0\nWorkingDirectory=/home/u/wt\n", nil
+	}
+	InvalidateUnitCache()
+	t.Cleanup(func() { unitCacheListFn = prevList; unitShowFn = prevShow; InvalidateUnitCache() })
+
+	unitStatusCached("lerd-vite-app") // triggers a refresh that fills states + meta
+	globalUnitCache.mu.Lock()
+	wd := globalUnitCache.meta["lerd-vite-app"].WorkingDir
+	globalUnitCache.mu.Unlock()
+	if wd != "/home/u/wt" {
+		t.Errorf("meta WorkingDir = %q, want /home/u/wt", wd)
 	}
 }
 

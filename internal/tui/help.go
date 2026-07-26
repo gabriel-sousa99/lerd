@@ -13,8 +13,11 @@ var helpReference = []helpSection{
 	{
 		title: "Navigation",
 		rows: [][2]string{
-			{"tab / shift+tab", "cycle focus through Sites · Detail · Services (use `v` to hide services from the cycle)"},
-			{"↑ ↓  j k", "move selection within the focused pane"},
+			{"ctrl+← / ctrl+→", "switch the top tab (Dashboard · Sites · Services); tabs are also clickable"},
+			{"tab / shift+tab", "cycle focus between the list and the detail pane on the current tab"},
+			{"click", "click a tab to switch screens, or a site / service / worker row to open it"},
+			{"↑ ↓  j k", "move the selection in the focused pane or Dashboard card (info cards scroll)"},
+			{"enter", "on the Dashboard, open the selected row (same as clicking it)"},
 			{"pgup / pgdn", "jump by 10 rows"},
 			{"home / end · g G", "jump to first / last row"},
 		},
@@ -25,7 +28,9 @@ var helpReference = []helpSection{
 			{"/", "type to filter the focused list by name"},
 			{"  enter", "apply filter and leave input mode"},
 			{"  esc", "clear filter and leave input mode"},
-			{"o", "cycle sort order (name · status · …)"},
+			{"o", "cycle the focused list's sort order"},
+			{"  sites", "name · status · framework · workspace"},
+			{"  services", "name · status · usage"},
 		},
 	},
 	{
@@ -45,11 +50,11 @@ var helpReference = []helpSection{
 	{
 		title: "Site detail tabs",
 		rows: [][2]string{
-			{"1", "Overview tab (default — workers, toggles, worktrees)"},
-			{"2", "Env tab (read-only .env display)"},
-			{"3", "Debug tab (this site's lenses: dumps, queries, jobs, mail, …)"},
-			{"4", "App logs tab (every framework-declared log file with size and mtime)"},
-			{"5", "Doctor tab (Laravel only — APP_KEY, env drift, migrations, storage link; press again to re-run)"},
+			{"1", "Overview tab (default: workers, toggles, worktrees)"},
+			{"2", "Logs tab (FPM / container, every worker, the framework's app logs)"},
+			{"3", "Env tab (read-only .env display)"},
+			{"4", "Debug tab (this site's lenses: dumps, queries, jobs, mail, …)"},
+			{"5", "Doctor tab (framework-agnostic health checks; press again to re-run)"},
 		},
 	},
 	{
@@ -87,7 +92,7 @@ var helpReference = []helpSection{
 	{
 		title: "Logs",
 		rows: [][2]string{
-			{"l", "toggle the logs pane for the focused item"},
+			{"l", "jump to a site's Logs tab, or toggle the logs pane elsewhere"},
 			{"[ / ]", "cycle through the site's log sources (FPM, workers, app logs)"},
 			{"{ / }", "scroll back through buffered output / return to tail"},
 			{"f", "find within the tailed buffer — matches highlighted, non-matches dimmed"},
@@ -96,11 +101,10 @@ var helpReference = []helpSection{
 	{
 		title: "Panes & overlays",
 		rows: [][2]string{
-			{"v", "show / hide the services pane"},
-			{"F", "swap the detail pane for the Dashboard (counts, system health, resources)"},
-			{"S", "swap the detail pane for global Settings (LAN expose, autostart, Xdebug)"},
-			{"Y", "swap the detail pane for the System overview (DNS, Nginx, Watcher, PHP, Node, Lerd)"},
-			{"D", "open the Debug window (dumps, queries with N+1, jobs, mail, …)"},
+			{"Dashboard tab", "six-card overview (Sites · Services · Workers · System Health · Resources · Lerd)"},
+			{"S", "swap the detail pane for global Settings (LAN expose, autostart, Xdebug) — Sites tab"},
+			{"Y", "swap the detail pane for the System overview (DNS, Nginx, Watcher, PHP, Node, Lerd) — Sites tab"},
+			{"D", "open the Debug window (dumps, queries with N+1, jobs, mail, …) — Sites tab"},
 			{"?", "swap the detail pane for this help reference"},
 			{"esc", "close picker or return to site detail"},
 		},

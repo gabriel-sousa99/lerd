@@ -317,6 +317,30 @@ func TestProjectConfig_Container_RoundTrip(t *testing.T) {
 	}
 }
 
+// A .lerd.yaml that carries only custom commands (or a framework version/def)
+// is meaningful user config: IsEmpty must report false so the link wizard
+// doesn't classify it as a blank file and overwrite it.
+func TestProjectConfig_Commands_IsEmpty(t *testing.T) {
+	cfg := &ProjectConfig{}
+	if !cfg.IsEmpty() {
+		t.Error("empty config should be empty")
+	}
+	cfg.Commands = []FrameworkCommand{{Name: "deploy", Command: "php artisan deploy"}}
+	if cfg.IsEmpty() {
+		t.Error("config with custom commands should not be empty")
+	}
+
+	cfg = &ProjectConfig{FrameworkVersion: "11"}
+	if cfg.IsEmpty() {
+		t.Error("config with a framework version should not be empty")
+	}
+
+	cfg = &ProjectConfig{FrameworkDef: &Framework{Name: "laravel"}}
+	if cfg.IsEmpty() {
+		t.Error("config with an embedded framework definition should not be empty")
+	}
+}
+
 func TestProjectConfig_Container_IsEmpty(t *testing.T) {
 	cfg := &ProjectConfig{}
 	if !cfg.IsEmpty() {
@@ -414,6 +438,43 @@ func TestProjectConfig_Proxy_RoundTrip(t *testing.T) {
 	}
 	if restored.Proxy.Port != 3000 || !restored.Proxy.SSL || restored.Proxy.PortEnvKey != "APP_PORT" {
 		t.Errorf("Proxy not persisted correctly: %+v", restored.Proxy)
+	}
+}
+
+func TestProjectConfig_Proxy_InjectHost(t *testing.T) {
+	// Guards the inject_host struct tag: a typo would leave the field nil
+	// even though the key is present, and every Go-level test would still pass.
+	cases := map[string]struct {
+		input   string
+		wantSet bool
+		wantVal bool
+	}{
+		"opt out":      {"proxy:\n  port: 3000\n  inject_host: false\n", true, false},
+		"explicit on":  {"proxy:\n  port: 3000\n  inject_host: true\n", true, true},
+		"unset is nil": {"proxy:\n  port: 3000\n", false, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var cfg ProjectConfig
+			if err := yaml.Unmarshal([]byte(tc.input), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if cfg.Proxy == nil {
+				t.Fatal("Proxy is nil")
+			}
+			if !tc.wantSet {
+				if cfg.Proxy.InjectHost != nil {
+					t.Errorf("InjectHost = %v, want nil (unset = default true)", *cfg.Proxy.InjectHost)
+				}
+				return
+			}
+			if cfg.Proxy.InjectHost == nil {
+				t.Fatal("InjectHost = nil, want non-nil (inject_host struct tag mismatch?)")
+			}
+			if *cfg.Proxy.InjectHost != tc.wantVal {
+				t.Errorf("InjectHost = %v, want %v", *cfg.Proxy.InjectHost, tc.wantVal)
+			}
+		})
 	}
 }
 
@@ -562,6 +623,29 @@ func TestProjectConfig_RequestTimeout_IsEmpty(t *testing.T) {
 	cfg.RequestTimeout = 300
 	if cfg.IsEmpty() {
 		t.Error("config with request_timeout should not be empty")
+	}
+}
+
+func TestProjectConfig_MCPInject_IsEmpty(t *testing.T) {
+	cfg := &ProjectConfig{}
+	if !cfg.IsEmpty() {
+		t.Error("empty config should be empty")
+	}
+	if cfg.MCPInjectDisabled() {
+		t.Error("unset mcp_inject should not report disabled")
+	}
+	off := false
+	cfg.MCPInject = &off
+	if cfg.IsEmpty() {
+		t.Error("config with mcp_inject should not be empty")
+	}
+	if !cfg.MCPInjectDisabled() {
+		t.Error("mcp_inject: false should report disabled")
+	}
+	on := true
+	cfg.MCPInject = &on
+	if cfg.MCPInjectDisabled() {
+		t.Error("mcp_inject: true should not report disabled")
 	}
 }
 

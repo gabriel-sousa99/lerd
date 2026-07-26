@@ -5,9 +5,12 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gabriel-sousa99/lerd/internal/activityping"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/idle"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // IsParkedSite checks whether a site's path is inside one of the parked directories.
@@ -80,7 +83,10 @@ func UnlinkSiteCore(site *config.Site, parkedDirs []string) error {
 		_ = config.IgnoreSite(site.Name)
 	} else {
 		_ = config.RemoveSite(site.Name)
+		_ = config.RemoveSiteFromWorkspaces(site.Name)
 	}
+
+	forgetSiteState(site.Name)
 
 	_ = podman.WriteContainerHosts()
 	if err := podman.RewriteFPMQuadlets(); err != nil {
@@ -97,4 +103,20 @@ func UnlinkSiteCore(site *config.Site, parkedDirs []string) error {
 		podman.AfterUnitChange("site:" + site.Name)
 	}
 	return nil
+}
+
+// forgetSiteState drops the per-site request-timing and idle state the watcher
+// writes, which the rest of the unlink path leaves behind: the durable request
+// store, both snapshot files, and (via the control socket) the running watcher's
+// in-memory copy so it stops re-emitting the site. Worktree keys are covered too.
+// All best-effort: a site with no recorded state or a down watcher just no-ops.
+func forgetSiteState(name string) {
+	_ = reqstats.RemoveSite(config.RequestStatsFile(), name)
+	_ = idle.RemoveActivity(config.IdleActivityFile(), name)
+	if _, err := os.Stat(config.RequestStatsDB()); err == nil {
+		if st, err := reqstats.OpenShared(config.RequestStatsDB()); err == nil {
+			_, _ = st.DeleteSite(name)
+		}
+	}
+	activityping.Forget(name)
 }

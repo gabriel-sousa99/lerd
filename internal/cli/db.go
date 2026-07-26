@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -10,7 +11,9 @@ import (
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/spf13/cobra"
 )
 
@@ -93,6 +96,20 @@ func serviceToDBEnv(name string) *dbEnv {
 	return &dbEnv{service: name, connection: "mysql", username: "root", password: "lerd"}
 }
 
+// lerdServiceFromHost returns the lerd service a DB host of the form
+// "lerd-<service>" points at (e.g. "lerd-mariadb-11-8" -> "mariadb-11-8"), or ""
+// when the host is not a lerd service container (an external host, or the
+// loopback a host-proxy site uses). Lets the db commands target the exact
+// service a site runs on instead of collapsing to the family's canonical
+// service, so a mariadb- or postgres-18-backed site dumps the right server.
+func lerdServiceFromHost(host string) string {
+	svc, ok := strings.CutPrefix(strings.TrimSpace(host), "lerd-")
+	if !ok || svc == "" {
+		return ""
+	}
+	return svc
+}
+
 // resolveDB resolves database connection config using the following priority:
 //  1. --service flag (flagService)
 //  2. .lerd.yaml db: block (present even on unlinked sites)
@@ -145,7 +162,7 @@ func resolveDBFromFramework(cwd string) *dbEnv {
 	if !ok {
 		return nil
 	}
-	fw, ok := config.GetFramework(fwName)
+	fw, ok := config.GetFrameworkForDir(fwName, cwd)
 	if !ok || len(fw.Env.Services) == 0 {
 		return nil
 	}
@@ -170,6 +187,11 @@ func resolveDBFromFramework(cwd string) *dbEnv {
 			continue
 		}
 		env := serviceToDBEnv(svc)
+		// Target the exact service the site points at (an alternate like mariadb
+		// or postgres-18), not just the family's canonical service.
+		if s := lerdServiceFromHost(readKey("DB_HOST")); s != "" {
+			env.service = s
+		}
 		// Resolve database name from the framework's env file.
 		env.database = readKey("DB_DATABASE")
 		if env.database == "" {
@@ -260,8 +282,12 @@ func loadDBEnv(cwd string) (*dbEnv, error) {
 	// DB_PASSWORD avoids authenticating as a role that doesn't exist in the
 	// container (e.g. DB_USERNAME=root against pgsql).
 	svcDefaults := serviceToDBEnv(connToService(conn))
+	service := connToService(conn)
+	if s := lerdServiceFromHost(vals["DB_HOST"]); s != "" {
+		service = s
+	}
 	return &dbEnv{
-		service:    connToService(conn),
+		service:    service,
 		connection: conn,
 		database:   db,
 		username:   svcDefaults.username,
@@ -293,15 +319,23 @@ func runDbImport(file, service, database string) error {
 	if err != nil {
 		return err
 	}
+	// psql exits 0 even when every statement failed, so the output is tallied on
+	// its way to the terminal and the result reported at the end.
+	var tally serviceops.ImportTally
 	cmd.Stdin = f
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.MultiWriter(os.Stdout, tally.Stream())
+	cmd.Stderr = io.MultiWriter(os.Stderr, tally.Stream())
 
-	fmt.Printf("Importing %s into %s (%s)...\n", file, env.database, env.connection)
+	feedback.Begin()
+	feedback.Line("importing " + file + " into " + feedback.Val(env.database) + " (" + env.connection + ")")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("import failed: %w", err)
 	}
-	fmt.Println("Import complete.")
+	if rep := tally.Report(); rep.Errors > 0 {
+		feedback.Warn("import finished but %s", rep.Summary())
+		return nil
+	}
+	feedback.Done("import complete")
 	return nil
 }
 
@@ -311,7 +345,7 @@ func dbImportCmd(env *dbEnv) (*exec.Cmd, error) {
 	case "mysql", "mariadb":
 		// MariaDB 11+ images ship `mariadb` instead of `mysql`; resolve whichever
 		// client exists in the container at runtime.
-		shellCmd := "$(command -v mysql || command -v mariadb) -u" + podman.ShellQuote(env.username) + " " + podman.ShellQuote(env.database)
+		shellCmd := "$(command -v mysql || command -v mariadb) --max-allowed-packet=" + config.MySQLImportMaxPacket + " -u" + podman.ShellQuote(env.username) + " " + podman.ShellQuote(env.database)
 		return podman.Cmd("exec", "-i",
 			"-e", "MYSQL_PWD="+env.password,
 			container, "sh", "-c", shellCmd), nil
@@ -355,12 +389,13 @@ func runDbExport(output, service, database string) error {
 	cmd.Stdout = f
 	cmd.Stderr = os.Stderr
 
-	fmt.Printf("Exporting %s (%s) to %s...\n", env.database, env.connection, output)
+	feedback.Begin()
+	feedback.Line("exporting " + feedback.Val(env.database) + " (" + env.connection + ") to " + output)
 	if err := cmd.Run(); err != nil {
 		_ = os.Remove(output)
 		return fmt.Errorf("export failed: %w", err)
 	}
-	fmt.Printf("Export complete: %s\n", output)
+	feedback.Done("export complete · " + output)
 	return nil
 }
 
@@ -421,15 +456,16 @@ func runDbCreate(flagService string, args []string) error {
 		return fmt.Errorf("could not start %s: %w", env.service, err)
 	}
 
+	feedback.Begin()
 	for _, name := range []string{dbName, dbName + "_testing"} {
 		created, err := createDatabase(env.service, name)
 		if err != nil {
 			return fmt.Errorf("creating %q: %w", name, err)
 		}
 		if created {
-			fmt.Printf("Created database %q\n", name)
+			feedback.Done("created database " + feedback.Val(name))
 		} else {
-			fmt.Printf("Database %q already exists\n", name)
+			feedback.Line("database " + feedback.Val(name) + " already exists")
 		}
 	}
 	return nil
@@ -473,16 +509,13 @@ func runDbShell(flagService, flagDatabase string) error {
 			if !isInteractive() {
 				return fmt.Errorf("database %q does not exist in %s — run 'lerd db:create %s'", env.database, env.service, env.database)
 			}
-			fmt.Printf("Database %q does not exist in %s. Create it? [Y/n] ", env.database, env.service)
-			var answer string
-			fmt.Scanln(&answer) //nolint:errcheck
-			if answer != "" && answer[0] != 'Y' && answer[0] != 'y' {
+			if !feedback.Confirm(fmt.Sprintf("Database %q does not exist in %s. Create it?", env.database, env.service), true) {
 				return fmt.Errorf("database %q does not exist", env.database)
 			}
 			if _, err := createDatabase(env.service, env.database); err != nil {
 				return fmt.Errorf("creating database %q: %w", env.database, err)
 			}
-			fmt.Printf("Created database %q\n", env.database)
+			feedback.Done("created database " + feedback.Val(env.database))
 		}
 	}
 
@@ -645,8 +678,12 @@ func loadDBEnvLenient(cwd string) (*dbEnv, error) {
 	}
 
 	svcDefaults := serviceToDBEnv(connToService(conn))
+	service := connToService(conn)
+	if s := lerdServiceFromHost(vals["DB_HOST"]); s != "" {
+		service = s
+	}
 	return &dbEnv{
-		service:    connToService(conn),
+		service:    service,
 		connection: conn,
 		database:   db,
 		username:   svcDefaults.username,

@@ -1,7 +1,7 @@
 <script lang="ts">
   import DetailPanel from '$components/DetailPanel.svelte';
   import SiteHeader from './SiteHeader.svelte';
-  import SiteControls from './SiteControls.svelte';
+  import SiteOverview from './SiteOverview.svelte';
   import SiteLogs from './SiteLogs.svelte';
   import SiteTinkerTab from './SiteTinkerTab.svelte';
   import SiteEnvTab from './SiteEnvTab.svelte';
@@ -9,10 +9,7 @@
   import SiteDebugTab from '$tabs/sites/SiteDebugTab.svelte';
   import DetailButton from '$components/DetailButton.svelte';
   import { resumeSite, loadSites, activeWorktreeDomain, type Site } from '$stores/sites';
-  import { proxies } from '$stores/proxies';
-  import { openProxyAddModal, openProxyEditModal } from '$stores/modals';
-  import { suggestUnifiedDomain } from '$lib/fullstack';
-  import { routeRest } from '$stores/route';
+  import { routeRest, goToTab } from '$stores/route';
   import { m } from '../../paraglide/messages.js';
 
   let resumeBusy = $state(false);
@@ -31,13 +28,13 @@
   }
   let { site }: Props = $props();
 
-  type TabId = 'overview' | 'tinker' | 'env' | 'dumps';
+  type TabId = 'overview' | 'logs' | 'tinker' | 'env' | 'dumps';
   const TAB_STORAGE_KEY = 'lerd:siteDetailTab';
 
   function readStoredTab(): TabId {
     if (typeof localStorage === 'undefined') return 'overview';
     const v = localStorage.getItem(TAB_STORAGE_KEY);
-    if (v === 'tinker' || v === 'env' || v === 'dumps') return v;
+    if (v === 'logs' || v === 'tinker' || v === 'env' || v === 'dumps') return v;
     return 'overview';
   }
 
@@ -47,14 +44,14 @@
   const canTinker = $derived(Boolean(site.uses_php));
   const canDumps = $derived(Boolean(site.uses_php));
   const canEnv = $derived(Boolean(site.has_env));
+  // Logs get their own tab in the resource layout rather than living under the
+  // overview. Offer it whenever the site exposes any log source.
+  const canLogs = $derived(
+    Boolean(site.has_app_logs || site.uses_php || site.custom_container || site.host_has_dev_server)
+  );
   // A lone Overview tab can't be switched to anything, so don't render the tab
   // row at all when no other tab is available (e.g. static sites).
-  const hasExtraTabs = $derived(canEnv || canTinker || canDumps);
-
-  const siteName = $derived(site.name ?? site.domain.replace(/\.localhost$/, ''));
-  const boundProxy = $derived(
-    $proxies.find((p) => p.site === siteName || (p.routes ?? []).some((r) => r.site === siteName))
-  );
+  const hasExtraTabs = $derived(canLogs || canEnv || canTinker || canDumps);
 
   // The route can deep-link a sub-tab (e.g. dump notifications go to
   // #sites/<domain>/dumps). When the second segment names a tab, honour it
@@ -63,12 +60,13 @@
     const seg = $routeRest.split('/')[1] ?? '';
     if (seg === 'nginx') {
       nginxOpen = true;
-    } else if (seg === 'tinker' || seg === 'env' || seg === 'dumps' || seg === 'overview') {
+    } else if (seg === 'logs' || seg === 'tinker' || seg === 'env' || seg === 'dumps' || seg === 'overview') {
       active = seg;
     }
   });
 
   $effect(() => {
+    if (active === 'logs' && !canLogs) active = 'overview';
     if (active === 'tinker' && !canTinker) active = 'overview';
     if (active === 'env' && !canEnv) active = 'overview';
     if (active === 'dumps' && !canDumps) active = 'overview';
@@ -87,6 +85,16 @@
     if (!exists) activeWorktreeBranch = '';
   });
 
+  // Select a tab and mirror it into the URL hash so the two never drift. Without
+  // this, clicking a tab left the hash pointing at whatever deep link last set it
+  // (e.g. the doctor's "edit env" #sites/<d>/env), so a refresh snapped back to
+  // that tab and a repeat deep link to the same hash fired no hashchange and so
+  // appeared to do nothing.
+  function selectTab(t: TabId) {
+    active = t;
+    goToTab('sites', `${site.domain}/${t}`);
+  }
+
   const tabBtn = (tab: TabId, isActive: boolean) =>
     'pb-1 text-xs font-medium border-b-2 transition-colors ' +
     (isActive
@@ -95,15 +103,18 @@
 </script>
 
 {#snippet tabs()}
-  <button class={tabBtn('overview', active === 'overview')} onclick={() => (active = 'overview')}>{m.sites_tabs_overview()}</button>
+  <button class={tabBtn('overview', active === 'overview')} onclick={() => selectTab('overview')}>{m.sites_tabs_overview()}</button>
+  {#if canLogs}
+    <button class={tabBtn('logs', active === 'logs')} onclick={() => selectTab('logs')}>{m.services_tabs_logs()}</button>
+  {/if}
   {#if canEnv}
-    <button class={tabBtn('env', active === 'env')} onclick={() => (active = 'env')}>{m.sites_tabs_env()}</button>
+    <button class={tabBtn('env', active === 'env')} onclick={() => selectTab('env')}>{m.sites_tabs_env()}</button>
   {/if}
   {#if canTinker}
-    <button class={tabBtn('tinker', active === 'tinker')} onclick={() => (active = 'tinker')}>{m.sites_tabs_tinker()}</button>
+    <button class={tabBtn('tinker', active === 'tinker')} onclick={() => selectTab('tinker')}>{m.sites_tabs_tinker()}</button>
   {/if}
   {#if canDumps}
-    <button class={tabBtn('dumps', active === 'dumps')} onclick={() => (active = 'dumps')}>{m.debug_title()}</button>
+    <button class={tabBtn('dumps', active === 'dumps')} onclick={() => selectTab('dumps')}>{m.debug_title()}</button>
   {/if}
 {/snippet}
 
@@ -137,25 +148,8 @@
       </div>
     </div>
   {:else if active === 'overview'}
-    <SiteControls {site} {activeWorktreeBranch} />
-    <section class="px-6 py-4 space-y-2 border-b border-gray-100 dark:border-lerd-border">
-      <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">Proxy fullstack</h2>
-      {#if boundProxy}
-        <div class="flex items-center justify-between gap-2">
-          <span class="text-xs text-gray-600 dark:text-gray-300">
-            API em
-            <a href={`${boundProxy.secured ? 'https' : 'http'}://${boundProxy.domain}`} target="_blank" rel="noopener" class="font-mono text-lerd-red hover:underline">↗ {boundProxy.domain}</a>
-            <span class="text-gray-400">· {(boundProxy.routes ?? []).map((r) => r.path).join(' ')}</span>
-          </span>
-          <DetailButton onclick={() => openProxyEditModal(boundProxy)}>Editar</DetailButton>
-        </div>
-      {:else}
-        <div class="flex items-center justify-between gap-2">
-          <span class="text-xs text-gray-500">Servir este site como API sob um domínio único com seu SPA.</span>
-          <DetailButton tone="primary" onclick={() => openProxyAddModal({ fullstack: true, apiSite: siteName, domain: suggestUnifiedDomain(siteName) })}>+ Criar proxy fullstack</DetailButton>
-        </div>
-      {/if}
-    </section>
+    <SiteOverview {site} {activeWorktreeBranch} />
+  {:else if active === 'logs'}
     <SiteLogs {site} {activeWorktreeBranch} />
   {:else if active === 'env'}
     {#key site.domain + '@' + activeWorktreeBranch}
@@ -166,7 +160,7 @@
       <SiteTinkerTab {site} branch={activeWorktreeBranch} />
     {/key}
   {:else if active === 'dumps'}
-    <SiteDebugTab siteName={site.name} framework={site.framework} />
+    <SiteDebugTab siteName={site.name} framework={site.framework} domain={site.domain} branch={activeWorktreeBranch} />
   {/if}
 </DetailPanel>
 

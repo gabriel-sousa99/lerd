@@ -1,12 +1,18 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -51,20 +57,88 @@ echo "  shimmed $n browser binary(ies) to system chromium"
 test "$n" -gt 0
 `, pestBrowserCachePath)
 
-// pestBrowserInstall runs the project's Playwright CLI to populate the browser
-// registry, preferring the locally installed binary so the downloaded revision
-// matches the project's pinned Playwright version. The download itself is mostly
-// wasted work (the glibc binaries it fetches are immediately overwritten by the
-// shim), but it is the canonical, version-proof way to create the exact cache
-// layout Playwright later looks for, so we accept the cost over reconstructing
-// that layout by hand.
-const pestBrowserInstall = `if [ -x ./node_modules/.bin/playwright ]; then
-  ./node_modules/.bin/playwright install chromium
-else
+// pestBrowserPlanAwk turns `playwright install --dry-run` output into one
+// "<install dir>\t<url>\t<mirror>" line per component, deduplicated (ffmpeg is
+// listed once per browser). The dry run is the only supported way to learn the
+// exact cache layout and archive URLs for the project's pinned Playwright. Each
+// component is emitted when the next one starts, so a block that lists no
+// fallback still yields a line.
+const pestBrowserPlanAwk = `function flush() { if (dir != "" && url != "" && !seen[dir]++) print dir "\t" url "\t" mirror }
+/Install location:/ { flush(); dir = $NF; url = ""; mirror = "" }
+/Download url:/ { url = $NF }
+/Download fallback 1:/ { mirror = $NF }
+END { flush() }`
+
+// pestBrowserInstall populates the browser registry from the project's own
+// Playwright CLI, but does the fetching itself: it asks Playwright where each
+// component belongs and what to download, then uses curl and the image's unzip.
+// Playwright's Node extractor deadlocks mid-write on the bind-mounted cache
+// (#1006), stalling forever with no output, while unzip writes the same archive
+// to the same path in seconds. curl's --speed-time guard turns a stalled
+// download into an error instead of another silent hang, and the
+// INSTALLATION_COMPLETE marker is what makes Playwright's registry accept the
+// result as a real install. The .links entry is the other half of that bargain:
+// Playwright deletes any browser directory no link claims, so without it an
+// unrelated project's `playwright install` reaps these browsers as unused.
+var pestBrowserInstall = fmt.Sprintf(`set -e
+pw=./node_modules/.bin/playwright
+if [ ! -x "$pw" ]; then
   echo "the 'playwright' npm package is not in node_modules — run: lerd npm install playwright" >&2
   exit 1
 fi
-`
+cache="${PLAYWRIGHT_BROWSERS_PATH:-%s}"
+mkdir -p "$cache"
+
+plan=$("$pw" install --dry-run chromium | awk '%s')
+if [ -z "$plan" ]; then
+  echo "could not read Playwright's install plan; falling back to its own installer" >&2
+  exec "$pw" install chromium
+fi
+
+core=$(node -e 'process.stdout.write(require("path").dirname(require.resolve("playwright-core/package.json", {paths: [process.cwd()]})))' 2>/dev/null || true)
+if [ -n "$core" ]; then
+  mkdir -p "$cache/.links"
+  printf '%%s' "$core" > "$cache/.links/$(printf '%%s' "$core" | sha1sum | cut -d' ' -f1)"
+fi
+
+printf '%%s\n' "$plan" | while IFS="$(printf '\t')" read -r dir url mirror; do
+  name=$(basename "$dir")
+  if [ -f "$dir/INSTALLATION_COMPLETE" ]; then
+    echo "  $name is already installed"
+    continue
+  fi
+  zip="/tmp/lerd-playwright-$name.zip"
+  echo "  downloading $name..."
+  rm -rf "$dir" "$zip"
+  if ! curl -fsSL --retry 3 --speed-limit 1024 --speed-time 60 -o "$zip" "$url"; then
+    [ -n "$mirror" ] || exit 1
+    echo "  the download server did not answer, retrying from the mirror..."
+    curl -fsSL --retry 3 --speed-limit 1024 --speed-time 60 -o "$zip" "$mirror"
+  fi
+  echo "  extracting $name..."
+  mkdir -p "$dir"
+  unzip -q -o "$zip" -d "$dir"
+  rm -f "$zip"
+  find "$dir" -type f \( -name 'chrome' -o -name 'chrome-headless-shell' -o -name 'chrome_sandbox' \
+    -o -name 'chrome_crashpad_handler' -o -name 'ffmpeg-linux' -o -name '*.sh' \) -exec chmod +x {} +
+  touch "$dir/INSTALLATION_COMPLETE"
+done
+`, pestBrowserCachePath, pestBrowserPlanAwk)
+
+// pestBrowserCleanup clears what an aborted install leaves inside the container.
+// Ctrl+C kills the host-side lerd process only, so the in-container downloader
+// survives: our own curl and the shell driving it, or, on the fallback path,
+// Playwright's installer holding the __dirlock that makes every retry block with
+// no output at all. Half-downloaded archives are dropped here too, since nothing
+// else ever reclaims them. The bracketed characters keep each pattern from
+// matching this script's own command line, which would kill the cleanup itself,
+// and the rm glob is bracketed for the same reason rather than for globbing.
+var pestBrowserCleanup = fmt.Sprintf(`pkill -f "oopDownloadBrowserMai[n]" >/dev/null 2>&1
+pkill -f "playwright[ ]install" >/dev/null 2>&1
+pkill -f "lerd-playwrigh[t]" >/dev/null 2>&1
+rm -rf "${PLAYWRIGHT_BROWSERS_PATH:-%s}/__dirlock" /tmp/playwright-download-* /tmp/lerd-playwrigh[t]-*.zip
+exit 0
+`, pestBrowserCachePath)
 
 // pestBrowserSupportedVersion rejects the frozen legacy PHP tier, whose base
 // image ships a Node too old for current Playwright (see docs). Returning early
@@ -154,8 +228,8 @@ func installPestBrowser(version string, w io.Writer) error {
 		return err
 	}
 	added := false
-	if !slices.Contains(cfg.GetPackages(version), pestBrowserPkg) {
-		cfg.AddPackage(version, pestBrowserPkg)
+	if !slices.Contains(cfg.GetPackages(), pestBrowserPkg) {
+		cfg.AddPackage(pestBrowserPkg)
 		if err := config.SaveGlobal(cfg); err != nil {
 			return fmt.Errorf("saving config: %w", err)
 		}
@@ -166,8 +240,8 @@ func installPestBrowser(version string, w io.Writer) error {
 		return fmt.Errorf("updating FPM quadlet: %w", err)
 	}
 
-	if running, _ := podman.ContainerRunning(container); !running {
-		return fmt.Errorf("PHP %s FPM container is not running — start it with: %s", version, serviceStartHint(container))
+	if err := ensureFPMStarted(version, container); err != nil {
+		return err
 	}
 
 	// Rebuild when chromium was just opted in, or when an image from an older
@@ -177,11 +251,15 @@ func installPestBrowser(version string, w io.Writer) error {
 		fmt.Fprintf(w, "Baking chromium into the PHP %s image...\n", version)
 		if err := podman.RebuildFPMImageTo(version, false, w); err != nil {
 			if added {
-				cfg.RemovePackage(version, pestBrowserPkg)
+				cfg.RemovePackage(pestBrowserPkg)
 				_ = config.SaveGlobal(cfg)
 			}
 			return fmt.Errorf("rebuild failed: %w", err)
 		}
+		// chromium is an ordinary entry in the declared package set, so it has
+		// to reach Octane sites too. This step restarts the FPM container
+		// itself below, which is why only the FrankenPHP half runs here.
+		rebuildFrankenPHPForVersion(version)
 	}
 	if needRebuild || !playwrightVolumeMounted(container) {
 		fmt.Fprintf(w, "Restarting the PHP %s container...\n", version)
@@ -198,10 +276,7 @@ func installPestBrowser(version string, w io.Writer) error {
 
 	browsersEnv := "PLAYWRIGHT_BROWSERS_PATH=" + pestBrowserCachePath
 	fmt.Fprintln(w, "Downloading the Playwright browser registry...")
-	inst := podman.Cmd("exec", "-w", cwd, "--env", browsersEnv, container, "sh", "-c", pestBrowserInstall)
-	inst.Stdout = w
-	inst.Stderr = w
-	if err := inst.Run(); err != nil {
+	if err := runPestBrowserInstall(container, cwd, browsersEnv, w); err != nil {
 		return fmt.Errorf("playwright install: %w", err)
 	}
 
@@ -214,6 +289,32 @@ func installPestBrowser(version string, w io.Writer) error {
 
 	fmt.Fprintf(w, "\nPest browser testing is ready for PHP %s. Run your suite with `lerd test` or `lerd pest`.\n", version)
 	return nil
+}
+
+// runPestBrowserInstall fetches the browser registry into the container, running
+// the cleanup both before (a previous abort may still hold the install lock) and
+// after a failed or interrupted run, so the state a user retries from is always
+// recoverable rather than silently wedged.
+func runPestBrowserInstall(container, cwd, browsersEnv string, w io.Writer) error {
+	cleanup := func() {
+		_ = podman.Cmd("exec", "--env", browsersEnv, container, "sh", "-c", pestBrowserCleanup).Run()
+	}
+	cleanup()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	inst := podman.CmdContext(ctx, "exec", "-w", cwd, "--env", browsersEnv, container, "sh", "-c", pestBrowserInstall)
+	inst.Stdout = w
+	inst.Stderr = w
+	err := inst.Run()
+	if err != nil {
+		cleanup()
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("interrupted; the in-container download was stopped and its lock cleared")
+	}
+	return err
 }
 
 func newPestBrowserRemoveCmd() *cobra.Command {
@@ -241,11 +342,11 @@ func removePestBrowser(version string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if !slices.Contains(cfg.GetPackages(version), pestBrowserPkg) {
+	if !slices.Contains(cfg.GetPackages(), pestBrowserPkg) {
 		fmt.Fprintf(w, "Pest browser testing is not enabled for PHP %s — nothing to remove.\n", version)
 		return nil
 	}
-	cfg.RemovePackage(version, pestBrowserPkg)
+	cfg.RemovePackage(pestBrowserPkg)
 	if err := config.SaveGlobal(cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
@@ -254,7 +355,7 @@ func removePestBrowser(version string, w io.Writer) error {
 	if err := podman.RebuildFPMImageTo(version, false, w); err != nil {
 		// Restore config so it doesn't claim chromium is gone while the live
 		// image still carries it (mirrors installPestBrowser's revert).
-		cfg.AddPackage(version, pestBrowserPkg)
+		cfg.AddPackage(pestBrowserPkg)
 		_ = config.SaveGlobal(cfg)
 		return fmt.Errorf("rebuild failed (config restored): %w", err)
 	}
@@ -308,7 +409,7 @@ func doctorPestBrowser(version string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	check(slices.Contains(cfg.GetPackages(version), pestBrowserPkg),
+	check(slices.Contains(cfg.GetPackages(), pestBrowserPkg),
 		"chromium baked into the FPM image", "lerd pest:browser install")
 
 	running, _ := podman.ContainerRunning(container)
@@ -327,5 +428,120 @@ func doctorPestBrowser(version string, w io.Writer) error {
 		`fs=$(find "${PLAYWRIGHT_BROWSERS_PATH:-`+pestBrowserCachePath+`}" -type f \( -name chrome-headless-shell -o -name chrome \) 2>/dev/null); [ -n "$fs" ] || exit 1; for b in $fs; do head -1 "$b" | grep -q '#!/bin/sh' || exit 1; done`).Run() == nil
 	check(shimOK, "Playwright browser shimmed to musl chromium", "lerd pest:browser install")
 
+	// The checks above can pass while `lerd test` still fails: pest-plugin-browser
+	// boots the server (run-server --mode launchServer) and that boot can fail for
+	// a reason presence checks miss. Boot it too and surface the real error (#677).
+	if playwrightOK {
+		ctx, cancel := context.WithTimeout(context.Background(), pestServerBootTimeout)
+		bootOK, bootOut := bootPlaywrightServer(ctx, container, cwd)
+		cancel()
+		check(bootOK, "Playwright server boots (run-server, launchServer mode)",
+			"the server failed to start; its output is below")
+		if !bootOK && bootOut != "" {
+			fmt.Fprintf(w, "%s\n", indentBlock(bootOut, "        | "))
+		}
+	}
+
 	return nil
+}
+
+// pestServerBootTimeout caps how long the doctor waits for the Playwright server
+// to print its ready marker before treating the boot as failed.
+const pestServerBootTimeout = 25 * time.Second
+
+// playwrightServerReadyMarker is what Playwright's run-server prints once it is
+// listening; pest-plugin-browser waits for the same line before driving it.
+const playwrightServerReadyMarker = "Listening on"
+
+// playwrightServerBootCmd mirrors how pest-plugin-browser launches the server:
+// run-server in launchServer mode. Port 0 takes an ephemeral port so the probe
+// never collides with a real run, and the process is killed as soon as it is up.
+const playwrightServerBootCmd = "./node_modules/.bin/playwright run-server --host 127.0.0.1 --port 0 --mode launchServer"
+
+// bootPlaywrightServer boots the Playwright server inside the FPM container the
+// way pest-plugin-browser does and reports whether it came up; on failure it
+// returns the captured output so the doctor can show the real error.
+func bootPlaywrightServer(ctx context.Context, container, cwd string) (bool, string) {
+	browsersEnv := "PLAYWRIGHT_BROWSERS_PATH=" + pestBrowserCachePath
+	cmd := podman.CmdContext(ctx, "exec", "-w", cwd, "--env", browsersEnv, container,
+		"sh", "-c", playwrightServerBootCmd)
+	ok, out := watchPlaywrightBoot(ctx, cmd)
+	// Killing the podman exec client does not reap the run-server it spawned
+	// inside the container. Stop it explicitly; the --port 0 command line is
+	// unique to this probe, so a real test run's server is never matched.
+	_ = podman.Cmd("exec", container, "pkill", "-f", playwrightServerBootCmd).Run()
+	return ok, out
+}
+
+// watchPlaywrightBoot starts cmd and waits for the ready marker, returning true
+// once listening (then killing it) or false with the captured output if it exits
+// first or the context expires. Exec-agnostic so it is testable.
+func watchPlaywrightBoot(ctx context.Context, cmd *exec.Cmd) (bool, string) {
+	w := &readyWatcher{found: make(chan struct{})}
+	cmd.Stdout = w
+	cmd.Stderr = w
+
+	if err := cmd.Start(); err != nil {
+		return false, err.Error()
+	}
+
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	select {
+	case <-w.found:
+		_ = cmd.Process.Kill()
+		<-exited
+		return true, ""
+	case <-exited:
+		out := w.output()
+		if ctx.Err() == context.DeadlineExceeded {
+			msg := fmt.Sprintf("timed out after %s waiting for the server to start", pestServerBootTimeout)
+			if out != "" {
+				msg += "\n" + out
+			}
+			return false, msg
+		}
+		if out == "" {
+			out = "the server exited without output"
+		}
+		return false, out
+	}
+}
+
+// readyWatcher accumulates a process's combined output and closes found the
+// moment the ready marker appears, so a booting server is detected without
+// waiting for it to exit.
+type readyWatcher struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	found chan struct{}
+	once  sync.Once
+}
+
+func (rw *readyWatcher) Write(p []byte) (int, error) {
+	rw.mu.Lock()
+	rw.buf.Write(p)
+	seen := strings.Contains(rw.buf.String(), playwrightServerReadyMarker)
+	rw.mu.Unlock()
+	if seen {
+		rw.once.Do(func() { close(rw.found) })
+	}
+	return len(p), nil
+}
+
+func (rw *readyWatcher) output() string {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	return strings.TrimSpace(rw.buf.String())
+}
+
+// indentBlock prefixes every line of s with prefix, so multi-line process output
+// reads as one indented block under a doctor check.
+func indentBlock(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
 }

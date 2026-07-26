@@ -65,6 +65,17 @@ Binding symmetry is preserved across stacks: `127.0.0.1` maps to `[::1]` and `0.
 
 **Shared nginx**: a single nginx container serves all sites via virtual hosts. nginx uses a Podman-network-aware resolver to route `fastcgi_pass` to the correct PHP-FPM container by hostname.
 
+**Shared hosts files**: containers resolve `.test` domains through two generated files that lerd bind-mounts as `/etc/hosts`. `~/.local/share/lerd/hosts` goes into every PHP-FPM container so server-side HTTP from PHP reaches local sites, and it also carries the `host.containers.internal` entry that Xdebug and host-database overrides rely on. `~/.local/share/lerd/browser-hosts` goes into services declaring `share_hosts: true`, today Selenium, so Dusk and Pest Browser can reach a site. Both pin lerd-nginx's address on the Podman bridge, and Podman assigns a fresh one every time the container is recreated, so a reboot that brings the quadlet units up without `lerd start` would otherwise leave every container resolving `.test` to a dead address. A background watcher inside `lerd-ui` inspects the nginx container once per 30-second tick and repoints both files when the address has moved. The same loop keeps `host.containers.internal` on a routable address across network changes, reprobing only when the host's primary LAN IP changes, since that probe is a container exec and costs far more than the inspect.
+
 **Per-version PHP-FPM**: each PHP version gets its own container built from a local `Containerfile`. The image includes all extensions needed for Laravel out of the box: `pdo_mysql`, `pdo_pgsql`, `bcmath`, `mbstring`, `xml`, `zip`, `gd`, `intl`, `opcache`, `pcntl`, `exif`, `sockets`, `redis`, `imagick`.
 
 **Automatic volume mounts**: the PHP-FPM and nginx containers bind-mount `$HOME` by default. When a project lives outside the home directory (e.g. `/var/www`, `/opt/projects`), lerd automatically adds the extra volume mount to both containers and restarts them. This happens transparently during `lerd link`, `lerd park`, or the first `lerd php` / `composer` / `laravel new` invocation from the outside path.
+
+Ephemeral system trees (`/tmp`, `/var/tmp`, `/run`, `/proc`, `/sys`, `/dev`) are deliberately excluded from auto-mounting: they vanish on reboot and would leave containers with dead mounts, and IDEs dropping randomly named temp files there would otherwise cascade container restarts. Running `lerd php` from such a path is refused with a clear message rather than an opaque runtime error. To opt a specific scratch root in anyway (common for AI coding agents whose session files live under `/tmp`), list it under `mounts:` in `~/.config/lerd/config.yaml`:
+
+```yaml
+mounts:
+  - /tmp/claude
+```
+
+Each entry is bind-mounted at the same location in the PHP-FPM and nginx containers, on the next `lerd start` or on the first `lerd php` invocation from a path it covers. Paths are mounted verbatim (host path equals container path), so a script's working directory and file arguments resolve unchanged.

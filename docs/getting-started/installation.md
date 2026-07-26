@@ -39,20 +39,25 @@ The installer will:
 - Automatically run `lerd install` to complete environment setup
 
 ::: info DNS setup requires sudo
-`lerd install` writes to `/etc/NetworkManager/dnsmasq.d/` and `/etc/NetworkManager/conf.d/` and restarts NetworkManager. This is the only step that requires `sudo`.
+`lerd install` writes to `/etc/NetworkManager/dnsmasq.d/` and `/etc/NetworkManager/conf.d/` and restarts NetworkManager. This is the only step that requires `sudo`. It also installs a passwordless sudoers rule for the DNS resolver operations, so this is a one-time prompt: reinstalling for an update or a test reuses the existing rule and does not ask again. Uninstalling takes the rule back out, so the grant lasts exactly as long as lerd does.
 :::
 
 After install, reload your shell or open a new terminal so `PATH` takes effect.
 
 `lerd install` will:
 
-1. Create XDG config and data directories
-2. Create the `lerd` Podman network
-3. Download static binaries: Composer, fnm, mkcert
-4. Install the mkcert CA into your system trust store
-5. Write and start the `lerd-dns` and `lerd-nginx` Podman Quadlet containers
-6. Enable the `lerd-watcher` background service (auto-discovers new projects)
-7. Add `~/.local/share/lerd/bin` to your shell's `PATH`
+1. Check that the host ports lerd binds first (HTTP 80, HTTPS 443, DNS 5300) are free
+2. Create XDG config and data directories
+3. Create the `lerd` Podman network
+4. Download static binaries: Composer, fnm, mkcert
+5. Install the mkcert CA into your system trust store
+6. Write and start the `lerd-dns` and `lerd-nginx` Podman Quadlet containers
+7. Enable the `lerd-watcher` background service (auto-discovers new projects)
+8. Add `~/.local/share/lerd/bin` to your shell's `PATH`
+
+::: info Running alongside Laravel Herd or another local stack
+If another tool is already serving sites on ports 80/443 (Laravel Herd, a system nginx/Apache) or holding the DNS port, install prints a warning naming each busy port and how to find the process. Install still continues, so stop the other stack to free the ports first, otherwise `lerd-nginx` and `lerd-dns` will fail to start.
+:::
 
 ---
 
@@ -112,6 +117,8 @@ To answer yes to every prompt without interaction:
 lerd uninstall --force
 ```
 
+The installer's own `--uninstall` stops the user units and removes the binary, but the DNS setup lives outside your home directory and only lerd can take it back out: the `lerd0` link unit, the NetworkManager rules and dispatcher, the drop-in that empties `FallbackDNS`, and the passwordless sudoers rule the DNS operations run under. So when it finds that configuration it offers to run `lerd dns:disable` first, and prints the root commands to clear it by hand if you decline or the binary has already gone.
+
 ---
 
 ### Check prerequisites only
@@ -124,30 +131,79 @@ bash install.sh --check
 
 ## macOS
 
-Install via the Homebrew tap:
+### One-line installer (recommended)
+
+::: code-group
+
+```bash [curl]
+curl -fsSL https://lerd.sh/install.sh | bash
+```
+
+```bash [wget]
+wget -qO- https://lerd.sh/install.sh | bash
+```
+
+:::
+
+The same installer powers Linux and macOS. On macOS it will:
+
+- Check for the `podman` CLI and offer to `brew install podman` if it's missing
+- Download the latest `darwin` binary for your architecture (amd64 / arm64)
+- Install it to `~/.local/bin/lerd` and add that directory to your `PATH`
+- Automatically run `lerd install`, which starts Podman Machine, mkcert, DNS, and nginx
+
+::: info Homebrew is only used for Podman
+The installer itself doesn't require Homebrew. It's used only to install the `podman` dependency when it isn't already present, so you can also install Podman by any other means beforehand.
+:::
+
+### Install via Homebrew (alternative)
 
 ```bash
 brew install gabriel-sousa99/lerd/lerd
 lerd install
 ```
 
-Podman is installed automatically as a Homebrew dependency. `lerd install` sets up
-Podman Machine, DNS, and nginx on first run.
+Podman is installed automatically as a Homebrew dependency.
 
-**Update:**
+::: warning Untrusted tap
+Recent Homebrew versions refuse to load formulae from third-party taps until they're trusted. If you see `Refusing to load formula ... from untrusted tap`, run `brew trust lerd-env/lerd` once, then retry.
+:::
 
-```bash
-brew upgrade lerd
-lerd install
-```
-
-**Uninstall:**
+### Update
 
 ```bash
-lerd uninstall
-brew uninstall lerd
+lerd update
 ```
+
+If you installed via Homebrew instead, update with `brew upgrade lerd && lerd install`.
+
+If you're running a local development build (a `git describe` version like `1.25.0-6-g7d03`), the one-line installer and `--update` detect it and ask before replacing it with a release binary, so an ahead-of-release build isn't overwritten silently. Decline to keep your build, or reinstall one explicitly with `install.sh --local <path>`.
+
+### Uninstall
+
+```bash
+lerd uninstall                                    # tears down launchd agents, DNS resolver, containers
+curl -fsSL https://lerd.sh/install.sh | bash -s -- --uninstall
+```
+
+Run `lerd uninstall` first (while the binary is still present) so the DNS resolver and Podman state are cleaned up, then the installer's `--uninstall` removes the launchd agents and the binary. If you installed via Homebrew, finish with `brew uninstall lerd` instead of the second command. On macOS the installer detects when the binary is still present and pauses to remind you to run `lerd uninstall` first, since the DNS resolver (`/etc/resolver/test`, removed with sudo) and the Podman machine are unreachable once the binary is gone; if it can't reach a terminal it prints the manual removal commands at the end instead.
 
 ## Windows (beta)
 
 There is no native Windows build. Lerd runs on Windows through WSL2, where the standard Linux build works unchanged once systemd and rootless Podman are set up. Windows support is **beta**, it works well for daily development but gets less testing than native Linux or macOS. See the [Windows (WSL2) guide](./wsl2) for the full walkthrough, including the `events_logger` Podman tweak and the mkcert root CA export to the Windows trust store.
+
+## NixOS
+
+NixOS's declarative model doesn't fit the one-line installer's imperative DNS and self-install steps, so the community [`lerd-nixos`](https://github.com/lerd-env/lerd-nixos) flake packages the `lerd` binary and provides the `configuration.nix` blocks the stack needs (rootless Podman, `*.test`-only DNS routing, the mkcert CA, and the systemd fixes for `lerd-ui` / `lerd-watcher`). See the [NixOS guide](./nixos) for the complete runbook from a fresh install.
+
+## Desktop app (optional)
+
+The dashboard runs in any browser, but [Lerd Desktop](https://github.com/lerd-env/lerd-desktop) wraps it in a dedicated window with [native desktop notifications](../features/notifications) for captured mail, worker failures and finished operations. It is optional and entirely separate from the lerd install itself, which keeps working unchanged without it.
+
+It ships for Linux as a Flatpak:
+
+```bash
+flatpak install --user https://lerd.sh/lerd.flatpakref
+```
+
+Update it with `flatpak update`. Once it is installed, `lerd dashboard` and the tray's **Open Dashboard** open the app instead of a browser tab, and clicking a native notification opens it through its `lerd://` scheme. The one-line installer also offers to set it up for you on Linux.

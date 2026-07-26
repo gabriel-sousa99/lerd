@@ -2,14 +2,30 @@ package cli
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	"github.com/spf13/cobra"
 )
+
+// Wire the siteops demote helper to the cli worker lifecycle so the UI, MCP,
+// and install-refresh paths recreate workers when a FrankenPHP site falls back
+// to FPM, the same way switchToFPM does for `lerd runtime fpm`.
+func init() {
+	siteops.StopRuntimeWorkers = func(site *config.Site) []string {
+		running := collectRunningWorkers(site)
+		for _, w := range running {
+			WorkerStopForSite(site.Name, site.Path, w) //nolint:errcheck
+		}
+		return running
+	}
+	siteops.RecreateFPMWorkers = func(site *config.Site, workers []string) {
+		startWorkersForSite(site, workers, site.PHPVersion)
+	}
+}
 
 // NewRuntimeCmd returns the `lerd runtime` parent command.
 func NewRuntimeCmd() *cobra.Command {
@@ -32,13 +48,9 @@ choice is committed with the project.
 }
 
 func runRuntime(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	site, err := ensureSiteForCwd()
 	if err != nil {
 		return err
-	}
-	site, err := config.FindSiteByPath(cwd)
-	if err != nil {
-		return fmt.Errorf("not a registered site — run 'lerd link' first")
 	}
 	if site.IsCustomContainer() {
 		return fmt.Errorf("site uses a custom Containerfile; the runtime is defined by your Containerfile.lerd")
@@ -56,10 +68,11 @@ func runRuntime(cmd *cobra.Command, args []string) error {
 	worker, _ := cmd.Flags().GetBool("worker")
 	noWorker, _ := cmd.Flags().GetBool("no-worker")
 
+	feedback.Begin()
 	switch target {
 	case "fpm":
 		if !site.IsFrankenPHP() {
-			fmt.Println("Already on FPM runtime.")
+			feedback.Line("already on FPM runtime")
 			return nil
 		}
 		return switchToFPM(site)
@@ -77,7 +90,7 @@ func runRuntime(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("site has no framework assigned — FrankenPHP needs a framework entrypoint or the generic public/ fallback")
 		}
 		if fw.FrankenPHP == nil && fw.PublicDir == "" {
-			fmt.Println("[INFO] framework has no FrankenPHP adapter, falling back to the generic `frankenphp php-server` entrypoint")
+			feedback.Note("framework has no FrankenPHP adapter, using the generic `frankenphp php-server` entrypoint")
 		}
 		wantWorker := site.RuntimeWorker
 		if worker {
@@ -96,9 +109,7 @@ func runRuntime(cmd *cobra.Command, args []string) error {
 // removes its quadlet, and reloads systemd so the generated unit disappears.
 // Shared by switchToFPM and link's stale-quadlet reconcile.
 func removeFrankenPHPContainer(siteName string) {
-	_ = podman.StopUnit(podman.FrankenPHPContainerName(siteName))
-	_ = podman.RemoveFrankenPHPQuadlet(siteName)
-	_ = podman.DaemonReloadFn()
+	podman.RemoveFrankenPHPContainer(siteName)
 }
 
 // reconcileStaleFrankenPHP removes a leftover per-site FrankenPHP quadlet when a
@@ -110,6 +121,35 @@ func reconcileStaleFrankenPHP(site config.Site) {
 		return
 	}
 	removeFrankenPHPContainer(site.Name)
+}
+
+// removeCustomFPMContainer stops a site's per-site custom-FPM container, removes
+// its quadlet, and reloads systemd so the generated unit disappears. Mirrors
+// removeFrankenPHPContainer for the fpm-custom runtime.
+func removeCustomFPMContainer(siteName string) {
+	_ = podman.StopUnit(podman.CustomFPMContainerName(siteName))
+	_ = podman.RemoveCustomFPMQuadlet(siteName)
+	_ = podman.DaemonReloadFn()
+}
+
+// reconcileStaleCustomFPM removes a leftover per-site custom-FPM quadlet when a
+// (re)linked site is no longer fpm-custom (e.g. the Containerfile was removed, or
+// a port was added so it became a reverse-proxied custom container). Like the
+// FrankenPHP one, that quadlet is WantedBy=default.target with Restart=always, so
+// podman's generator keeps auto-starting an orphan that lerd start/stop miss.
+func reconcileStaleCustomFPM(site config.Site) {
+	if site.IsCustomFPM() || !podman.QuadletInstalled(podman.CustomFPMContainerName(site.Name)) {
+		return
+	}
+	removeCustomFPMContainer(site.Name)
+}
+
+// reconcileStaleRuntimeQuadlets clears any per-site FrankenPHP or custom-FPM
+// quadlet a site no longer uses, so changing a project's runtime (or dropping its
+// Containerfile) on re-link never strands an auto-starting orphan container.
+func reconcileStaleRuntimeQuadlets(site config.Site) {
+	reconcileStaleFrankenPHP(site)
+	reconcileStaleCustomFPM(site)
 }
 
 func runtimeLabel(site *config.Site) string {
@@ -155,7 +195,7 @@ func switchToFPM(site *config.Site) error {
 	// instead of the per-site FrankenPHP one that no longer exists.
 	startWorkersForSite(site, running, site.PHPVersion)
 
-	fmt.Printf("Runtime: fpm (switched from FrankenPHP)\n")
+	feedback.Done("runtime switched to " + feedback.Val("fpm"))
 	return nil
 }
 
@@ -185,6 +225,6 @@ func switchToFrankenPHP(site *config.Site, worker bool) error {
 	if worker {
 		label = "frankenphp (worker mode)"
 	}
-	fmt.Printf("Runtime: %s\n", label)
+	feedback.Done("runtime switched to " + feedback.Val(label))
 	return nil
 }

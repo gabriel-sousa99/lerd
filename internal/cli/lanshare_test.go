@@ -719,6 +719,60 @@ func mustExtractPort(t *testing.T, rawURL string) int {
 	return p
 }
 
+func TestLANShareProxy_rewritesHTTPSLocationRedirects(t *testing.T) {
+	// Upstream stands in for nginx/the app. It builds a redirect Location from
+	// the path: /to-domain uses the origin domain, /to-lanhost uses the
+	// forwarded LAN host with a forced https scheme (the case Laravel hits when
+	// it honors X-Forwarded-Host but forces https from APP_URL).
+	const domain = "laravel.test"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var loc string
+		switch r.URL.Path {
+		case "/to-domain":
+			loc = "https://" + domain + "/dashboard"
+		case "/to-lanhost":
+			loc = "https://" + r.Header.Get("X-Forwarded-Host") + "/dashboard"
+		}
+		w.Header().Set("Location", loc)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer upstream.Close()
+	upstreamPort := mustExtractPort(t, upstream.URL)
+
+	// Reserve a free port for the proxy, then hand it to startLANShareProxy.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	proxyPort := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+
+	srv, err := startLANShareProxy(domain, proxyPort, upstreamPort, 0, false)
+	if err != nil {
+		t.Fatalf("startLANShareProxy: %v", err)
+	}
+	defer srv.Close()
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	lanHost := fmt.Sprintf("127.0.0.1:%d", proxyPort)
+	wantLoc := "http://" + lanHost + "/dashboard"
+
+	for _, path := range []string{"/to-domain", "/to-lanhost"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := client.Get("http://" + lanHost + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			resp.Body.Close()
+			if got := resp.Header.Get("Location"); got != wantLoc {
+				t.Errorf("Location = %q, want %q", got, wantLoc)
+			}
+		})
+	}
+}
+
 func TestRewriteLANShareBody_fixesLANIPWithWrongPort(t *testing.T) {
 	// Laravel/Symfony can emit URLs with the LAN IP but SERVER_PORT (443 from
 	// the nginx HTTPS vhost) when X-Forwarded-Port isn't honored — those must
@@ -736,5 +790,35 @@ func TestRewriteLANShareBody_fixesLANIPWithWrongPort(t *testing.T) {
 
 	if got != want {
 		t.Errorf("rewriteLANShareBody port-fix:\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
+// TestIsViteHMRSocket_matchesViteSubprotocolOnAnyPath: Vite's HMR client always
+// opens its socket with the "vite-hmr" subprotocol regardless of the configured
+// server.hmr.path or base, so the diversion must key off that, not only the bare
+// root path. Application sockets (Reverb's /app/<key>, noVNC's /websockify) carry
+// no such subprotocol and must keep flowing to the main proxy.
+func TestIsViteHMRSocket_matchesViteSubprotocolOnAnyPath(t *testing.T) {
+	mk := func(path, proto string) *http.Request {
+		r := httptest.NewRequest("GET", "http://lan.test"+path, nil)
+		if proto != "" {
+			r.Header.Set("Sec-WebSocket-Protocol", proto)
+		}
+		return r
+	}
+
+	if !isViteHMRSocket(mk("/__vite_hmr", "vite-hmr")) {
+		t.Error("custom server.hmr.path Vite socket (vite-hmr subprotocol) must route to Vite")
+	}
+	if !isViteHMRSocket(mk("/", "vite-hmr")) {
+		t.Error("bare-origin Vite HMR socket must route to Vite")
+	}
+	if !isViteHMRSocket(mk("/", "")) {
+		t.Error("bare-origin socket must still route to Vite via the path fallback")
+	}
+	for _, p := range []string{"/app/local-key", "/websockify"} {
+		if isViteHMRSocket(mk(p, "")) {
+			t.Errorf("app socket %s must flow to the main proxy, not be hijacked to Vite", p)
+		}
 	}
 }

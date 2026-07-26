@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,9 +52,7 @@ func LintTinkerCode(ctx context.Context, sitePath, code string) ([]LintDiagnosti
 		lineOffset = 1
 	}
 
-	cmd := exec.CommandContext(ctx, podman.PodmanBin(),
-		"exec", "-i", container, "php", "-l", "/dev/stdin",
-	)
+	cmd := podman.CmdContext(ctx, "exec", "-i", container, "php", "-l", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(body)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

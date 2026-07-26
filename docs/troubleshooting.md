@@ -9,6 +9,20 @@ lerd status   # quick health snapshot of all running services
 
 `lerd doctor` reports OK/FAIL/WARN for each check with a hint for every failure.
 
+## Repairing findings automatically
+
+`lerd doctor --fix` runs the same diagnostic and then offers to repair the findings it safely can. It confirms each fix before applying it, so you can pick and choose:
+
+```bash
+lerd doctor --fix             # confirm each repair
+lerd doctor --fix --yes       # apply without prompting (heavy fixes still confirm)
+lerd doctor --fix --dry-run   # list what would be repaired, change nothing
+```
+
+The fixes fall into three groups. lerd applies the safe ones itself, creating a missing data or config directory, enabling linger so services survive logout, installing the network-online drop-in, rebuilding a missing PHP image, and, after you confirm the heavier ones, reinstalling the services or reclaiming podman disk. Anything that needs `sudo` lerd never runs for you; it prints the exact command to copy. That covers installing podman, crun, fuse-overlayfs, the rootless network helpers or adding a subuid range, and also `lerd dns:repair` and `lerd wsl:setup`, which rewrite the resolver and podman configuration through `sudo` and so are yours to run even though lerd knows the command. Findings that are external state, a foreign process already holding port 80, a config file with a syntax error, are left untouched with their hint. The same safe, non-heavy repairs are available to AI assistants through the MCP `diag` tool's `doctor_fix` action, which therefore never elevates on your behalf.
+
+Reclaimable disk is listed separately as optional, because nothing is wrong when there is disk to reclaim. It runs the same interactive reclaim as `lerd cleanup`, so it takes the deep scope and can remove an unreferenced catalog image whoever pulled it, and the size doctor quotes is that same deep scope. If you run other podman workloads on the machine, run [`lerd cleanup --safe`](usage/cleanup.md) yourself instead. Optional fixes never count towards what a re-check reports as still outstanding.
+
 ## Filing a bug report
 
 If you need help on the [issue tracker](https://github.com/gabriel-sousa99/lerd/issues), run:
@@ -37,6 +51,37 @@ lerd bug-report --output /tmp/report.txt --log-lines 500
 lerd bug-report --show-real-names
 ```
 
+## Profiling lerd-ui
+
+If lerd-ui itself is using more CPU or memory than it should, you can capture a Go profile from the running process and attach it to an issue. Profiling is off until you turn it on, and lerd-ui only serves it to the local machine.
+
+Create the marker, capture, then remove it:
+
+```bash
+touch ~/.local/share/lerd/run/pprof.enabled
+curl -o /tmp/lerd-cpu.prof 'http://127.0.0.1:7073/debug/pprof/profile?seconds=30'
+rm ~/.local/share/lerd/run/pprof.enabled
+```
+
+The marker is read on every request, so nothing needs restarting. That matters when you are chasing a daemon that is busy right now, because restarting it would throw away the state worth capturing. Drive the site or wait for the symptom while the thirty seconds are running, otherwise you profile an idle process.
+
+Other useful captures, once the marker is in place:
+
+```bash
+curl -o /tmp/lerd-heap.prof http://127.0.0.1:7073/debug/pprof/heap
+curl 'http://127.0.0.1:7073/debug/pprof/goroutine?debug=1' | head -50
+```
+
+Read a profile by passing the binary alongside it, or just attach the file to the issue:
+
+```bash
+go tool pprof -top ~/.local/bin/lerd /tmp/lerd-cpu.prof
+```
+
+Release binaries are stripped, so the plain-text views (`?debug=1`) print raw addresses rather than function names. Pass the binary as above and `go tool pprof` resolves them anyway, so a profile captured from an ordinary install is still readable.
+
+Remove the marker when you are done. While it exists, anyone who can reach the machine's loopback interface can read goroutine stacks, the process command line, and heap contents, and can start a profile that occupies a core for as long as they ask for.
+
 ---
 
 ::: details `.test` domains not resolving
@@ -58,15 +103,15 @@ Otherwise, the fastest way to find the broken rung is `lerd doctor`. The DNS sec
 
 The chain in order:
 
-| Rung                             | What it checks                                                                          | If it fails                                                                                                                                                                                                                                                          |
-| -------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lerd-dns container`             | The dnsmasq container is running.                                                       | `lerd start` (or `podman logs lerd-dns` to see why it crashed).                                                                                                                                                                                                      |
-| `dnsmasq config`                 | `~/.local/share/lerd/dnsmasq/lerd.conf` exists with `port=5300` and `address=/.<tld>/`. | `lerd start` regenerates the config from your registered TLD.                                                                                                                                                                                                        |
-| `port 5300 listening`            | TCP/UDP 5300 is reachable on 127.0.0.1.                                                 | Another process owns the port. Find it with `ss -tlnp sport = :5300` on Linux, or `lsof -nP -iTCP:5300 -sTCP:LISTEN` on macOS.                                                                                                                                       |
-| `dig @127.0.0.1 -p 5300`         | A direct query at port 5300 returns 127.0.0.1 for `lerd-probe.<tld>`.                   | dnsmasq is up but its config drifted. `systemctl --user restart lerd-dns`.                                                                                                                                                                                           |
-| `resolver hookup`                | The NetworkManager dispatcher script or systemd-resolved drop-in is installed.          | Rerun `lerd install`.                                                                                                                                                                                                                                                |
-| `interface routes .test to 5300` | `resolvectl status` shows `127.0.0.1:5300` and `~<tld>` on the active interface.        | `sudo systemctl restart NetworkManager`, or set the routing manually with `sudo resolvectl domain <iface> ~test ~.`.                                                                                                                                                 |
-| `system DNS lookup`              | `host lerd-probe.test` (the system resolver) returns 127.0.0.1.                         | The drop-in is installed but resolved isn't honouring it. Check whether cloud-init or another tool wrote a higher-priority resolver config. Common on EC2 / cloud images. With a VPN connected this rung is reported as a warning rather than a failure, see the VPN section below. |
+| Rung | What it checks | If it fails |
+|---|---|---|
+| `lerd-dns container` | The dnsmasq container is running. | `lerd start` (or `podman logs lerd-dns` to see why it crashed). |
+| `dnsmasq config` | `~/.local/share/lerd/dnsmasq/lerd.conf` exists with `port=5300` and `address=/.<tld>/`. | `lerd start` regenerates the config from your registered TLD. |
+| `port 5300 listening` | TCP/UDP 5300 is reachable on 127.0.0.1. | Another process owns the port. Find it with `ss -tlnp sport = :5300` on Linux, or `lsof -nP -iTCP:5300 -sTCP:LISTEN` on macOS. |
+| `dig @127.0.0.1 -p 5300` | A direct query at port 5300 returns 127.0.0.1 for `lerd-probe.<tld>`, or the host's LAN IP when [`lan:expose`](usage/lan-sharing.md) is on. | dnsmasq is up but its config drifted. `lerd dns:repair`. |
+| `resolver hookup` | The NetworkManager dispatcher script or systemd-resolved drop-in is installed. | Rerun `lerd install`. |
+| `interface routes .test to 5300` | `resolvectl status` shows `127.0.0.1:5300` and `~<tld>` on the active interface. | `sudo systemctl restart NetworkManager`, or set the routing manually with `sudo resolvectl domain <iface> ~test ~.`. |
+| `system DNS lookup` | `host lerd-probe.test` (the system resolver) returns 127.0.0.1, or the host's LAN IP under `lan:expose`. | The drop-in is installed but resolved isn't honouring it. Check whether cloud-init or another tool wrote a higher-priority resolver config. Common on EC2 / cloud images. With a VPN connected this rung is reported as a warning rather than a failure, see the VPN section below. |
 
 You can also call this programmatically over MCP via the `diag` tool's `dns_diagnose` action, useful for AI-driven troubleshooting:
 
@@ -75,6 +120,30 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"diag","arg
 ```
 
 The response includes a `steps` array with a `status` (`ok` / `fail` / `warn` / `skip`) and `hint` per rung, plus a `first_failure` index so an LLM can jump straight to the broken layer.
+:::
+
+::: details `.test` domains stop resolving when offline (no internet)
+On systemd-resolved systems, `.test` used to reach lerd-dns only through a route that depended on your real network being up: per interface (`resolvectl domain <iface> ~test`) when NetworkManager manages resolved, or a global drop-in otherwise. Either way, systemd-resolved refuses to resolve anything at all, over both `resolvectl` and the glibc/NSS path a browser uses, once no real link is routable, so a fresh `.test` lookup failed even though lerd-dns kept answering on `127.0.0.1:5300`. A common symptom was a page that still worked while the browser stayed open (cached DNS) but failed the moment you closed and reopened it.
+
+Lerd now keeps an always-up dummy interface, `lerd0`, that carries the `~test` route. Because that link never goes down, systemd-resolved keeps forwarding `.test` to lerd-dns with no network connection at all. It is created by a small system service, `lerd-dns-link.service`, which starts on every boot, so the fix survives reboots and applies automatically on your next `lerd start`, nothing to run by hand. This applies to both systemd-resolved setups: with NetworkManager (Ubuntu, Fedora, CachyOS) and without it (Arch, omarchy).
+
+If you also saw a stall of up to twenty seconds on `.test` while offline, that was an AAAA (IPv6) lookup. lerd's dnsmasq config answers both `address=/.test/127.0.0.1` and `address=/.test/::1`, but the NetworkManager dispatcher used to regenerate that file from a v4-only template whenever an interface came up, dropping the AAAA record. dnsmasq then forwarded `.test` AAAA queries to your upstream, which times out once that upstream is unreachable. The dispatcher now leaves the address records alone, so AAAA is answered locally and returns instantly.
+:::
+
+::: details What is the `lerd0` network interface?
+`lerd0` is a dummy (virtual) network interface lerd creates on Linux so that `.test` domains keep resolving when you have no network at all. It carries no traffic and connects to nothing; it exists purely to give systemd-resolved a link that is always up to hang the `.test` route on. See the offline entry above for why that is necessary.
+
+It is deliberately marked unmanaged in NetworkManager (`/etc/NetworkManager/conf.d/lerd-dns-link.conf`), so it does not appear as a connection in your desktop's network menu and cannot be switched off by accident. Its only address is `192.0.2.1/32`, from the range RFC 5737 reserves for documentation and which never appears on a real network, so it cannot conflict with anything you connect to.
+
+Alongside it, lerd turns off systemd-resolved's fallback DNS servers (`/etc/systemd/resolved.conf.d/lerd-fallback.conf`). This is the price of `lerd0`: it stops resolved refusing every lookup when you are offline, which is the point for `.test`, but the same switch makes resolved willing to try names it cannot reach, so it works through its fallback servers (Quad9, Cloudflare, Google) one at a time and every offline lookup of an ordinary domain hangs for 20 seconds or more instead of failing at once. Debian, Ubuntu and Fedora already ship these fallbacks off, so nothing changes there; on Arch and its derivatives this aligns them with the others. The trade is that if your own DNS server breaks, lookups now fail instead of quietly going to a public resolver. `lerd uninstall` puts the fallbacks back.
+
+If it ever goes missing, `lerd doctor` reports it under the `offline .test route` check and the next `lerd start` recreates it. To recreate it by hand:
+
+```bash
+sudo systemctl restart lerd-dns-link.service
+```
+
+`lerd uninstall` removes the interface, its service, and the NetworkManager rule. To remove it without uninstalling lerd, use `lerd dns:disable`, which turns off lerd's DNS management entirely.
 :::
 
 ::: details DNS shows "Degraded" while connected to a VPN
@@ -89,6 +158,16 @@ hosts: mymachines mdns_minimal [NOTFOUND=return] files myhostname dns resolve
 ```
 
 This makes glibc consult the plain `dns` module before systemd-resolved's `nss-resolve`, which the VPN client no longer shadows.
+:::
+
+::: details "Secure Connection Failed" after the host wakes from suspend or hibernate
+After a long suspend or hibernate, rootless podman networking can come back in a bad state: the lerd-nginx container loses its host port forward (or stops), so nothing listens on 443 and the browser shows a generic "Secure Connection Failed" for your `.test` sites, or the lerd-dns container stops and names no longer resolve.
+
+On Linux the watcher now restarts nginx automatically. It notices the host has resumed from a real wall-clock gap in its tick loop (the timer is frozen while the machine is suspended), and on that one tick it checks whether lerd-nginx is accepting on its HTTPS port and restarts it if the listener died. Keying off the resume event rather than a continuous poll means it acts exactly once and can never fight a `lerd start` you ran yourself, since a start does not suspend the machine. DNS resolution is repaired by the same watcher's existing path, so `.test` names come back on their own too.
+
+A stopped lerd-dns is healed too. Whenever the watcher finds `.test` broken it now asks lerd's dnsmasq directly on port 5300 whether it is alive, and restarts the container when it is not, instead of only rewriting the host resolver config, which can never bring back a container that is gone. Waking is not the only way to lose it: the NetworkManager dispatcher restarts lerd-dns on every interface change, and a wake that brings wifi, ethernet and a VPN back at once used to fire enough restarts in a few seconds to exhaust systemd's start rate limit, which parks the unit in `failed` permanently. That limit is now lifted for lerd-dns, and the watcher clears any leftover failed state before it restarts.
+
+One case it still leaves for `lerd start` rather than acting from a background timer: a host whose IPv6 support changed across the wake, since the lerd network must be recreated and that rebuilds every container. The same applies in the rare case the watcher itself was not running at the moment of resume.
 :::
 
 ::: details Nginx not serving a site
@@ -142,7 +221,26 @@ grep Volume ~/.config/containers/systemd/lerd-nginx.container
 grep Volume ~/.config/containers/systemd/lerd-php*-fpm.container
 ```
 
-You should see your project path listed alongside the `%h:%h` mount.
+You should see your project path listed alongside the `%h:%h` mount. The quadlet is only half the answer though, a container keeps the mounts it booted with, so check the running one too:
+
+```bash
+podman inspect lerd-php84-fpm --format '{{range .Mounts}}{{.Source}}
+{{end}}'
+```
+
+If the path is in the quadlet but not in that output, `lerd restart` picks it up.
+:::
+
+::: details nginx fails to start with "statfs /path: no such file or directory"
+Podman refuses to start a container whose bind-mount source is gone, so a directory outside `$HOME` that lerd mounted while it existed, and that has since disappeared, stops the container dead. A Git branch checkout that removes a project subdirectory is the usual cause, and because nginx serves every site, one missing directory takes the whole stack down.
+
+`lerd start` repairs this for you: it drops the stale mounts before starting anything and tells you which path and site was responsible.
+
+```
+WARN: /var/www/erp/Modules/Accounts no longer exists (site erp), removed from lerd-nginx
+```
+
+The mount comes back on its own once the directory is there again and you run any command from it, or after `lerd restart`.
 :::
 
 ::: details Permission denied on port 80/443
@@ -374,6 +472,42 @@ cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/networks/aardvark-dns/ler
 # if only 10.89.7.1 is present, the drift fix didn't run — re-run lerd install
 ```
 
+:::
+
+::: details Every container takes 90 seconds to start (Fedora Silverblue and other atomic images)
+Symptom: `lerd start` sits there for a minute and a half per container, and after a reboot nothing is serving until well over a minute in. `systemctl --user list-units --state=failed` shows `podman-user-wait-network-online.service` failed with a timeout, and `lerd doctor` reports the `podman network-online wait` check as a warning.
+
+Cause: podman's quadlet generator makes every rootless container `Wants=` and `After=podman-user-wait-network-online.service`, a unit that polls the system's `network-online.target` until it gives up after 90 seconds. That target is only reached when some unit pulls it in, and on atomic images (Silverblue, Kinoite, Bazzite, CoreOS) nothing does, so the wait can never succeed. Every container start, and the boot itself, pays the full timeout.
+
+Lerd detects this on `lerd start` and `lerd install` and writes a drop-in that turns the wait into a no-op, since lerd publishes on loopback and needs no routable network:
+
+```bash
+lerd start   # writes ~/.config/systemd/user/podman-user-wait-network-online.service.d/10-lerd-no-network-wait.conf
+```
+
+The override only lands on hosts where `network-online.target` is genuinely inactive; on an ordinary distro the wait is left alone. To confirm the target is the one at fault:
+
+```bash
+systemctl is-active network-online.target   # "inactive" here means every quadlet start pays 90s
+```
+
+To go back to podman's stock behaviour, delete the drop-in and run `systemctl --user daemon-reload`.
+:::
+
+::: details System tray missing on Fedora Silverblue and other atomic images
+Symptom: no tray icon, and `systemctl --user is-system-running` reports `degraded` because `lerd-tray.service` failed with status 127.
+
+Cause: `lerd-tray` links `libayatana-appindicator3.so.1`, which these images don't ship, and an immutable OS can't just install it into `/usr` on demand.
+
+Lerd checks the helper's libraries at install time and leaves the tray unit stopped and disabled when one is missing, so the failure no longer drags the systemd user session into `degraded`. Everything else (CLI, dashboard, watcher, containers) is unaffected, the tray is the only thing you lose.
+
+To get the tray back, layer the package and reboot, then re-enable the unit:
+
+```bash
+rpm-ostree install libayatana-appindicator-gtk3
+systemctl reboot
+lerd install   # re-enables the tray now that the library resolves
+```
 :::
 
 ::: details Podman Machine overlay-storage error (macOS)

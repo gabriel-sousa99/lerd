@@ -9,6 +9,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
@@ -37,12 +38,26 @@ func sitesWithTLD(oldTLD string) []string {
 	return names
 }
 
+// projectWantsHTTPS reports whether the site's committed .lerd.yaml records
+// HTTPS intent. It is the record the DNS re-enable migration restores from; a
+// missing or unreadable file means no intent, so the site stays plain HTTP.
+func projectWantsHTTPS(dir string) bool {
+	cfg, err := config.LoadProjectConfig(dir)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return cfg.Secured
+}
+
 // migrateSiteTLD rewrites every site's domain suffix from oldTLD to newTLD,
 // removes stale nginx vhost confs at the previous primary-domain paths, and
 // updates each site's .env APP_URL (plus Vite/Reverb keys) via
 // envfile.SyncPrimaryDomain. When forceUnsecure is true (DNS being disabled,
-// so HTTPS is unavailable) the site's Secured flag is also flipped off so the
-// regen pass writes plain HTTP vhosts.
+// so HTTPS is unavailable) the site's registry Secured flag is flipped off so
+// the regen pass writes plain HTTP vhosts, but the project's committed HTTPS
+// intent in .lerd.yaml is left intact. When forceUnsecure is false (DNS being
+// enabled) each site's Secured flag is restored from that intent, so a
+// disable/enable round trip returns previously secured sites to https.
 //
 // Returns the list of sites that were actually mutated. Errors on individual
 // sites are printed but do not stop the migration: a partial rename is still
@@ -81,8 +96,15 @@ func migrateSiteTLD(oldTLD, newTLD string, forceUnsecure bool) []string {
 		worktrees, _ := gitpkg.DetectWorktrees(s.Path, oldPrimary)
 
 		s.Domains = newDomains
+		// Registry flag off while DNS is down; on re-enable restore HTTPS from
+		// the committed .lerd.yaml intent, or the registry-recorded pre-disable
+		// state for a site with no .lerd.yaml, so the round trip is lossless.
 		if forceUnsecure {
+			s.SecuredBeforeDNSOff = s.Secured
 			s.Secured = false
+		} else {
+			s.Secured = projectWantsHTTPS(s.Path) || s.SecuredBeforeDNSOff
+			s.SecuredBeforeDNSOff = false
 		}
 		if err := config.AddSite(s); err != nil {
 			fmt.Printf("    WARN: %s: persist domains: %v\n", s.Name, err)
@@ -131,13 +153,84 @@ func migrateSiteTLD(oldTLD, newTLD string, forceUnsecure bool) []string {
 		if err := envfile.SyncPrimaryDomain(s.Path, newPrimary, s.Secured); err != nil {
 			fmt.Printf("    WARN: %s: update .env: %v\n", s.Name, err)
 		}
-		_ = config.SetProjectSecured(s.Path, s.Secured)
 		_ = config.SyncProjectDomains(s.Path, s.Domains, newTLD)
 
-		fmt.Printf("    --> %s: %s -> %s://%s\n", s.Name, oldPrimary, scheme, newPrimary)
+		feedback.Note(fmt.Sprintf("%s: %s → %s://%s", s.Name, oldPrimary, scheme, newPrimary))
 		changed = append(changed, s.Name)
 	}
 	return changed
+}
+
+// adjustSitesSecuredForDNS tracks DNS availability for sites on a preserved
+// (custom) TLD without renaming: disabling drops to http (certs and worktree
+// vhosts follow), enabling restores HTTPS from .lerd.yaml or the recorded state.
+func adjustSitesSecuredForDNS(tld string, enabling bool) {
+	reg, err := config.LoadSites()
+	if err != nil || reg == nil {
+		return
+	}
+	// regenWorktrees rewrites a site's worktree vhosts at the unchanged primary
+	// with the site's current secured state (http vs ssl), so a worktree tracks
+	// the parent's HTTPS flip instead of pointing at a removed wildcard cert.
+	regenWorktrees := func(s config.Site) {
+		worktrees, _ := gitpkg.DetectWorktrees(s.Path, s.PrimaryDomain())
+		if len(worktrees) == 0 {
+			return
+		}
+		var wtProxy *config.ProxyConfig
+		if s.IsHostProxy() {
+			wtProxy = parentProxyConfig(s)
+		}
+		migrateWorktreeVhosts(worktrees, s.PrimaryDomain(), s.PHPVersion, s.Name, s.Secured, wtProxy)
+	}
+	suffix := "." + tld
+	for _, s := range reg.Sites {
+		onTLD := false
+		for _, d := range s.Domains {
+			if strings.HasSuffix(d, suffix) {
+				onTLD = true
+				break
+			}
+		}
+		if !onTLD {
+			continue
+		}
+		if enabling {
+			if s.Secured || !(projectWantsHTTPS(s.Path) || s.SecuredBeforeDNSOff) {
+				if s.SecuredBeforeDNSOff {
+					s.SecuredBeforeDNSOff = false
+					_ = config.AddSite(s)
+				}
+				continue
+			}
+			s.Secured = true
+			s.SecuredBeforeDNSOff = false
+			if err := config.AddSite(s); err != nil {
+				fmt.Printf("    WARN: %s: restore HTTPS: %v\n", s.Name, err)
+				continue
+			}
+			if err := certs.ReissueCertForWorktree(s); err != nil {
+				fmt.Printf("    WARN: %s: reissue cert: %v\n", s.Name, err)
+			}
+			_ = envfile.SyncPrimaryDomain(s.Path, s.PrimaryDomain(), true)
+			regenWorktrees(s)
+			feedback.Note(fmt.Sprintf("%s: restored https://%s", s.Name, s.PrimaryDomain()))
+		} else {
+			if !s.Secured {
+				continue
+			}
+			s.SecuredBeforeDNSOff = true
+			s.Secured = false
+			if err := config.AddSite(s); err != nil {
+				fmt.Printf("    WARN: %s: drop HTTPS: %v\n", s.Name, err)
+				continue
+			}
+			removeStaleCerts(s.PrimaryDomain())
+			_ = envfile.SyncPrimaryDomain(s.Path, s.PrimaryDomain(), false)
+			regenWorktrees(s)
+			feedback.Note(fmt.Sprintf("%s: dropped to http://%s (HTTPS unavailable with DNS off)", s.Name, s.PrimaryDomain()))
+		}
+	}
 }
 
 // migrateWorktreeVhosts removes each worktree's stale vhost confs (built from

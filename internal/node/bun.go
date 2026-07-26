@@ -63,6 +63,41 @@ func UsesBun(dir string) bool {
 	return false
 }
 
+// PackageManager reports the JS package manager a project uses: the
+// package.json "packageManager" field (corepack's pin) wins, then the lockfile.
+// Returns "bun", "pnpm", "yarn", or "npm" (the default). bun is normally
+// resolved earlier via UsesBun/BunPath; it is reported here too for callers
+// that want the raw signal.
+func PackageManager(dir string) string {
+	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		var pkg struct {
+			PackageManager string `json:"packageManager"`
+		}
+		if json.Unmarshal(data, &pkg) == nil {
+			name, _, _ := strings.Cut(strings.TrimSpace(pkg.PackageManager), "@")
+			switch name {
+			case "bun", "pnpm", "yarn", "npm":
+				return name
+			}
+		}
+	}
+	switch {
+	case fileInDir(dir, "bun.lockb"), fileInDir(dir, "bun.lock"):
+		return "bun"
+	case fileInDir(dir, "pnpm-lock.yaml"):
+		return "pnpm"
+	case fileInDir(dir, "yarn.lock"):
+		return "yarn"
+	default:
+		return "npm"
+	}
+}
+
+func fileInDir(dir, name string) bool {
+	_, err := os.Stat(filepath.Join(dir, name))
+	return err == nil
+}
+
 // BunPath resolves the host bun binary: the official installer drops it in
 // ~/.bun/bin, which is not on the controlled PATH lerd gives host workers, so
 // check there first and fall back to PATH. Returns "" when bun isn't installed.
@@ -125,11 +160,56 @@ func SystemNodeAvailable() bool {
 }
 
 // Bunify rewrites the npm/npx/node command verb to its bun equivalent
-// (npm->bun, npx->bunx, node->bun), leaving the rest verbatim. It first walks
+// (npm->bun, npx->bunx, node->bun) for every command in a shell chain, so
+// `npm run build && npm run preview` becomes `bun run build && bun run preview`.
+// Segments are split on the shell operators &&, ||, |, ;, & (operators inside
+// quotes don't split); each segment is rewritten independently.
+func Bunify(command string) string {
+	var out, seg strings.Builder
+	flush := func() {
+		out.WriteString(bunifySegment(seg.String()))
+		seg.Reset()
+	}
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if quote != 0 {
+			seg.WriteByte(c)
+			// Inside double quotes a backslash escapes the next byte, so a \" does
+			// not close the string; single quotes have no escaping (POSIX). Without
+			// this the quote state desyncs and an operator inside the string would
+			// wrongly split it, rewriting an npm/node/npx token that is really an
+			// argument.
+			if quote == '"' && c == '\\' && i+1 < len(command) {
+				i++
+				seg.WriteByte(command[i])
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+			seg.WriteByte(c)
+		case ';', '|', '&':
+			flush()
+			out.WriteByte(c)
+		default:
+			seg.WriteByte(c)
+		}
+	}
+	flush()
+	return out.String()
+}
+
+// bunifySegment rewrites the leading verb of one command segment. It first walks
 // past a leading `env` invocation and any KEY=VALUE assignments, since host-proxy
 // commands are wrapped as `env PORT=N npm run ...` and would otherwise never
-// switch. Commands whose verb isn't npm/npx/node are returned unchanged.
-func Bunify(command string) string {
+// switch. A segment whose verb isn't npm/npx/node is returned unchanged.
+func bunifySegment(command string) string {
 	pos := 0
 	for {
 		ws := 0

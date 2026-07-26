@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/mcp"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +27,10 @@ This command is normally invoked automatically by the AI assistant via
 the MCP configuration injected by 'lerd mcp:inject'.`,
 		Hidden: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			// Inject the cross-platform queue lifecycle so the MCP queue tools
+			// derive the command from the framework instead of hardcoding artisan.
+			mcp.QueueStartFn = queueStartTuned
+			mcp.QueueStopFn = QueueStopForSite
 			return mcp.Serve()
 		},
 	}
@@ -45,7 +51,6 @@ assistant into the target project directory:
   .cursor/rules/lerd.mdc           Cursor rules file
   .junie/mcp/mcp.json              JetBrains Junie MCP config
   .junie/guidelines.md             JetBrains Junie guidelines
-  .ai/mcp/mcp.json                 Windsurf MCP config
   .gemini/settings.json            Gemini CLI MCP config
   GEMINI.md                        Gemini CLI context
   .vscode/mcp.json                 GitHub Copilot (VS Code) MCP config
@@ -61,6 +66,48 @@ Run this from a Laravel project root, or use --path to specify a directory.`,
 	return cmd
 }
 
+// NewMCPEjectCmd returns the mcp:eject command, the inverse of mcp:inject.
+func NewMCPEjectCmd() *cobra.Command {
+	var targetPath string
+	cmd := &cobra.Command{
+		Use:   "mcp:eject",
+		Short: "Remove lerd MCP config and AI skill files from a project",
+		Long: `Removes every lerd-owned MCP server entry and context file that
+mcp:inject wrote into the target project directory, leaving other MCP servers
+(e.g. laravel-boost) and your own instructions content untouched. Also strips
+the entry an older lerd left in .ai/mcp/mcp.json.
+
+Run this from a project root, or use --path to specify a directory.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runMCPEject(targetPath)
+		},
+	}
+	cmd.Flags().StringVar(&targetPath, "path", "", "Target project directory (defaults to current directory)")
+	return cmd
+}
+
+func runMCPEject(targetPath string) error {
+	if targetPath == "" {
+		var err error
+		targetPath, err = os.Getwd()
+		if err != nil {
+			return err
+		}
+	}
+	abs, err := filepath.Abs(targetPath)
+	if err != nil {
+		return err
+	}
+
+	feedback.Begin()
+	feedback.Line("removing lerd MCP config from " + feedback.Val(abs))
+	if err := RemoveProjectAISkills(abs, true); err != nil {
+		return err
+	}
+	feedback.Done("done — restart your AI assistant to unload the lerd MCP server")
+	return nil
+}
+
 func runMCPInject(targetPath string) error {
 	if targetPath == "" {
 		var err error
@@ -74,11 +121,12 @@ func runMCPInject(targetPath string) error {
 		return err
 	}
 
-	fmt.Printf("Injecting lerd MCP config into: %s\n\n", abs)
+	feedback.Begin()
+	feedback.Line("injecting lerd MCP config into " + feedback.Val(abs))
 	if err := WriteProjectAISkills(abs, true); err != nil {
 		return err
 	}
-	fmt.Println("\nDone! Restart your AI assistant to load the lerd MCP server.")
+	feedback.Done("done — restart your AI assistant to load the lerd MCP server")
 	return nil
 }
 
@@ -94,7 +142,12 @@ func WriteProjectAISkills(abs string, verbose bool) error {
 // RefreshProjectAISkills re-writes only the per-project artefacts a client was
 // already set up with, so `lerd update` keeps existing files current without
 // expanding a project's footprint with files for clients it never opted into.
+// A project that set mcp_inject: false in .lerd.yaml is skipped entirely so
+// lerd never touches its committed config on a self-update.
 func RefreshProjectAISkills(abs string, verbose bool) error {
+	if cfg, err := config.LoadProjectConfig(abs); err == nil && cfg.MCPInjectDisabled() {
+		return nil
+	}
 	return writeProjectArtefacts(abs, verbose, false)
 }
 
@@ -109,7 +162,7 @@ func writeProjectArtefacts(abs string, verbose, createMissing bool) error {
 		if c.ProjectMCP != "" {
 			full := filepath.Join(abs, c.ProjectMCP)
 			if createMissing || mcpConfigHasLerd(full, c) {
-				if err := writeClientMCP(full, c, abs); err != nil {
+				if err := writeClientMCP(full, c); err != nil {
 					return err
 				}
 				log("  updated " + c.ProjectMCP)
@@ -129,6 +182,9 @@ func writeProjectArtefacts(abs string, verbose, createMissing bool) error {
 		}
 	}
 
+	if sweepLegacySharedAIMCP(abs) {
+		log("  cleaned " + legacySharedAIMCP + " (no longer written)")
+	}
 	return nil
 }
 
@@ -175,7 +231,7 @@ no LERD_SITE_PATH configuration needed.
 This command updates:
   claude mcp add --scope user      Claude Code user-scope MCP registration
   ~/.cursor/mcp.json               Cursor global MCP config
-  ~/.ai/mcp/mcp.json               Windsurf global MCP config
+  ~/.codeium/windsurf/mcp_config.json  Windsurf global MCP config
   ~/.junie/mcp/mcp.json            JetBrains Junie global MCP config
   ~/.gemini/settings.json          Gemini CLI global MCP config
   ~/.codex/config.toml             Codex CLI global MCP config
@@ -195,7 +251,8 @@ This command updates:
 // RunMCPEnableGlobal registers lerd MCP at user scope for all supported AI tools.
 // It is exported so the install command can call it directly.
 func RunMCPEnableGlobal() error {
-	fmt.Println("Registering lerd MCP globally...")
+	feedback.Begin()
+	feedback.Line("registering lerd MCP globally")
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -209,8 +266,41 @@ func RunMCPEnableGlobal() error {
 		return err
 	}
 
-	fmt.Println("\nDone! Restart your AI assistant for changes to take effect.")
-	fmt.Println("lerd will use the directory you open Claude in as the site context.")
+	feedback.Done("done — restart your AI assistant for changes to take effect")
+	feedback.Note("lerd uses the directory you open Claude in as the site context")
+	return nil
+}
+
+// NewMCPDisableGlobalCmd returns the mcp:disable-global command, the inverse of
+// mcp:enable-global.
+func NewMCPDisableGlobalCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "mcp:disable-global",
+		Short: "Unregister the user-scope lerd MCP server for all AI assistants",
+		Long: `Removes the user-scope lerd MCP registration and context docs written
+by mcp:enable-global: the Claude Code user-scope entry, each client's global MCP
+config, and the user-scope skill/guidelines files. Other MCP servers and your own
+instructions content are left untouched.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return RunMCPDisableGlobal()
+		},
+	}
+}
+
+// RunMCPDisableGlobal tears down the user-scope lerd MCP registration.
+func RunMCPDisableGlobal() error {
+	feedback.Begin()
+	feedback.Line("unregistering lerd MCP globally")
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if err := RemoveGlobalAISkills(home, true); err != nil {
+		return err
+	}
+
+	feedback.Done("done — restart your AI assistant for changes to take effect")
 	return nil
 }
 
@@ -221,7 +311,7 @@ func RunMCPEnableGlobal() error {
 func writeGlobalMCPConfigs(home string, verbose bool) error {
 	log := func(msg string) {
 		if verbose {
-			fmt.Println(msg)
+			feedback.Note(msg)
 		}
 	}
 	for _, c := range aiClients {
@@ -230,20 +320,23 @@ func writeGlobalMCPConfigs(home string, verbose bool) error {
 			_, _ = claudeMCP("remove", "--scope", "user", "lerd")
 			out, err := claudeMCP("add", "--scope", "user", "lerd", "--", "lerd", "mcp")
 			if err != nil {
-				fmt.Printf("  warning: could not register with Claude Code (%v): %s\n", err, strings.TrimSpace(string(out)))
-				fmt.Println("  Run manually: claude mcp add --scope user lerd -- lerd mcp")
+				feedback.Warn("could not register with Claude Code (%v): %s", err, strings.TrimSpace(string(out)))
+				feedback.Note("run manually: claude mcp add --scope user lerd -- lerd mcp")
 			} else {
-				log("  registered in Claude Code (user scope)")
+				log("registered in Claude Code (user scope)")
 			}
 			continue
 		}
 		if c.GlobalMCP == "" {
 			continue
 		}
-		if err := writeClientMCP(filepath.Join(home, c.GlobalMCP), c, ""); err != nil {
+		if err := writeClientMCP(filepath.Join(home, c.GlobalMCP), c); err != nil {
 			return err
 		}
-		log("  updated ~/" + c.GlobalMCP)
+		log("updated ~/" + c.GlobalMCP)
+	}
+	if sweepLegacySharedAIMCP(home) {
+		log("cleaned ~/" + legacySharedAIMCP + " (no longer written)")
 	}
 	return nil
 }
@@ -278,7 +371,7 @@ func writeGlobalContexts(home string, verbose, createMissing bool) error {
 				return fmt.Errorf("writing %s: %w", cx.Global, err)
 			}
 			if verbose {
-				fmt.Println("  wrote   ~/" + cx.Global)
+				feedback.Note("wrote ~/" + cx.Global)
 			}
 		}
 	}
@@ -323,7 +416,7 @@ func ensureClaudeMCPRegistered() {
 		return
 	}
 	if _, err := claudeMCP("add", "-s", "user", "lerd", "--", "lerd", "mcp"); err != nil {
-		fmt.Printf("  [WARN] could not register lerd with Claude Code: %v\n", err)
+		feedback.Warn("could not register lerd with Claude Code: %v", err)
 		fmt.Println("  Run manually: claude mcp add -s user lerd -- lerd mcp")
 	}
 }
@@ -439,6 +532,9 @@ func RemoveGlobalAISkills(home string, verbose bool) error {
 			}
 		}
 	}
+	if sweepLegacySharedAIMCP(home) {
+		log("  cleaned ~/" + legacySharedAIMCP)
+	}
 	return nil
 }
 
@@ -473,6 +569,9 @@ func RemoveProjectAISkills(abs string, verbose bool) error {
 			}
 		}
 	}
+	if sweepLegacySharedAIMCP(abs) {
+		log("  cleaned " + legacySharedAIMCP)
+	}
 	return nil
 }
 
@@ -484,9 +583,9 @@ func RemoveProjectAISkills(abs string, verbose bool) error {
 //go:embed aidocs/lerd-reference.md
 var lerdReference string
 
-const skillDescription = "Manage the lerd local PHP development environment — run framework console commands (artisan, bin/console, etc.), manage services, start/stop queue workers, run composer, manage Node.js versions, and inspect site status via MCP tools."
+const skillDescription = "Manage the lerd local PHP development environment via MCP tools: run framework console commands (artisan, bin/console, etc.), manage services, start/stop queue workers, run composer, manage Node.js versions, and inspect site status. Also the way to diagnose and optimize a slow site: find N+1 and slow queries, read per-site response-time and slow-route timings, profile requests, and run site health checks, from real captured traffic rather than reading code."
 
-const cursorDescription = "Lerd local PHP development environment — use the lerd MCP tools to manage sites, services, workers, and PHP/Node runtimes."
+const cursorDescription = "Lerd local PHP development environment — use the lerd MCP tools to manage sites, services, workers, and PHP/Node runtimes, and to diagnose slow sites (N+1 and slow queries, request timing, slow routes, profiling) from real traffic."
 
 // renderClaudeSkill wraps the reference with Claude Code skill frontmatter.
 func renderClaudeSkill() string {

@@ -1,6 +1,6 @@
 # Lerd Oracle Edition
 
-> Fork do [`geodro/lerd`](https://github.com/geodro/lerd) com **suporte a
+> Fork do [`lerd-env/lerd`](https://github.com/lerd-env/lerd) com **suporte a
 > Oracle Database embutido em todas as imagens PHP** — Oracle Instant
 > Client 21.18 (LTS) + `oci8` + memcached + amqp já compilados, prontos
 > para PHP 5.6 → 8.5. Drop-in replacement: todo comando `lerd` existente
@@ -9,15 +9,15 @@
 > [!IMPORTANT]
 > Este fork mantém o mesmo binário `lerd` (compatibilidade total) e
 > aponta o auto-update para **este** repositório. Releases seguem o
-> esquema `v1.23.1-oracle.N`.
+> esquema `vX.Y.Z-oracle.N`.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL2%20(beta)-lightgrey)]()
-[![Docs](https://img.shields.io/badge/docs-geodro.github.io%2Flerd-blue)](https://geodro.github.io/lerd/)
+[![Docs](https://img.shields.io/badge/docs-lerd.sh-blue)](https://lerd.sh)
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Flerd-ff2d20?logo=reddit)](https://reddit.com/r/lerd)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/ej33c5N9s)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/5JK54s7xCC)
 
-[![Fork base](https://img.shields.io/badge/forked%20from-geodro%2Flerd%20v1.23.1-blue)](https://github.com/geodro/lerd)
+[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.30.1-blue)](https://github.com/lerd-env/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
 [![PHP](https://img.shields.io/badge/PHP-5.6%20%E2%80%93%208.5-777BB4)]()
 
@@ -38,9 +38,9 @@
 
 ## O que muda em relação ao upstream
 
-> Recursos herdados do upstream (`geodro/lerd`), todos presentes nesta fork:
+> Recursos herdados do upstream (`lerd-env/lerd`), todos presentes nesta fork:
 >
-> - 🌐 **Domínios `.test` automáticos** com TLS em um comando, ou [desative o DNS gerenciado pelo lerd](https://geodro.github.io/lerd/features/dns/) e use `*.localhost` (sem dnsmasq, sem mexer no resolver do sistema, sem sudo na parte de DNS); o DNS é ciente de VPN e re-sincroniza os resolvers dos containers em menos de um segundo quando um túnel conecta/desconecta
+> - 🌐 **Domínios `.test` automáticos** com TLS em um comando, ou [desative o DNS gerenciado pelo lerd](https://lerd.sh/features/dns/) e use `*.localhost` (sem dnsmasq, sem mexer no resolver do sistema, sem sudo na parte de DNS); o DNS é ciente de VPN e re-sincroniza os resolvers dos containers em menos de um segundo quando um túnel conecta/desconecta
 > - 🐘 **Versão de PHP por projeto** (8.1–8.5, mais uma faixa legacy congelada 7.4 / 8.0 para projetos em stack antigo), troca com um clique
 > - ⚡ **Runtime FrankenPHP** por site como alternativa ao PHP-FPM compartilhado, com modo worker do Laravel Octane e Symfony Runtime
 > - 📦 **Isolamento de Node.js** por projeto (Node 22, 24)
@@ -63,7 +63,7 @@
 
 Esta fork adiciona, por cima de tudo isso:
 
-| Recurso                            | Upstream (geodro/lerd)       | Esta fork (gabriel-sousa99/lerd)                                    |
+| Recurso                            | Upstream (lerd-env/lerd)       | Esta fork (gabriel-sousa99/lerd)                                    |
 | ---------------------------------- | ---------------------------- | ------------------------------------------------------------------- |
 | Driver Oracle (`oci8`)             | instalar manual              | **compilado em toda imagem** (`oci8` 2.0.12 → 3.4.1 por versão PHP) |
 | Oracle Instant Client              | n/a                          | **21.18 LTS** em `/opt/oracle/instantclient`                        |
@@ -78,7 +78,7 @@ Esta fork adiciona, por cima de tudo isso:
 | Instalar versão PHP                | só CLI                       | **botão no dashboard + SSE logs ao vivo**                           |
 | Service presets adicionais         | mysql/postgres/redis/…       | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**             |
 | Xdebug por padrão                  | `start_with_request=yes`     | **`=trigger`** (sem spam em CLI sem IDE)                            |
-| Versão                             | `1.23.1`                     | `1.23.1-oracle.N`                                                   |
+| Versão                             | `1.30.1`                     | `1.30.1-oracle.N`                                                   |
 
 ### Extensões PHP nas imagens
 
@@ -193,7 +193,7 @@ O script verifica `podman`/`git`/`mkcert`, baixa o binário para
 NÃO** → sites em `http://meusite.localhost/` (sem sudo, RFC 6761).
 
 ```bash
-lerd about    # confirma "Lerd Oracle Edition" e versão 1.23.1-oracle.N
+lerd about    # confirma "Lerd Oracle Edition" e versão 1.30.1-oracle.N
 ```
 
 > [!TIP]
@@ -274,8 +274,13 @@ projeto (o nginx vhost vira landing page).
 lerd php:rebuild              # todas as versões instaladas
 lerd php:rebuild 8.4          # só a 8.4
 lerd php:rebuild --local      # do zero, sem pull do ghcr
-lerd php:ext add pdo_dblib 8.4 --apk-deps "freetds-dev"   # extensão por cima
+lerd php:ext add pdo_dblib --apk-deps "freetds-dev"   # extensão por cima
 ```
+
+> [!NOTE]
+> Desde o merge com o upstream v1.30.1, o conjunto de extensões customizadas é
+> **global** — vale para toda imagem PHP. `php:ext add` não recebe mais versão;
+> a versão só decide qual imagem é reconstruída na hora.
 
 > [!NOTE]
 > O template Containerfile deste fork difere do upstream, então o SHA dos pulls

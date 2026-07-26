@@ -12,7 +12,7 @@ import (
 )
 
 func TestSiteTabsHeader_HighlightsActive(t *testing.T) {
-	base := []siteTab{tabSiteOverview, tabSiteEnv, tabSiteDebug, tabSiteAppLogs}
+	base := []siteTab{tabSiteOverview, tabSiteEnv, tabSiteDebug}
 	for _, tab := range base {
 		got := stripANSI(siteTabsHeader(tab, base))
 		want := siteTabLabel(tab)
@@ -22,10 +22,10 @@ func TestSiteTabsHeader_HighlightsActive(t *testing.T) {
 	}
 }
 
-func TestAvailableSiteTabs_DoctorOnlyForLaravel(t *testing.T) {
-	plain := availableSiteTabs(&siteinfo.EnrichedSite{Name: "static"})
-	if slices.Contains(plain, tabSiteDoctor) {
-		t.Errorf("non-Laravel site should not offer the Doctor tab, got %v", plain)
+func TestAvailableSiteTabs_DoctorForEveryFramework(t *testing.T) {
+	plain := availableSiteTabs(&siteinfo.EnrichedSite{Name: "static", FrameworkName: "wordpress"})
+	if !slices.Contains(plain, tabSiteDoctor) {
+		t.Errorf("every framework should offer the Doctor tab, got %v", plain)
 	}
 	laravel := availableSiteTabs(&siteinfo.EnrichedSite{Name: "app", FrameworkName: "laravel"})
 	if !slices.Contains(laravel, tabSiteDoctor) {
@@ -33,7 +33,7 @@ func TestAvailableSiteTabs_DoctorOnlyForLaravel(t *testing.T) {
 	}
 	// Doctor is the fifth tab, so the strip numbers it [5].
 	if got := stripANSI(siteTabsHeader(tabSiteOverview, laravel)); !strings.Contains(got, "[5] Doctor") {
-		t.Errorf("Laravel strip should carry [5] Doctor, got %q", got)
+		t.Errorf("strip should carry [5] Doctor, got %q", got)
 	}
 }
 
@@ -127,33 +127,5 @@ func TestSiteDumpsContent_EmptyShowsHint(t *testing.T) {
 	joined := stripANSI(strings.Join(lines, "\n"))
 	if !strings.Contains(joined, "no dumps from this site") {
 		t.Errorf("expected empty-state hint:\n%s", joined)
-	}
-}
-
-func TestSiteAppLogsContent_NoLogsShowsHint(t *testing.T) {
-	m := NewModel("test")
-	site := &siteinfo.EnrichedSite{Name: "acme", Path: t.TempDir()}
-	lines := siteAppLogsContentLines(m, site, 120)
-	joined := stripANSI(strings.Join(lines, "\n"))
-	if !strings.Contains(joined, "no app log paths declared") {
-		t.Errorf("expected empty-state hint:\n%s", joined)
-	}
-}
-
-func TestHumanSize(t *testing.T) {
-	cases := []struct {
-		in   int64
-		want string
-	}{
-		{0, "0B"},
-		{500, "500B"},
-		{2048, "2KB"},
-		{int64(5 * 1024 * 1024), "5.0MB"},
-		{int64(2 * 1024 * 1024 * 1024), "2.0GB"},
-	}
-	for _, c := range cases {
-		if got := humanSize(c.in); got != c.want {
-			t.Errorf("humanSize(%d) = %q, want %q", c.in, got, c.want)
-		}
 	}
 }

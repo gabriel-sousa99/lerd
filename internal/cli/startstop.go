@@ -7,19 +7,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/proxyops"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/gabriel-sousa99/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/shims"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // quadletImage reads the Image= value from an installed quadlet file.
@@ -88,7 +94,10 @@ func ensureImages() {
 			v := ver
 			jobs = append(jobs, BuildJob{
 				Label: "PHP " + v,
-				Run:   func(w io.Writer) error { return podman.BuildFPMImageTo(v, false, w) },
+				Run: func(w io.Writer) error {
+					_, err := podman.BuildFPMImageTo(v, false, w)
+					return err
+				},
 			})
 
 		case strings.HasPrefix(img, "localhost/lerd-frankenphp") && strings.HasSuffix(img, ":local"):
@@ -124,7 +133,7 @@ func ensureImages() {
 			})
 
 		default:
-			label := img
+			label := podman.PlatformImage(img)
 			jobs = append(jobs, BuildJob{
 				Label: "Pulling " + label,
 				Run: func(w io.Writer) error {
@@ -357,10 +366,16 @@ func CollectPortChecks(units []string) []PortCheck {
 		}
 		container := "lerd-" + svc
 		if cfg != nil {
-			if sc, ok := cfg.Services[svc]; ok && sc.Port > 0 {
-				checks = append(checks, PortCheck{strconv.Itoa(sc.Port), svc, container})
-			}
 			if sc, ok := cfg.Services[svc]; ok {
+				// A PublishedPort override moves the primary published port, so
+				// check the real bound port rather than the preset default.
+				port := sc.Port
+				if sc.PublishedPort > 0 {
+					port = sc.PublishedPort
+				}
+				if port > 0 {
+					checks = append(checks, PortCheck{strconv.Itoa(port), svc, container})
+				}
 				for _, ep := range sc.ExtraPorts {
 					checks = append(checks, PortCheck{hostPort(ep), svc, container})
 				}
@@ -484,15 +499,37 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// external podman-machine restart (which orphans gvproxy port forwards)
 	// from a stop+start the ensure itself performs. No-op on Linux.
 	preEnsureLastUp := currentMachineLastUp()
-	ensurePodmanMachineRunning()
+	if err := ensurePodmanMachineRunning(); err != nil {
+		return err
+	}
 	migrateExecWorkerPlists()
 	healMachineRestartIfNeeded(preEnsureLastUp)
+
+	// Podman orders every rootless quadlet after its network-online wait unit.
+	// Where network-online.target never activates (Fedora Silverblue and other
+	// atomic images) that unit only ever times out, so each container start,
+	// and the boot itself, stalls for 90s. Override it before starting anything.
+	if applied, err := lerdSystemd.EnsureNoNetworkWaitStall(); err != nil {
+		fmt.Printf("  WARN: skip podman network-online wait: %v\n", err)
+	} else if applied {
+		fmt.Println("  Skipping podman's network-online wait (this host never reaches that target)")
+	}
+
+	// Self-heal a podman upgrade before touching the network or starting
+	// containers. A major-version or backend change since the last run
+	// reshuffles rootless storage/networking and otherwise surfaces as the
+	// cryptic "rootless netns" container start failure (#635). No-op unless
+	// drift is detected. The heal force-removes the lerd containers; the start
+	// sequence below brings them back up, so the returned list is not needed
+	// here.
+	containerDNS := dns.ReadContainerDNS()
+	_ = healPodmanUpgrade(containerDNS)
 
 	// Ensure the lerd bridge network exists. On macOS the network is stored
 	// inside the Podman Machine VM; it may be absent after a fresh machine
 	// init or if it was pruned. All service containers use --network lerd so
 	// this must succeed before any container is started.
-	if err := podman.EnsureNetwork("lerd", dns.ReadContainerDNS()); err != nil {
+	if err := podman.EnsureNetwork("lerd", containerDNS); err != nil {
 		if errors.Is(err, podman.ErrNetworkNeedsMigration) {
 			fmt.Println("  WARN: lerd network schema doesn't match host IPv6 support; run 'lerd install' to recreate")
 		} else {
@@ -503,6 +540,10 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// Restore quadlets and worker units that may be missing after an
 	// uninstall/reinstall cycle. Reads .lerd.yaml from each active site.
 	restoreSiteInfrastructure()
+
+	// Reconcile custom services against their YAMLs (issue #678): regenerate a
+	// missing quadlet, drop an orphan quadlet with no YAML. Data dirs untouched.
+	reconcileCustomServices()
 
 	// If the configured default PHP version has never been installed (no plist /
 	// quadlet / container), install it now so coreUnits() can include it.
@@ -551,6 +592,18 @@ func runStart(_ *cobra.Command, _ []string) error {
 		fmt.Printf("  WARN: container hosts file: %v\n", err)
 	}
 
+	// Pre-flight: drop bind mounts whose host directory has gone (a branch
+	// checkout that removed it, a deleted project). Podman refuses to start a
+	// container with a missing bind source, so one such path otherwise takes
+	// nginx and every site down with it (#1083).
+	for _, r := range podman.RepairMissingMounts() {
+		if r.Site != "" {
+			fmt.Printf("  WARN: %s no longer exists (site %s), removed from %s\n", r.Path, r.Site, r.Unit)
+		} else {
+			fmt.Printf("  WARN: %s no longer exists, removed from %s\n", r.Path, r.Unit)
+		}
+	}
+
 	// Pre-flight: repair SSL vhosts with missing cert files so nginx can start.
 	if repairs := nginx.RepairVhosts(); len(repairs) > 0 {
 		for _, r := range repairs {
@@ -593,7 +646,8 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// Mirrors the worktree autostart filter; real activity wakes it via the engine.
 	workerUnits = dropIdleSuspendedUnits(workerUnits)
 
-	fmt.Println("Starting Lerd...")
+	feedback.Begin()
+	feedback.Line("starting lerd")
 
 	makeJobs := func(us []string) []BuildJob {
 		jobs := make([]BuildJob, len(us))
@@ -617,8 +671,10 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// When the Podman Machine's container storage is left corrupt after an
 	// unclean host shutdown, every container start fails. Remount storage and
 	// rebuild the stale containers (data is host bind-mounted, so this is safe),
-	// then retry the start pass once.
-	if healOverlayCorruptionIfNeeded(serviceErr) {
+	// then retry the start pass once. A ghost container (libpod DB entry intact
+	// but its storage layer gone) is the other unclean-shutdown failure; purge it
+	// inside the VM and retry the same way. The two signatures are exclusive.
+	if healOverlayCorruptionIfNeeded(serviceErr) || healGhostContainersIfNeeded(serviceErr) {
 		serviceErr = RunParallel(makeJobs(serviceUnits))
 	}
 	// If the storage is still corrupt the heal couldn't fix it; every worker
@@ -659,6 +715,20 @@ func runStart(_ *cobra.Command, _ []string) error {
 		fmt.Printf("  WARN: %v\n", err)
 	}
 
+	// Refresh the sudoers drop-in before reapplying DNS config, but only where a
+	// password prompt can be answered. A release that adds a privileged step ships
+	// new grants, and writing /etc/sudoers.d/lerd needs a real authentication:
+	// granting `tee` on sudoers.d would itself be an escalation, so it can never be
+	// passwordless. Headless (lerd-ui driving a start), sudo has no tty and the
+	// write just fails, so we skip it and let ConfigureResolver report what is
+	// missing rather than burying a prompt no one can see. Content-hashed, so on an
+	// unchanged drop-in this is a no-op either way.
+	if dnsEnabled() && canPromptForPassword() {
+		if err := dns.InstallSudoers(); err != nil {
+			fmt.Printf("  WARN: refreshing DNS sudoers rule: %v\n", err)
+		}
+	}
+
 	// Re-apply DNS routing so .test resolves via lerd-dns on every start.
 	// resolvectl settings are ephemeral and reset on reboot; the NM dispatcher
 	// script fires on interface "up" but that event precedes lerd-dns starting.
@@ -680,15 +750,15 @@ func runStart(_ *cobra.Command, _ []string) error {
 
 	// Restart the tray applet, stopping any existing instance first.
 	// Prefer the systemd service when enabled; otherwise launch directly.
-	fmt.Print("  --> lerd-tray ... ")
+	tray := feedback.Start("starting lerd-tray")
 	if services.Mgr.IsEnabled("lerd-tray") {
 		// Use Start (bootout+bootstrap) instead of Restart (kickstart -k) to
 		// avoid launchctl hanging while waiting for the tray process to die.
 		killTray()
 		if err := services.Mgr.Start("lerd-tray"); err != nil {
-			fmt.Printf("WARN (%v)\n", err)
+			tray.Fail(err)
 		} else {
-			fmt.Println("OK")
+			tray.OK("")
 		}
 	} else {
 		killTray()
@@ -697,9 +767,9 @@ func runStart(_ *cobra.Command, _ []string) error {
 			err = exec.Command(exe, "tray").Start()
 		}
 		if err != nil {
-			fmt.Printf("WARN (%v)\n", err)
+			tray.Fail(err)
 		} else {
-			fmt.Println("OK")
+			tray.OK("")
 		}
 	}
 
@@ -719,7 +789,9 @@ func startRestoredServices() {
 	var pullJobs []BuildJob
 	seen := map[string]bool{}
 	for _, unit := range units {
-		image := quadletImage(unit)
+		// PlatformImage covers a quadlet still on the upstream image from before
+		// the rewrite landed (idempotent once the unit is rewritten on start).
+		image := podman.PlatformImage(quadletImage(unit))
 		if image == "" || seen[image] {
 			continue
 		}
@@ -753,6 +825,7 @@ func startRestoredServices() {
 			Run:   func(_ io.Writer) error { return podman.StartUnit(unit) },
 		})
 	}
+	feedback.Header("Starting services")
 	RunParallel(startJobs) //nolint:errcheck
 
 	// Workers exec into the FPM containers and depend on lerd-redis et al.
@@ -766,6 +839,13 @@ func startRestoredServices() {
 	workerUnits = append(workerUnits, registeredFrameworkWorkerUnits()...)
 	workerUnits = append(workerUnits, registeredTimerUnits()...)
 	workerUnits = collapseTimerSiblings(dedupeStrings(workerUnits))
+	// Don't resurrect workers the idle engine has gracefully suspended, exactly
+	// as runStart does. Without this, `lerd install`/`update` (which re-creates
+	// and re-enables every worker via restoreSiteInfrastructure) restarts a
+	// deliberately-asleep worker on an idle site and wedges the engine: the
+	// registry still records it suspended, so the dashboard shows the site asleep
+	// while its workers run and the engine never re-suspends them.
+	workerUnits = dropIdleSuspendedUnits(workerUnits)
 	if len(workerUnits) == 0 {
 		return
 	}
@@ -778,6 +858,7 @@ func startRestoredServices() {
 			Run:   func(_ io.Writer) error { return podman.StartUnit(unit) },
 		})
 	}
+	feedback.Header("Starting workers")
 	RunParallel(workerJobs) //nolint:errcheck
 }
 
@@ -785,6 +866,43 @@ func startRestoredServices() {
 func killTray() {
 	exec.Command("pkill", "-f", "lerd tray").Run()
 	exec.Command("pkill", "-f", "lerd-tray").Run()
+}
+
+// reconcileCustomServices heals custom-service drift on start (issue #678).
+// Failures are non-fatal so one bad service can't block the start sequence.
+func reconcileCustomServices() {
+	res, err := serviceops.ReconcileServices(nil)
+	if err != nil {
+		feedback.Warn("reconciling services: %v", err)
+	}
+	// A refreshed definition may add client tools (client_shims), so bring the
+	// shim dir in line non-interactively.
+	if len(res.DefinitionsRefreshed) > 0 {
+		_ = shims.Reconcile(nil)
+	}
+	for _, name := range res.ConfigsApplied {
+		feedback.Warn("applied an updated config to %s and restarted it", name)
+	}
+	// Default-stack services (mysql, postgres, redis…) don't flow through the custom
+	// reconcile above, so apply the same config-drift restart to them: a shipped
+	// preset config bump (e.g. a higher max_allowed_packet) must reach a running
+	// default service on update, not only on an explicit reinstall.
+	for _, name := range config.DefaultPresetNames() {
+		if applied, err := serviceops.RestartIfConfigDrifted(name, name); err != nil {
+			feedback.Warn("applying config for %s: %v", name, err)
+		} else if applied {
+			feedback.Warn("applied an updated config to %s and restarted it", name)
+		}
+	}
+	for _, name := range res.QuadletsRegenerated {
+		feedback.Warn("regenerated missing unit for %s from its config", name)
+	}
+	for _, name := range res.OrphansRemoved {
+		feedback.Warn("removed orphan service %s (unit with no config; data left intact)", name)
+	}
+	for _, name := range res.RunningOrphansSkipped {
+		feedback.Warn("orphan service %s has no config but its container is running; left as-is (remove with: lerd service remove %s)", name, name)
+	}
 }
 
 // registeredStripeUnits returns unit names for all lerd-stripe-* service files
@@ -830,7 +948,7 @@ func restoreSiteInfrastructure() {
 				proj, _ := config.LoadProjectConfig(s.Path)
 				if proj != nil && proj.Container != nil {
 					if err := podman.WriteCustomContainerQuadlet(s.Name, s.Path, s.ContainerPort); err != nil {
-						fmt.Printf("[WARN] restoring custom container unit for %s: %v\n", s.Name, err)
+						feedback.Warn("restoring custom container unit for %s: %v", s.Name, err)
 					}
 				}
 			}
@@ -847,7 +965,7 @@ func restoreSiteInfrastructure() {
 						_ = podman.BuildCustomImage(s.Name, s.Path, proj.Container)
 					}
 					if err := podman.WriteCustomFPMQuadlet(s.Name, s.PHPVersion); err != nil {
-						fmt.Printf("[WARN] restoring custom FPM unit for %s: %v\n", s.Name, err)
+						feedback.Warn("restoring custom FPM unit for %s: %v", s.Name, err)
 					}
 				}
 			}
@@ -880,7 +998,7 @@ func restoreSiteInfrastructure() {
 		// new one, warn and wait for a re-link to re-approve it.
 		if s.IsHostProxy() && proj.Proxy != nil {
 			if s.HostCommand != "" && proj.Proxy.Command != s.HostCommand {
-				fmt.Printf("[WARN] %s: dev command in .lerd.yaml changed since link; not auto-starting. Run `lerd link` to review and approve.\n", s.Name)
+				feedback.Warn("%s: dev command in .lerd.yaml changed since link; not auto-starting. Run `lerd link` to review and approve.", s.Name)
 			} else if w, ok := hostProxyWorker(proj.Proxy); ok && !services.Mgr.IsEnabled(hostProxyWorkerUnit(s.Name)) {
 				restoreWorker(s.Name, s.Path, "", hostProxyWorkerName, w)
 			}
@@ -896,7 +1014,7 @@ func restoreSiteInfrastructure() {
 			seenSvc[svc.Name] = true
 			cs, err := svc.Resolve()
 			if err != nil {
-				fmt.Printf("[WARN] resolving service %q for %s: %v\n", svc.Name, s.Name, err)
+				feedback.Warn("resolving service %q for %s: %v", svc.Name, s.Name, err)
 				continue
 			}
 			if cs != nil {
@@ -910,6 +1028,14 @@ func restoreSiteInfrastructure() {
 		// decides whether to start immediately (Linux) or just write the unit
 		// file and let phase 2 of runStart launch it (macOS).
 		for _, w := range proj.Workers {
+			// Leave a worker the idle engine suspended fully down: don't recreate,
+			// enable, or start it. Restoring it here re-enables it (so a later boot
+			// resurrects it) and feeds it to the start passes, which is how an idle
+			// site ends up with running workers after `lerd install`. The engine
+			// owns a suspended worker's lifecycle and resumes it on real activity.
+			if containsString(s.IdleSuspendedWorkers, w) {
+				continue
+			}
 			unitName := "lerd-" + w + "-" + s.Name
 			parentEnabled := services.Mgr.IsEnabled(unitName)
 			phpVersion := s.PHPVersion
@@ -957,7 +1083,14 @@ func restoreSiteInfrastructure() {
 				continue
 			}
 			for _, wt := range worktrees {
-				if services.Mgr.IsEnabled(workerUnitName(s.Name, wt.Path, w)) {
+				// Leave a worktree worker the idle engine suspended fully down, the
+				// same as the main-site guard above: restoreWorker re-enables it (so a
+				// later boot's default.target pulls it in, past dropIdleSuspendedUnits)
+				// and the engine, not install, owns resuming it on real activity.
+				if worktreeWorkerIdleSuspended(&s, wt.Path, w) {
+					continue
+				}
+				if services.Mgr.IsEnabled(WorkerUnitName(s.Name, wt.Path, w)) {
 					continue
 				}
 				wtPHP := config.WorktreePHPVersion(wt.Path, phpVersion)
@@ -1129,6 +1262,15 @@ func collapseTimerSiblings(in []string) []string {
 	return out
 }
 
+// mergeMigrationRestarts unions the containers torn down by the podman-upgrade
+// heal with those recreated by a network migration, de-duplicated and order
+// preserved, so a run that triggers BOTH restarts every affected container
+// exactly once. Overwriting one list with the other left heal-torn-down services
+// stopped after install.
+func mergeMigrationRestarts(healed, recreated []string) []string {
+	return dedupeStrings(append(append([]string(nil), healed...), recreated...))
+}
+
 func dedupeStrings(in []string) []string {
 	seen := make(map[string]struct{}, len(in))
 	out := make([]string, 0, len(in))
@@ -1151,7 +1293,10 @@ func RunStop() error { return runStop(nil, nil) }
 // RunQuit stops all lerd processes and containers (exported for use by the UI server).
 func RunQuit() error { return runQuit(nil, nil) }
 
-func runStop(_ *cobra.Command, _ []string) error {
+// stopUnitSet returns every unit `lerd stop` tears down. lerd-dns is
+// deliberately excluded: the resolver points .test at it until uninstall, so
+// it stays up as install-level DNS plumbing (the watcher would restart it).
+func stopUnitSet() []string {
 	units := append(coreUnits(), allInstalledServiceUnits()...)
 	units = append(units, installedCustomContainerUnits()...)
 	units = append(units, registeredQueueUnits()...)
@@ -1163,8 +1308,14 @@ func runStop(_ *cobra.Command, _ []string) error {
 	// oneshot .service is a no-op (it isn't running between firings),
 	// so without this the timer keeps dispatching after `lerd stop`.
 	units = append(units, registeredTimerUnits()...)
+	return slices.DeleteFunc(units, func(u string) bool { return u == "lerd-dns" })
+}
 
-	fmt.Println("Stopping Lerd...")
+func runStop(_ *cobra.Command, _ []string) error {
+	units := stopUnitSet()
+
+	feedback.Begin()
+	feedback.Line("stopping lerd")
 
 	// Mark the intentional shutdown before tearing anything down, so the worker
 	// health watcher (which keeps running) suppresses heal/notification noise for
@@ -1197,19 +1348,30 @@ func runStop(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
+// quitProcessUnits is the ordered set of host process units `lerd quit` tears
+// down after runStop. Unlike `lerd stop`, quit is a full teardown, so it
+// includes lerd-dns. lerd-watcher precedes lerd-dns because the watcher is the
+// only thing that restarts lerd-dns; stopping it first keeps dns down.
+func quitProcessUnits() []string {
+	return []string{"lerd-ui", "lerd-watcher", "lerd-tray", "lerd-dns"}
+}
+
 func runQuit(_ *cobra.Command, _ []string) error {
-	// Stop containers and services (same as stop).
+	// Stop containers and services (same as stop). `lerd stop` leaves lerd-dns
+	// up as install-level plumbing; `lerd quit` is a full teardown, so it also
+	// stops lerd-dns below.
 	if err := runStop(nil, nil); err != nil {
 		return err
 	}
 
-	// Stop process units.
-	for _, unit := range []string{"lerd-ui", "lerd-watcher", "lerd-tray"} {
-		fmt.Printf("  --> %s ... ", unit)
+	// Stop process units. lerd-watcher comes before lerd-dns: the watcher is the
+	// only thing that restarts lerd-dns, so stopping it first keeps dns down.
+	for _, unit := range quitProcessUnits() {
+		s := feedback.Start("stopping " + unit)
 		if err := podman.StopUnit(unit); err != nil {
-			fmt.Printf("WARN (%v)\n", err)
+			s.Fail(err)
 		} else {
-			fmt.Println("OK")
+			s.OK("")
 		}
 	}
 	// Also kill any directly-launched tray instance not managed by launchd/systemd.
@@ -1218,4 +1380,27 @@ func runQuit(_ *cobra.Command, _ []string) error {
 	stopPodmanMachine()
 
 	return nil
+}
+
+// canPromptForPassword reports whether sudo would have someone to ask. sudo reads
+// the password from the controlling terminal, not from stdin, so /dev/tty is the
+// signal: `lerd start < /dev/null` in a terminal can still prompt, and a systemd
+// service with neither cannot. term.IsTerminal on stdin alone gets both wrong.
+func canPromptForPassword() bool {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return true
+	}
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return false
+	}
+	tty.Close()
+	return true
+}
+
+// dnsEnabled reports whether the user has lerd manage DNS. When off, start must
+// not install DNS sudoers grants or touch any resolver state.
+func dnsEnabled() bool {
+	cfg, err := config.LoadGlobal()
+	return err == nil && cfg != nil && cfg.DNS.Enabled
 }

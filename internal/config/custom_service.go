@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -39,6 +39,17 @@ type SiteInit struct {
 	Exec string `yaml:"exec"`
 }
 
+// Introspect declares engine-specific commands the databases UI runs inside
+// the service container. lerd stays framework-agnostic by executing the
+// declared command and parsing its plain output, so no Go code branches on the
+// engine name.
+type Introspect struct {
+	// ListDatabases is run via sh -c inside the container and must print one
+	// "name<TAB>size_bytes" row per user database. lerd parses the tab-separated
+	// output; the whole query, including any system-database filtering, lives here.
+	ListDatabases string `yaml:"list_databases,omitempty" json:"list_databases,omitempty"`
+}
+
 // FileMount is a single file rendered to disk on the host and bind-mounted
 // into a custom service container. It exists so presets can ship config files
 // (e.g. pgAdmin's servers.json, a pgpass) without requiring the user to manage
@@ -51,9 +62,15 @@ type FileMount struct {
 	Content string `yaml:"content"`
 	// ContentFn dynamically generates the file body at materialise time
 	// based on the resolved service (e.g. to inject family-discovered
-	// hosts into pgAdmin's servers.json). Cannot be loaded from YAML, only
-	// the Go-side preset_files map sets it.
+	// hosts into pgAdmin's servers.json). Not loadable from YAML directly;
+	// a preset selects one by name via Generator.
 	ContentFn func(*CustomService) (string, error) `yaml:"-"`
+	// Generator names a built-in content generator (see presetFileGenerators)
+	// for dynamic mounts a preset can't express as static Content, such as
+	// pgAdmin's family-discovered servers.json. Resolved to ContentFn when the
+	// preset's files are read; an unknown name is skipped, not fatal, so a store
+	// preset built for a newer lerd degrades gracefully.
+	Generator string `yaml:"generator,omitempty"`
 	// Mode is the octal permission bits, e.g. "0600". Defaults to "0644".
 	Mode string `yaml:"mode,omitempty"`
 	// Chown adds the :U flag to the volume mount so podman re-chowns the file
@@ -78,6 +95,14 @@ type CustomService struct {
 	ConnectionURL string            `yaml:"connection_url,omitempty"`
 	Description   string            `yaml:"description,omitempty"`
 	DependsOn     []string          `yaml:"depends_on,omitempty"`
+	// Category groups the service under a discovery heading and Icon names an
+	// entry in the UI's icon set, so a new preset needs no UI edit to appear.
+	Category string `yaml:"category,omitempty" json:"category,omitempty"`
+	Icon     string `yaml:"icon,omitempty" json:"icon,omitempty"`
+	// AdminFor lists the services this preset's UI administers. It is not
+	// DependsOn: phpMyAdmin starts after mysql but administers mariadb too, and
+	// RedisInsight administers valkey without ever depending on it.
+	AdminFor []string `yaml:"admin_for,omitempty" json:"admin_for,omitempty"`
 	// Files is deprecated as a YAML user field but kept with its yaml tag so
 	// LoadCustomServiceFromFile can detect legacy on-disk entries and migrate
 	// them away. The authoritative source of file mounts is presetFiles in
@@ -87,6 +112,11 @@ type CustomService struct {
 	// member. e.g. the mysql preset declares family: mysql, and phpMyAdmin
 	// uses dynamic_env to read all family members at quadlet generation time.
 	Family string `yaml:"family,omitempty"`
+	// EnvRole names the service this preset is a drop-in for, so a framework that
+	// wires up `mysql` also wires up mariadb. Only needed when the substitution
+	// crosses families (mariadb -> mysql, valkey -> redis); a preset in the same
+	// family as the one the framework maps is matched on that.
+	EnvRole string `yaml:"env_role,omitempty"`
 	// Tuning, when set, exposes a user-editable runtime config override
 	// for this service via the web UI's Config tab and the
 	// `lerd service config` CLI. Custom services declare their own
@@ -143,6 +173,50 @@ type CustomService struct {
 	// handler when it runs as PID 1, which makes podman stop time out and
 	// systemctl restart wedge for ~90s.
 	Init bool `yaml:"init,omitempty" json:"init,omitempty"`
+	// ClientShims lists the client tools this service exposes as host shims
+	// (mysqldump, pg_dump, psql…) so host tools and IDEs can run them against
+	// external databases. Empty for services with nothing to expose.
+	ClientShims []ClientShim `yaml:"client_shims,omitempty" json:"client_shims,omitempty"`
+	// Introspect, when set, lets the databases UI enumerate the databases inside
+	// this engine and read their sizes. Only database-engine presets declare it.
+	Introspect *Introspect `yaml:"introspect,omitempty" json:"introspect,omitempty"`
+}
+
+// ClientShim declares a service client tool that lerd exposes as a host shim.
+// Name is the command written onto the host PATH; Binaries are the candidate
+// binaries to resolve inside the service container, tried in order, so a mariadb
+// service can back the mysqldump shim with mariadb-dump. In YAML a bare string
+// is shorthand for a shim whose host name and container binary are identical.
+type ClientShim struct {
+	Name     string   `yaml:"name" json:"name"`
+	Binaries []string `yaml:"binary,omitempty" json:"binary,omitempty"`
+}
+
+// UnmarshalYAML accepts either a bare string (name == binary) or a mapping with
+// an explicit name and one or more candidate binaries.
+func (c *ClientShim) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		c.Name = value.Value
+		c.Binaries = []string{value.Value}
+		return nil
+	case yaml.MappingNode:
+		var raw struct {
+			Name   string   `yaml:"name"`
+			Binary []string `yaml:"binary"`
+		}
+		if err := value.Decode(&raw); err != nil {
+			return err
+		}
+		c.Name = raw.Name
+		c.Binaries = raw.Binary
+		if len(c.Binaries) == 0 {
+			c.Binaries = []string{c.Name}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unexpected YAML node kind %v for client shim", value.Kind)
+	}
 }
 
 // ServiceFilePath returns the deterministic host path for a single FileMount
@@ -178,15 +252,7 @@ var (
 func loadFamilyIndex() {
 	defaultFamiliesMap = map[string]string{}
 	knownFamiliesSet = map[string]bool{}
-	entries, err := fs.ReadDir(presetFS, "presets")
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		name := strings.TrimSuffix(e.Name(), ".yaml")
+	for _, name := range presetNames() {
 		p, err := LoadPreset(name)
 		if err != nil {
 			continue
@@ -287,6 +353,24 @@ func FamilyOfName(name string) string {
 	return InferFamily(name)
 }
 
+// EnvRoleOf returns the service this one is a drop-in for, or "" when it stands
+// on its own. It falls back to the preset the service was installed from, so a
+// service installed before the field existed still resolves its role.
+func EnvRoleOf(svc *CustomService) string {
+	if svc == nil {
+		return ""
+	}
+	if svc.EnvRole != "" {
+		return svc.EnvRole
+	}
+	if svc.Preset != "" {
+		if p, err := LoadPreset(svc.Preset); err == nil {
+			return p.EnvRole
+		}
+	}
+	return ""
+}
+
 // ResolveDynamicEnv applies any dynamic_env directives on svc, writing the
 // computed values into svc.Environment. Called immediately before quadlet
 // generation so the resolved values land in the rendered .container file.
@@ -351,23 +435,59 @@ func uniqueFamilyHosts(families string) []string {
 // the Go binary is always the source of truth — updating lerd and restarting
 // the service is enough to roll out new file contents.
 func MaterializeServiceFiles(svc *CustomService) error {
+	_, err := MaterializeServiceFilesChanged(svc)
+	return err
+}
+
+// ServiceFilesNewestMtime returns the most recent modification time across svc's
+// materialised preset files, and whether any exist on disk. Because a re-materialise
+// only rewrites a file whose content actually changed, this mod time advances only
+// on a real config change, so comparing it against a container's start time tells
+// whether the running container is on stale config.
+func ServiceFilesNewestMtime(svc *CustomService) (time.Time, bool) {
+	var newest time.Time
+	found := false
+	for _, f := range PresetFiles(svc.Preset) {
+		if f.Target == "" {
+			continue
+		}
+		info, err := os.Stat(ServiceFilePath(svc.Name, f.Target))
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+			found = true
+		}
+	}
+	return newest, found
+}
+
+// MaterializeServiceFilesChanged is MaterializeServiceFiles with drift detection:
+// it rewrites a preset file only when its content differs from what is already on
+// disk, and reports whether anything changed. The passive reconcile uses this to
+// roll a shipped preset config bump (e.g. a higher max_allowed_packet) onto an
+// already-installed service on update and to know when a restart is warranted,
+// without churning a service whose config is already current.
+func MaterializeServiceFilesChanged(svc *CustomService) (bool, error) {
 	files := PresetFiles(svc.Preset)
 	if len(files) == 0 {
-		return nil
+		return false, nil
 	}
 	dir := ServiceFilesDir(svc.Name)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("creating files dir for %s: %w", svc.Name, err)
+		return false, fmt.Errorf("creating files dir for %s: %w", svc.Name, err)
 	}
+	changed := false
 	for _, f := range files {
 		if f.Target == "" {
-			return fmt.Errorf("service %s: file mount missing target", svc.Name)
+			return changed, fmt.Errorf("service %s: file mount missing target", svc.Name)
 		}
 		mode := os.FileMode(0644)
 		if f.Mode != "" {
 			parsed, err := strconv.ParseUint(f.Mode, 8, 32)
 			if err != nil {
-				return fmt.Errorf("service %s: invalid mode %q for %s: %w", svc.Name, f.Mode, f.Target, err)
+				return changed, fmt.Errorf("service %s: invalid mode %q for %s: %w", svc.Name, f.Mode, f.Target, err)
 			}
 			mode = os.FileMode(parsed)
 		}
@@ -376,25 +496,40 @@ func MaterializeServiceFiles(svc *CustomService) error {
 		if f.ContentFn != nil {
 			out, err := f.ContentFn(svc)
 			if err != nil {
-				return fmt.Errorf("generating %s for service %s: %w", path, svc.Name, err)
+				return changed, fmt.Errorf("generating %s for service %s: %w", path, svc.Name, err)
 			}
 			content = out
+		}
+		// A file whose content already matches needs no rewrite; comparing by
+		// content (not ownership) leaves a podman :U-chowned file in place and, most
+		// importantly, avoids a needless service restart when nothing changed. The
+		// mode is still enforced so a re-materialise stays idempotent on permissions,
+		// but a mode-only fixup is not a content change and triggers no restart.
+		if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+			if info, statErr := os.Stat(path); statErr == nil && info.Mode().Perm() != mode.Perm() {
+				if err := os.Chmod(path, mode); err != nil {
+					return changed, fmt.Errorf("chmod %s: %w", path, err)
+				}
+			}
+			continue
 		}
 		// Unlink first: with chown:true podman's :U flag re-owns the file to a
 		// userns-mapped uid, so a plain rewrite would EACCES. Removing the dir
 		// entry succeeds because the parent dir is owned by us.
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing stale %s for service %s: %w", path, svc.Name, err)
+			return changed, fmt.Errorf("removing stale %s for service %s: %w", path, svc.Name, err)
 		}
+		guardRealWrite(path)
 		if err := os.WriteFile(path, []byte(content), mode); err != nil {
-			return fmt.Errorf("writing %s for service %s: %w", path, svc.Name, err)
+			return changed, fmt.Errorf("writing %s for service %s: %w", path, svc.Name, err)
 		}
 		// WriteFile honours umask; chmod explicitly so 0600 sticks.
 		if err := os.Chmod(path, mode); err != nil {
-			return fmt.Errorf("chmod %s: %w", path, err)
+			return changed, fmt.Errorf("chmod %s: %w", path, err)
 		}
+		changed = true
 	}
-	return nil
+	return changed, nil
 }
 
 // CustomServicesDependingOn returns the names of all custom services that
@@ -448,6 +583,7 @@ func LoadCustomServiceFromFile(path string) (*CustomService, error) {
 	if len(svc.Files) > 0 {
 		svc.Files = nil
 		if migrated, err := yaml.Marshal(&svc); err == nil {
+			guardRealWrite(path)
 			_ = os.WriteFile(path, migrated, 0644)
 		}
 	}
@@ -513,6 +649,7 @@ func SaveCustomService(svc *CustomService) error {
 		return err
 	}
 	path := filepath.Join(dir, svc.Name+".yaml")
+	guardRealWrite(path)
 	return os.WriteFile(path, data, 0644)
 }
 
@@ -523,6 +660,15 @@ func RemoveCustomService(name string) error {
 		return err
 	}
 	return nil
+}
+
+// CustomServiceExists reports whether a custom service's definition YAML exists.
+// The YAML is the authoritative install-state signal for a custom service, so
+// ServiceInstalled and the services list resolve from it and can't drift (#678).
+func CustomServiceExists(name string) bool {
+	path := filepath.Join(CustomServicesDir(), name+".yaml")
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // ListCustomServices returns all custom services defined in the services directory.

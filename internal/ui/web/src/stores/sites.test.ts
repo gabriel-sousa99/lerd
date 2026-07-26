@@ -45,6 +45,17 @@ describe('sites store', () => {
     expect(activeWorktreeDomain(s, 'mystery')).toBe('acme.test');
   });
 
+  it('siteDomainForName maps a site name back to its domain', async () => {
+    const { siteDomainForName } = await import('./sites');
+    const list = [
+      { domain: 'acme.test', name: 'acme' },
+      { domain: 'admin-astrolov.test', name: 'admin-astrolov' }
+    ];
+    expect(siteDomainForName(list, 'admin-astrolov')).toBe('admin-astrolov.test');
+    expect(siteDomainForName(list, 'mystery')).toBe('');
+    expect(siteDomainForName(list, '')).toBe('');
+  });
+
   it('saveSiteEnv PUTs JSON body to the site env endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ ok: true, backup_path: '.env.20260528-103045' }), {
@@ -102,10 +113,22 @@ describe('sites store', () => {
     vi.unstubAllGlobals();
   });
 
-  it('loadSiteEnvFiles falls back to [.env] on error or empty list', async () => {
+  it('loadSiteEnvFiles returns an empty list on error', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 500 })));
     const { loadSiteEnvFiles } = await import('./sites');
-    expect(await loadSiteEnvFiles('acme.test', '')).toEqual(['.env']);
+    expect(await loadSiteEnvFiles('acme.test', '')).toEqual([]);
+    vi.unstubAllGlobals();
+  });
+
+  it('loadSiteEnvFiles passes an empty server list through rather than inventing .env', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      )
+    );
+    const { loadSiteEnvFiles } = await import('./sites');
+    expect(await loadSiteEnvFiles('acme.test', '')).toEqual([]);
     vi.unstubAllGlobals();
   });
 
@@ -126,7 +149,21 @@ describe('sites store', () => {
     vi.unstubAllGlobals();
   });
 
-  it('saveSiteEnv omits ?file= for the default .env to keep URLs stable', async () => {
+  it('saveSiteEnv sends a nested framework dotenv encoded', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { saveSiteEnv } = await import('./sites');
+
+    await saveSiteEnv('acme.test', '', 'X=1\n', false, 'config/.env');
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).toMatch(/\/api\/sites\/acme\.test\/env\?file=config%2F\.env$/);
+    vi.unstubAllGlobals();
+  });
+
+  it('saveSiteEnv omits ?file= when no file is given, letting the server resolve the framework dotenv', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     );
@@ -186,49 +223,9 @@ describe('sites store', () => {
     expect(res.restored).toBe('.env.20260528-103045');
     expect(res.content).toBe('OLD=1\n');
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toMatch(/\/api\/sites\/acme\.test\/env\/restore\?branch=feature%2Fx$/);
+    expect(String(url)).toMatch(/\/api\/sites\/acme\.test\/env\/restore\?branch=feature%2Fx&file=\.env$/);
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body as string)).toEqual({ name: '.env.20260528-103045' });
-    vi.unstubAllGlobals();
-  });
-
-  it('reorderSites POSTs the name order to /api/sites/reorder', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' }
-      })
-    );
-    vi.stubGlobal('fetch', fetchMock);
-    const { reorderSites } = await import('./sites');
-
-    const res = await reorderSites(['gamma', 'alpha', 'beta']);
-
-    expect(res.ok).toBe(true);
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toMatch(/\/api\/sites\/reorder$/);
-    expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body as string)).toEqual({ order: ['gamma', 'alpha', 'beta'] });
-    vi.unstubAllGlobals();
-  });
-
-  it('reorderSites surfaces backend errors verbatim', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ ok: false, error: 'saving registry: disk full' }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        })
-      )
-    );
-    const { reorderSites } = await import('./sites');
-
-    const res = await reorderSites(['a']);
-
-    expect(res.ok).toBe(false);
-    expect(res.error).toBe('saving registry: disk full');
     vi.unstubAllGlobals();
   });
 

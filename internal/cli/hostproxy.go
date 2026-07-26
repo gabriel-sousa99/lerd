@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,13 +10,15 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/freeport"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
 )
 
@@ -55,18 +56,71 @@ func RegenerateHostProxyVhostsOnGatewayChange() {
 			continue
 		}
 		if err := siteops.RegenerateSiteVhost(&s, s.PrimaryDomain()); err != nil {
-			fmt.Printf("[WARN] regenerating host-proxy vhost for %s: %v\n", s.Name, err)
+			feedback.Warn("regenerating host-proxy vhost for %s: %v", s.Name, err)
 			continue
+		}
+		proxy := parentProxyConfig(s)
+		if proxy != nil {
+			if w, ok := hostProxyWorker(proxy); ok {
+				rebindHostProxyDevServer(proxy, s.Name, s.Path, w)
+			}
 		}
 		if wts, wErr := gitpkg.ServableWorktrees(s.Path, s.PrimaryDomain()); wErr == nil {
 			for _, wt := range wts {
 				_ = certs.RegenerateHostProxyWorktreeVhost(s, wt.Path, wt.Domain, s.Secured)
+				if proxy != nil {
+					port := WorktreeHostPort(proxy.Port, wt.Path, hostProxyPortEnvKey(proxy))
+					if w, ok := hostProxyWorkerForPort(proxy, port); ok {
+						rebindHostProxyDevServer(proxy, s.Name, wt.Path, w)
+					}
+				}
 			}
 		}
 		regenerated = true
 	}
 	if regenerated {
 		_ = nginx.Reload()
+	}
+}
+
+// rebindHostProxyDevServer rewrites a host-proxy dev server's unit with the
+// current host-gateway bind address and restarts it so a network change can't
+// strand it on a stale IP. It only touches a server that is already running and
+// whose bind lerd injects (inject_host:false servers manage their own bind), and
+// it restarts only when the rewritten unit actually changed, so an unchanged bind
+// never churns a running server. This is a rewrite-and-restart rather than the
+// full start path, which would tear down conflicts and emit a spurious "starting".
+func rebindHostProxyDevServer(proxy *config.ProxyConfig, siteName, sitePath string, w config.FrameworkWorker) {
+	if !hostProxyShouldBind(proxy) {
+		return
+	}
+	unitName, unitSiteName := workerNames(siteName, sitePath, hostProxyWorkerName)
+	if !isServiceActiveOrRestarting(unitName) {
+		return
+	}
+	label := w.Label
+	if label == "" {
+		label = hostProxyWorkerName
+	}
+	restart := w.Restart
+	if restart == "" {
+		restart = "always"
+	}
+	command := resolveWorkerCommand(sitePath, hostProxyWorkerName, w)
+	fpmUnit := resolveWorkerFPMUnit(siteName, "")
+	changed, err := writeWorkerUnitFile(unitName, label, unitSiteName, sitePath, "", command, restart, w.Schedule, fpmUnit, w.Host)
+	if err != nil {
+		feedback.Warn("rebinding dev server for %s: %v", siteName, err)
+		return
+	}
+	if !changed {
+		return // bind unchanged — leave the running server alone
+	}
+	if err := podman.DaemonReloadFn(); err != nil {
+		feedback.Warn("daemon-reload for %s: %v", siteName, err)
+	}
+	if err := restartDevServer(unitName, proxy.Port, hostProxyRebindTimeout); err != nil {
+		feedback.Warn("restarting dev server for %s: %v", siteName, err)
 	}
 }
 
@@ -85,16 +139,90 @@ func hostProxyPortEnvKey(proxy *config.ProxyConfig) string {
 	return "PORT"
 }
 
-// buildHostProxyCommandPort prefixes the dev command with `env KEY=port` so the
-// app binds the port nginx proxies to. The `env` utility (not a bare `KEY=value`
+// hostProxyHostEnvKey returns the environment variable the bind address is
+// injected as, defaulting to HOST (honoured by Nuxt, NestJS, and most Node
+// servers). Set host_env_key to e.g. HOSTNAME for a Next.js standalone server.
+func hostProxyHostEnvKey(proxy *config.ProxyConfig) string {
+	if proxy.HostEnvKey != "" {
+		return proxy.HostEnvKey
+	}
+	return "HOST"
+}
+
+// hostProxyShouldBind reports whether lerd injects the bind-address env
+// (e.g. HOST=0.0.0.0). Defaults to true; a project sets `inject_host: false` to
+// opt out entirely, for a dev server that reads HOST for something else or
+// manages its own bind. The port injection is unaffected.
+func hostProxyShouldBind(proxy *config.ProxyConfig) bool {
+	return proxy.InjectHost == nil || *proxy.InjectHost
+}
+
+// hostGatewayBindIP resolves the host-gateway IP a host-proxy dev server should
+// bind. It is the same address nginx proxies to, so binding it keeps the dev
+// server reachable from the container while off every other interface. A package
+// var so tests can pin it.
+var hostGatewayBindIP = podman.ReadHostGatewayFromFile
+
+// hostIPIsLocal reports whether an IP is assigned to a local interface (so a dev
+// server can actually bind it). A package var so tests can pin it.
+var hostIPIsLocal = isLocalInterfaceIP
+
+// hostProxyBindAddr is the address the dev server must bind so the in-container
+// nginx can reach it. On Linux that is the routable host-gateway IP, which keeps
+// the dev server off other interfaces; but only when that IP is a local interface
+// we can bind. A gateway that isn't local (slirp4netns 10.0.2.2, the 169.254.1.2
+// fallback), an unknown gateway, or macOS (gvproxy) all fall back to 0.0.0.0,
+// which always binds. Env-only: pure Vite reads --host, not this var.
+func hostProxyBindAddr() string {
+	if runtime.GOOS == "darwin" {
+		return "0.0.0.0"
+	}
+	if ip := hostGatewayBindIP(); ip != "" && hostIPIsLocal(ip) {
+		return ip
+	}
+	return "0.0.0.0"
+}
+
+// isLocalInterfaceIP reports whether ip is assigned to one of the host's network
+// interfaces, so binding it won't fail with "cannot assign requested address".
+func isLocalInterfaceIP(ip string) bool {
+	target := net.ParseIP(ip)
+	if target == nil {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.Equal(target) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildHostProxyCommandPort prefixes the dev command with `env PORT=port
+// HOST=<bind>` so the app binds the port nginx proxies to, on the interface the
+// proxy container reaches it by. The `env` utility (not a bare `KEY=value`
 // assignment) is used because host workers exec the command both through a
 // shell (macOS) and directly via `fnm exec --` (Linux); `env` is a real
-// executable that works in both. Returns "" in proxy-only mode (no command).
+// executable that works in both. A HOST the user sets later in their own
+// command still wins (env evaluates left to right). The bind injection is
+// suppressed when `inject_host: false`, leaving only the port. Returns "" in
+// proxy-only mode (no command).
 func buildHostProxyCommandPort(proxy *config.ProxyConfig, port int) string {
 	if proxy.Command == "" {
 		return ""
 	}
-	return fmt.Sprintf("env %s=%d %s", hostProxyPortEnvKey(proxy), port, proxy.Command)
+	if !hostProxyShouldBind(proxy) {
+		return fmt.Sprintf("env %s=%d %s",
+			hostProxyPortEnvKey(proxy), port, proxy.Command)
+	}
+	return fmt.Sprintf("env %s=%d %s=%s %s",
+		hostProxyPortEnvKey(proxy), port,
+		hostProxyHostEnvKey(proxy), hostProxyBindAddr(),
+		proxy.Command)
 }
 
 func buildHostProxyCommand(proxy *config.ProxyConfig) string {
@@ -216,45 +344,6 @@ func isNodeProject(dir string) bool {
 	return false
 }
 
-// firstFreePort returns the first port at or above start for which isTaken is
-// false. Pure (isTaken is injected) so the search logic is unit-testable
-// without binding real sockets. Falls back to start if nothing is free.
-func firstFreePort(start int, isTaken func(int) bool) int {
-	if start < 1 {
-		start = 1
-	}
-	for p := start; p <= 65535; p++ {
-		if !isTaken(p) {
-			return p
-		}
-	}
-	return start
-}
-
-// portBoundOnHost reports whether something is already listening on the host's
-// loopback at port p. Used as the live half of host-port allocation so a dev
-// server isn't assigned a port a lerd service (or any process) already holds.
-// Both IPv4 and IPv6 loopback are probed so a service bound only to [::1] (as
-// some lerd quadlets are) is still detected as taken.
-func portBoundOnHost(p int) bool {
-	// IPv4 loopback is authoritative: a failure here means the port is taken.
-	if ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p))); err != nil {
-		return true
-	} else {
-		_ = ln.Close()
-	}
-	// IPv6 loopback catches services bound only to [::1], but on a host with
-	// IPv6 disabled the listen fails with EADDRNOTAVAIL / EAFNOSUPPORT for every
-	// port. Only an in-use error counts as taken, else allocation would report
-	// every port busy and fall back to the start port.
-	if ln, err := net.Listen("tcp", net.JoinHostPort("::1", strconv.Itoa(p))); err != nil {
-		return errors.Is(err, syscall.EADDRINUSE)
-	} else {
-		_ = ln.Close()
-	}
-	return false
-}
-
 // reservedHostPorts returns host ports already claimed by other host-proxy
 // sites in the registry, so two sites never get assigned the same port even
 // when the other site's dev server isn't currently running. exceptSite is
@@ -292,7 +381,7 @@ func reservedHostPorts(exceptSite string) map[int]bool {
 	}
 	// Reserve host ports lerd services publish (e.g. gotenberg on 3000) even when
 	// the container is stopped: a stopped service still owns its published port
-	// and would collide the moment it starts, which portBoundOnHost can't foresee.
+	// and would collide the moment it starts, which a bind probe can't foresee.
 	for p := range lerdServiceHostPorts() {
 		out[p] = true
 	}
@@ -308,40 +397,12 @@ func reservedHostPorts(exceptSite string) map[int]bool {
 // lerdServiceHostPorts returns every host port a lerd service may publish:
 // installed/default services (with their resolved ports), all bundled presets
 // (including optional ones like gotenberg that aren't in the default set), and
-// installed custom services. Used so a host-proxy dev server is never assigned a
-// port a service will reclaim.
+// installed custom services. It delegates to config.ReservedHostPorts, the single
+// shared definition the serviceops port-ownership guard consumes too, so a
+// host-proxy dev server is never assigned a port a service will reclaim and the
+// two reserved sets can't drift.
 func lerdServiceHostPorts() map[int]bool {
-	out := map[int]bool{}
-	add := func(mappings []string) {
-		for _, m := range mappings {
-			if host, _, ok := splitHostContainerPort(m); ok {
-				if n, _ := strconv.Atoi(host); n > 0 {
-					out[n] = true
-				}
-			}
-		}
-	}
-	if cfg, err := config.LoadGlobal(); err == nil {
-		for _, svc := range cfg.Services {
-			if svc.Port > 0 {
-				out[svc.Port] = true
-			}
-			add(svc.ExtraPorts)
-		}
-	}
-	if presets, err := config.ListPresets(); err == nil {
-		for _, p := range presets {
-			if pr, err := config.LoadPreset(p.Name); err == nil {
-				add(pr.Ports)
-			}
-		}
-	}
-	if customs, err := config.ListCustomServices(); err == nil {
-		for _, svc := range customs {
-			add(svc.Ports)
-		}
-	}
-	return out
+	return config.ReservedHostPorts()
 }
 
 // allocateHostPort picks a free host port for a dev server, starting from the
@@ -349,9 +410,14 @@ func lerdServiceHostPorts() map[int]bool {
 // site reserves or any process currently binds (e.g. lerd-gotenberg on 3000).
 func allocateHostPort(start int, exceptSite string) int {
 	reserved := reservedHostPorts(exceptSite)
-	return firstFreePort(start, func(p int) bool {
-		return reserved[p] || portBoundOnHost(p)
-	})
+	// freeport.FirstFree returns 0 when nothing in range is free; preserve this
+	// allocator's long-standing fall-back-to-start behaviour in that case.
+	if p := freeport.FirstFree(start, func(p int) bool {
+		return reserved[p] || !freeport.Bindable(p)
+	}); p > 0 {
+		return p
+	}
+	return start
 }
 
 // WorktreeHostPort returns the dev-server port for a host-proxy site's worktree:
@@ -420,11 +486,11 @@ func startHostProxyWorker(site config.Site, proxy *config.ProxyConfig) {
 		return
 	}
 	if err := gateHostProxyAutostart(site, proxy.Command); err != nil {
-		fmt.Printf("[WARN] dev server not started: %v\n", err)
+		feedback.Warn("dev server not started: %v", err)
 		return
 	}
 	if err := WorkerStartForSite(site.Name, site.Path, "", hostProxyWorkerName, w, false); err != nil {
-		fmt.Printf("[WARN] starting dev server: %v\n", err)
+		feedback.Warn("starting dev server: %v", err)
 	}
 }
 

@@ -5,7 +5,7 @@ Lerd runs on Windows through WSL2. There is no native Windows build, the archite
 This page is the minimum configuration to get a working setup, with the WSL2 specific gotchas called out so you do not lose an afternoon to them.
 
 ::: warning Beta
-Windows support via WSL2 is **beta**. The standard Linux build runs unchanged inside a systemd WSL2 session and is fine for daily development, but this path gets less testing than native Linux or macOS and a couple of steps still need manual Windows-side setup (mirrored networking and trusting the mkcert root CA, both below). Please report anything that misbehaves on the [issue tracker](https://github.com/geodro/lerd/issues).
+Windows support via WSL2 is **beta**. The standard Linux build runs unchanged inside a systemd WSL2 session and is fine for daily development, but this path gets less testing than native Linux or macOS and a couple of steps still need manual Windows-side setup (mirrored networking and trusting the mkcert root CA, both below). Please report anything that misbehaves on the [issue tracker](https://github.com/lerd-env/lerd/issues).
 :::
 
 ::: warning Supported distros
@@ -111,7 +111,7 @@ Lerd is built exclusively for rootless Podman with Quadlet. Installing `docker.i
 ## 4. Run the lerd installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/geodro/lerd/main/install.sh | bash
+curl -fsSL https://lerd.sh/install.sh | bash
 ```
 
 When the installer asks **"Let lerd manage DNS for local sites?"**, both modes are viable on WSL2:

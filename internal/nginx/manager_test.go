@@ -111,7 +111,7 @@ func TestGenerateVhost_honoursSitePublicDir(t *testing.T) {
 		t.Fatalf("GenerateVhost: %v", err)
 	}
 	content := readConf(t, filepath.Join(confD, "myapp.test.conf"))
-	if !strings.Contains(content, "root /srv/myapp/public_html") {
+	if !strings.Contains(content, `root "/srv/myapp/public_html`) {
 		t.Errorf("expected custom public_html doc root in:\n%s", content)
 	}
 }
@@ -380,7 +380,7 @@ func TestRenderNginxConfIncludesUpgradeMap(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, struct{ Resolver, AccessSocket string }{"10.0.0.1", "/run/lerd-access.sock"}); err != nil {
+	if err := tmpl.Execute(&buf, struct{ Resolver, AccessLogTarget string }{"10.0.0.1", "unix:/run/lerd-access.sock"}); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	out := buf.String()
@@ -404,7 +404,7 @@ func TestGenerateVhost_createsConfFile(t *testing.T) {
 	if !strings.Contains(content, "server_name myapp.test") {
 		t.Errorf("expected server_name myapp.test in:\n%s", content)
 	}
-	if !strings.Contains(content, "root /srv/myapp/public") {
+	if !strings.Contains(content, `root "/srv/myapp/public`) {
 		t.Errorf("expected root path in:\n%s", content)
 	}
 	if !strings.Contains(content, "lerd-php83-fpm") {
@@ -516,7 +516,7 @@ func TestGenerateWorktreeVhost_createsConfFile(t *testing.T) {
 	if !strings.Contains(content, "*.feat-x.myapp.test") {
 		t.Errorf("expected wildcard server_name for worktree subdomains in:\n%s", content)
 	}
-	if !strings.Contains(content, "root /srv/myapp-feat/public") {
+	if !strings.Contains(content, `root "/srv/myapp-feat/public`) {
 		t.Errorf("expected worktree path in:\n%s", content)
 	}
 }

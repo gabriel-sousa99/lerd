@@ -9,6 +9,7 @@ import (
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 )
 
 // Snapshot is the full view-model the TUI renders from. Produced by
@@ -18,6 +19,9 @@ type Snapshot struct {
 	Sites    []siteinfo.EnrichedSite
 	Services []ServiceRow
 	Status   StatusRow
+	// Workspaces group sites for display only, in the order the user's config
+	// lists them. The TUI shows them and never edits them.
+	Workspaces []config.Workspace
 }
 
 // ServiceRow is a flat row for the services pane. Sourced from podman unit
@@ -60,6 +64,8 @@ type StatusRow struct {
 	WatcherRunning bool
 	PHPRunning     []string
 	Version        string
+	Autostart      bool
+	LANExposed     bool
 }
 
 // loadSnapshot collects everything the TUI needs in one shot. Called on every
@@ -73,6 +79,8 @@ func loadSnapshot() Snapshot {
 		sort.Slice(enriched, func(i, j int) bool { return enriched[i].Name < enriched[j].Name })
 		snap.Sites = enriched
 	}
+
+	snap.Workspaces, _ = config.ListWorkspaces()
 
 	snap.Services = loadServices()
 	// Workers live on sites but belong in the services pane too — same
@@ -196,6 +204,8 @@ func loadStatus() StatusRow {
 		DNSDegraded:  dnsStatus == dns.StatusDegraded,
 		DNSDisabled:  dnsDisabled,
 		NginxRunning: podman.Cache.Running("lerd-nginx"),
+		Autostart:    lerdSystemd.IsAutostartEnabled(),
+		LANExposed:   cfg != nil && cfg.LAN.Exposed,
 	}
 
 	if versions, err := phpPkg.ListInstalled(); err == nil {

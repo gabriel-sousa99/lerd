@@ -1,19 +1,25 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
+	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 	"github.com/gabriel-sousa99/lerd/internal/version"
 	"github.com/gabriel-sousa99/lerd/internal/wsl"
@@ -22,16 +28,40 @@ import (
 
 // NewDoctorCmd returns the doctor command.
 func NewDoctorCmd() *cobra.Command {
-	return &cobra.Command{
+	var fix, yes, dryRun, asJSON bool
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose your Lerd environment and report issues",
-		RunE:  runDoctor,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runDoctor(fix, yes, dryRun, asJSON)
+		},
 	}
+	cmd.Flags().BoolVar(&fix, "fix", false, "Offer to apply the automatic repairs for any findings")
+	cmd.Flags().BoolVar(&yes, "yes", false, "With --fix, apply fixes without prompting (heavy fixes still confirm)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "With --fix, show what would be repaired without changing anything")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the findings as JSON (each carries a fix tier), instead of the human report")
+	return cmd
 }
 
-func runDoctor(_ *cobra.Command, _ []string) error {
-	_, _, err := RunDoctorTo(os.Stdout, true)
-	return err
+func runDoctor(fix, yes, dryRun, asJSON bool) error {
+	if asJSON {
+		rep, err := RunDoctorReport()
+		if err != nil {
+			return err
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rep)
+	}
+	useColor := feedback.Animated()
+	rep, err := runDoctorInto(os.Stdout, useColor)
+	if err != nil {
+		return err
+	}
+	if !fix {
+		return nil
+	}
+	return runDoctorFix(os.Stdout, rep, yes, dryRun)
 }
 
 // RunDoctorTo runs the full doctor diagnostic, writing human-readable output
@@ -39,43 +69,72 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 // safe to embed in a plain-text file (used by `lerd bug-report`). Returns
 // the failure and warning counts for callers that want to summarise.
 func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
-	cR, cG, cY, cReset := colorRed, colorGreen, colorYellow, colorReset
-	if !useColor {
-		cR, cG, cY, cReset = "", "", "", ""
-	}
+	rep, err := runDoctorInto(w, useColor)
+	return rep.Failures, rep.Warnings, err
+}
 
+// RunDoctorReport runs the full diagnostic without printing and returns the
+// structured findings, used by `lerd doctor --fix` and the MCP diag tool.
+func RunDoctorReport() (DoctorReport, error) {
+	return runDoctorInto(io.Discard, false)
+}
+
+func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
+	rep := &DoctorReport{Version: version.String()}
+	section := ""
 	ok := func(label string) {
-		fmt.Fprintf(w, "  %s%-34s%s OK\n", cG, label, cReset)
+		fmt.Fprintf(w, "  %s %s\n", feedback.GreenIf(useColor, feedback.GlyphOK), label)
+		rep.add(Finding{Section: section, Name: label, Status: "ok"})
 	}
 	fail := func(label, msg, hint string) {
-		fails++
-		fmt.Fprintf(w, "  %s%-34s%s FAIL  %s\n    hint: %s\n", cR, label, cReset, msg, hint)
+		rep.Failures++
+		fmt.Fprintf(w, "  %s %s  %s\n    hint: %s\n", feedback.RedIf(useColor, feedback.GlyphFail), label, msg, hint)
+		rep.add(Finding{Section: section, Name: label, Status: "fail", Message: msg, Hint: hint})
 	}
 	warn := func(label, msg string) {
-		warns++
-		fmt.Fprintf(w, "  %s%-34s%s WARN  %s\n", cY, label, cReset, msg)
+		rep.Warnings++
+		fmt.Fprintf(w, "  %s %s  %s\n", feedback.AmberIf(useColor, feedback.GlyphWarn), label, msg)
+		rep.add(Finding{Section: section, Name: label, Status: "warn", Message: msg})
 	}
 	info := func(label, val string) {
 		fmt.Fprintf(w, "  %-34s %s\n", label, val)
+		rep.add(Finding{Section: section, Name: strings.TrimSpace(label), Status: "info", Message: val})
 	}
 
 	fmt.Fprintf(w, "Lerd Doctor  (version %s)\n", version.String())
 	fmt.Fprintln(w, "══════════════════════════════════════════════")
 
 	// ── Prerequisites ───────────────────────────────────────────────────────
+	section = "Prerequisites"
 	fmt.Fprintln(w, "\n[Prerequisites]")
 
 	if _, lookErr := exec.LookPath("podman"); lookErr != nil {
 		fail("podman binary", "not found in PATH", "install podman: https://podman.io/docs/installation")
+		rep.fixLast(manualFix)
 	} else if runErr := podman.RunSilent("info"); runErr != nil {
 		fail("podman", "podman info failed — daemon not running?", podmanDaemonHint())
+		rep.fixLast(manualFix)
 	} else {
 		ok("podman")
+	}
+
+	// podman 4.5 is lerd's minimum on every platform: older clients reject the
+	// quadlet units lerd emits and hit build regressions (#636). Probes the
+	// binary directly, so it reports even when the daemon/machine is down.
+	if meetsMin, ver, verErr := podman.VersionAtLeast(4, 5); verErr == nil {
+		if meetsMin {
+			ok(fmt.Sprintf("podman version (%s)", ver))
+		} else {
+			fail("podman version", "podman "+ver+" is older than the 4.5 minimum",
+				"upgrade podman to 4.5 or newer: https://podman.io/docs/installation")
+			rep.fixLast(manualFix)
+		}
 	}
 
 	if runtime.GOOS == "linux" {
 		if _, lookErr := exec.LookPath("crun"); lookErr != nil {
 			warn("OCI runtime", "crun not found — recommended for rootless podman (install: sudo pacman -S crun / sudo apt install crun / sudo dnf install crun)")
+			rep.fixLast(manualFix)
 		} else {
 			ok("OCI runtime (crun)")
 		}
@@ -91,6 +150,30 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 			ok("systemd user session")
 		}
 
+		// mkcert can only trust .test in the browser when certutil (nss-tools) is
+		// present. Without it lerd's mkcert step installs the CA to the system
+		// store only, so curl and PHP trust it but Firefox and Chrome warn, and
+		// the mkcert warning is swallowed. Only relevant when DNS/HTTPS is managed.
+		if cfg, cfgErr := config.LoadGlobal(); cfgErr == nil && cfg.DNSManaged() {
+			if certs.BrowserTrustAvailable() {
+				ok("browser HTTPS trust (certutil)")
+			} else {
+				warn("browser HTTPS trust (certutil)", browserTrustGuidance(ostreeBootedFn()))
+				rep.fixLast(manualFix)
+			}
+		}
+
+		// Podman orders every rootless quadlet after its network-online wait
+		// unit. Where network-online.target is never pulled in (Fedora
+		// Silverblue and other atomic images) that unit can only time out, and
+		// every container start, plus the boot, pays the 90s.
+		if lerdSystemd.NetworkWaitStalls() {
+			warn("podman network-online wait", "network-online.target never activates here, so every container start stalls 90s — fix: lerd start")
+			rep.fixLast(autoFix(fixNetworkWait, "", "install the podman network-online drop-in"))
+		} else {
+			ok("podman network-online wait")
+		}
+
 		currentUser := os.Getenv("USER")
 		if currentUser == "" {
 			currentUser = os.Getenv("LOGNAME")
@@ -99,15 +182,83 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 			out, runErr := exec.Command("loginctl", "show-user", currentUser).Output()
 			if runErr != nil || !strings.Contains(string(out), "Linger=yes") {
 				warn("linger enabled", "services won't survive logout — fix: loginctl enable-linger "+currentUser)
+				rep.fixLast(autoFix(fixEnableLinger, currentUser, "enable lingering so services survive logout"))
 			} else {
 				ok("linger enabled")
 			}
+		}
+
+		// Rootless podman build preflight: a missing subuid/subgid range or a
+		// missing fuse-overlayfs surface as the same opaque tar "Operation not
+		// permitted" failure during image builds (#636). Both are Linux-host
+		// concerns; on macOS the uid mapping and storage live inside the podman
+		// machine VM. Diagnose each so the user gets a real pointer.
+		if currentUser != "" {
+			uid := strconv.Itoa(os.Getuid())
+			for _, path := range []string{"/etc/subuid", "/etc/subgid"} {
+				b, readErr := os.ReadFile(path)
+				if readErr != nil || !hasSubIDRange(string(b), currentUser, uid) {
+					fail(path+" range", "no sub-id range for "+currentUser+" (rootless podman builds will fail)",
+						"add one: echo "+currentUser+":100000:65536 | sudo tee -a "+path+" && podman system migrate")
+					rep.fixLast(manualFix)
+				} else {
+					ok(path + " range")
+				}
+			}
+		}
+
+		if _, lookErr := exec.LookPath("fuse-overlayfs"); lookErr != nil {
+			warn("fuse-overlayfs", "not found — recommended for rootless overlay storage (install: sudo apt install fuse-overlayfs / sudo dnf install fuse-overlayfs / sudo pacman -S fuse-overlayfs)")
+			rep.fixLast(manualFix)
+		} else {
+			ok("fuse-overlayfs")
+		}
+
+		// Rootless network helpers. lerd's containers run on a custom bridge
+		// network, which on rootless podman requires netavark + aardvark-dns
+		// plus a rootless network tool (pasta or slirp4netns). Missing any of
+		// these is the "failed to mount runtime directory for rootless netns"
+		// container start failure from #635 — a fresh, minimal host can lack
+		// them entirely. They need sudo to install, so flag with the command.
+		//
+		// netavark/aardvark-dns live in libexec, not on $PATH, so ask podman
+		// for the paths it actually resolved rather than LookPath (which would
+		// false-fail on a healthy host). Skip the check when podman can't report
+		// them (older podman without the field).
+		if netavark, aardvark, probed := podman.NetworkHelpers(); probed {
+			if netavark == "" {
+				fail("rootless network (netavark)", "podman cannot find netavark — containers on the lerd bridge cannot start",
+					"sudo apt install netavark  (or dnf/pacman); then: lerd install")
+				rep.fixLast(manualFix)
+			} else {
+				ok("rootless network (netavark)")
+			}
+			if aardvark == "" {
+				fail("rootless network (aardvark-dns)", "podman cannot find aardvark-dns — container DNS will not resolve",
+					"sudo apt install aardvark-dns  (or dnf/pacman); then: lerd install")
+				rep.fixLast(manualFix)
+			} else {
+				ok("rootless network (aardvark-dns)")
+			}
+		}
+		// pasta/slirp4netns are user-PATH tools, so LookPath is reliable here.
+		if _, p := exec.LookPath("pasta"); p != nil {
+			if _, s := exec.LookPath("slirp4netns"); s != nil {
+				fail("rootless network (pasta/slirp4netns)", "neither pasta nor slirp4netns found — rootless containers have no network",
+					"sudo apt install passt  (provides pasta), or: sudo apt install slirp4netns; then: lerd install")
+				rep.fixLast(manualFix)
+			} else {
+				ok("rootless network (slirp4netns)")
+			}
+		} else {
+			ok("rootless network (pasta)")
 		}
 	}
 
 	quadletDir := config.QuadletDir()
 	if dirErr := checkDirWritable(quadletDir); dirErr != nil {
 		fail("service config dir writable", dirErr.Error(), "mkdir -p "+quadletDir)
+		rep.fixLast(autoFix(fixMkdir, quadletDir, "create the service config directory"))
 	} else {
 		ok("service config dir writable")
 	}
@@ -115,6 +266,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	dataDir := config.DataDir()
 	if dirErr := checkDirWritable(dataDir); dirErr != nil {
 		fail("data dir writable", dirErr.Error(), "mkdir -p "+dataDir)
+		rep.fixLast(autoFix(fixMkdir, dataDir, "create the data directory"))
 	} else {
 		ok("data dir writable")
 	}
@@ -124,6 +276,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	// 9P bind mounts) don't exist on a native Linux or macOS host. `lerd wsl:setup`
 	// fixes the first two in one shot.
 	if wsl.IsWSL() {
+		section = "WSL2"
 		fmt.Fprintln(w, "\n[WSL2]")
 
 		home, _ := os.UserHomeDir()
@@ -132,6 +285,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 			ok("podman events_logger journald")
 		} else {
 			warn("podman events_logger journald", "log views fail with --follow on WSL, run lerd wsl:setup")
+			rep.fixLast(manualFixWith("run `lerd wsl:setup` (it needs sudo to write the podman config)"))
 		}
 
 		out, _ := exec.Command("systemctl", "--user", "is-enabled", "lerd-tray.service").Output()
@@ -139,6 +293,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 			ok("lerd-tray masked (no WSL tray host)")
 		} else {
 			warn("lerd-tray on WSL", "no tray host on WSL2 so the unit fails, run lerd wsl:setup")
+			rep.fixLast(manualFixWith("run `lerd wsl:setup` (it needs sudo to write the podman config)"))
 		}
 
 		if reg, regErr := config.LoadSites(); regErr == nil {
@@ -157,6 +312,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	}
 
 	// ── Configuration ────────────────────────────────────────────────────────
+	section = "Configuration"
 	fmt.Fprintln(w, "\n[Configuration]")
 
 	cfgFile := config.GlobalConfigFile()
@@ -190,6 +346,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 		for _, dir := range cfg.ParkedDirectories {
 			if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
 				warn(fmt.Sprintf("parked dir: %s", truncate(dir, 26)), "directory does not exist — run: mkdir -p "+dir)
+				rep.fixLast(autoFix(fixMkdir, dir, "create the parked directory"))
 			} else {
 				ok(fmt.Sprintf("parked dir: %s", truncate(dir, 26)))
 			}
@@ -197,6 +354,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	}
 
 	// ── DNS ──────────────────────────────────────────────────────────────────
+	section = "DNS"
 	fmt.Fprintln(w, "\n[DNS]")
 
 	dnsManaged := cfg == nil || cfg.DNS.Enabled
@@ -216,6 +374,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 		// lookup) so a one-line failure points at exactly which rung
 		// broke instead of the historical "not resolving to 127.0.0.1".
 		diag := dns.Diagnose(tld)
+		dnsRepairable := dns.RepairPossible()
 		for _, s := range diag.Steps {
 			label := "  " + s.Name
 			switch s.Status {
@@ -227,6 +386,9 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 				}
 			case dns.StepFail:
 				fail(label, s.Detail, s.Hint)
+				if dnsRepairable {
+					rep.fixLast(manualFixWith("run `lerd dns:repair` (it needs sudo to rewrite the resolver config)"))
+				}
 			case dns.StepWarn:
 				warn(label, s.Detail)
 			case dns.StepSkip:
@@ -248,6 +410,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	}
 
 	// ── Ports ────────────────────────────────────────────────────────────────
+	section = "Ports"
 	fmt.Fprintln(w, "\n[Ports]")
 
 	nginxRunning, _ := podman.ContainerRunning("lerd-nginx")
@@ -273,6 +436,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	// bound by another process (a system-installed postgres, a stray docker
 	// container, etc.), Start will fail with a generic bind error. List those
 	// upfront so the user sees the conflict before clicking anything.
+	section = "Stopped service ports"
 	fmt.Fprintln(w, "\n[Stopped service ports]")
 	{
 		var stoppedUnits []string
@@ -319,10 +483,12 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	}
 
 	// ── Containers & Images ──────────────────────────────────────────────────
+	section = "Containers & Images"
 	fmt.Fprintln(w, "\n[Containers & Images]")
 
 	if !services.Mgr.ContainerUnitInstalled("lerd-nginx") {
 		fail("lerd-nginx service", "not installed", "run: lerd install")
+		rep.fixLast(autoFix(fixInstall, "", "install the lerd services (lerd install)"))
 	} else {
 		ok("lerd-nginx service installed")
 	}
@@ -336,9 +502,15 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 		image := "lerd-php" + short + "-fpm:local"
 		if !podman.ImageExists(image) {
 			fail(fmt.Sprintf("PHP %s image", v), "missing", "lerd php:rebuild "+v)
+			rep.fixLast(autoFix(fixPhpRebuild, v, "rebuild the PHP "+v+" image"))
 		} else {
 			ok(fmt.Sprintf("PHP %s image", v))
 		}
+	}
+
+	if plan, planErr := cleanup.Inspect(cleanupScope(false)); planErr == nil && plan.ReclaimBytes() > 0 {
+		info("Reclaimable disk", fmt.Sprintf("about %s (run: lerd cleanup)", humanSize(plan.ReclaimBytes())))
+		rep.fixLast(autoFix(fixCleanup, "", "reclaim disk space (lerd cleanup)"))
 	}
 
 	// ── Container → Host Connectivity ────────────────────────────────────────
@@ -349,6 +521,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	// Xdebug times out silently with no error in the FPM logs other than
 	// "Time-out connecting to debugging client" (issue #186 redux). This
 	// check surfaces the failure so the user gets a real diagnosis.
+	section = "Container → Host connectivity"
 	fmt.Fprintln(w, "\n[Container → Host connectivity]")
 	if !services.Mgr.IsActive("lerd-nginx") {
 		warn("host reachability probe", "skipped — lerd-nginx not running (start lerd first)")
@@ -377,6 +550,7 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	}
 
 	// ── Version Info ─────────────────────────────────────────────────────────
+	section = "Version Info"
 	fmt.Fprintln(w, "\n[Version Info]")
 
 	info("lerd", version.String())
@@ -401,17 +575,17 @@ func RunDoctorTo(w io.Writer, useColor bool) (fails, warns int, err error) {
 	// ── Summary ──────────────────────────────────────────────────────────────
 	fmt.Fprintln(w, "\n══════════════════════════════════════════════")
 	switch {
-	case fails > 0 && warns > 0:
-		fmt.Fprintf(w, "%s%d failure(s), %d warning(s) found.%s\n", cR, fails, warns, cReset)
-	case fails > 0:
-		fmt.Fprintf(w, "%s%d failure(s) found.%s\n", cR, fails, cReset)
-	case warns > 0:
-		fmt.Fprintf(w, "%s%d warning(s) found.%s  All critical checks passed.\n", cY, warns, cReset)
+	case rep.Failures > 0 && rep.Warnings > 0:
+		fmt.Fprintln(w, feedback.RedIf(useColor, fmt.Sprintf("%d failure(s), %d warning(s) found.", rep.Failures, rep.Warnings)))
+	case rep.Failures > 0:
+		fmt.Fprintln(w, feedback.RedIf(useColor, fmt.Sprintf("%d failure(s) found.", rep.Failures)))
+	case rep.Warnings > 0:
+		fmt.Fprintf(w, "%s  All critical checks passed.\n", feedback.AmberIf(useColor, fmt.Sprintf("%d warning(s) found.", rep.Warnings)))
 	default:
-		fmt.Fprintf(w, "%sAll checks passed.%s\n", cG, cReset)
+		fmt.Fprintln(w, feedback.GreenIf(useColor, "All checks passed."))
 	}
 
-	return fails, warns, nil
+	return *rep, nil
 }
 
 // checkDirWritable returns an error if the directory doesn't exist or isn't writable.

@@ -79,7 +79,7 @@ cd ~/Projects/my-app
 lerd setup
 ```
 
-After the wizard, a checkbox list appears with all available steps pre-selected based on the current project state. Worker steps are pre-selected based on the `.lerd.yaml` workers list:
+After the wizard, a checkbox list appears with all available steps pre-selected based on the current project state. Worker steps are pre-selected based on the `.lerd.yaml` workers list. The JavaScript steps are labelled with the [package manager the project pins](/usage/node), so a pnpm project shows `pnpm install --frozen-lockfile` and `pnpm run build` where the npm project below shows `npm ci` and `npm run build`:
 
 ```
 ? Select setup steps to run:
@@ -102,6 +102,16 @@ On a machine where `.lerd.yaml` already exists the wizard is skipped and the sav
 
 `lerd link` also applies `.lerd.yaml` when the file is present, so cloning a repo and running `lerd link` is enough to restore the full environment without running `lerd setup` or `lerd init` first. When workers are configured in `.lerd.yaml` but not yet running, `lerd link` prompts to run `lerd setup` so you can install dependencies, run migrations, and start workers in the right order.
 
+## Running a command in an unlinked project
+
+Commands that operate on the current site (`lerd open`, `lerd runtime`, `lerd worker`, `lerd stripe`, `lerd env`, `lerd domain`, `lerd share`, `lerd xdebug`, and the worker-backed `lerd reverb`, `lerd schedule`, `lerd queue`) need the directory to be linked. When you run one in a project that has not been linked yet, lerd offers to link it for you instead of stopping with an error:
+
+```
+This directory isn't linked to lerd. Link it now? [Y/n]
+```
+
+Accepting runs `lerd link` (which cascades into `lerd init` when there is no `.lerd.yaml`), then the original command continues, so a single command is enough rather than a link, init, retry sequence. In a non-interactive context (a script or CI) the command returns a single clear error and does nothing else.
+
 See [Configuration](../configuration.md#per-project-config-lerdyaml) for the full field reference including inline service definitions and custom frameworks.
 
 ---
@@ -123,13 +133,13 @@ No hooks or per-project setup needed; it works for every linked site out of the 
 | Step | Default | Condition |
 |---|---|---|
 | `composer install` | - [x] on | only if `vendor/` is missing; runs inside the project's PHP-FPM container to match the `composer.json` PHP constraint |
-| `npm ci` | - [x] on | only if `node_modules/` is missing and `package.json` exists |
+| install JS deps | - [x] on | only if `node_modules/` is missing and `package.json` exists; runs `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --immutable` or `bun install` to match the [detected package manager](/usage/node) |
 | `lerd env` | - [x] on | always |
 | `lerd mcp:inject` | - [ ] off | opt-in |
 | `php artisan migrate` | - [x] on | always |
 | `php artisan db:seed` | - [ ] off | opt-in |
 | `php artisan storage:link` | - [x] on | only if `storage/app/public` is not yet symlinked |
-| `npm run build` | - [x] on | only if `package.json` exists |
+| build assets | - [x] on | only if `package.json` exists; runs the build script through the [detected package manager](/usage/node) |
 | `lerd secure` | - [ ] off | opt-in |
 | `queue:start` | - [x] on | only if `QUEUE_CONNECTION=redis` is set in `.env` or `.env.example` |
 | `lerd open` | - [x] on | always |

@@ -58,7 +58,37 @@ func MigrateService(name, targetImage string, emit func(PhaseEvent)) error {
 	if err := os.MkdirAll(config.BackupsDir(), 0700); err != nil {
 		return fmt.Errorf("creating backups dir: %w", err)
 	}
+	if err := startEngineForMigrate(name, fam, emit); err != nil {
+		return err
+	}
 	return fn(name, targetImage, emit)
+}
+
+// migrateProbe returns the in-container command that answers once the family's
+// engine is accepting connections.
+func migrateProbe(family string) string {
+	switch family {
+	case "mysql", "mariadb":
+		return mysqlMigrateProbeCommand()
+	case "postgres":
+		return pgMigrateProbeCommand()
+	}
+	return ""
+}
+
+// startEngineForMigrate brings the engine up before the dump. A service that no
+// site uses is auto-stopped, and the dump execs into its container, so migrating
+// one in that state failed on "no such container" before anything had run.
+func startEngineForMigrate(name, family string, emit func(PhaseEvent)) error {
+	unit := "lerd-" + name
+	if status, _ := podman.UnitStatus(unit); status == "active" {
+		return nil
+	}
+	emit(PhaseEvent{Phase: "waiting_ready", Unit: unit, Message: "starting the engine to dump from"})
+	if err := podman.StartUnit(unit); err != nil {
+		return fmt.Errorf("starting %s to dump from: %w", unit, err)
+	}
+	return waitContainerReady(unit, migrateProbe(family), snapshotEnv(family), 90*time.Second)
 }
 
 // familyOf returns the service family for a default preset or installed
@@ -130,7 +160,7 @@ func containerExec(container, shellCmd string, envPairs []string, stdin *os.File
 		args = append(args, "--env", kv)
 	}
 	args = append(args, container, "sh", "-c", shellCmd)
-	cmd := exec.CommandContext(ctx, podman.PodmanBin(), args...)
+	cmd := podman.CmdContext(ctx, args...)
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
@@ -153,7 +183,7 @@ func dumpToHost(container, shellCmd string, envPairs []string, hostPath string, 
 		args = append(args, "--env", kv)
 	}
 	args = append(args, container, "sh", "-c", shellCmd)
-	cmd := exec.CommandContext(ctx, podman.PodmanBin(), args...)
+	cmd := podman.CmdContext(ctx, args...)
 	if err := runStreaming(cmd, out); err != nil {
 		return fmt.Errorf("dump command failed: %w", err)
 	}
@@ -174,10 +204,10 @@ func runStreaming(cmd *exec.Cmd, out *os.File) error {
 }
 
 // restoreFromHost streams a host file into a container command's stdin.
-func restoreFromHost(container, shellCmd string, envPairs []string, hostPath string, timeout time.Duration) error {
+func restoreFromHost(container, shellCmd string, envPairs []string, hostPath string, timeout time.Duration) (ImportReport, error) {
 	in, err := os.Open(hostPath)
 	if err != nil {
-		return fmt.Errorf("opening dump file %s: %w", hostPath, err)
+		return ImportReport{}, fmt.Errorf("opening dump file %s: %w", hostPath, err)
 	}
 	defer in.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -187,13 +217,13 @@ func restoreFromHost(container, shellCmd string, envPairs []string, hostPath str
 		args = append(args, "--env", kv)
 	}
 	args = append(args, container, "sh", "-c", shellCmd)
-	cmd := exec.CommandContext(ctx, podman.PodmanBin(), args...)
+	cmd := podman.CmdContext(ctx, args...)
 	cmd.Stdin = in
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("restore command failed: %w\n%s", err, string(out))
+		return ImportReport{}, fmt.Errorf("restore command failed: %w\n%s", err, string(out))
 	}
-	return nil
+	return parseImportOutput(string(out)), nil
 }
 
 // swapDataDirAside moves the current data dir to a timestamped backup name so
@@ -337,6 +367,21 @@ func abortMigrate(unit, name, backup string, snapshot *serviceConfigSnapshot, ca
 
 // ---- mysql / mariadb -------------------------------------------------------
 
+// The three in-container commands a mysql-family migrate runs. They resolve the
+// client binary at runtime because the mariadb images carry only the mariadb
+// names, and a literal `mysqldump` aborts the migrate before it dumps anything.
+func mysqlMigrateDumpCommand() string {
+	return mysqlDumpBin + " -h 127.0.0.1 -uroot --all-databases " + mysqldumpFlags
+}
+
+func mysqlMigrateProbeCommand() string {
+	return mysqlClientBin + " -h 127.0.0.1 -uroot -e 'SELECT 1' >/dev/null 2>&1"
+}
+
+func mysqlMigrateRestoreCommand() string {
+	return mysqlClientBin + " --max-allowed-packet=" + config.MySQLImportMaxPacket + " -h 127.0.0.1 -uroot 2>&1"
+}
+
 func migrateMysql(name, targetImage string, emit func(PhaseEvent)) error {
 	unit := "lerd-" + name
 	snapshot, err := captureServiceConfig(name)
@@ -347,8 +392,7 @@ func migrateMysql(name, targetImage string, emit func(PhaseEvent)) error {
 	rootEnv := []string{"MYSQL_PWD=lerd"}
 
 	emit(PhaseEvent{Phase: "dumping_data", Message: "mysqldump → " + dump})
-	dumpCmd := "mysqldump -h 127.0.0.1 -uroot --all-databases --single-transaction --routines --triggers --events --quick"
-	if err := dumpToHost(unit, dumpCmd, rootEnv, dump, dumpRestoreTimeout); err != nil {
+	if err := dumpToHost(unit, mysqlMigrateDumpCommand(), rootEnv, dump, dumpRestoreTimeout); err != nil {
 		return fmt.Errorf("mysqldump: %w", err)
 	}
 
@@ -375,15 +419,17 @@ func migrateMysql(name, targetImage string, emit func(PhaseEvent)) error {
 	}
 
 	emit(PhaseEvent{Phase: "waiting_ready", Unit: unit})
-	probe := "mysql -h 127.0.0.1 -uroot -e 'SELECT 1' >/dev/null 2>&1 || mariadb -h 127.0.0.1 -uroot -e 'SELECT 1' >/dev/null 2>&1"
-	if err := waitContainerReady(unit, probe, rootEnv, 90*time.Second); err != nil {
+	if err := waitContainerReady(unit, mysqlMigrateProbeCommand(), rootEnv, 90*time.Second); err != nil {
 		return fmt.Errorf("%w. Dump preserved at %s; old data dir at %s", err, dump, backup)
 	}
 
 	emit(PhaseEvent{Phase: "restoring_data", Message: dump})
-	restoreCmd := "mysql -h 127.0.0.1 -uroot 2>&1 || mariadb -h 127.0.0.1 -uroot 2>&1"
-	if err := restoreFromHost(unit, restoreCmd, rootEnv, dump, dumpRestoreTimeout); err != nil {
+	rep, err := restoreFromHost(unit, mysqlMigrateRestoreCommand(), rootEnv, dump, dumpRestoreTimeout)
+	if err != nil {
 		return fmt.Errorf("restore: %w. Dump preserved at %s; old data dir at %s", err, dump, backup)
+	}
+	if rep.Errors > 0 {
+		emit(PhaseEvent{Phase: "restore_warnings", Message: rep.Summary()})
 	}
 
 	if err := recordMigrateBackup(name, backup); err != nil {
@@ -394,6 +440,10 @@ func migrateMysql(name, targetImage string, emit func(PhaseEvent)) error {
 }
 
 // ---- postgres --------------------------------------------------------------
+
+func pgMigrateProbeCommand() string {
+	return "psql -h 127.0.0.1 -U postgres -c 'SELECT 1' >/dev/null 2>&1"
+}
 
 func migratePostgres(name, targetImage string, emit func(PhaseEvent)) error {
 	unit := "lerd-" + name
@@ -433,15 +483,18 @@ func migratePostgres(name, targetImage string, emit func(PhaseEvent)) error {
 	}
 
 	emit(PhaseEvent{Phase: "waiting_ready", Unit: unit})
-	probe := "psql -h 127.0.0.1 -U postgres -c 'SELECT 1' >/dev/null 2>&1"
-	if err := waitContainerReady(unit, probe, pgEnv, 90*time.Second); err != nil {
+	if err := waitContainerReady(unit, pgMigrateProbeCommand(), pgEnv, 90*time.Second); err != nil {
 		return fmt.Errorf("%w. Dump preserved at %s; old data dir at %s", err, dump, backup)
 	}
 
 	emit(PhaseEvent{Phase: "restoring_data", Message: dump})
 	restoreCmd := "psql -h 127.0.0.1 -U postgres -d postgres 2>&1"
-	if err := restoreFromHost(unit, restoreCmd, pgEnv, dump, dumpRestoreTimeout); err != nil {
+	rep, err := restoreFromHost(unit, restoreCmd, pgEnv, dump, dumpRestoreTimeout)
+	if err != nil {
 		return fmt.Errorf("restore: %w. Dump preserved at %s; old data dir at %s", err, dump, backup)
+	}
+	if rep.Errors > 0 {
+		emit(PhaseEvent{Phase: "restore_warnings", Message: rep.Summary()})
 	}
 
 	if err := recordMigrateBackup(name, backup); err != nil {

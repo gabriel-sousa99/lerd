@@ -1,3 +1,4 @@
+import { m } from '../paraglide/messages.js';
 import { writable, derived, get } from 'svelte/store';
 import { apiJson, apiFetch } from '$lib/api';
 import { wsMessage } from '$lib/ws';
@@ -7,10 +8,15 @@ export interface FrameworkWorker {
   label?: string;
   running?: boolean;
   failing?: boolean;
+  // Process is up but its server isn't accepting connections. Distinct from
+  // failing (systemd failed); rendered as its own state, not folded into it.
+  unreachable?: boolean;
 }
 
 export interface Site {
   name?: string;
+  // Display-only grouping; a group secondary reports its main's workspace.
+  workspace?: string;
   app_name?: string;
   domain: string;
   domains?: string[];
@@ -18,6 +24,8 @@ export interface Site {
   path?: string;
   branch?: string;
   php_version?: string;
+  php_min?: string;
+  php_max?: string;
   uses_php?: boolean;
   node_version?: string;
   js_runtime?: string;
@@ -35,12 +43,19 @@ export interface Site {
   idle?: boolean;
   idle_suspended_workers?: string[];
   services?: string[];
+  db_database?: string;
   custom_container?: boolean;
   container_image?: string;
   container_port?: number;
   host_proxy?: boolean;
   host_port?: number;
   host_has_dev_server?: boolean;
+  // False when no doctor check can apply (a host-proxy Python/Ruby/Go site with
+  // no framework and no composer/package manifest), so the button stays hidden.
+  doctor_applicable?: boolean;
+  // False when SPX can't profile the site's requests: no PHP, or PHP served by
+  // something other than FPM (FrankenPHP, a custom container, a host proxy).
+  can_profile?: boolean;
   group?: string;
   group_subdomain?: string;
   group_main_domain?: string;
@@ -51,6 +66,8 @@ export interface Site {
     domain?: string;
     path?: string;
     php_version?: string;
+    php_min?: string;
+    php_max?: string;
     node_version?: string;
     php_version_override?: boolean;
     node_version_override?: boolean;
@@ -87,7 +104,8 @@ export interface Site {
   lan_port?: number;
   lan_share_url?: string;
   framework_workers?: FrameworkWorker[];
-  latest_log_time?: string;
+  last_request_at?: number;
+  request_count?: number;
   [k: string]: unknown;
 }
 
@@ -139,6 +157,15 @@ export function nodeSiteCount(v: string): number {
 
 export function findSite(domain: string): Site | undefined {
   return get(sites).find((s) => s.domain === domain);
+}
+
+// siteDomainForName resolves a registered site name to the domain the hash
+// router keys sites by, mirroring siteDomainForRoute on the backend. Returns
+// '' when nothing matches, so callers can fall back to plain text instead of
+// linking to a route that doesn't exist.
+export function siteDomainForName(list: Site[], name: string): string {
+  if (!name) return '';
+  return list.find((s) => s.name === name)?.domain ?? '';
 }
 
 export function isGroupSecondary(s: Site): boolean {
@@ -203,10 +230,13 @@ export function siteHasWorkers(s: Site): boolean {
   );
 }
 
-export function openSiteInBrowser(s: Site, branch: string = '') {
+export function openSiteInBrowser(s: Site, branch: string = '', urlOverride?: string) {
   const target = activeWorktreeDomain(s, branch);
   const useTLS = Boolean(s.tls);
-  const url = (useTLS ? 'https://' : 'http://') + target;
+  // urlOverride carries the LAN share URL when a remote dashboard viewer opens
+  // the site: the .test domain only resolves on the host, so off-host we open
+  // http://<lan-ip>:<port> instead.
+  const url = urlOverride || (useTLS ? 'https://' : 'http://') + target;
   // Opening the site loads it, which wakes it via the activity feed. Clear the
   // idle marker optimistically so the sleep indicator drops immediately rather
   // than lingering until the next poll confirms the activity.
@@ -228,7 +258,7 @@ async function postAction(path: string): Promise<{ ok: boolean; error?: string }
     const data = (await res.json()) as { ok?: boolean; error?: string };
     return { ok: Boolean(data.ok), error: data.error };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
@@ -239,25 +269,28 @@ function site(path: string, action: string): string {
 function envQS(branch: string, file?: string): string {
   const params = new URLSearchParams();
   if (branch) params.set('branch', branch);
-  if (file && file !== '.env') params.set('file', file);
+  if (file) params.set('file', file);
   const s = params.toString();
   return s ? '?' + s : '';
 }
 
+// An empty list is a real answer: the framework has no editable dotenv, or the
+// one it declares isn't on disk yet. Don't invent a .env the framework never
+// reads; the caller decides what to show.
 export async function loadSiteEnvFiles(domain: string, branch: string = ''): Promise<string[]> {
   try {
     const res = await apiFetch(site(domain, 'env') + '/files' + envQS(branch));
-    if (!res.ok) return ['.env'];
-    const list = (await res.json()) as string[];
-    return list.length > 0 ? list : ['.env'];
+    if (!res.ok) return [];
+    const list = (await res.json()) as string[] | null;
+    return Array.isArray(list) ? list : [];
   } catch {
-    return ['.env'];
+    return [];
   }
 }
 
-export async function loadSiteEnv(domain: string, branch: string = '', file: string = '.env'): Promise<string> {
+export async function loadSiteEnv(domain: string, branch: string = '', file: string = ''): Promise<string> {
   const res = await apiFetch(site(domain, 'env') + envQS(branch, file));
-  if (!res.ok) throw new Error(`Failed to load ${file} (${res.status})`);
+  if (!res.ok) throw new Error(m.sites_fileLoadFailed({ file, status: res.status }));
   return await res.text();
 }
 
@@ -265,6 +298,45 @@ export interface SaveEnvResult {
   ok: boolean;
   error?: string;
   backupPath?: string;
+}
+
+export interface EnvProposeEntry {
+  key: string;
+  value: string;
+  required: boolean;
+}
+
+export interface SiteEnvProposal {
+  file: string;
+  current: string;
+  merged: string;
+  added: string[];
+  addedLines: number[];
+  required: string[];
+  optional: string[];
+  entries: EnvProposeEntry[];
+}
+
+// proposeSiteEnv asks the server for a proposed env file that inserts the keys
+// the site's env is missing from .env.example, each placed beside its
+// neighbours. includeOptional pulls in the keys the app reads with a code
+// default too; by default only the required ones are proposed. Passing an
+// explicit keys list stages exactly those keys and ignores includeOptional, so
+// the review modal can add just the ones the user ticked.
+export async function proposeSiteEnv(
+  domain: string,
+  branch: string = '',
+  includeOptional: boolean = false,
+  keys?: string[]
+): Promise<SiteEnvProposal> {
+  const params = new URLSearchParams();
+  if (branch) params.set('branch', branch);
+  if (keys && keys.length) params.set('keys', keys.join(','));
+  else if (includeOptional) params.set('optional', '1');
+  const qs = params.toString();
+  const res = await apiFetch(site(domain, 'env') + '/propose' + (qs ? '?' + qs : ''));
+  if (!res.ok) throw new Error(m.sites_envProposalLoadFailed({ status: res.status }));
+  return (await res.json()) as SiteEnvProposal;
 }
 
 export interface SiteEnvBackup {
@@ -275,7 +347,7 @@ export interface SiteEnvBackup {
 export async function loadSiteEnvBackups(
   domain: string,
   branch: string = '',
-  file: string = '.env'
+  file: string = ''
 ): Promise<SiteEnvBackup[]> {
   try {
     const res = await apiFetch(site(domain, 'env') + '/backups' + envQS(branch, file));
@@ -290,10 +362,10 @@ export async function loadSiteEnvBackupContent(
   domain: string,
   name: string,
   branch: string = '',
-  file: string = '.env'
+  file: string = ''
 ): Promise<string> {
   const res = await apiFetch(site(domain, 'env') + '/backups/' + encodeURIComponent(name) + envQS(branch, file));
-  if (!res.ok) throw new Error(`Failed to load backup (${res.status})`);
+  if (!res.ok) throw new Error(m.common_backupLoadFailed({ status: res.status }));
   return await res.text();
 }
 
@@ -307,7 +379,7 @@ export interface RestoreEnvResult {
 export async function restoreSiteEnv(
   domain: string,
   branch: string = '',
-  file: string = '.env',
+  file: string = '',
   name: string = ''
 ): Promise<RestoreEnvResult> {
   try {
@@ -319,7 +391,7 @@ export async function restoreSiteEnv(
     const data = (await res.json()) as { ok?: boolean; error?: string; restored?: string; content?: string };
     return { ok: Boolean(data.ok), error: data.error, restored: data.restored, content: data.content };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
@@ -328,7 +400,7 @@ export async function saveSiteEnv(
   branch: string,
   content: string,
   backup: boolean,
-  file: string = '.env'
+  file: string = ''
 ): Promise<SaveEnvResult> {
   try {
     const res = await apiFetch(site(domain, 'env') + envQS(branch, file), {
@@ -339,7 +411,7 @@ export async function saveSiteEnv(
     const data = (await res.json()) as { ok?: boolean; error?: string; backup_path?: string };
     return { ok: Boolean(data.ok), error: data.error, backupPath: data.backup_path };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
@@ -416,7 +488,7 @@ export async function saveSiteNginx(
       exists: data.exists
     };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
@@ -424,18 +496,18 @@ export async function loadSiteNginxBackups(domain: string): Promise<LoadNginxBac
   try {
     const res = await apiFetch(site(domain, 'nginx') + '/backups');
     if (!res.ok) {
-      return { ok: false, list: [], error: `Failed to load backups (${res.status})` };
+      return { ok: false, list: [], error: m.common_backupsLoadFailed({ status: res.status }) };
     }
     const list = (await res.json()) as SiteNginxBackup[];
     return { ok: true, list: Array.isArray(list) ? list : [] };
   } catch (e) {
-    return { ok: false, list: [], error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, list: [], error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
 export async function loadSiteNginxBackupContent(domain: string, name: string): Promise<string> {
   const res = await apiFetch(site(domain, 'nginx') + '/backups/' + encodeURIComponent(name));
-  if (!res.ok) throw new Error(`Failed to load backup (${res.status})`);
+  if (!res.ok) throw new Error(m.common_backupLoadFailed({ status: res.status }));
   return await res.text();
 }
 
@@ -450,7 +522,7 @@ export async function resetSiteNginx(domain: string): Promise<ResetNginxResult> 
     const data = (await res.json()) as { ok?: boolean; error?: string };
     return { ok: Boolean(data.ok), error: data.error };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
@@ -467,21 +539,7 @@ export async function restoreSiteNginx(
     const data = (await res.json()) as { ok?: boolean; error?: string; restored?: string; content?: string };
     return { ok: Boolean(data.ok), error: data.error, restored: data.restored, content: data.content };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
-  }
-}
-
-export async function reorderSites(order: string[]): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const res = await apiFetch('/api/sites/reorder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ order })
-    });
-    const data = (await res.json()) as { ok?: boolean; error?: string };
-    return { ok: Boolean(data.ok), error: data.error };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
@@ -497,6 +555,14 @@ export const openTerminal = (d: string, branch: string = '') =>
 // VS Code / Cursor / JetBrains / etc. Fork addition.
 export const openEditor = (d: string, branch: string = '') =>
   postAction(site(d, 'editor') + (branch ? `?branch=${encodeURIComponent(branch)}` : ''));
+
+export function openFolder(path: string) {
+  return apiFetch('/api/open-folder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path })
+  });
+}
 
 export function setWorktreeDBIsolated(
   d: string,
@@ -553,75 +619,9 @@ export type TinkerResponse = {
   error?: string;
 };
 
-export type TinkerSymbols = {
-  models: string[];
-  classes: string[];
-  functions: string[];
-};
-
-export type TinkerLintDiagnostic = {
-  line: number;
-  column: number;
-  message: string;
-  severity: 'error' | 'warning';
-};
-
-export type TinkerLintResponse = {
-  ok: boolean;
-  diagnostics: TinkerLintDiagnostic[];
-  error?: string;
-};
-
 function tinkerURL(domain: string, action: string, branch: string): string {
   const base = site(domain, action);
   return branch ? `${base}?branch=${encodeURIComponent(branch)}` : base;
-}
-
-export async function lintTinker(
-  domain: string,
-  code: string,
-  branch: string = ''
-): Promise<TinkerLintResponse> {
-  try {
-    const res = await apiFetch(tinkerURL(domain, 'tinker:lint', branch), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code })
-    });
-    return (await res.json()) as TinkerLintResponse;
-  } catch (e) {
-    return {
-      ok: false,
-      diagnostics: [],
-      error: e instanceof Error ? e.message : 'Request failed'
-    };
-  }
-}
-
-// Symbol responses are stable for the lifetime of the tab session
-// (project classes, composer helpers, PHP internals don't change while
-// the user is at the editor). Cache per-domain+branch so quick tab
-// switches don't re-trigger the ~80 ms PHP exec on the backend, but
-// switching worktree pulls the worktree's own symbol set.
-const tinkerSymbolsCache = new Map<string, Promise<TinkerSymbols>>();
-
-export async function loadTinkerSymbols(
-  domain: string,
-  branch: string = ''
-): Promise<TinkerSymbols> {
-  const key = `${domain}@${branch}`;
-  const cached = tinkerSymbolsCache.get(key);
-  if (cached) return cached;
-  const p = (async () => {
-    try {
-      const res = await apiFetch(tinkerURL(domain, 'tinker:symbols', branch), { method: 'POST' });
-      return (await res.json()) as TinkerSymbols;
-    } catch {
-      return { models: [], classes: [], functions: [] };
-    }
-  })();
-  tinkerSymbolsCache.set(key, p);
-  return p;
 }
 
 export async function runTinker(
@@ -645,7 +645,7 @@ export async function runTinker(
       exit_code: -1,
       duration_ms: 0,
       mode: 'php',
-      error: e instanceof Error ? e.message : 'Request failed'
+      error: e instanceof Error ? e.message : m.common_requestFailed()
     };
   }
 }
@@ -665,7 +665,7 @@ export async function setSiteVersion(
     const data = (await res.json()) as { ok?: boolean; error?: string };
     return { ok: Boolean(data.ok), error: data.error };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 

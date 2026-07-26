@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"

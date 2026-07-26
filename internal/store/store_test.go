@@ -6,7 +6,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
@@ -80,6 +83,61 @@ func testClient(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
 	return &Client{
 		BaseURL: srv.URL,
+	}
+}
+
+// When the primary base returns a non-200, the client must transparently fetch
+// from the fallback base. This is the geodro->lerd-env transition path.
+func TestFetchIndex_FallsBackWhenPrimaryFails(t *testing.T) {
+	good := testServer(t)
+	defer good.Close()
+
+	c := &Client{
+		BaseURL:   good.URL + "/missing", // /missing/index.json -> 404
+		Fallbacks: []string{good.URL},
+	}
+	idx, err := c.FetchIndex()
+	if err != nil {
+		t.Fatalf("FetchIndex should succeed via fallback: %v", err)
+	}
+	if len(idx.Frameworks) == 0 || idx.Frameworks[0].Name != "laravel" {
+		t.Fatalf("unexpected index from fallback: %+v", idx)
+	}
+}
+
+// When every base fails (e.g. an internet outage), the client returns an error
+// rather than silently changing anything.
+func TestFetchIndex_AllBasesFail(t *testing.T) {
+	good := testServer(t)
+	dead := good.URL
+	good.Close() // now refuses connections
+
+	c := &Client{
+		BaseURL:   dead,
+		Fallbacks: []string{dead + "/also-dead"},
+	}
+	if _, err := c.FetchIndex(); err == nil {
+		t.Fatal("expected an error when all bases are unreachable")
+	}
+}
+
+// NewClient wires the framework-store URL from origin: the store content lives on
+// lerd-env and is served directly, with no geodro fallback.
+func TestNewClient_UsesNewOrgDirectly(t *testing.T) {
+	c := NewClient()
+	if !strings.Contains(c.BaseURL, "lerd-env") {
+		t.Errorf("primary store URL = %q, want lerd-env", c.BaseURL)
+	}
+	if strings.Contains(c.BaseURL, "geodro") {
+		t.Errorf("store URL must not rely on geodro, got %q", c.BaseURL)
+	}
+}
+
+// NewServiceClient points at the dedicated lerd-env/services store.
+func TestNewServiceClient_UsesServicesRepo(t *testing.T) {
+	c := NewServiceClient()
+	if !strings.Contains(c.BaseURL, "lerd-env/services") {
+		t.Errorf("primary service-store URL = %q, want lerd-env/services", c.BaseURL)
 	}
 }
 
@@ -250,5 +308,72 @@ func TestDetectFromStore_NoMatch(t *testing.T) {
 	_, _, ok := c.DetectFromStore(dir)
 	if ok {
 		t.Fatal("expected no detection in empty dir")
+	}
+}
+
+func TestFetchWithRetry_RecoversFromTransientFailure(t *testing.T) {
+	prevSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	t.Cleanup(func() { sleepFn = prevSleep })
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) < 3 {
+			http.Error(w, "boom", http.StatusBadGateway) // 502, transient
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(srv.Close)
+
+	body, err := fetchWithRetry(&http.Client{Timeout: httpTimeout}, srv.URL)
+	if err != nil {
+		t.Fatalf("expected recovery, got %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want ok", body)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("expected 3 attempts, got %d", got)
+	}
+}
+
+func TestFetchWithRetry_DoesNotRetry404(t *testing.T) {
+	prevSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	t.Cleanup(func() { sleepFn = prevSleep })
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := fetchWithRetry(&http.Client{Timeout: httpTimeout}, srv.URL); err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("a 4xx must not be retried, got %d attempts", got)
+	}
+}
+
+func TestFetchWithRetry_GivesUpAfterMaxAttempts(t *testing.T) {
+	prevSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	t.Cleanup(func() { sleepFn = prevSleep })
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := fetchWithRetry(&http.Client{Timeout: httpTimeout}, srv.URL); err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if got := atomic.LoadInt32(&calls); got != maxFetchAttempts {
+		t.Fatalf("expected %d attempts, got %d", maxFetchAttempts, got)
 	}
 }

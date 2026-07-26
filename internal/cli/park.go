@@ -5,15 +5,80 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	"github.com/spf13/cobra"
 )
+
+// extMismatch is a composer.json requirement whose extension is in the image but
+// under a different platform name, so composer install still fails its check.
+type extMismatch struct {
+	Required string // the ext-* name composer.json asks for
+	Platform string // the ext-* name composer actually publishes
+}
+
+// extUnavailable is a requirement no image for this PHP version can satisfy: the
+// extension only exists from a later version, so php:ext add can never build it.
+type extUnavailable struct {
+	Required string // the ext-* name composer.json asks for
+	Since    string // the first PHP version that ships it
+}
+
+// checkExtensions compares composer's ext-* requirements against the image, folding
+// both spellings of an extension onto one name so ext-opcache and ext-zend-opcache
+// resolve to the same module. A missing extension that is version-gated is reported
+// separately: bundled already excludes it for this version, so it cannot be built.
+func checkExtensions(detected, bundled, installed []string) ([]string, []extUnavailable, []extMismatch) {
+	inSet := func(ext string, set []string) bool {
+		for _, e := range set {
+			if podman.CanonicalExtension(e) == ext {
+				return true
+			}
+		}
+		return false
+	}
+
+	var missing []string
+	var unavailable []extUnavailable
+	var misnamed []extMismatch
+	for _, ext := range detected {
+		canonical := podman.CanonicalExtension(ext)
+		if !inSet(canonical, bundled) && !inSet(canonical, installed) {
+			if since, gated := podman.BundledSince(canonical); gated {
+				unavailable = append(unavailable, extUnavailable{Required: ext, Since: since})
+				continue
+			}
+			missing = append(missing, ext)
+			continue
+		}
+		if platform := podman.ComposerPlatformName(canonical); platform != strings.ToLower(ext) {
+			misnamed = append(misnamed, extMismatch{Required: ext, Platform: platform})
+		}
+	}
+	return missing, unavailable, misnamed
+}
+
+// customExtensionsOn returns the declared extensions this version's image
+// actually loaded. The declared set applies to every version, but a version
+// cannot always honour it (mongodb needs 8.1+), and treating a declared-but-
+// unbuildable extension as present would silence the very warning a site
+// requiring it needs. Versions with no recorded build fall back to the declared
+// set, which is the most that is known about them.
+func customExtensionsOn(cfg *config.GlobalConfig, phpVersion string) []string {
+	declared := cfg.GetExtensions()
+	missing := cfg.MissingFromImage(phpVersion, declared)
+	if len(missing) == 0 {
+		return declared
+	}
+	return slices.DeleteFunc(slices.Clone(declared), func(e string) bool { return slices.Contains(missing, e) })
+}
 
 // warnMissingExtensions checks composer.json for ext-* requirements and warns if any are
 // not covered by the bundled image or the user's custom extension list.
@@ -22,27 +87,20 @@ func warnMissingExtensions(dir, name, phpVersion string, cfg *config.GlobalConfi
 	if len(detected) == 0 {
 		return
 	}
-	bundled := podman.BundledExtensions()
-	installed := cfg.GetExtensions(phpVersion)
+	missing, unavailable, misnamed := checkExtensions(detected, podman.BundledExtensions(phpVersion), customExtensionsOn(cfg, phpVersion))
 
-	inSet := func(ext string, set []string) bool {
-		for _, e := range set {
-			if e == ext {
-				return true
-			}
-		}
-		return false
-	}
-
-	var missing []string
-	for _, ext := range detected {
-		if !inSet(ext, bundled) && !inSet(ext, installed) {
-			missing = append(missing, ext)
-		}
-	}
 	if len(missing) > 0 {
 		fmt.Printf("  [!] %s requires PHP extensions not in the image: %s\n", name, strings.Join(missing, ", "))
 		fmt.Printf("      Run: lerd php:ext add %s\n", strings.Join(missing, " "))
+	}
+	for _, u := range unavailable {
+		fmt.Printf("  [!] %s requires ext-%s, which is not available on PHP %s (first shipped on %s)\n", name, u.Required, phpVersion, u.Since)
+		fmt.Printf("      lerd php:ext add cannot build it. Move the site to PHP %s or newer, or require a polyfill package instead.\n", u.Since)
+	}
+	for _, m := range misnamed {
+		fmt.Printf("  [!] %s requires ext-%s, which composer publishes as ext-%s\n", name, m.Required, m.Platform)
+		fmt.Printf("      The extension is in the image; composer install will still fail its platform check.\n")
+		fmt.Printf("      Require ext-%s in composer.json instead.\n", m.Platform)
 	}
 }
 
@@ -73,6 +131,9 @@ func runPark(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if absDir == "/" {
+		return fmt.Errorf("refusing to park the filesystem root; lerd would bind-mount / into every container and shadow its rootfs")
+	}
 
 	cfg, err := config.LoadGlobal()
 	if err != nil {
@@ -86,7 +147,8 @@ func runPark(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("Parking directory: %s\n", absDir)
+	feedback.Begin()
+	feedback.Line("parking " + feedback.Val(absDir))
 
 	// Add to parked directories in global config
 	found := false
@@ -116,17 +178,18 @@ func runPark(_ *cobra.Command, args []string) error {
 		}
 		projectDir := filepath.Join(absDir, entry.Name())
 		if registered, err := RegisterProject(projectDir, cfg); err != nil {
-			fmt.Printf("  [WARN] could not register %s: %v\n", entry.Name(), err)
+			feedback.Warn("could not register %s: %v", entry.Name(), err)
 		} else if registered {
 			count++
 		}
 	}
 
 	if count > 0 {
-		fmt.Printf("Reloading nginx (%d sites registered)...\n", count)
+		reload := feedback.Start("reloading nginx")
 		nginx.ReloadOrWarn("  ")
+		reload.OK(fmt.Sprintf("%d site(s) registered", count))
 	} else {
-		fmt.Println("No PHP projects found in directory.")
+		feedback.Line("no PHP projects found in directory")
 	}
 
 	// Rewrite FPM quadlets so volume mounts cover the new parked directory.
@@ -165,8 +228,8 @@ func freeSiteName(desired, path string) string {
 		if err != nil || existing == nil {
 			return candidate // name is free
 		}
-		if existing.Path == path {
-			return candidate // same site being re-registered
+		if config.CanonicalPath(existing.Path) == config.CanonicalPath(path) {
+			return candidate // same site being re-registered (symlink spellings included, #930)
 		}
 	}
 }
@@ -179,7 +242,7 @@ func RegisterProject(projectDir string, cfg *config.GlobalConfig) (bool, error) 
 	// This prevents Laravel subdirs (app/, vendor/, public/, etc.) from being
 	// registered as sites when a project root is accidentally used as a park dir.
 	if _, ok := config.DetectFramework(filepath.Dir(projectDir)); ok {
-		fmt.Printf("  [WARN] skipping %s — looks like a subdirectory of a framework project.\n         Run 'lerd link' from %s instead.\n", projectDir, filepath.Dir(projectDir))
+		feedback.Warn("skipping %s — looks like a subdirectory of a framework project.\n         Run 'lerd link' from %s instead.", projectDir, filepath.Dir(projectDir))
 		return false, nil
 	}
 
@@ -261,7 +324,7 @@ func RegisterProject(projectDir string, cfg *config.GlobalConfig) (bool, error) 
 	if frameworkLabel == "" {
 		frameworkLabel = "unknown (public: " + detectedPublicDir + ")"
 	}
-	fmt.Printf("  + %s -> %s (PHP %s, Node %s, Framework: %s)\n", name, strings.Join(domains, ", "), phpVersion, nodeVersion, frameworkLabel)
+	feedback.Start("linking " + name).OK(feedback.Val(strings.Join(domains, ", ")) + " · php " + feedback.Val(phpVersion) + " · " + frameworkLabel)
 	return true, nil
 }
 
@@ -276,6 +339,17 @@ func ensureFPMQuadlet(phpVersion string) error {
 	return ensureFPMQuadletTo(phpVersion, os.Stdout)
 }
 
+// Seams for the ensure path, swappable in tests. Every step shells out to
+// podman or writes real state, so a test of the start/restart decision alone
+// would otherwise build a container storage tree to reach it.
+var (
+	writeFPMQuadlet = podman.WriteFPMQuadlet
+	buildFPMImageTo = podman.BuildFPMImageTo
+	ensureXdebugIni = podman.EnsureXdebugIni
+	startUnitFn     = podman.StartUnit
+	restartUnitFn   = podman.RestartUnit
+)
+
 // ensureFPMQuadletTo is like ensureFPMQuadlet but writes build output to w.
 func ensureFPMQuadletTo(phpVersion string, w io.Writer) error {
 	versionShort := strings.ReplaceAll(phpVersion, ".", "")
@@ -283,15 +357,22 @@ func ensureFPMQuadletTo(phpVersion string, w io.Writer) error {
 
 	// Write the unit file first so the version is registered in lerd status even
 	// if the image build fails — lerd start will rebuild the image on the next run.
-	if err := podman.WriteFPMQuadlet(phpVersion); err != nil {
+	if err := writeFPMQuadlet(phpVersion); err != nil {
 		return err
 	}
 
-	if err := podman.BuildFPMImageTo(phpVersion, false, w); err != nil {
+	rebuilt, err := buildFPMImageTo(phpVersion, false, w)
+	if err != nil {
 		return fmt.Errorf("building FPM image for PHP %s: %w", phpVersion, err)
 	}
 
-	_ = podman.EnsureXdebugIni(phpVersion)
+	_ = ensureXdebugIni(phpVersion)
 
-	return podman.StartUnit(unitName)
+	// A start is a no-op on an already-active unit, so a version whose image was
+	// just rebuilt here (the deferred half of a php:ext / php:pkg change) would
+	// keep serving the old image while every status surface reported the new set.
+	if rebuilt {
+		return restartUnitFn(unitName)
+	}
+	return startUnitFn(unitName)
 }

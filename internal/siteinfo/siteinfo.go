@@ -10,7 +10,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/gabriel-sousa99/lerd/internal/applog"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
@@ -42,11 +41,18 @@ const (
 )
 
 // WorkerInfo describes a framework worker and its runtime state.
+//
+// Failing means systemd reports the unit failed. Unreachable is a distinct
+// state: the unit is active (its process is up) but its declared server is not
+// accepting connections — a vite dev server that died under npm. The two are
+// kept apart so a surface never labels an active unit "failed" (which would
+// attach a misleading last-log line); they are mutually exclusive.
 type WorkerInfo struct {
-	Name    string
-	Label   string
-	Running bool
-	Failing bool
+	Name        string
+	Label       string
+	Running     bool
+	Failing     bool
+	Unreachable bool
 }
 
 // WorktreeInfo describes a git worktree associated with a site.
@@ -100,6 +106,11 @@ type EnrichedSite struct {
 	FrameworkName    string
 	FrameworkLabel   string
 	FrameworkVersion string
+	// FrameworkPHPMin/Max are the framework's supported PHP range, so the UI and
+	// TUI can disable out-of-range versions. Empty when the version was guessed
+	// (clamped), since the range then belongs to a different version.
+	FrameworkPHPMin string
+	FrameworkPHPMax string
 
 	// UsesPHP reports whether the site is actually a PHP project (composer.json
 	// or .php files present) served by the shared FPM image or FrankenPHP.
@@ -174,9 +185,8 @@ type EnrichedSite struct {
 	LANPort int
 
 	// App metadata
-	HasAppLogs    bool
-	LatestLogTime string
-	HasFavicon    bool
+	HasAppLogs bool
+	HasFavicon bool
 	// AppName is the Laravel APP_NAME from .env, or "" for non-Laravel sites and
 	// for the stock "Laravel" default, so a surface can title a site by its
 	// application name without burying customised ones under identical defaults.
@@ -195,6 +205,12 @@ func (e *EnrichedSite) PrimaryDomain() string {
 		return e.Domains[0]
 	}
 	return ""
+}
+
+// IsProxyOnly mirrors config.Site.IsProxyOnly on the enriched view: a host-proxy
+// site with no supervised dev command, so lerd runs nothing for it.
+func (e *EnrichedSite) IsProxyOnly() bool {
+	return e.HostPort > 0 && e.HostCommand == ""
 }
 
 // KnownServices returns the built-in service names used for auto-detection.
@@ -301,6 +317,16 @@ func Enrich(s config.Site, flags EnrichFlag) EnrichedSite {
 		fw, hasFw = config.GetFrameworkForDir(s.Framework, s.Path)
 		if hasFw {
 			e.FrameworkVersion = fw.Version
+			if fw.VersionGuessed {
+				// Report the project's real version, not the borrowed
+				// definition's, and don't enforce that definition's PHP range.
+				if fw.DetectedVersion != "" {
+					e.FrameworkVersion = fw.DetectedVersion
+				}
+			} else {
+				e.FrameworkPHPMin = fw.PHP.Min
+				e.FrameworkPHPMax = fw.PHP.Max
+			}
 		}
 	}
 
@@ -413,27 +439,35 @@ func (e *EnrichedSite) enrichVersions(s config.Site, fw *config.Framework, hasFw
 		return
 	}
 
-	phpMin, phpMax := "", ""
-	if hasFw {
-		phpMin, phpMax = fw.PHP.Min, fw.PHP.Max
-	}
-
-	// Oracle fork: when the user has an explicit pin (`.php-version` or
-	// `.lerd.yaml` php_version), respect it absolutely. The framework's
-	// PHP.Min/Max constraints come from the BUNDLED framework definition
-	// (always the upstream latest, e.g. Laravel 13 ≥ PHP 8.4), which would
-	// otherwise clamp a legitimate Laravel 8 + PHP 7.4 project up to PHP 8.5
-	// on every site-snapshot refresh, undoing the user's choice.
-	if pinned := readUserPHPPin(s.Path); pinned != "" {
-		if pinned != s.PHPVersion {
-			e.PHPVersion = pinned
-			e.PHPVersionChanged = true
-		}
-	} else {
-		detected := phpPkg.DetectVersionClamped(s.Path, phpMin, phpMax, s.PHPVersion)
-		if detected != s.PHPVersion {
-			e.PHPVersion = detected
-			e.PHPVersionChanged = true
+	// A custom-FPM site's PHP version is fixed by its Containerfile FROM line, so
+	// don't let detection override it — otherwise this enrichment (run by lerd-ui
+	// and the TUI, then persisted) drifts the stored version away from the image the
+	// container actually runs, undoing what link pinned. Node tooling still applies.
+	if !s.IsCustomFPM() {
+		// Oracle fork: when the user has an explicit pin (`.php-version` or
+		// `.lerd.yaml` php_version), respect it absolutely. The framework's
+		// PHP.Min/Max constraints come from the BUNDLED framework definition
+		// (always the upstream latest, e.g. Laravel 13 ≥ PHP 8.4), which would
+		// otherwise clamp a legitimate Laravel 8 + PHP 7.4 project up to PHP 8.5
+		// on every site-snapshot refresh, undoing the user's choice.
+		if pinned := readUserPHPPin(s.Path); pinned != "" {
+			if pinned != s.PHPVersion {
+				e.PHPVersion = pinned
+				e.PHPVersionChanged = true
+			}
+		} else {
+			phpMin, phpMax := "", ""
+			// A guessed framework targets a different version than the project, so its
+			// PHP range must not constrain detection, or a Laravel 6 project pinned to
+			// 7.4 would be bumped to the Laravel 10 minimum on every snapshot.
+			if hasFw && !fw.VersionGuessed {
+				phpMin, phpMax = fw.PHP.Min, fw.PHP.Max
+			}
+			detected := phpPkg.DetectVersionClamped(s.Path, phpMin, phpMax, s.PHPVersion)
+			if detected != s.PHPVersion {
+				e.PHPVersion = detected
+				e.PHPVersionChanged = true
+			}
 		}
 	}
 
@@ -566,20 +600,51 @@ func (e *EnrichedSite) enrichWorkers(fw *config.Framework, hasFw bool) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	meta := AllUnitMeta()
 	for _, wname := range names {
 		w := fw.Workers[wname]
-		unitStatus, _ := unitStatusFn("lerd-" + wname + "-" + e.Name)
+		unit := "lerd-" + wname + "-" + e.Name
+		serviceState, _ := unitStatusFn(unit)
+		timerState := ""
+		if w.Schedule != "" {
+			timerState, _ = unitStatusFn(unit + ".timer")
+		}
+		running, failing := workerLiveness(w.Schedule, serviceState, timerState)
 		label := w.Label
 		if label == "" {
 			label = wname
 		}
+		unreachable := false
+		// A worker whose process is up but whose server isn't accepting is
+		// unhealthy, not running (a vite dev server that died under npm). Probe
+		// only "active" (a still-activating server may not have bound yet). It is
+		// unreachable, not failed: systemd still calls the unit active.
+		if serviceState == "active" && w.Health != nil {
+			if reachable, probed := WorkerServerReachable(e.Path, w.Health, meta[unit].ActiveEnter); probed && !reachable {
+				running = false
+				unreachable = true
+			}
+		}
 		e.FrameworkWorkers = append(e.FrameworkWorkers, WorkerInfo{
-			Name:    wname,
-			Label:   label,
-			Running: unitStatus == "active" || unitStatus == "activating",
-			Failing: unitStatus == "failed",
+			Name:        wname,
+			Label:       label,
+			Running:     running,
+			Failing:     failing,
+			Unreachable: unreachable,
 		})
 	}
+}
+
+// workerLiveness maps a worker's unit states to what a UI should show. A daemon
+// is alive when its service is. A scheduled worker is a Type=oneshot triggered
+// by a .timer, so its service is inactive between ticks and the timer carries
+// the liveness; a failed last run still surfaces.
+func workerLiveness(schedule, serviceState, timerState string) (running, failing bool) {
+	failing = serviceState == "failed"
+	if schedule != "" {
+		return timerState == "active" || timerState == "activating", failing
+	}
+	return serviceState == "active" || serviceState == "activating", failing
 }
 
 // enrichWorktreeWorkers returns running state for framework workers that the
@@ -604,16 +669,32 @@ func enrichWorktreeWorkers(siteName, wtPath string, fw *config.Framework) []Work
 	for _, wname := range names {
 		w := fw.Workers[wname]
 		unit := "lerd-" + wname + "-" + siteName + "-" + wtBase
-		status, _ := unitStatusFn(unit)
+		serviceState, _ := unitStatusFn(unit)
+		timerState := ""
+		if w.Schedule != "" {
+			timerState, _ = unitStatusFn(unit + ".timer")
+		}
+		running, failing := workerLiveness(w.Schedule, serviceState, timerState)
 		label := w.Label
 		if label == "" {
 			label = wname
 		}
+		unreachable := false
+		// Same server-reachability check as enrichWorkers, against this worktree's
+		// own checkout where its dev server writes the URL file. Active-but-unbound
+		// is unreachable, not failed.
+		if serviceState == "active" && w.Health != nil {
+			if reachable, probed := WorkerServerReachable(wtPath, w.Health, AllUnitMeta()[unit].ActiveEnter); probed && !reachable {
+				running = false
+				unreachable = true
+			}
+		}
 		out = append(out, WorkerInfo{
-			Name:    wname,
-			Label:   label,
-			Running: status == "active" || status == "activating",
-			Failing: status == "failed",
+			Name:        wname,
+			Label:       label,
+			Running:     running,
+			Failing:     failing,
+			Unreachable: unreachable,
 		})
 	}
 	return out
@@ -647,6 +728,9 @@ func (e *EnrichedSite) enrichGit() {
 			}
 			if fw, ok := config.GetFrameworkForDir(e.FrameworkName, wt.Path); ok {
 				info.FrameworkVersion = fw.Version
+				if fw.VersionGuessed && fw.DetectedVersion != "" {
+					info.FrameworkVersion = fw.DetectedVersion
+				}
 				info.FrameworkLabel = frameworkLabel(e.FrameworkName, wt.Path, fw, true)
 				info.FrameworkWorkers = enrichWorktreeWorkers(e.Name, wt.Path, fw)
 			} else {
@@ -680,14 +764,20 @@ func (e *EnrichedSite) enrichServices() {
 	}
 	envStr := string(envData)
 	for _, svcName := range KnownServices() {
-		if !svcSet[svcName] && strings.Contains(envStr, "lerd-"+svcName) {
-			e.Services = append(e.Services, svcName)
-			svcSet[svcName] = true
+		if svcSet[svcName] || !envfile.ReferencesContainer(envStr, svcName) {
+			continue
 		}
+		// Skip a referenced-but-uninstalled default preset so a removed service
+		// (quadlet gone) stops ghosting on sites whose .env still points at it.
+		if !podman.QuadletInstalled("lerd-" + svcName) {
+			continue
+		}
+		e.Services = append(e.Services, svcName)
+		svcSet[svcName] = true
 	}
 	if customs, err := config.ListCustomServices(); err == nil {
 		for _, cs := range customs {
-			if !svcSet[cs.Name] && strings.Contains(envStr, "lerd-"+cs.Name) {
+			if !svcSet[cs.Name] && envfile.ReferencesContainer(envStr, cs.Name) {
 				e.Services = append(e.Services, cs.Name)
 				svcSet[cs.Name] = true
 			}
@@ -733,7 +823,6 @@ func (e *EnrichedSite) enrichDomainConflicts() {
 
 func (e *EnrichedSite) enrichLogs(fw *config.Framework, hasFw bool) {
 	e.HasAppLogs = hasLogFiles(hasFw, fw, e.Path)
-	e.LatestLogTime = latestLogTime(hasFw, fw, e.Path)
 }
 
 func frameworkLabel(name, path string, fw *config.Framework, hasFw bool) string {
@@ -747,6 +836,12 @@ func frameworkLabel(name, path string, fw *config.Framework, hasFw bool) string 
 		// the upstream latest, and stale for older projects. Fork fix for
 		// "Laravel 13 shown on a Laravel 8 project".
 		version := config.DetectMajorVersion(path, name)
+		// A guessed definition is borrowed from a different major, so its own
+		// Version never describes this project; the version detection recorded
+		// on the definition still does.
+		if version == "" && fw.VersionGuessed {
+			version = fw.DetectedVersion
+		}
 		if version == "" {
 			version = fw.Version
 		}
@@ -827,17 +922,6 @@ func hasLogFiles(hasFw bool, fw *config.Framework, projectPath string) bool {
 		}
 	}
 	return false
-}
-
-func latestLogTime(hasFw bool, fw *config.Framework, projectPath string) string {
-	if !hasFw || len(fw.Logs) == 0 {
-		return ""
-	}
-	t := applog.LatestModTime(projectPath, fw.Logs)
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339)
 }
 
 // DetectFavicon returns the absolute path of the first favicon file found in

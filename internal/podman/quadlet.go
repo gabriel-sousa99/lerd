@@ -1,6 +1,8 @@
 package podman
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -68,10 +70,16 @@ func WriteQuadletDiff(name, content string) (changed bool, err error) {
 	content = BindForLAN(content, lanExposed)
 	content = PairIPv6Binds(content)
 	content = StripInstallSection(content, autostartDisabled)
-	// Centralised platform podman-run flags (e.g. --platform=linux/amd64 for
-	// postgis on darwin) so every quadlet writer emits identical units.
+	// Centralised platform image rewrite + podman-run flags so every quadlet
+	// writer emits identical units. On Apple Silicon PlatformImage swaps
+	// postgis/postgis for the multi-arch imresamu/postgis (runs native, no
+	// Rosetta); mysql:5.7 keeps the --platform=linux/amd64 pin.
 	if svc := strings.TrimPrefix(name, "lerd-"); svc != name {
 		if img := CurrentImage(content); img != "" {
+			if rewritten := PlatformImage(img); rewritten != img {
+				content = ApplyImage(content, rewritten)
+				img = rewritten
+			}
 			if arg := PlatformPodmanArgs(svc, img); arg != "" {
 				content = InjectPodmanArgs(content, arg)
 			}
@@ -83,6 +91,7 @@ func WriteQuadletDiff(name, content string) (changed bool, err error) {
 		fileChanged = false
 	}
 	if fileChanged {
+		config.GuardRealWrite(path)
 		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 			return false, err
 		}
@@ -105,11 +114,32 @@ func QuadletInstalled(name string) bool {
 	return err == nil
 }
 
+// ListManagedServiceNames returns the service names (lerd- prefix and .container
+// suffix stripped) of every quadlet carrying CustomServiceQuadletMarker. Used by
+// ReconcileServices to find orphans without misclassifying site/worker quadlets.
+func ListManagedServiceNames() []string {
+	entries, err := filepath.Glob(filepath.Join(config.QuadletDir(), "lerd-*.container"))
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, p := range entries {
+		data, err := os.ReadFile(p)
+		if err != nil || !bytes.Contains(data, []byte(CustomServiceQuadletMarker)) {
+			continue
+		}
+		base := strings.TrimSuffix(filepath.Base(p), ".container")
+		names = append(names, strings.TrimPrefix(base, "lerd-"))
+	}
+	return names
+}
+
 // RemoveQuadlet removes a Podman quadlet container unit file. On macOS it
 // also removes the launchd plist that AfterQuadletWriteFn keeps in sync, so
 // callers don't leave an orphan agent in ~/Library/LaunchAgents/.
 func RemoveQuadlet(name string) error {
 	path := filepath.Join(config.QuadletDir(), name+".container")
+	config.GuardRealWrite(path)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -124,7 +154,7 @@ func RemoveQuadlet(name string) error {
 // RemoveContainer removes a stopped Podman container by name, ignoring errors
 // if the container does not exist.
 func RemoveContainer(name string) {
-	_ = exec.Command(PodmanBin(), "rm", "-f", name).Run()
+	_ = execCommand(PodmanBin(), "rm", "-f", name).Run()
 }
 
 // AfterQuadletWriteFn, if non-nil, is called by WriteQuadletDiff after
@@ -214,8 +244,19 @@ func unitOpCaller() string {
 	}
 }
 
+// errNoRealSystemd is what the unit lifecycle returns when a test drives it with
+// no stub installed. Falling through to the real user bus would start, stop and
+// enable units on the machine running the suite, which it has already done once.
+var errNoRealSystemd = errors.New("podman: refusing the real systemd from a test; set podman.UnitLifecycle")
+
+// realSystemdBlocked reports whether this call must not reach the real user bus.
+func realSystemdBlocked() bool { return UnitLifecycle == nil && config.UnderTest() }
+
 func StartUnit(name string) error {
 	logUnitOp("start", name)
+	if realSystemdBlocked() {
+		return errNoRealSystemd
+	}
 	if UnitLifecycle != nil {
 		err := UnitLifecycle.Start(name)
 		if err == nil {
@@ -233,6 +274,9 @@ func StartUnit(name string) error {
 // StopUnit stops a service unit.
 func StopUnit(name string) error {
 	logUnitOp("stop", name)
+	if realSystemdBlocked() {
+		return errNoRealSystemd
+	}
 	if UnitLifecycle != nil {
 		err := UnitLifecycle.Stop(name)
 		if err == nil {
@@ -253,7 +297,7 @@ func StopUnit(name string) error {
 // DBusStartUnit does. On macOS launchd has no separate failed state (the
 // bootstrap path replaces the job), so this is a no-op. Best-effort.
 func ResetFailedUnit(name string) {
-	if UnitLifecycle != nil {
+	if UnitLifecycle != nil || realSystemdBlocked() {
 		return
 	}
 	_ = systemd.DBusResetFailed(name)
@@ -262,6 +306,9 @@ func ResetFailedUnit(name string) {
 // RestartUnit restarts a service unit.
 func RestartUnit(name string) error {
 	logUnitOp("restart", name)
+	if realSystemdBlocked() {
+		return errNoRealSystemd
+	}
 	if UnitLifecycle != nil {
 		err := UnitLifecycle.Restart(name)
 		if err == nil {
@@ -294,6 +341,22 @@ var mariadbReadyArgs = []string{"mariadb-admin", "ping", "-h127.0.0.1", "-P3306"
 // catastrophic failures for the bare-name presets — versioned ones
 // fall through to the systemd-active probe which can report "active"
 // for a few seconds even when the container is crashlooping.
+// rustfsProbeAddr is the host address WaitReady dials to test rustfs readiness.
+// rustfs is probed over TCP from the host rather than via podman exec (the image
+// ships no shell), so the probe must follow the port rustfs is actually published
+// on. HostPorts() is the registry's effective primary: the PublishedPort override
+// the port-ownership guard sets when a host server owns 9000, else the preset
+// default seeded into Port. Without this the dial targets a port nothing is on and
+// WaitReady burns its full timeout on every php/composer call. Empty (rustfs not
+// configured, so not something WaitReady is starting) resolves to nothing to dial.
+func rustfsProbeAddr(svc config.ServiceConfig) string {
+	hp := svc.HostPorts()
+	if len(hp) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("localhost:%d", hp[0])
+}
+
 func readyFamily(service string) string {
 	for _, fam := range []string{"mariadb", "mysql", "postgres", "redis", "rustfs"} {
 		if service == fam || strings.HasPrefix(service, fam+"-") {
@@ -318,28 +381,32 @@ func WaitReady(service string, timeout time.Duration) error {
 	case "mysql":
 		args := append([]string{"exec", unit}, mysqlReadyArgs...)
 		probe = func() bool {
-			return exec.Command(PodmanBin(), args...).Run() == nil
+			return execCommand(PodmanBin(), args...).Run() == nil
 		}
 	case "mariadb":
 		args := append([]string{"exec", unit}, mariadbReadyArgs...)
 		probe = func() bool {
-			return exec.Command(PodmanBin(), args...).Run() == nil
+			return execCommand(PodmanBin(), args...).Run() == nil
 		}
 	case "postgres":
 		probe = func() bool {
-			cmd := exec.Command(PodmanBin(), "exec", unit,
+			cmd := execCommand(PodmanBin(), "exec", unit,
 				"pg_isready", "-U", "postgres")
 			return cmd.Run() == nil
 		}
 	case "redis":
 		probe = func() bool {
-			cmd := exec.Command(PodmanBin(), "exec", unit,
+			cmd := execCommand(PodmanBin(), "exec", unit,
 				"redis-cli", "ping")
 			return cmd.Run() == nil
 		}
 	case "rustfs":
+		addr := rustfsProbeAddr(config.ServiceConfigFor(service))
 		probe = func() bool {
-			conn, err := net.DialTimeout("tcp", "localhost:9000", time.Second)
+			if addr == "" {
+				return false
+			}
+			conn, err := net.DialTimeout("tcp", addr, time.Second)
 			if err != nil {
 				return false
 			}

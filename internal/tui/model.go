@@ -9,16 +9,18 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	lerddumps "github.com/gabriel-sousa99/lerd/internal/dumps"
 	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 	"github.com/gabriel-sousa99/lerd/internal/sitedoctor"
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 	"github.com/gabriel-sousa99/lerd/internal/stats"
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
+	zone "github.com/lrstanley/bubblezone/v2"
 )
 
 // focusPane identifies which pane currently owns keyboard focus. Detail sits
@@ -43,8 +45,34 @@ const (
 	detailSettings
 	detailDumps
 	detailSystem
-	detailDashboard
 )
+
+// topTab identifies the active top-level screen. The tab bar switches the
+// whole body between a 6-card dashboard overview, the sites screen (list +
+// site detail) and the services screen (list + service detail). Clickable in
+// the tab strip and cyclable with ctrl+left / ctrl+right.
+type topTab int
+
+const (
+	tabDashboard topTab = iota
+	tabSites
+	tabServices
+)
+
+func (t topTab) label() string {
+	switch t {
+	case tabDashboard:
+		return "Dashboard"
+	case tabServices:
+		return "Services"
+	default:
+		return "Sites"
+	}
+}
+
+// orderedTabs is the left-to-right order the tab bar renders and the order
+// nextTab cycles through.
+var orderedTabs = []topTab{tabDashboard, tabSites, tabServices}
 
 // Model is the bubbletea root. Panes are all projections of snap plus small
 // per-pane cursor/scroll state, so every refresh cycle rebuilds from a single
@@ -54,6 +82,7 @@ type Model struct {
 
 	snap Snapshot
 
+	activeTab  topTab
 	detailMode detailMode
 	focus      focusPane
 
@@ -78,26 +107,43 @@ type Model struct {
 	systemRow    int // index into navigable system rows
 	helpScroll   int // vertical scroll offset for the help view
 
-	// Active sub-tab within the site detail view (overview / env / dumps /
-	// app logs). Only meaningful when detailMode == detailSite; tabs other
-	// than overview are read-only views.
+	// Active sub-tab within the site detail view (overview / logs / env /
+	// debug / doctor). Only meaningful when detailMode == detailSite; tabs
+	// other than overview are read-only views.
 	siteTab siteTab
 
-	// Laravel Doctor tab state. doctorChecks caches the last run keyed by
-	// doctorSite, so switching away and back shows the result instantly while
-	// pressing 5 again forces a fresh run. doctorLoading is set while the
-	// (potentially slow, container-execing) checks are in flight.
+	// Doctor tab state. doctorChecks caches the last run keyed by doctorSite, so
+	// switching away and back shows the result instantly while pressing 5 again
+	// forces a fresh run. doctorLoading is set while the (potentially slow,
+	// container-execing) checks are in flight.
 	doctorChecks  []sitedoctor.Check
 	doctorSite    string
 	doctorLoading bool
+
+	// Request-timing panel on the site Overview, read from the durable store the
+	// watcher fills. timingKey is the site+branch+window the held figures belong
+	// to, so a late read for a scope the user has left is discarded; timingRange
+	// and timingScope are the cycle positions for the window and the branch.
+	timingRange  int
+	timingScope  int
+	timingKey    string
+	timingAt     time.Time
+	timingLoaded bool
+	timingErr    error
+	timing       reqstats.Analytics
+	timingRecent []reqstats.Record
 
 	// Picker state (PHP/Node version). When active, up/down navigates
 	// pickerOptions instead of detail rows and enter applies the pick.
 	// pickerWorktreePath is set when the picker was opened from a per-
 	// worktree row; applyPicker uses it as the cwd so the change writes
 	// .php-version / .node-version inside the worktree's checkout.
-	pickerKind         detailKind
-	pickerOptions      []string
+	pickerKind    detailKind
+	pickerOptions []string
+	// pickerDisabled is parallel to pickerOptions: a true entry is shown dimmed
+	// and skipped on navigation and apply. Used to reflect a framework's PHP
+	// range so out-of-range versions are visible but not selectable.
+	pickerDisabled     []bool
 	pickerCursor       int
 	pickerWorktreePath string
 	pickerWorktreeName string
@@ -110,11 +156,10 @@ type Model struct {
 	domainInput        string
 	domainInputEditing string
 
-	showLogs     bool
-	logScroll    int // lines scrolled back from tail (0 = live tail)
-	hideServices bool
-	logTail      *logTail
-	logCursor    int // index into currentLogTargets() for the focused item
+	showLogs  bool
+	logScroll int // lines scrolled back from tail (0 = live tail)
+	logTail   *logTail
+	logCursor int // index into currentLogTargets() for the focused item
 
 	status       string
 	statusExpiry time.Time
@@ -185,6 +230,32 @@ type Model struct {
 	// once the snapshot is zero-valued (Available=false) and the
 	// dashboard renders a "collecting…" placeholder.
 	stats stats.Snapshot
+
+	// Dashboard grid state: which of the numDashCards cards has focus (so
+	// j/k and the mouse wheel know what to scroll) and the per-card vertical
+	// scroll offset. Cards show their whole list and clip to a scroll window.
+	dashFocus  int
+	dashScroll [numDashCards]int
+	// dashRowCursor is the selected row within each card (an index into
+	// dashZones[card]); ↑↓ moves it on the Sites/Services/Workers cards and
+	// enter activates it like a click. dashZones caches, per card, the ordered
+	// clickable zone ids laid down at the last render so the cursor and enter
+	// resolve against exactly what's on screen.
+	dashRowCursor [numDashCards]int
+	dashZones     [numDashCards][]string
+
+	// Activity feed: a capped ring of recent state-change events derived by
+	// diffing successive snapshots, mirroring the web UI's Recent Activity.
+	// prevSnap holds the last snapshot the diff ran against.
+	activity []activityEvent
+	prevSnap *Snapshot
+
+	// followCursor is set by keyboard navigation so the next render scrolls
+	// the focused pane to keep the selected row visible. The mouse wheel
+	// leaves it false and moves the scroll offset directly, so wheeling scrolls
+	// the viewport without dragging the selection along. Cleared after each
+	// render.
+	followCursor bool
 }
 
 // DumpEntry is a TUI-side mirror of dumps.Event with the fields rendering
@@ -205,11 +276,14 @@ type DumpEntry struct {
 // podman.Cache.Start before running; NewModel itself is pure.
 func NewModel(version string) *Model {
 	return &Model{
-		width:   100,
-		height:  30,
-		logTail: newLogTail(),
-		sub:     eventbus.Default.Subscribe(),
-		version: version,
+		width:       100,
+		height:      30,
+		activeTab:   tabDashboard,
+		focus:       paneDetail,
+		logTail:     newLogTail(),
+		timingRange: defaultTimingRange,
+		sub:         eventbus.Default.Subscribe(),
+		version:     version,
 	}
 }
 
@@ -224,6 +298,9 @@ func (m *Model) Init() tea.Cmd {
 		busCmd(m.sub),
 		updateCheckCmd(m.version),
 		spinnerTickCmd(),
+		// lipgloss v2 has no render-time adaptive colour, so ask the terminal
+		// for its background and adapt the greys once it answers.
+		tea.RequestBackgroundColor,
 	)
 }
 
@@ -246,6 +323,11 @@ func updateCheckCmd(current string) tea.Cmd {
 
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// followCursor is a one-shot consumed by the render that follows this
+	// update: clear it here, before any handler runs, so keyboard navigation
+	// can re-arm it and the wheel (which doesn't) leaves the scroll offset put.
+	m.followCursor = false
+
 	switch msg := msg.(type) {
 	case dumpsClearedMsg:
 		m.debug = nil
@@ -257,8 +339,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.BackgroundColorMsg:
+		applyBackground(msg.IsDark())
+		return m, nil
+
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case refreshMsg:
 		return m, loadCmd()
@@ -269,9 +358,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(loadCmd(), busCmd(m.sub))
 
 	case snapshotMsg:
+		m.recordActivity(msg.snap, time.Now())
 		m.snap = msg.snap
 		m.clampCursors()
-		return m, tickCmd(10 * time.Second)
+		return m, tea.Batch(tickCmd(10*time.Second), m.ensureTiming())
+
+	case timingResultMsg:
+		// Discard a read that landed after the user moved to another site, branch
+		// or window, so the panel never shows one scope's figures under another's.
+		if msg.cacheKey == m.timingKey {
+			m.timing, m.timingRecent, m.timingErr = msg.analytic, msg.recent, msg.err
+			m.timingLoaded = true
+		}
+		return m, nil
 
 	case ActionResult:
 		m.setStatus(formatAction(msg), 5*time.Second)
@@ -326,11 +425,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m.handleMainKey(msg)
 }
 
-func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleMainKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Confirmation prompt sits above every other input mode so y / n always
 	// resolve the guard rail rather than firing the underlying pane action.
 	if m.confirmActive {
@@ -368,6 +467,11 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "enter", " ":
+		// On the Dashboard, enter (or space) acts like a click on the selected
+		// row: it jumps to that site / service / worker on its own tab.
+		if m.activeTab == tabDashboard {
+			return m, m.activateDashSelection()
+		}
 		if m.focus == paneDetail {
 			if m.pickerKind != kindInfo {
 				return m, m.applyPicker()
@@ -380,6 +484,12 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			if m.detailMode == detailDumps {
 				return m, m.toggleDumpExpand()
+			}
+			// Row toggling only applies to a site's detail; the Dashboard parks
+			// focus on the detail pane with no list selection, so don't mutate
+			// the carried-over site there.
+			if m.activeTab != tabSites {
+				return m, nil
 			}
 			return m, m.detailToggleSelected(m.currentSite(), detailRows(m.currentSite()), navigableRows(detailRows(m.currentSite())))
 		}
@@ -396,6 +506,11 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "S":
+		// Settings / system / dumps swap the Sites tab's detail pane; they
+		// have no surface on the other tabs, so they no-op there.
+		if m.activeTab != tabSites {
+			return m, nil
+		}
 		if m.detailMode == detailSettings {
 			m.detailMode = detailSite
 		} else {
@@ -418,6 +533,9 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "D":
+		if m.activeTab != tabSites {
+			return m, nil
+		}
 		if m.detailMode == detailDumps {
 			m.detailMode = detailSite
 		} else {
@@ -430,6 +548,9 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "Y":
+		if m.activeTab != tabSites {
+			return m, nil
+		}
 		if m.detailMode == detailSystem {
 			m.detailMode = detailSite
 		} else {
@@ -440,69 +561,78 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "F":
-		if m.detailMode == detailDashboard {
-			m.detailMode = detailSite
-		} else {
-			m.detailMode = detailDashboard
-			m.detailScroll = 0
-			m.focus = paneDetail
+	case "ctrl+right":
+		m.switchTab(m.nextTab(+1))
+		return m, m.afterNav()
+
+	case "ctrl+left":
+		m.switchTab(m.nextTab(-1))
+		return m, m.afterNav()
+
+	case "left", "right":
+		// The Overview lays Domains beside Toggles when the pane is wide enough;
+		// left and right cross between those columns while up and down walk one.
+		if m.timingActive() && m.focus == paneDetail {
+			site := m.currentSite()
+			rows := detailRows(site)
+			m.detailCursor = hopDetailColumn(rows, navigableRows(rows), m.detailCursor, m.detailInnerWidth())
+			m.followCursor = true
 		}
 		return m, nil
 
 	case "tab":
+		// On the Dashboard tab there are no list panes; tab moves focus
+		// between the grid cards so j/k and the wheel scroll the right one.
+		if m.activeTab == tabDashboard {
+			m.dashFocus = (m.dashFocus + 1) % numDashCards
+			return m, nil
+		}
 		m.focus = m.nextFocus(+1)
-		return m, m.syncLogs()
+		return m, m.afterNav()
 
 	case "shift+tab":
+		if m.activeTab == tabDashboard {
+			m.dashFocus = (m.dashFocus - 1 + numDashCards) % numDashCards
+			return m, nil
+		}
 		m.focus = m.nextFocus(-1)
-		return m, m.syncLogs()
+		return m, m.afterNav()
 
 	case "up", "k":
 		m.moveCursor(-1)
-		return m, m.syncLogs()
+		return m, m.afterNav()
 
 	case "down", "j":
 		m.moveCursor(1)
-		return m, m.syncLogs()
+		return m, m.afterNav()
 
 	case "pgup":
 		m.moveCursor(-10)
-		return m, m.syncLogs()
+		return m, m.afterNav()
 
 	case "pgdown":
 		m.moveCursor(10)
-		return m, m.syncLogs()
+		return m, m.afterNav()
 
 	case "home", "g":
 		m.setCursor(0)
-		return m, m.syncLogs()
+		return m, m.afterNav()
 
 	case "end", "G":
 		m.setCursor(1 << 30)
-		return m, m.syncLogs()
+		return m, m.afterNav()
 
 	case "l":
+		// On the Sites tab logs are a tab, not an overlay: `l` is the shortcut to
+		// it. An overlay opened on another tab still closes here, or `l` would
+		// select the tab underneath and leave the pane stuck open.
+		if m.activeTab == tabSites && m.detailMode == detailSite && m.currentSite() != nil && !m.showLogs {
+			return m, m.selectSiteTabByID(tabSiteLogs)
+		}
 		return m, m.toggleLogs()
 
 	case "t":
 		return m, m.actionShell()
-
-	case "v":
-		if m.width < narrowWidth {
-			// Narrow: v switches the top list between sites and services.
-			if m.focus == paneServices {
-				m.focus = paneSites
-			} else {
-				m.focus = paneServices
-			}
-		} else {
-			m.hideServices = !m.hideServices
-			if m.hideServices && m.focus == paneServices {
-				m.focus = paneSites
-			}
-		}
-		return m, nil
 
 	case "/":
 		if m.detailMode == detailDumps {
@@ -548,7 +678,7 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o":
 		switch m.focus {
 		case paneSites:
-			m.siteSort = (m.siteSort + 1) % 3
+			m.siteSort = (m.siteSort + 1) % siteSortModes
 			m.siteCursor = 0
 		case paneServices:
 			m.svcSort = (m.svcSort + 1) % 3
@@ -557,12 +687,15 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "[":
-		// In the Debug view (global D or the per-site Debug tab), [ / ] switch
-		// lens; everywhere else they cycle the log-pane target.
+		// [ / ] cycle whatever the focused surface offers: the Debug lens, the
+		// timing window on Overview, or the log target anywhere logs are showing.
 		if m.inDebugView() {
 			m.cycleDebugLens(-1)
 			m.detailScroll = 0
 			return m, nil
+		}
+		if m.timingActive() && !m.showLogs {
+			return m, m.cycleTimingRange(-1)
 		}
 		return m, m.cycleLogTarget(-1)
 
@@ -571,6 +704,9 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cycleDebugLens(1)
 			m.detailScroll = 0
 			return m, nil
+		}
+		if m.timingActive() && !m.showLogs {
+			return m, m.cycleTimingRange(1)
 		}
 		return m, m.cycleLogTarget(1)
 
@@ -581,13 +717,13 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "{":
-		if m.showLogs {
+		if m.showLogs || m.logsInDetail() {
 			m.logScroll += 10
 		}
 		return m, nil
 
 	case "}":
-		if m.showLogs {
+		if m.showLogs || m.logsInDetail() {
 			m.logScroll -= 10
 			if m.logScroll < 0 {
 				m.logScroll = 0
@@ -605,7 +741,7 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.actionStop()
 
 	case "a":
-		if m.focus == paneDetail && m.detailMode == detailSite && m.currentSite() != nil {
+		if m.activeTab == tabSites && m.focus == paneDetail && m.detailMode == detailSite && m.currentSite() != nil {
 			m.openDomainInput()
 			return m, nil
 		}
@@ -633,6 +769,11 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.actionServiceUpdate()
 
 	case "b":
+		// On the site Overview b cycles the timing panel's branch scope; on the
+		// Services tab it stays the service rollback.
+		if m.timingActive() {
+			return m, m.cycleTimingScope(1)
+		}
 		return m, m.actionServiceRollback()
 
 	case "O":
@@ -671,9 +812,7 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // selectSiteTab switches to the n-th site tab (1-based) drawn from the focused
 // site's available tabs — the single mapping the number-key shortcuts and the
 // tab strip both derive from, so the displayed number and the working key can't
-// diverge. Out-of-range numbers (e.g. 5 on a non-Laravel site that offers only
-// four tabs) are no-ops, and the Doctor tab routes through openDoctorTab so its
-// on-demand run still fires.
+// diverge. Out-of-range numbers are no-ops.
 func (m *Model) selectSiteTab(n int) tea.Cmd {
 	if m.detailMode != detailSite {
 		return nil
@@ -682,7 +821,17 @@ func (m *Model) selectSiteTab(n int) tea.Cmd {
 	if n < 1 || n > len(tabs) {
 		return nil
 	}
-	tab := tabs[n-1]
+	return m.selectSiteTabByID(tabs[n-1])
+}
+
+// selectSiteTabByID switches to a tab by identity, for the shortcuts that name a
+// tab rather than its position (`l` for Logs). The Doctor tab routes through
+// openDoctorTab so its on-demand run still fires; the Logs tab retargets the
+// tail so it starts streaming on arrival rather than on the next selection move.
+func (m *Model) selectSiteTabByID(tab siteTab) tea.Cmd {
+	if m.detailMode != detailSite {
+		return nil
+	}
 	if tab == tabSiteDoctor {
 		return m.openDoctorTab()
 	}
@@ -691,6 +840,10 @@ func (m *Model) selectSiteTab(n int) tea.Cmd {
 	// Switching to a tab focuses the detail pane so arrow keys navigate the tab
 	// content rather than the list pane the user came from.
 	m.focus = paneDetail
+	if tab == tabSiteLogs {
+		m.logScroll = 0
+		return m.afterNav()
+	}
 	return nil
 }
 
@@ -758,7 +911,7 @@ func (m *Model) openDomainEdit(full string) {
 // the detail cursor on a domain row. Returns false when the focus/row
 // doesn't match so other bindings keep working.
 func (m *Model) editFocusedDomain() (handled bool) {
-	if m.focus != paneDetail || m.detailMode != detailSite {
+	if m.activeTab != tabSites || m.focus != paneDetail || m.detailMode != detailSite {
 		return false
 	}
 	s := m.currentSite()
@@ -782,7 +935,7 @@ func (m *Model) editFocusedDomain() (handled bool) {
 // enter (running `lerd domain add <short>` from the site dir), cancels on
 // esc. Unlike filter input we're not narrowing a list in real time, so no
 // refresh is needed until the subprocess exits.
-func (m *Model) handleDomainInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleDomainInputKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.domainInputActive = false
@@ -823,8 +976,8 @@ func (m *Model) handleDomainInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.domainInput = string(r[:len(r)-1])
 		}
 	default:
-		if len(msg.Runes) > 0 {
-			m.domainInput += string(msg.Runes)
+		if msg.Text != "" {
+			m.domainInput += msg.Text
 		}
 	}
 	return m, nil
@@ -835,7 +988,7 @@ func (m *Model) handleDomainInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // + exits, backspace removes, runes append. Live filtering is cheap because
 // styleLogLine runs per visible row only — typing doesn't re-process the
 // entire ring buffer.
-func (m *Model) handleLogFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleLogFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.logFilter = ""
@@ -851,8 +1004,8 @@ func (m *Model) handleLogFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.logFilter = string(r[:len(r)-1])
 		}
 	default:
-		if len(msg.Runes) > 0 {
-			m.logFilter += string(msg.Runes)
+		if msg.Text != "" {
+			m.logFilter += msg.Text
 		}
 	}
 	return m, nil
@@ -863,7 +1016,7 @@ func (m *Model) handleLogFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // backspace removes, enter commits and exits, esc clears + exits. The
 // filter is applied live by dumpsContentLines so the visible list narrows
 // as the user types.
-func (m *Model) handleDumpsFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleDumpsFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.dumpsFilter = ""
@@ -883,8 +1036,8 @@ func (m *Model) handleDumpsFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dumpsScroll = 0
 		}
 	default:
-		if len(msg.Runes) > 0 {
-			m.dumpsFilter += string(msg.Runes)
+		if msg.Text != "" {
+			m.dumpsFilter += msg.Text
 			m.dumpsCursor = 0
 			m.dumpsScroll = 0
 		}
@@ -897,7 +1050,7 @@ func (m *Model) handleDumpsFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // the last rune; enter and esc exit input mode (esc also clears the
 // filter). Actions, tab, navigation are all suppressed while filter mode
 // is active so the user can type freely.
-func (m *Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	target := m.filterTarget()
 	switch msg.String() {
 	case "esc":
@@ -916,8 +1069,8 @@ func (m *Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.resetFilteredCursor()
 		}
 	default:
-		if len(msg.Runes) > 0 {
-			*target += string(msg.Runes)
+		if msg.Text != "" {
+			*target += msg.Text
 			m.resetFilteredCursor()
 		}
 	}
@@ -943,12 +1096,24 @@ func (m *Model) resetFilteredCursor() {
 	m.siteScroll = 0
 }
 
+// afterNav retargets everything that follows the selection: the log tail and the
+// request-timing panel. Every key that moves the cursor or changes focus goes
+// through here, so neither surface needs the individual handlers to know about it.
+func (m *Model) afterNav() tea.Cmd {
+	return tea.Batch(m.syncLogs(), m.ensureTiming())
+}
+
 // syncLogs retargets the log tail to match the currently-focused item
 // whenever the log pane is open. Called after every navigation or focus
 // change. Resets to the first target of the new selection; previous logCursor
 // doesn't transfer since target lists differ per item.
 func (m *Model) syncLogs() tea.Cmd {
-	if !m.showLogs {
+	// The site Logs tab and the Services detail both show the tail without the
+	// manual `l` toggle, so it follows the selection there too. When no surface
+	// wants logs, stop the tail rather than keep streaming a container we've
+	// navigated away from.
+	if !m.showLogs && !m.logsInDetail() {
+		m.logTail.Stop()
 		return nil
 	}
 	targets := m.currentLogTargets()
@@ -967,6 +1132,318 @@ func (m *Model) syncLogs() tea.Cmd {
 	return m.logTail.Start(targets[0])
 }
 
+// nextTab returns the tab `dir` steps (±1) along orderedTabs, wrapping at
+// both ends so ctrl+left from Dashboard lands on Services and ctrl+right
+// from Services lands on Dashboard.
+func (m *Model) nextTab(dir int) topTab {
+	n := len(orderedTabs)
+	idx := 0
+	for i, t := range orderedTabs {
+		if t == m.activeTab {
+			idx = i
+			break
+		}
+	}
+	idx = ((idx+dir)%n + n) % n
+	return orderedTabs[idx]
+}
+
+// switchTab moves to tab t and parks focus on the pane that screen leads
+// with: the sites list on the Sites tab, the services list on the Services
+// tab, and the (non-list) detail surface on the Dashboard so j/k scrolls the
+// grid. Closes any open picker so a half-finished version pick doesn't bleed
+// across screens.
+func (m *Model) switchTab(t topTab) {
+	if t == m.activeTab {
+		return
+	}
+	m.activeTab = t
+	m.closePicker()
+	// Settings / System / Debug are Sites-only detail surfaces; leaving the mode
+	// set when moving to another tab would render that stale surface there (and
+	// the S/Y/D toggles are gated to Sites, so it couldn't be cleared).
+	m.detailMode = detailSite
+	switch t {
+	case tabServices:
+		m.focus = paneServices
+	case tabSites:
+		m.focus = paneSites
+	case tabDashboard:
+		m.focus = paneDetail
+		m.detailScroll = 0
+	}
+}
+
+// handleMouse turns mouse input into tab switches, row selections, card focus
+// and scrolling. The wheel scrolls whichever dashboard card it's over; a
+// left-click switches tabs, selects a list row, or (on the dashboard) jumps to
+// a clicked site/service's tab or focuses a card. Every clickable region is a
+// bubblezone mark laid down during render, so hit-testing is a bounds check.
+func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// While a modal overlay is open, View() returns the modal frame without
+	// rescanning zones, so the registered click regions are stale from the last
+	// base frame. Swallow mouse input here (mirroring handleMainKey, which routes
+	// through the modal handlers before any pane action) so a stray click can't
+	// switch tabs, move a cursor, or silently dismiss a half-finished picker.
+	if m.modalActive() {
+		return m, nil
+	}
+	if _, ok := msg.(tea.MouseWheelMsg); ok {
+		return m.handleWheel(msg)
+	}
+	// bubbletea v2 delivers a press as its own MouseClickMsg; only left clicks
+	// drive the hit-testing below.
+	if _, ok := msg.(tea.MouseClickMsg); !ok || msg.Mouse().Button != tea.MouseLeft {
+		return m, nil
+	}
+	for _, t := range orderedTabs {
+		if zone.Get("tab:" + t.label()).InBounds(msg) {
+			m.switchTab(t)
+			return m, m.afterNav()
+		}
+	}
+	// The Debug lens tabs (Dumps / Queries / …) are clickable wherever the
+	// Debug view is showing — the per-site Debug tab or the full window.
+	if m.inDebugView() {
+		for i := range debugLenses {
+			if zone.Get(fmt.Sprintf("debuglens:%d", i)).InBounds(msg) {
+				m.debugLens = i
+				m.dumpsCursor = 0
+				m.dumpsScroll = 0
+				m.detailScroll = 0
+				return m, nil
+			}
+		}
+	}
+	switch m.activeTab {
+	case tabSites:
+		for i := range m.visibleSites() {
+			if zone.Get(fmt.Sprintf("site:%d", i)).InBounds(msg) {
+				m.focus = paneSites
+				m.siteCursor = i
+				m.closePicker()
+				return m, m.afterNav()
+			}
+		}
+		// The site-detail tab strip ([1] Overview · [2] Env · …) is clickable.
+		if m.detailMode == detailSite {
+			tabs := availableSiteTabs(m.currentSite())
+			for i := range tabs {
+				if zone.Get(fmt.Sprintf("sitetab:%d", i)).InBounds(msg) {
+					return m, m.selectSiteTab(i + 1)
+				}
+			}
+		}
+	case tabServices:
+		for i := range m.visibleServices() {
+			if zone.Get(fmt.Sprintf("svc:%d", i)).InBounds(msg) {
+				m.focus = paneServices
+				m.svcCursor = i
+				return m, m.afterNav()
+			}
+		}
+	case tabDashboard:
+		// A click on any clickable row jumps to that item via the same path as
+		// the keyboard enter. Each card's selectable zone ids are cached at
+		// render time, so we just hit-test those rather than rebuilding them.
+		for ci := 0; ci < numDashCards; ci++ {
+			for ri, id := range m.dashZones[ci] {
+				if zone.Get(id).InBounds(msg) {
+					// Keep the keyboard cursor in sync so returning to the
+					// dashboard lands on the row the user last clicked.
+					m.dashFocus = ci
+					m.dashRowCursor[ci] = ri
+					return m, m.activateDashZone(id)
+				}
+			}
+		}
+		// A click elsewhere on a card just focuses it for keyboard navigation.
+		for i := 0; i < numDashCards; i++ {
+			if zone.Get(fmt.Sprintf("card:%d", i)).InBounds(msg) {
+				m.dashFocus = i
+				return m, nil
+			}
+		}
+	}
+	return m, nil
+}
+
+// handleWheel scrolls whichever scrollable pane the cursor is over: a
+// dashboard card, the app-logs / logs panes, the detail pane, or a list. Each
+// pane is a bubblezone region laid down during render; if the wheel isn't over
+// any known pane it falls back to scrolling the currently focused one.
+func (m *Model) handleWheel(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	up := msg.Mouse().Button == tea.MouseWheelUp
+	delta := 3
+	if up {
+		delta = -3
+	}
+
+	if m.activeTab == tabDashboard {
+		for i := 0; i < numDashCards; i++ {
+			if zone.Get(fmt.Sprintf("card:%d", i)).InBounds(msg) {
+				m.dashFocus = i
+				m.dashScroll[i] += delta
+				if m.dashScroll[i] < 0 {
+					m.dashScroll[i] = 0
+				}
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
+	// The logs pane takes priority, whether it's the full-width `l` overlay or the
+	// tail standing in for the detail column.
+	if (m.showLogs || m.logsInDetail()) && zone.Get("pane:logs").InBounds(msg) {
+		if up {
+			m.logScroll += 3
+		} else if m.logScroll -= 3; m.logScroll < 0 {
+			m.logScroll = 0
+		}
+		return m, nil
+	}
+	if zone.Get("pane:detail").InBounds(msg) {
+		m.scrollOffset(&m.detailScroll, delta)
+		return m, nil
+	}
+	if zone.Get("pane:sites").InBounds(msg) {
+		m.scrollOffset(&m.siteScroll, delta)
+		return m, nil
+	}
+	if zone.Get("pane:services").InBounds(msg) {
+		m.scrollOffset(&m.svcScroll, delta)
+		return m, nil
+	}
+	// Fallback: scroll the offset of whatever pane currently holds focus.
+	switch m.focus {
+	case paneSites:
+		m.scrollOffset(&m.siteScroll, delta)
+	case paneServices:
+		m.scrollOffset(&m.svcScroll, delta)
+	case paneDetail:
+		m.scrollOffset(&m.detailScroll, delta)
+	}
+	return m, nil
+}
+
+// scrollOffset nudges a viewport scroll offset by delta, clamping the lower
+// bound; the upper bound is clamped by viewport() against the content height at
+// render time. It deliberately leaves the selection cursor alone, so wheeling
+// moves the view without changing what's selected.
+func (m *Model) scrollOffset(off *int, delta int) {
+	*off += delta
+	if *off < 0 {
+		*off = 0
+	}
+}
+
+// activateDashSelection activates the focused dashboard card's selected row,
+// the keyboard equivalent of clicking it. No-op on info-only cards.
+func (m *Model) activateDashSelection() tea.Cmd {
+	zones := m.dashZones[m.dashFocus]
+	cur := m.dashRowCursor[m.dashFocus]
+	if cur < 0 || cur >= len(zones) {
+		return nil
+	}
+	return m.activateDashZone(zones[cur])
+}
+
+// activateDashZone performs the jump for a dashboard row zone id, shared by the
+// mouse click handler and keyboard enter so both behave identically. A site /
+// service / worker jumps to its own tab with that item selected; a failing
+// worker jumps to its owning site's detail.
+func (m *Model) activateDashZone(id string) tea.Cmd {
+	idx := func(prefix string) (int, bool) {
+		if !strings.HasPrefix(id, prefix) {
+			return 0, false
+		}
+		var n int
+		if _, err := fmt.Sscanf(id[len(prefix):], "%d", &n); err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	if i, ok := idx("dashsite:"); ok && i >= 0 && i < len(m.snap.Sites) {
+		m.switchTab(tabSites)
+		m.selectSiteByName(m.snap.Sites[i].Name)
+		return m.afterNav()
+	}
+	if i, ok := idx("dashsvc:"); ok && i >= 0 && i < len(m.snap.Services) {
+		m.switchTab(tabServices)
+		m.selectServiceByName(m.snap.Services[i].Name)
+		return m.afterNav()
+	}
+	if i, ok := idx("dashworker:"); ok && i >= 0 && i < len(m.snap.Services) {
+		m.switchTab(tabServices)
+		m.selectServiceByName(m.snap.Services[i].Name)
+		return m.afterNav()
+	}
+	if fi, ok := idx("dashfailsite:"); ok {
+		failing := failingWorkers(m.snap)
+		if fi >= 0 && fi < len(failing) {
+			m.switchTab(tabSites)
+			if si := failing[fi].siteIdx; si >= 0 && si < len(m.snap.Sites) {
+				m.selectSiteByName(m.snap.Sites[si].Name)
+			}
+			return m.afterNav()
+		}
+	}
+	return nil
+}
+
+// selectSiteByName focuses the Sites list on the site with the given name,
+// matched against the current (filtered/sorted) view so the cursor lands on
+// the row the user actually sees.
+func (m *Model) selectSiteByName(name string) {
+	if m.focusSiteIfVisible(name) {
+		return
+	}
+	// A leftover filter on the destination tab can hide the target (e.g. when
+	// jumping in from a dashboard click). Clear it and retry so the navigation
+	// lands rather than silently doing nothing.
+	if m.siteFilter != "" {
+		m.siteFilter = ""
+		m.focusSiteIfVisible(name)
+	}
+}
+
+func (m *Model) focusSiteIfVisible(name string) bool {
+	for i, s := range m.visibleSites() {
+		if s.Name == name {
+			m.focus = paneSites
+			m.siteCursor = i
+			m.followCursor = true // scroll the destination list to it
+			return true
+		}
+	}
+	return false
+}
+
+// selectServiceByName focuses the Services list on the service with the given
+// name, matched against the current view.
+func (m *Model) selectServiceByName(name string) {
+	if m.focusServiceIfVisible(name) {
+		return
+	}
+	if m.svcFilter != "" {
+		m.svcFilter = ""
+		m.focusServiceIfVisible(name)
+	}
+}
+
+func (m *Model) focusServiceIfVisible(name string) bool {
+	for i, s := range m.visibleServices() {
+		if s.Name == name {
+			m.focus = paneServices
+			m.svcCursor = i
+			m.followCursor = true // scroll the destination list to it
+			return true
+		}
+	}
+	return false
+}
+
 // nextFocus returns the focus after moving `dir` steps (±1) through the
 // list of panes that are currently visible and usable. Wide-mode order is
 // sites → detail → services so tab from a selected site lands on its
@@ -976,23 +1453,20 @@ func (m *Model) syncLogs() tea.Cmd {
 // moves between the current list pane and detail.
 func (m *Model) nextFocus(dir int) focusPane {
 	var panes []focusPane
-	if m.width < narrowWidth {
-		// In narrow mode, tab only moves between the current list pane and detail.
-		listPane := paneSites
-		if m.focus == paneServices {
-			listPane = paneServices
-		}
-		panes = []focusPane{listPane}
-		if m.currentSite() != nil {
+	switch m.activeTab {
+	case tabDashboard:
+		// The dashboard grid has no list panes; focus stays on detail so
+		// j/k scrolls the grid.
+		return paneDetail
+	case tabServices:
+		panes = []focusPane{paneServices}
+		if m.currentService() != nil {
 			panes = append(panes, paneDetail)
 		}
-	} else {
+	default: // tabSites
 		panes = []focusPane{paneSites}
 		if m.currentSite() != nil {
 			panes = append(panes, paneDetail)
-		}
-		if !m.hideServices {
-			panes = append(panes, paneServices)
 		}
 	}
 	n := len(panes)
@@ -1011,6 +1485,23 @@ func (m *Model) nextFocus(dir int) focusPane {
 }
 
 func (m *Model) moveCursor(delta int) {
+	// On the Dashboard, a card with selectable rows (Sites, Services, Workers)
+	// moves its row cursor; the render follows it. Info-only cards (System
+	// Health, Resources, Lerd) have nothing to select, so j/k scrolls them.
+	if m.activeTab == tabDashboard {
+		if zones := m.dashZones[m.dashFocus]; len(zones) > 0 {
+			m.dashRowCursor[m.dashFocus] = clamp(m.dashRowCursor[m.dashFocus]+delta, 0, len(zones)-1)
+			return
+		}
+		m.dashScroll[m.dashFocus] += delta
+		if m.dashScroll[m.dashFocus] < 0 {
+			m.dashScroll[m.dashFocus] = 0
+		}
+		return
+	}
+	// Keyboard navigation should keep the moved selection on screen; the next
+	// render follows the cursor for the focused pane.
+	m.followCursor = true
 	switch m.focus {
 	case paneSites:
 		m.siteCursor = clamp(m.siteCursor+delta, 0, max(0, len(m.visibleSites())-1))
@@ -1019,11 +1510,7 @@ func (m *Model) moveCursor(delta int) {
 		m.svcCursor = clamp(m.svcCursor+delta, 0, max(0, len(m.visibleServices())-1))
 	case paneDetail:
 		if m.pickerKind != kindInfo {
-			n := len(m.pickerOptions)
-			if n == 0 {
-				return
-			}
-			m.pickerCursor = clamp(m.pickerCursor+delta, 0, n-1)
+			m.movePickerCursor(delta)
 			return
 		}
 		switch m.detailMode {
@@ -1033,21 +1520,22 @@ func (m *Model) moveCursor(delta int) {
 		case detailSystem:
 			nav := navigableSystemRows(m.systemRows())
 			m.systemRow = clamp(m.systemRow+delta, 0, max(0, len(nav)-1))
-		case detailDashboard:
-			// Dashboard has no selection — j/k just scrolls the content.
-			// Without this case the default branch would silently advance
-			// m.detailCursor on the hidden site-overview rows.
-			m.detailScroll += delta
-			if m.detailScroll < 0 {
-				m.detailScroll = 0
-			}
 		case detailDumps:
 			visible := len(m.debugVisibleEvents(""))
 			m.dumpsCursor = clamp(m.dumpsCursor+delta, 0, max(0, visible-1))
 		default:
-			// Non-Overview site tabs (Env / Dumps / App logs) are read-only
-			// scroll surfaces; advance detailScroll directly. The cursor
-			// concept only applies to Overview's toggleable rows.
+			// The Logs tab is a live tail, so it scrolls its own buffer: up walks
+			// back through history, down returns toward the tail.
+			if m.siteTab == tabSiteLogs {
+				m.logScroll -= delta
+				if m.logScroll < 0 {
+					m.logScroll = 0
+				}
+				return
+			}
+			// The other non-Overview site tabs (Env / Debug / Doctor) are read-only
+			// scroll surfaces; advance detailScroll directly. The cursor concept
+			// only applies to Overview's toggleable rows.
 			if m.siteTab != tabSiteOverview {
 				m.detailScroll += delta
 				if m.detailScroll < 0 {
@@ -1064,6 +1552,7 @@ func (m *Model) moveCursor(delta int) {
 }
 
 func (m *Model) setCursor(pos int) {
+	m.followCursor = true
 	switch m.focus {
 	case paneSites:
 		m.siteCursor = clamp(pos, 0, max(0, len(m.visibleSites())-1))
@@ -1075,6 +1564,11 @@ func (m *Model) setCursor(pos int) {
 func (m *Model) clampCursors() {
 	m.siteCursor = clamp(m.siteCursor, 0, max(0, len(m.visibleSites())-1))
 	m.svcCursor = clamp(m.svcCursor, 0, max(0, len(m.visibleServices())-1))
+	// Keep each dashboard card's row cursor within the rows it had at the last
+	// render; the next render rebuilds dashZones and re-clamps as needed.
+	for i := range m.dashRowCursor {
+		m.dashRowCursor[i] = clamp(m.dashRowCursor[i], 0, max(0, len(m.dashZones[i])-1))
+	}
 }
 
 // visibleSites is the view-ready sites list: m.snap.Sites with the active
@@ -1082,7 +1576,7 @@ func (m *Model) clampCursors() {
 // this so filtered-out rows are invisible to navigation, not just hidden
 // visually.
 func (m *Model) visibleSites() []siteinfo.EnrichedSite {
-	return filteredSortedSites(m.snap.Sites, m.siteFilter, m.siteSort)
+	return filteredSortedSites(m.snap.Sites, m.siteFilter, m.siteSort, m.snap.Workspaces)
 }
 
 func (m *Model) visibleServices() []ServiceRow {
@@ -1127,10 +1621,10 @@ func (m *Model) toggleLogs() tea.Cmd {
 }
 
 // cycleLogTarget steps through the available log sources for the currently
-// focused item (FPM → queue → schedule → …). No-op when the log pane is
-// closed or the item has only one source.
+// focused item (FPM → queue → schedule → …). No-op when no surface is showing
+// the tail, or the item has only one source.
 func (m *Model) cycleLogTarget(delta int) tea.Cmd {
-	if !m.showLogs {
+	if !m.showLogs && !m.logsInDetail() {
 		return nil
 	}
 	targets := m.currentLogTargets()
@@ -1147,14 +1641,14 @@ func (m *Model) cycleLogTarget(delta int) tea.Cmd {
 // per running-or-defined worker (each worker is a systemd user unit tailed
 // via journalctl --user). Services have just the one container.
 func (m *Model) currentLogTargets() []LogTarget {
-	switch m.focus {
-	case paneSites, paneDetail:
+	switch m.activeTab {
+	case tabSites:
 		s := m.currentSite()
 		if s == nil {
 			return nil
 		}
 		return logTargetsForSite(s)
-	case paneServices:
+	case tabServices:
 		svc := m.currentService()
 		if svc == nil {
 			return nil
@@ -1286,13 +1780,13 @@ func (m *Model) currentService() *ServiceRow {
 }
 
 func (m *Model) actionStart() tea.Cmd {
-	switch m.focus {
-	case paneSites, paneDetail:
+	switch m.activeTab {
+	case tabSites:
 		if s := m.currentSite(); s != nil {
 			m.setStatus("starting "+s.Name+"…", 5*time.Second)
 			return runLerd(s.Path, "unpause", s.Name)
 		}
-	case paneServices:
+	case tabServices:
 		if svc := m.currentService(); svc != nil {
 			if cmd := m.workerActionCmd(svc, "start"); cmd != nil {
 				return cmd
@@ -1337,13 +1831,13 @@ func (m *Model) workerActionCmd(svc *ServiceRow, verb string) tea.Cmd {
 }
 
 func (m *Model) actionStop() tea.Cmd {
-	switch m.focus {
-	case paneSites, paneDetail:
+	switch m.activeTab {
+	case tabSites:
 		if s := m.currentSite(); s != nil {
 			m.setStatus("pausing "+s.Name+"…", 5*time.Second)
 			return runLerd(s.Path, "pause", s.Name)
 		}
-	case paneServices:
+	case tabServices:
 		if svc := m.currentService(); svc != nil {
 			if cmd := m.workerActionCmd(svc, "stop"); cmd != nil {
 				return cmd
@@ -1356,13 +1850,13 @@ func (m *Model) actionStop() tea.Cmd {
 }
 
 func (m *Model) actionRestart() tea.Cmd {
-	switch m.focus {
-	case paneSites, paneDetail:
+	switch m.activeTab {
+	case tabSites:
 		if s := m.currentSite(); s != nil {
 			m.setStatus("restarting "+s.Name+"…", 5*time.Second)
 			return runLerd(s.Path, "restart", s.Name)
 		}
-	case paneServices:
+	case tabServices:
 		if svc := m.currentService(); svc != nil {
 			if cmd := m.workerActionCmd(svc, "restart"); cmd != nil {
 				return cmd
@@ -1380,8 +1874,8 @@ func (m *Model) actionRestart() tea.Cmd {
 // site's project path means PHP tools (composer, artisan) run as if the
 // user had cd'd into the project first.
 func (m *Model) actionShell() tea.Cmd {
-	switch m.focus {
-	case paneSites, paneDetail:
+	switch m.activeTab {
+	case tabSites:
 		s := m.currentSite()
 		if s == nil {
 			return nil
@@ -1396,7 +1890,7 @@ func (m *Model) actionShell() tea.Cmd {
 			return nil
 		}
 		return runShellIn(container, s.Path)
-	case paneServices:
+	case tabServices:
 		svc := m.currentService()
 		if svc == nil {
 			return nil
@@ -1445,7 +1939,7 @@ func (m *Model) siteByName(name string) *siteinfo.EnrichedSite {
 }
 
 func (m *Model) actionPauseToggle() tea.Cmd {
-	if m.focus != paneSites && m.focus != paneDetail {
+	if m.activeTab != tabSites {
 		return nil
 	}
 	s := m.currentSite()
@@ -1465,8 +1959,9 @@ func (m *Model) actionPauseToggle() tea.Cmd {
 // command registry.
 func Run(version string) error {
 	podman.Cache.Start(context.Background())
+	zone.NewGlobal()
 	m := NewModel(version)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 
 	// Wire the cache's change callback into the program so an external
 	// state change (CLI mutation in another process, container crash,

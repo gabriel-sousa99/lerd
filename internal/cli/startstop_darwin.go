@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
@@ -86,11 +87,29 @@ var requiredMachineMounts = []string{"/Users", "/private", "/var/folders", "/Vol
 // can start.
 const homeMachineMount = "/Users"
 
+// machineProvider returns the machine provider to pin for `podman machine
+// init`, or "" to accept podman's default. Podman 6 switched the macOS
+// Apple-Silicon default to libkrun, which needs a `krunkit` binary that is not
+// in Homebrew core, so an unpinned init fails with "krunkit: executable file
+// not found". Pin applehv (the vfkit backend bundled with podman, which lerd
+// has always used) so init works with no extra dependency. Empty on podman <6,
+// where applehv is already the default and --provider may be unsupported.
+func machineProvider() string {
+	if ok, _, err := podman.VersionAtLeast(6, 0); err == nil && ok {
+		return "applehv"
+	}
+	return ""
+}
+
 // machineInitArgs builds `podman machine init` arguments with every required
 // mount and the host-scaled memory. name re-creates a specific machine
-// (preserving a custom name); "" creates Podman's default.
-func machineInitArgs(name string, targetMemoryMiB int64) []string {
+// (preserving a custom name); "" creates Podman's default. provider pins the
+// VM backend ("" leaves podman's default); see machineProvider.
+func machineInitArgs(name string, targetMemoryMiB int64, provider string) []string {
 	args := []string{"machine", "init", "--rootful"}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
 	for _, m := range requiredMachineMounts {
 		args = append(args, "-v", m+":"+m)
 	}
@@ -145,37 +164,39 @@ func machineMissingHomeMount(name string) bool {
 // (every bind mount fails), so nothing of value is lost. The caller starts the
 // freshly-initialised machine.
 func recreateBrokenMachine(name string, running bool, targetMemoryMiB int64) {
-	fmt.Println("  --> Podman Machine is missing the host home mount and can't be repaired")
-	fmt.Println("      in place; recreating it. No running containers are affected (a")
-	fmt.Println("      machine in this state can't start any).")
+	feedback.Line("Podman Machine is missing the host home mount; recreating it (can't be repaired in place)…")
+	feedback.Note("No running containers are affected; a machine in this state can't start any.")
 	if running {
-		stopCmd := exec.Command(podman.PodmanBin(), "machine", "stop", name)
+		stopCmd := podman.Cmd("machine", "stop", name)
 		stopCmd.Stdout = os.Stdout
 		stopCmd.Stderr = os.Stderr
 		stopCmd.Run() //nolint:errcheck
 	}
-	rmCmd := exec.Command(podman.PodmanBin(), "machine", "rm", "-f", name)
+	rmCmd := podman.Cmd("machine", "rm", "-f", name)
 	rmCmd.Stdout = os.Stdout
 	rmCmd.Stderr = os.Stderr
 	if err := rmCmd.Run(); err != nil {
-		fmt.Printf("  WARN: podman machine rm: %v\n", err)
+		feedback.Warn("podman machine rm: %v", err)
 		return
 	}
-	initCmd := exec.Command(podman.PodmanBin(), machineInitArgs(name, targetMemoryMiB)...)
+	initCmd := podman.Cmd(machineInitArgs(name, targetMemoryMiB, machineProvider())...)
 	initCmd.Stdout = os.Stdout
 	initCmd.Stderr = os.Stderr
 	if err := initCmd.Run(); err != nil {
-		fmt.Printf("  WARN: podman machine init: %v\n", err)
+		feedback.Warn("podman machine init: %v", err)
 	}
 }
 
 // ensurePodmanMachineRunning ensures a Podman Machine VM exists, is rootful,
 // and is running. If no machine exists it initialises one with --rootful.
 // If an existing machine is rootless it is stopped, switched, and restarted.
-// On macOS all container operations require the VM to be up.
-func ensurePodmanMachineRunning() {
+// On macOS all container operations require the VM to be up. It returns an
+// error only when the VM cannot be started, so callers (install, start) can
+// halt instead of cascading into a wall of confusing podman "exit status 125"
+// failures from every command that follows.
+func ensurePodmanMachineRunning() error {
 	// machine list only exposes Name and Running; use inspect for Rootful.
-	listOut, _ := exec.Command(podman.PodmanBin(), "machine", "list", "--format", "{{.Name}}\t{{.Running}}").Output()
+	listOut, _ := machineQuery("machine", "list", "--format", "{{.Name}}\t{{.Running}}")
 
 	type machineInfo struct {
 		name    string
@@ -204,7 +225,7 @@ func ensurePodmanMachineRunning() {
 
 		// Inspect to get Rootful status.
 		rootful := false
-		inspectOut, err := exec.Command(podman.PodmanBin(), "machine", "inspect", "--format", "{{.Rootful}}", name).Output()
+		inspectOut, err := machineQuery("machine", "inspect", "--format", "{{.Rootful}}", name)
 		if err == nil {
 			rootful = strings.TrimSpace(string(inspectOut)) == "true"
 		}
@@ -225,7 +246,7 @@ func ensurePodmanMachineRunning() {
 	}
 
 	if len(machines) == 0 {
-		fmt.Println("  --> Initialising Podman Machine (first run, this may take a minute) ...")
+		feedback.Line("Initialising Podman Machine (first run, this may take a minute)…")
 		// Size memory at init so a fresh VM (first run, or one recreated by
 		// `lerd machine reset`) boots at the host-scaled target rather than
 		// podman's stock default. The existing-machine branch below only
@@ -233,12 +254,12 @@ func ensurePodmanMachineRunning() {
 		cfg, _ := config.LoadGlobal()
 		execMode := cfg != nil && cfg.WorkerExecMode() != config.WorkerExecModeContainer
 		targetMemoryMiB := recommendedVMMemoryMiB(hostMemoryGiB(), execMode)
-		cmd := exec.Command(podman.PodmanBin(), machineInitArgs("", targetMemoryMiB)...)
+		cmd := podman.Cmd(machineInitArgs("", targetMemoryMiB, machineProvider())...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			fmt.Printf("  WARN: podman machine init: %v\n", err)
-			return
+			feedback.Warn("podman machine init: %v", err)
+			return fmt.Errorf("podman machine init: %w", err)
 		}
 	} else {
 		m := machines[0]
@@ -259,8 +280,8 @@ func ensurePodmanMachineRunning() {
 		} else {
 			needsRootful := !m.rootful
 			needsMemory := false
-			if inspectMem, err := exec.Command(podman.PodmanBin(), "machine", "inspect",
-				"--format", "{{.Resources.Memory}}", m.name).Output(); err == nil {
+			if inspectMem, err := machineQuery("machine", "inspect",
+				"--format", "{{.Resources.Memory}}", m.name); err == nil {
 				if memMiB, parseErr := strconv.ParseInt(strings.TrimSpace(string(inspectMem)), 10, 64); parseErr == nil && memMiB > 0 {
 					if memMiB < targetMemoryMiB {
 						needsMemory = true
@@ -278,73 +299,104 @@ func ensurePodmanMachineRunning() {
 						parts = append(parts, fmt.Sprintf("increase memory to %d MB", targetMemoryMiB))
 					}
 					reason := strings.Join(parts, " and ")
-					fmt.Printf("  --> Stopping Podman Machine to %s ...\n", reason)
-					stopCmd := exec.Command(podman.PodmanBin(), "machine", "stop", m.name)
-					stopCmd.Stdout = os.Stdout
-					stopCmd.Stderr = os.Stderr
-					stopCmd.Run() //nolint:errcheck
+					feedback.Line(fmt.Sprintf("Stopping Podman Machine to %s…", reason))
+					_ = runMachineStreaming(machineStopTimeout, "machine", "stop", m.name)
 				}
 				if needsRootful {
-					fmt.Println("  --> Enabling rootful mode for Podman Machine (required for ports 80/443) ...")
-					setCmd := exec.Command(podman.PodmanBin(), "machine", "set", "--rootful", m.name)
+					feedback.Line("Enabling rootful mode for Podman Machine (required for ports 80/443)…")
+					setCmd := podman.Cmd("machine", "set", "--rootful", m.name)
 					setCmd.Stdout = os.Stdout
 					setCmd.Stderr = os.Stderr
 					if err := setCmd.Run(); err != nil {
-						fmt.Printf("  WARN: podman machine set --rootful: %v\n", err)
+						feedback.Warn("podman machine set --rootful: %v", err)
 					}
 				}
 				if needsMemory {
 					if hostGiB > 0 && hostGiB <= 8 {
-						fmt.Printf("  --> Host has %d GB RAM; setting Podman Machine to %d MB (tight but workable) ...\n", hostGiB, targetMemoryMiB)
-						fmt.Println("       If sites slow down under load, run: podman machine set --memory 4096")
+						feedback.Line(fmt.Sprintf("Host has %d GB RAM; setting Podman Machine to %d MB (tight but workable)…", hostGiB, targetMemoryMiB))
+						feedback.Note("If sites slow down under load, run: podman machine set --memory 4096")
 					} else {
-						fmt.Printf("  --> Setting Podman Machine memory to %d MB ...\n", targetMemoryMiB)
+						feedback.Line(fmt.Sprintf("Setting Podman Machine memory to %d MB…", targetMemoryMiB))
 					}
-					setCmd := exec.Command(podman.PodmanBin(), "machine", "set",
+					setCmd := podman.Cmd("machine", "set",
 						"--memory", strconv.FormatInt(targetMemoryMiB, 10), m.name)
 					setCmd.Stdout = os.Stdout
 					setCmd.Stderr = os.Stderr
 					if err := setCmd.Run(); err != nil {
-						fmt.Printf("  WARN: podman machine set --memory: %v\n", err)
+						feedback.Warn("podman machine set --memory: %v", err)
 					}
 				}
 			} else if m.running {
-				return // already running and correctly configured
+				return nil // already running and correctly configured
 			}
 		}
 	}
 
-	fmt.Println("  --> Starting Podman Machine ...")
-	cmd := exec.Command(podman.PodmanBin(), "machine", "start")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("  WARN: podman machine start: %v\n", err)
-		return
+	feedback.Line("Starting Podman Machine…")
+	if err := startPodmanMachineWithRetry(); err != nil {
+		return err
 	}
 
 	// `podman machine start` exits before the API socket is ready to handle
 	// container operations. Poll `podman ps` (which exercises the full
 	// container stack, not just the info endpoint) until it succeeds, then
 	// wait a few extra seconds for the socket to fully settle.
-	fmt.Print("  --> Waiting for Podman Machine to be ready ...")
+	// Printed in place (no feedback.Line) so the polling dots and the final
+	// "ready" land on the same line; the leading pad + dim arrow still match
+	// the surrounding feedback vocabulary.
+	fmt.Printf(" %s %s", feedback.Dim("→"), feedback.Dim("Waiting for Podman Machine to be ready…"))
 	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := exec.Command(podman.PodmanBin(), "ps", "-q").Run(); err == nil {
+		if err := podman.Cmd("ps", "-q").Run(); err == nil {
 			time.Sleep(3 * time.Second) // grace period before container ops
-			fmt.Println(" ready")
-			return
+			fmt.Println(" " + feedback.Green("ready"))
+			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
-		fmt.Print(".")
+		fmt.Print(feedback.Dim("."))
 	}
-	fmt.Println(" timed out (proceeding anyway)")
+	fmt.Println(" " + feedback.Amber("timed out (proceeding anyway)"))
+	return nil
+}
+
+// startPodmanMachineWithRetry runs `podman machine start`, retrying once if the
+// first attempt fails. On new macOS (e.g. Tahoe 26.x) vfkit can crash on the
+// first boot and leave its SSH port unreleased; a second start makes podman
+// notice the stale port, reassign it, and boot cleanly. If the retry also
+// fails we stop with an actionable message instead of letting every later
+// podman command cascade into confusing "exit status 125" errors.
+func startPodmanMachineWithRetry() error {
+	run := func() error {
+		return runMachineStreaming(machineStartTimeout, "machine", "start")
+	}
+
+	err := run()
+	if err == nil {
+		return nil
+	}
+
+	feedback.Warn("podman machine start: %v", err)
+	feedback.Line("Retrying Podman Machine start once…")
+	// Brief settle before retrying: when vfkit crashes it can take a moment to
+	// fully exit and release the SSH port it grabbed. Retrying instantly can
+	// race that release; a short pause lets podman reassign the port cleanly.
+	time.Sleep(3 * time.Second)
+	err = run()
+	if err == nil {
+		return nil
+	}
+
+	// The error itself is surfaced once by main as the command's exit error, so
+	// we only add the actionable guidance here rather than re-Warn the same text.
+	feedback.Note("The Podman Machine VM would not boot. On new macOS releases this is often a vfkit issue that leaves a stale SSH port behind.")
+	feedback.Note("Try: podman machine stop && podman machine start. If it keeps failing, run `lerd machine reset` to recreate the VM, then `lerd install` again.")
+	return fmt.Errorf("podman machine start: %w", err)
 }
 
 // stopPodmanMachine stops the running Podman Machine VM. Called by runQuit so
 // the VM is cleanly shut down when the user quits Lerd entirely.
 func stopPodmanMachine() {
-	out, err := exec.Command(podman.PodmanBin(), "machine", "list", "--format", "{{.Name}}\t{{.Running}}").Output()
+	out, err := podman.Cmd("machine", "list", "--format", "{{.Name}}\t{{.Running}}").Output()
 	if err != nil {
 		return
 	}
@@ -357,12 +409,12 @@ func stopPodmanMachine() {
 			continue
 		}
 		name := strings.TrimSuffix(fields[0], "*")
-		fmt.Printf("  --> Stopping Podman Machine (%s) ...\n", name)
-		cmd := exec.Command(podman.PodmanBin(), "machine", "stop", name)
+		feedback.Line(fmt.Sprintf("Stopping Podman Machine (%s)…", name))
+		cmd := podman.Cmd("machine", "stop", name)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			fmt.Printf("  WARN: podman machine stop: %v\n", err)
+			feedback.Warn("podman machine stop: %v", err)
 		}
 	}
 }

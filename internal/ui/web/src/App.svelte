@@ -25,6 +25,7 @@
   import DashboardOverlay from '$components/DashboardOverlay.svelte';
   import WorkerHealthBanner from '$components/WorkerHealthBanner.svelte';
   import NotifyBanner from '$components/NotifyBanner.svelte';
+  import NotificationToasts from '$components/NotificationToasts.svelte';
   import CommandPalette from '$components/CommandPalette.svelte';
   import CommandRunModal from '$components/CommandRunModal.svelte';
   import { initNotify } from '$lib/notify';
@@ -152,6 +153,7 @@
   <DashboardOverlay />
   <WorkerHealthBanner />
   <NotifyBanner />
+  <NotificationToasts />
   <CommandPalette />
   <CommandRunModal />
 </div>

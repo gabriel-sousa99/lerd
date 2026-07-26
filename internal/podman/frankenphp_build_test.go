@@ -42,6 +42,20 @@ func TestFrankenPHPRuntimeExtensionParity(t *testing.T) {
 			t.Errorf("FrankenPHP image missing pecl runtime extension %q present in FPM", ext)
 		}
 	}
+
+	// Reverse direction: every FrankenPHP runtime extension must actually be built
+	// by the FPM Containerfile (install block, or a docker-php-ext-enable name,
+	// which covers opcache + the pecl set), so the Octane image can't advertise an
+	// extension the FPM image never builds.
+	available := map[string]bool{}
+	for _, e := range fpmContainerfileExtensions(cf) {
+		available[e] = true
+	}
+	for _, ext := range frankenPHPRuntimeExtensions {
+		if !available[ext] {
+			t.Errorf("frankenPHPRuntimeExtensions lists %q but the FPM Containerfile never builds it — Octane would claim an extension FPM lacks", ext)
+		}
+	}
 }
 
 // fpmDockerExtInstallList extracts the extension tokens from the FPM
@@ -65,6 +79,39 @@ func fpmDockerExtInstallList(containerfile string) []string {
 		if tok != "" {
 			out = append(out, tok)
 		}
+	}
+	return out
+}
+
+// fpmContainerfileExtensions is everything the FPM Containerfile makes available:
+// the docker-php-ext-install block plus the docker-php-ext-enable names (opcache
+// and the pecl-built extensions). spx + lerd_devtools are lerd-internal best-effort
+// tooling, not advertised as project extensions, so they are excluded.
+func fpmContainerfileExtensions(containerfile string) []string {
+	set := map[string]bool{}
+	for _, e := range fpmDockerExtInstallList(containerfile) {
+		set[e] = true
+	}
+	skip := map[string]bool{"spx": true, "lerd_devtools": true}
+	for _, ln := range strings.Split(containerfile, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "#") {
+			continue // a comment mentioning docker-php-ext-enable isn't an install
+		}
+		_, after, found := strings.Cut(ln, "docker-php-ext-enable")
+		if !found {
+			continue
+		}
+		fields := strings.Fields(after)
+		if len(fields) == 0 {
+			continue
+		}
+		if name := strings.Trim(fields[0], "()|&;\\"); name != "" && !skip[name] {
+			set[name] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for e := range set {
+		out = append(out, e)
 	}
 	return out
 }
@@ -111,6 +158,12 @@ func TestRenderFrankenPHPContainerfile(t *testing.T) {
 	}
 	if !strings.Contains(cf, "jq") {
 		t.Errorf("custom package not rendered:\n%s", cf)
+	}
+	// Custom packages (which carry a custom extension's apk build deps) must be
+	// installed BEFORE the extension loop, or a custom extension that needs them
+	// can't compile and silently degrades to "missing".
+	if pkgIdx, extIdx := strings.Index(cf, "for p in jq;"), strings.Index(cf, "install-php-extensions"); pkgIdx < 0 || extIdx < 0 || pkgIdx > extIdx {
+		t.Errorf("custom packages must be installed before the extension loop (pkg at %d, ext at %d):\n%s", pkgIdx, extIdx, cf)
 	}
 }
 

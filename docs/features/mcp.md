@@ -26,7 +26,7 @@ MCP server registration:
 |---|---|
 | Claude Code | `claude mcp add --scope user` (CLI) |
 | Cursor | `~/.cursor/mcp.json` |
-| Windsurf | `~/.ai/mcp/mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 | JetBrains Junie | `~/.junie/mcp/mcp.json` |
 | Gemini CLI | `~/.gemini/settings.json` |
 | Codex CLI | `~/.codex/config.toml` |
@@ -57,7 +57,7 @@ All clients share a single canonical tool reference, so the guidance never drift
 
 ### Project-scoped registration
 
-To pin lerd to a specific project path (useful for teams or when sharing config via git):
+To commit the lerd MCP config into a project so every teammate picks it up from git:
 
 ```bash
 cd ~/Lerd/my-app
@@ -72,7 +72,6 @@ This writes MCP config and context files for every supported client into the pro
 | `.claude/skills/lerd/SKILL.md` | Claude Code skill |
 | `.cursor/mcp.json` | Cursor MCP config |
 | `.cursor/rules/lerd.mdc` | Cursor rules |
-| `.ai/mcp/mcp.json` | Windsurf MCP config |
 | `.junie/mcp/mcp.json` | JetBrains Junie MCP config |
 | `.junie/guidelines.md` | JetBrains Junie guidelines (merged) |
 | `.gemini/settings.json` | Gemini CLI MCP config |
@@ -81,9 +80,9 @@ This writes MCP config and context files for every supported client into the pro
 | `.github/copilot-instructions.md` | GitHub Copilot instructions (merged) |
 | `AGENTS.md` | Codex CLI context (merged) |
 
-The MCP config includes a `LERD_SITE_PATH` environment variable pointing to the project root, which takes precedence over the cwd fallback.
+The written entries carry no machine-specific data: the server resolves the site from the directory the assistant is opened in, exactly like a global registration. A committed `.mcp.json` therefore stays identical across every teammate's checkout, with no absolute path to drift or break on another machine. (An older lerd wrote a `LERD_SITE_PATH` absolute path into these files; it is still honoured if you set it by hand, but no longer written.)
 
-> **Codex** has no project-scoped MCP config (it reads only `~/.codex/config.toml`), so `mcp:inject` writes its `AGENTS.md` context but not a per-project server entry. Register Codex once with `lerd mcp:enable-global`.
+> **Codex and Windsurf** have no project-scoped MCP config (Codex reads only `~/.codex/config.toml`, Windsurf only `~/.codeium/windsurf/mcp_config.json`), so `mcp:inject` writes their context but not a per-project server entry. Register them once with `lerd mcp:enable-global`. lerd used to write a Windsurf entry into `.ai/mcp/mcp.json`, but that path was never Windsurf's (it belongs to Laravel Boost), so lerd no longer touches it and strips any entry an older version left behind.
 
 The command **merges** into existing configs; other MCP servers (e.g. `laravel-boost`, `herd`) and any existing instructions content are left untouched. Re-running it is safe.
 
@@ -93,37 +92,60 @@ To target a different directory:
 lerd mcp:inject --path ~/Lerd/another-app
 ```
 
+To reverse an injection, `lerd mcp:eject` (with an optional `--path`) strips every lerd-owned entry and skill file back out of the project, leaving other MCP servers and your own instructions content intact. The user-scope equivalent is `lerd mcp:disable-global`.
+
 > **During `lerd update`:** Projects that previously ran `mcp:inject` are detected automatically (by the presence of `.claude/skills/lerd/SKILL.md`, `.cursor/rules/lerd.mdc`, or the lerd marker in `.junie/guidelines.md`) and refreshed in place. Only files that already exist for a client are rewritten, so update never drops new client files into your repo; re-run `mcp:inject` to add a newly supported assistant. Directories whose content already matches the new binary stay untouched, so git status stays clean. Projects that never opted in are skipped.
+
+To opt a project out of this automatic refresh entirely, set `mcp_inject: false` in its `.lerd.yaml`. lerd then never rewrites that project's MCP config or skill files on a self-update, which is the right choice when you keep those files under version control and want them changed only when you say so. An explicit `lerd mcp:inject` still writes when you run it, since that is you asking directly.
 
 ### Path resolution
 
 Most actions accept an optional `path` argument. When omitted, the server resolves it in this order:
 
 1. Explicit `path` argument (highest priority)
-2. `LERD_SITE_PATH` env var (set by `mcp:inject`)
-3. Current working directory, the directory the assistant was opened in (global sessions)
+2. `LERD_SITE_PATH` env var (honoured if set by hand; lerd no longer writes it)
+3. Current working directory, the directory the assistant was opened in
+
+### Agent detection passthrough
+
+PHP runs inside the container, so the AI agent environment variables your coding agent exports on the host (`CLAUDECODE`, `AI_AGENT`, `CURSOR_AGENT`, `GEMINI_CLI`, and the rest of the [agent-detector](https://github.com/laravel/agent-detector) set) would normally be lost at the container boundary. lerd forwards any that are present into the container for `lerd php`, `lerd artisan`, and tinker, so packages like [laravel/pao](https://github.com/laravel/pao) still detect the agent and emit their compact JSON output.
+
+Commands the `exec` MCP tool runs (`artisan`, `composer`, `vendor_run` for Pest/PHPUnit) go a step further: because reaching them through the MCP server proves an agent is driving the command, lerd injects a neutral `AI_AGENT=lerd-mcp` marker when no real agent variable is present. Pao therefore returns JSON for MCP-originated test runs even if the host environment carries nothing, while a real agent variable is still forwarded as-is when it exists. Manual terminal runs are never given the marker, so their output is unchanged.
 
 ---
 
 ## Available MCP tools
 
-The MCP surface is **eleven grouped tools**, each driven by an `action` argument. Always pass `action`; start by calling `site` with `action: "list"` to discover sites.
+The MCP surface is **twelve grouped tools**, each driven by an `action` argument. Always pass `action`; start by calling `site` with `action: "list"` to discover sites.
 
 | Tool | Actions |
 |---|---|
-| `site` | `list` (discover sites — call first), `link`, `unlink`, `domain_add`, `domain_remove`, `group_assign`, `group_unassign`, `group_label`, `group_db`, `group_list`, `tls_enable`, `tls_disable`, `php`, `node`, `pause`, `unpause`, `restart`, `rebuild`, `runtime`, `nginx_read`, `nginx_write`, `nginx_reset`, `park`, `unpark` |
-| `service` | `start`, `stop`, `restart`, `pin`, `unpin`, `update`, `rollback`, `migrate`, `remove`, `reinstall`, `add`, `expose`, `env`, `config_read`, `config_write`, `config_restore`, `config_reset`, `config_list_backups`, `preset_list`, `preset_install`, `check_updates` |
-| `db` | `set`, `move`, `create`, `export`, `import`, `snapshot`, `snapshots`, `restore`, `snapshot_delete` |
+| `site` | `list` (discover sites — call first), `link`, `unlink`, `domain_add`, `domain_remove`, `group_assign`, `group_unassign`, `group_label`, `group_db`, `group_list`, `tls_enable`, `tls_disable`, `tls_renew`, `php`, `node`, `pause`, `unpause`, `restart`, `rebuild`, `runtime`, `nginx_read`, `nginx_write`, `nginx_reset`, `park`, `unpark` |
+| `service` | `start`, `stop`, `restart`, `pin`, `unpin`, `update`, `rollback`, `migrate`, `remove`, `reinstall`, `add`, `expose`, `port`, `env`, `config_read`, `config_write`, `config_restore`, `config_reset`, `config_list_backups`, `preset_list`, `preset_search`, `preset_install`, `check_updates` |
+| `db` | `list`, `set`, `move`, `create`, `export`, `import`, `snapshot`, `snapshots`, `restore`, `snapshot_delete` |
 | `env` | `setup`, `check`, `override` |
-| `runtime` | `versions`, `node_install`, `node_uninstall`, `php_list`, `ext_list`, `ext_add`, `ext_remove` |
+| `runtime` | `versions`, `node_install`, `node_uninstall`, `php_list`, `ext_list`, `ext_add`, `ext_remove`, `ports_list`, `ports_add`, `ports_remove`, `ini_read`, `ini_write`, `ini_reset` |
 | `worker` | `list` (call first), `start`, `stop`, `add`, `remove`, `health`, `heal`, `mode_get`, `mode_set`, `queue_start`, `queue_stop`, `horizon_start`, `horizon_stop`, `reverb_start`, `reverb_stop`, `schedule_start`, `schedule_stop`, `stripe_start`, `stripe_stop`, `stripe_config` |
 | `exec` | `artisan`, `console`, `composer`, `vendor_bins`, `vendor_run`, `commands_list`, `commands_run`, `command_add`, `command_remove` |
-| `framework` | `list`, `add`, `remove`, `search`, `install`, `project_new`, `setup` |
-| `diag` | `status`, `doctor`, `which`, `check`, `dns_diagnose`, `bug_report`, `analyze_queries`, `dumps_recent`, `dumps_status`, `dumps_clear`, `dumps_toggle`, `profiler_toggle`, `profiler_status`, `profiler_clear`, `xdebug_on`, `xdebug_off`, `xdebug_status` |
+| `framework` | `list`, `add`, `remove`, `prune`, `search`, `update`, `project_new`, `setup` |
+| `diag` | `status`, `doctor`, `doctor_fix`, `site_doctor`, `which`, `check`, `dns_diagnose`, `bug_report`, `analyze_queries`, `route_timing`, `optimize_route`, `dumps_recent`, `dumps_status`, `dumps_clear`, `dumps_toggle`, `profiler_toggle`, `profiler_status`, `profiler_clear`, `profiler_report`, `xdebug_on`, `xdebug_off`, `xdebug_status` |
 | `logs` | `sources`, `fetch` |
 | `worktree` | `list`, `add`, `remove`, `db_isolate`, `db_share` |
+| `workspace` | `list`, `create`, `rename`, `delete`, `assign`, `move` |
 
 The injected context files document each action's arguments and the key conventions in full.
+
+### Workspaces are not site groups
+
+The two are easy to confuse and an assistant reaching for the wrong one does the wrong thing.
+
+A **workspace** (the `workspace` tool) is a display-only bucket that organises the site list in the dashboard sidebar and the TUI. It never touches nginx, domains, certificates or `.env`. Use it when someone wants their sites sorted by client or by project.
+
+A **site group** (the `site` tool's `group_*` actions) nests a real site under another site's subdomain, at `<label>.<main>.test`, and regenerates vhosts and certificates to serve it. Use it when a site should actually be reachable at that address.
+
+### Service presets carry their own discovery metadata
+
+`preset_list` returns each preset's `category`, `icon` and `admin_for`. `admin_for` names the services a preset's admin UI administers, and it is **not** `depends_on`: phpMyAdmin depends on mysql but administers mariadb too, and RedisInsight administers valkey without depending on it. To answer "which dashboard administers this database", read `admin_for`.
 
 ### Reading logs
 
@@ -135,7 +157,7 @@ The `logs` tool lets an assistant debug a site's logs without opening files by h
 
 ## Example interactions
 
-The `path` argument is omitted from most calls; the server resolves it from the directory the assistant was opened in (global sessions) or from `LERD_SITE_PATH` (project-scoped sessions).
+The `path` argument is omitted from most calls; the server resolves it from the directory the assistant was opened in.
 
 ```
 You: create a new Laravel project and get it running
@@ -198,4 +220,16 @@ You: the app is throwing 500s, check the logs
 AI:  → logs(action: "sources", site: "myapp")
      → logs(action: "fetch", source: "app:laravel.log", level: "error", since: "15m")
      PHP Fatal error: Class "App\Jobs\ProcessOrder" not found ...
+
+You: this site feels slow, optimize it
+AI:  → diag(action: "route_timing", site: "myapp")
+       # GET /reports/:id runs at 1080ms p95, 27x the site's 40ms median
+     → diag(action: "dumps_toggle", enable: true)
+       # then hit the slow route a couple of times so queries are captured
+     → diag(action: "optimize_route", site: "myapp")
+       { "routes": [ { "route": "GET /reports/:id", "p95_millis": 1080,
+         "evidence": [ { "n_plus_one": [ { "count": 38,
+           "fingerprint": "select * from line_items where report_id = ?",
+           "caller": { "file": "app/Http/Controllers/ReportController.php", "line": 44 } } ] } ] } ] }
+     # the N+1 and its exact caller, from real traffic, not from reading code
 ```

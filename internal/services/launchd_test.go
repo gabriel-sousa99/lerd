@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // TestHasNonZeroExitCode covers the failure-detection helper for both
@@ -187,6 +189,8 @@ func TestSplitSystemdExec(t *testing.T) {
 			[]string{"sh", "-c", "install-php-extensions pcntl >/dev/null && exec php artisan octane:start --workers=auto --watch --poll"}},
 		{"escaped inner quote", `echo "say \"hi\" now"`,
 			[]string{"echo", `say "hi" now`}},
+		{"escaped backslash decoded", `cmd "a\\b"`, []string{"cmd", `a\b`}},
+		{"trailing backslash before closing quote", `cmd "path\\"`, []string{"cmd", `path\`}},
 		{"empty quoted arg preserved", `cmd ""`, []string{"cmd", ""}},
 		{"collapses runs of whitespace", "a   b\tc", []string{"a", "b", "c"}},
 	}
@@ -233,6 +237,48 @@ Exec=sh -c "install-php-extensions pcntl >/dev/null && exec php artisan octane:s
 	for _, a := range args {
 		if strings.HasPrefix(a, `"`) || strings.HasSuffix(a, `"`) {
 			t.Fatalf("argv retains a literal quote: %q (full: %v)", a, args)
+		}
+	}
+}
+
+// The ssh-agent quadlet clears its stale socket via `sh -c` before exec'ing the
+// agent; that script must reach podman as one argv element on macOS too.
+func TestSSHAgentQuadletExecSurvivesTranslation(t *testing.T) {
+	args, err := containerToPodmanArgs(parseSection(podman.GenerateSSHAgentQuadlet("lerd-php85-fpm:local"), "Container"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTail := args[len(args)-3:]
+	wantTail := []string{"sh", "-c",
+		"rm -f " + podman.SSHAgentSocket + " && exec ssh-agent -D -a " + podman.SSHAgentSocket}
+	for i := range wantTail {
+		if gotTail[i] != wantTail[i] {
+			t.Fatalf("tail arg[%d] = %q, want %q (full: %v)", i, gotTail[i], wantTail[i], args)
+		}
+	}
+}
+
+// Container units are started by reading the argv back out of the plist, so an
+// arg holding XML-special characters (any `sh -c` script with && or a
+// redirection) has to survive the escape/unescape round trip verbatim.
+func TestPlistArgsRoundTripsXMLSpecials(t *testing.T) {
+	script := "rm -f /ssh-agent/agent.sock && exec ssh-agent -D -a /ssh-agent/agent.sock 2>/dev/null"
+	want := []string{"podman", "run", "sh", "-c", script}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "unit.plist")
+	if err := os.WriteFile(p, []byte(buildPlist("com.lerd.unit", want, false, keepAliveAlways, "", "")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := plistArgs(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("plistArgs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("arg[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
 }
@@ -570,5 +616,84 @@ func TestStripPrivilegedIPBind_v6(t *testing.T) {
 		if got := stripPrivilegedIPBind(in); got != want {
 			t.Errorf("stripPrivilegedIPBind(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestStripIPv6PublishPorts(t *testing.T) {
+	cases := map[string]string{
+		// Loopback IPv6 dup is dropped; its IPv4 partner survives.
+		"PublishPort=127.0.0.1:80:80\nPublishPort=[::1]:80:80": "PublishPort=127.0.0.1:80:80",
+		// Bind-all IPv6 has no IPv4 partner: rewrite to 0.0.0.0 rather than drop.
+		"PublishPort=[::]:80:80":   "PublishPort=0.0.0.0:80:80",
+		"PublishPort=[::]:443:443": "PublishPort=0.0.0.0:443:443",
+		// Plain IPv4 lines and non-PublishPort lines pass through untouched.
+		"PublishPort=80:80": "PublishPort=80:80",
+		"Network=lerd":      "Network=lerd",
+		"[Container]":       "[Container]",
+	}
+	for in, want := range cases {
+		if got := stripIPv6PublishPorts(in); got != want {
+			t.Errorf("stripIPv6PublishPorts(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestLANExposedPublishPortsSurvive guards the full macOS transform chain for a
+// LAN-exposed container (lan.exposed: true). The regression: BindForLAN +
+// PairIPv6Binds collapse "PublishPort=80:80" into the "[::]:" bind-all form, and
+// stripIPv6PublishPorts used to drop every bracketed line — leaving lerd-nginx
+// with no -p flags, so nothing reached the host. The published ports must survive
+// as -p entries in the final podman run args.
+func TestLANExposedPublishPortsSurvive(t *testing.T) {
+	content := "[Container]\n" +
+		"Image=docker.io/library/nginx:alpine\n" +
+		"Network=lerd\n" +
+		"PublishPort=80:80\n" +
+		"PublishPort=443:443\n"
+
+	content = podman.BindForLAN(content, true) // lanExposed
+	content = podman.PairIPv6Binds(content)
+	content = stripIPv6PublishPorts(content)
+
+	c := parseSection(content, "Container")
+	args, err := containerToPodmanArgs(c)
+	if err != nil {
+		t.Fatalf("containerToPodmanArgs: %v", err)
+	}
+
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-p 80:80", "-p 443:443"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in podman args, got: %s", want, joined)
+		}
+	}
+}
+
+// TestPrecreateBindMountDirs_SkipsNamedVolume confirms a bind mount's absolute
+// source is pre-created while a named volume (bare name, e.g. the new
+// lerd-ssh-agent:/ssh-agent) is left to podman, so MkdirAll never drops a stray
+// relative directory into the process working directory.
+func TestPrecreateBindMountDirs_SkipsNamedVolume(t *testing.T) {
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	bind := filepath.Join(dir, "mnt", "data")
+	precreateBindMountDirs([]string{
+		"lerd-ssh-agent:/ssh-agent", // named volume: podman-managed, must be skipped
+		bind + ":" + bind + ":rw",   // bind mount: absolute source, must be created
+	})
+
+	if _, err := os.Stat(filepath.Join(dir, "lerd-ssh-agent")); !os.IsNotExist(err) {
+		t.Errorf("named volume created a stray relative dir lerd-ssh-agent (err=%v)", err)
+	}
+	if _, err := os.Stat(bind); err != nil {
+		t.Errorf("bind-mount source not pre-created: %v", err)
 	}
 }

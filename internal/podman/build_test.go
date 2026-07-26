@@ -3,12 +3,68 @@ package podman
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
+
+func TestBasePullArgs(t *testing.T) {
+	ref := "ghcr.io/geodro/lerd-php85-fpm-base:abc123def456"
+
+	args := basePullArgs(ref, "/tmp/auth.json")
+	if args[0] != "pull" {
+		t.Errorf("first arg must be pull, got %v", args)
+	}
+	// --policy is never passed: it's redundant (pull defaults to "always") and
+	// absent on podman 5.4 and every 4.x, where it was rejected as an unknown flag.
+	if slices.Contains(args, "--policy=always") {
+		t.Errorf("basePullArgs must not pass --policy, got %v", args)
+	}
+	if !slices.Contains(args, "--authfile=/tmp/auth.json") {
+		t.Errorf("must include the authfile, got %v", args)
+	}
+	if args[len(args)-1] != ref {
+		t.Errorf("ref must be the last arg, got %v", args)
+	}
+
+	noAuth := basePullArgs(ref, "")
+	for _, a := range noAuth {
+		if strings.HasPrefix(a, "--authfile=") {
+			t.Errorf("empty authFile must omit --authfile, got %v", noAuth)
+		}
+	}
+}
+
+// TestBaseImagePullResolvesFromRegistry guards the FPM base-image pull: as long
+// as the published ref (ghcr.io/gabriel-sousa99) is pullable, it must return that ref
+// rather than collapsing to a slow full local build.
+func TestBaseImagePullResolvesFromRegistry(t *testing.T) {
+	prevExec := execCommand
+	t.Cleanup(func() { execCommand = prevExec })
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		ref := args[len(args)-1]
+		if strings.Contains(ref, "ghcr.io/gabriel-sousa99/") {
+			return fakeExec("", "", 0)(name, args...)
+		}
+		return fakeExec("", "Error: manifest unknown", 1)(name, args...)
+	}
+
+	var buf strings.Builder
+	got := tryPullBaseImage("8.5", &buf)
+	if got == "" {
+		t.Fatalf("pull returned empty (would force a full local build); log:\n%s", buf.String())
+	}
+	if !strings.Contains(got, "ghcr.io/gabriel-sousa99/") {
+		t.Errorf("pulled %q, want a ref under ghcr.io/gabriel-sousa99/", got)
+	}
+	if !strings.Contains(got, "lerd-php85-fpm-base") {
+		t.Errorf("pulled %q, not the php 8.5 base image", got)
+	}
+}
 
 func TestBuildCustomExtBlock_Empty(t *testing.T) {
 	if got := buildCustomExtBlock(nil, nil); got != "" {
@@ -23,8 +79,10 @@ func TestBuildCustomPackagesBlock(t *testing.T) {
 	// Valid packages are deduped; invalid names (shell metachars) are dropped so
 	// they can't break out of the apk command.
 	block := buildCustomPackagesBlock([]string{"htop", "vim", "htop", "bad;rm -rf"})
-	if !strings.Contains(block, "RUN apk add --no-cache htop vim &&") {
-		t.Errorf("block must apk add the valid deduped packages:\n%s", block)
+	// Each package installs on its own and tolerantly, so one name the version
+	// does not have cannot fail the whole image (see the legacy Alpine 3.16 tier).
+	if !strings.Contains(block, "RUN for p in htop vim; do apk add --no-cache \"$p\" || true; done") {
+		t.Errorf("block must tolerantly apk add the valid deduped packages:\n%s", block)
 	}
 	if strings.Contains(block, "bad") {
 		t.Errorf("invalid package name must be dropped:\n%s", block)
@@ -96,6 +154,45 @@ func TestBuildCustomExtBlock_UserDepsUnionedWithBuiltin(t *testing.T) {
 		if strings.Contains(line, "pecl install redis") && strings.Contains(line, "apk add") {
 			t.Errorf("redis block should not have an apk add line:\n%s", line)
 		}
+	}
+}
+
+func TestBuildCustomExtBlockWithToolchain(t *testing.T) {
+	if got := buildCustomExtBlockWithToolchain(nil, nil); got != "" {
+		t.Errorf("expected empty block for no extensions, got:\n%s", got)
+	}
+	// The prebuilt base is the runtime image, so phpize has no toolchain there.
+	block := buildCustomExtBlockWithToolchain([]string{"yaml"}, map[string][]string{"yaml": {"yaml-dev"}})
+	for _, pkg := range phpizeToolchain {
+		if !strings.Contains(block, pkg) {
+			t.Errorf("fast-path block must install %q for phpize:\n%s", pkg, block)
+		}
+	}
+	if !strings.Contains(block, "--virtual .lerd-ext-build") {
+		t.Errorf("toolchain must install as a virtual package so it can be purged:\n%s", block)
+	}
+	if !strings.Contains(block, "apk del .lerd-ext-build") {
+		t.Errorf("toolchain must be purged in the same layer so the runtime image does not grow:\n%s", block)
+	}
+	// The extension's own deps still install, and outlive the purge: the
+	// compiled .so dlopens against them at runtime.
+	if !strings.Contains(block, "apk add --no-cache yaml-dev && ") {
+		t.Errorf("extension deps must still install:\n%s", block)
+	}
+	if strings.Count(block, "\nRUN ") > 1 {
+		t.Errorf("one extension should produce one RUN layer:\n%s", block)
+	}
+	if !strings.Contains(block, "|| true; }") {
+		t.Errorf("block must keep the `|| true` resilience guard:\n%s", block)
+	}
+}
+
+// The builder stage already carries the toolchain, so the local path must not
+// install or purge it: purging there would take the stage's own compilers out.
+func TestBuildCustomExtBlock_NoToolchainOnLocalPath(t *testing.T) {
+	block := buildCustomExtBlock([]string{"yaml"}, nil)
+	if strings.Contains(block, ".lerd-ext-build") {
+		t.Errorf("builder-stage block must not manage the toolchain:\n%s", block)
 	}
 }
 
@@ -419,7 +516,7 @@ func TestFPMImageName(t *testing.T) {
 }
 
 func TestFPMBuildArgs_ContainsHashLabel(t *testing.T) {
-	args := fpmBuildArgs("lerd-php84-fpm:local", "abc123", false)
+	args := fpmBuildArgs("lerd-php84-fpm:local", "abc123", "cust1", false)
 	if !sliceContainsPair(args, "--label", fpmContainerfileHashLabel+"=abc123") {
 		t.Errorf("build args missing the containerfile-hash label\nargs: %v", args)
 	}
@@ -429,7 +526,7 @@ func TestFPMBuildArgs_ContainsHashLabel(t *testing.T) {
 }
 
 func TestFPMBuildArgs_ForceAddsNoCache(t *testing.T) {
-	args := fpmBuildArgs("lerd-php84-fpm:local", "abc123", true)
+	args := fpmBuildArgs("lerd-php84-fpm:local", "abc123", "cust1", true)
 	if !sliceContains(args, "--no-cache") {
 		t.Errorf("force=true should add --no-cache, got: %v", args)
 	}
@@ -440,8 +537,19 @@ func TestFPMBuildArgs_ForceAddsNoCache(t *testing.T) {
 	}
 }
 
+// Both labels have to be stamped: the custom-set label is the only thing that
+// can tell a later build that this image predates a newly declared extension.
+func TestFPMBuildArgs_ContainsCustomSetLabel(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		args := fpmBuildArgs("lerd-php84-fpm:local", "abc123", "cust1", force)
+		if !sliceContainsPair(args, "--label", fpmCustomSetHashLabel+"=cust1") {
+			t.Errorf("force=%v: build args missing the custom-set label\nargs: %v", force, args)
+		}
+	}
+}
+
 func TestFPMBuildArgs_TagsImageName(t *testing.T) {
-	args := fpmBuildArgs("lerd-php85-fpm:local", "h", false)
+	args := fpmBuildArgs("lerd-php85-fpm:local", "h", "", false)
 	if !sliceContainsPair(args, "-t", "lerd-php85-fpm:local") {
 		t.Errorf("missing -t <image> pair\nargs: %v", args)
 	}

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -9,21 +8,50 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/gabriel-sousa99/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/shims"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/tray"
 	"github.com/spf13/cobra"
 )
+
+// disableTrayUnit stops the tray and takes it out of the autostart set, then
+// clears any failure it already recorded. A tray whose library is missing exits
+// 127 on every start, and the leftover failed unit is what tips the systemd
+// user session into "degraded".
+func disableTrayUnit() {
+	_ = services.Mgr.Stop("lerd-tray")
+	_ = services.Mgr.Disable("lerd-tray")
+	_ = exec.Command("systemctl", "--user", "reset-failed", "lerd-tray.service").Run()
+}
+
+// healPodmanUpgrade runs the podman-upgrade self-heal, renders its progress,
+// and returns the containers it tore down so the caller can restart them. Both
+// install and start enter the heal through here so the wording and error
+// handling stay identical regardless of entry point.
+func healPodmanUpgrade(containerDNS []string) []string {
+	healed, restart, err := podman.HealPodmanUpgrade(containerDNS, func(msg string) { feedback.Note(msg) })
+	if err != nil {
+		feedback.Warn("podman upgrade heal: %v", err)
+	} else if healed {
+		feedback.Note("podman upgrade detected — migrated storage and rebuilt the lerd network")
+	}
+	return restart
+}
 
 // NewInstallCmd returns the install command.
 func NewInstallCmd() *cobra.Command {
@@ -41,8 +69,14 @@ func NewInstallCmd() *cobra.Command {
 	return cmd
 }
 
-func step(label string) { fmt.Printf("  --> %s ... ", label) }
-func ok()               { fmt.Println("OK") }
+// step/ok render one install action in the shared feedback vocabulary: step
+// prints a dim "→ label…" in place (no spinner, so steps that wrap verbose
+// subprocess output don't fight an animation), ok finishes the line with a
+// green check. There's no trailing newline after step, so on the error path a
+// feedback.Warn completes the dangling line as "→ label… ⚠ msg" in place of the
+// check; steps that print multi-line output first emit their own newline.
+func step(label string) { fmt.Printf(" %s %s ", feedback.Dim("→"), feedback.Dim(label+"…")) }
+func ok()               { fmt.Println(feedback.Green("✓")) }
 
 // fileChangedBy runs mutate and reports whether the file at path differs
 // before vs after. A read error on either side is treated as empty content,
@@ -58,8 +92,48 @@ func fileChangedBy(path string, mutate func() error) (bool, error) {
 	return string(after) != string(before), nil
 }
 
+// portPreflightConflicts returns the core host ports lerd needs to bind first
+// (nginx HTTP/HTTPS and DNS) that are already held by a foreign process.
+// portList is the host listener dump from PortListOutput; the seams mirror
+// checkPortConflicts so lerd's own running container, an already-answering
+// dnsmasq, and the macOS gvproxy forward are not reported as conflicts.
+func portPreflightConflicts(portList string, containerRunning func(string) bool, dnsAnswering func() bool) []PortCheck {
+	var conflicts []PortCheck
+	for _, c := range CollectPortChecks([]string{"lerd-nginx", "lerd-dns"}) {
+		if isPortConflict(c, portList, containerRunning, dnsAnswering) {
+			conflicts = append(conflicts, c)
+		}
+	}
+	return conflicts
+}
+
+// ensurePortsAvailable warns, before any setup work runs, when a core port lerd
+// needs is already taken by a foreign process. The usual culprit is a parallel
+// local-dev stack such as Laravel Herd or a system nginx/Apache holding 80/443.
+// It is advisory only: install continues so a user who knows the conflict (or
+// plans to remap lerd's ports) isn't blocked.
+func ensurePortsAvailable() {
+	step("Checking required host ports")
+	portList := PortListOutput()
+	if portList == "" {
+		ok()
+		return
+	}
+	conflicts := portPreflightConflicts(portList, podmanContainerRunning, lerdDNSAnswering)
+	if len(conflicts) == 0 {
+		ok()
+		return
+	}
+	fmt.Println()
+	for _, c := range conflicts {
+		feedback.Warn("port %s (%s) is already in use, %s may fail to start", c.Port, c.Label, c.Container)
+		feedback.Note("find it: " + FindListenerCmd(c.Port))
+	}
+	feedback.Note("another local stack such as Laravel Herd may be hosting sites; stop it to free these ports, then re-run lerd install")
+}
+
 func runInstall(cmd *cobra.Command, _ []string) error {
-	fmt.Println("==> Installing Lerd")
+	feedback.Header("Installing Lerd")
 
 	noIPv6, _ := cmd.Flags().GetBool("no-ipv6")
 	if !noIPv6 && os.Getenv("LERD_DISABLE_IPV6") == "1" {
@@ -67,18 +141,27 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 	fromUpdate, _ := cmd.Flags().GetBool("from-update")
 	dnsFlag, _ := cmd.Flags().GetString("dns")
+	// Captured before any step writes config: a missing file means this is a
+	// first install, the only time the DNS question is asked. Every later run
+	// honours the saved choice, which is flipped afterward with dns:enable /
+	// dns:disable rather than by re-prompting.
+	_, cfgStatErr := os.Stat(config.GlobalConfigFile())
+	configExisted := cfgStatErr == nil
 	if noIPv6 {
 		podman.MarkIPv6Disabled("lerd")
-		fmt.Println("  IPv6 disabled by user; lerd network will be v4-only.")
-		fmt.Printf("  Delete %s and re-run `lerd install` to re-enable.\n",
-			podman.IPv6DisabledMarkerPath("lerd"))
+		feedback.Line("IPv6 disabled by user, lerd network will be v4-only")
+		feedback.Note("delete " + podman.IPv6DisabledMarkerPath("lerd") + " and re-run `lerd install` to re-enable")
 	}
 
 	// Sample LastUp before ensure so an internal stop+start isn't mistaken
 	// for an external machine restart by healMachineRestartIfNeeded below.
 	preEnsureLastUp := currentMachineLastUp()
-	ensurePodmanMachineRunning()
+	if err := ensurePodmanMachineRunning(); err != nil {
+		return err
+	}
 	healMachineRestartIfNeeded(preEnsureLastUp)
+
+	ensurePortsAvailable()
 
 	if err := ensureUnprivilegedPorts(); err != nil {
 		return err
@@ -119,8 +202,26 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// Containers removed by recreate are restarted AFTER the quadlet refresh
 	// phase below so they come up on the freshly written quadlets.
 	var migrated []string
-	step("Creating lerd podman network")
 	desiredDNS := dns.ReadContainerDNS()
+
+	// 2a. Self-heal a podman upgrade. A major-version or backend change since
+	// the last install reshuffles rootless storage and networking, which
+	// otherwise surfaces as the cryptic "rootless netns" container start
+	// failure (#635). Runs before the network step since it recreates it; any
+	// containers it tears down join the unconditional restart loop below.
+	migrated = append(migrated, healPodmanUpgrade(desiredDNS)...)
+
+	// 2b. Podman orders every rootless quadlet after its network-online wait
+	// unit, which can only time out on hosts where network-online.target is
+	// never pulled in (Fedora Silverblue and other atomic images). Left alone
+	// it stalls every container start, and the boot, by 90s.
+	if applied, err := lerdSystemd.EnsureNoNetworkWaitStall(); err != nil {
+		feedback.Note(fmt.Sprintf("could not skip podman's network-online wait: %v", err))
+	} else if applied {
+		feedback.Note("skipping podman's network-online wait (this host never reaches that target)")
+	}
+
+	step("Creating lerd podman network")
 	if err := podman.EnsureNetwork("lerd", desiredDNS); err != nil {
 		if errors.Is(err, podman.ErrNetworkNeedsMigration) {
 			fmt.Println()
@@ -129,12 +230,16 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 				return mErr
 			}
 			if dualStack {
-				fmt.Println("    Recreated lerd network as dual-stack v4+v6.")
+				feedback.Note("recreated lerd network as dual-stack v4+v6")
 			} else {
-				fmt.Println("    Recreated lerd network as v4-only (IPv6 not available for containers).")
+				feedback.Note("recreated lerd network as v4-only (IPv6 not available for containers)")
 			}
-			fmt.Println("    Existing containers on this network were recreated.")
-			migrated = restored
+			feedback.Note("existing containers on this network were recreated")
+			// Union, don't overwrite: `migrated` already holds the containers the
+			// upgrade heal tore down (line above). Replacing it with `restored`
+			// here dropped those from the restart loop, leaving services stopped
+			// after a run that triggered both heal and a network migration.
+			migrated = mergeMigrationRestarts(migrated, restored)
 			step("Creating lerd podman network")
 		} else {
 			return err
@@ -170,17 +275,36 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// and mirrored into the PHP container on setup.
 	bunPath := nodeDet.BunPath()
 	if bunPath != "" {
-		fmt.Printf("  --> bun detected at %s — lerd will use it automatically for projects that use bun\n", bunPath)
+		feedback.Line(fmt.Sprintf("bun detected at %s, lerd will use it automatically for projects that use bun", bunPath))
 	}
 
-	wantLerdNode := true
-	if systemNode := detectSystemNode(); systemNode != "" {
-		fmt.Printf("  --> Node.js detected at %s\n", systemNode)
+	// Resolve the Node-management choice from the persisted preference, the
+	// on-disk shim state (for configs predating the preference), and whether a
+	// system node exists. Update runs non-interactively so a prior node:unmanage
+	// survives; a fresh install only prompts when a system node is present.
+	var savedNode *bool
+	if nodeCfg, err := config.LoadGlobal(); err == nil && nodeCfg != nil {
+		if v, set := nodeCfg.NodeManagedPref(); set {
+			savedNode = &v
+		}
+	}
+	systemNode := detectSystemNode()
+	wantLerdNode, promptNode, nodeDefault := nodeManageDecision(fromUpdate, savedNode, systemNode != "", lerdManagesNode())
+	if promptNode {
+		feedback.Line("Node.js detected at " + systemNode)
 		prompt := "Let lerd manage Node.js versions (installs fnm shims, may override system node)?"
 		if bunPath != "" {
 			prompt += " Decline to keep your system Node and use bun."
 		}
-		wantLerdNode = confirmInstallPrompt(prompt)
+		wantLerdNode = confirmInstallPromptDefault(prompt, nodeDefault)
+	}
+	if nodeCfg, err := config.LoadGlobal(); err == nil && nodeCfg != nil {
+		if v, set := nodeCfg.NodeManagedPref(); !set || v != wantLerdNode {
+			nodeCfg.SetNodeManaged(wantLerdNode)
+			if err := config.SaveGlobal(nodeCfg); err != nil {
+				fmt.Printf("    WARN: persist Node-management choice: %v\n", err)
+			}
+		}
 	}
 
 	// Ask whether lerd should manage local DNS. Prompted on every direct
@@ -204,16 +328,18 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		if dnsCfg.DNS.TLD != "" {
 			prevTLD = dnsCfg.DNS.TLD
 		}
-		if fromUpdate {
-			wantDNS = prevEnabled
-		} else if flagDNS, ok := parseDNSMode(dnsFlag); ok {
-			wantDNS = flagDNS
-		} else {
-			wantDNS = confirmInstallPromptDefault(
-				"Let lerd manage DNS for local sites? (default No — use *.localhost, no dnsmasq, no HTTPS, no sudo)",
-				prevEnabled,
+		var flagDNS *bool
+		if v, ok := parseDNSMode(dnsFlag); ok {
+			flagDNS = &v
+		}
+		want, needPrompt := dnsManageDecision(fromUpdate, configExisted, flagDNS, prevEnabled)
+		if needPrompt {
+			want = confirmInstallPromptDefault(
+				"Let lerd manage DNS for local sites (No: use *.localhost, no dnsmasq, no sudo — HTTPS still works)?",
+				false,
 			)
 		}
+		wantDNS = want
 		// Only flip TLD on a real toggle and only when the current TLD is the
 		// canonical default for the previous state; preserves any custom TLD
 		// the user has set in config.yaml.
@@ -227,8 +353,8 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 		if newTLD != prevTLD {
 			if affected := sitesWithTLD(prevTLD); len(affected) > 0 {
-				fmt.Printf("  --> TLD change: %d site(s) currently on .%s -> .%s\n", len(affected), prevTLD, newTLD)
-				fmt.Printf("      %s\n", strings.Join(affected, ", "))
+				feedback.Line(fmt.Sprintf("TLD change: %d site(s) currently on .%s -> .%s", len(affected), prevTLD, newTLD))
+				feedback.Note(strings.Join(affected, ", "))
 				migrate := fromUpdate || confirmInstallPromptDefault(
 					fmt.Sprintf("Rewrite domains, .env APP_URL, and vhosts to .%s?", newTLD),
 					true,
@@ -236,12 +362,20 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 				if migrate {
 					migrateSiteTLD(prevTLD, newTLD, !wantDNS)
 				} else {
-					fmt.Println("      skipped, sites still reference ." + prevTLD)
+					feedback.Note("skipped, sites still reference ." + prevTLD)
 				}
 			}
+		} else if prevEnabled != wantDNS {
+			// A DNS toggle with no canonical rename (a custom TLD): HTTPS still
+			// tracks DNS, so drop/restore it in place like the dns: commands.
+			// Idempotent, so a re-exec from those commands is a no-op.
+			adjustSitesSecuredForDNS(prevTLD, wantDNS)
 		}
 
-		if prevEnabled != wantDNS || newTLD != prevTLD {
+		// Persist on any real change, and always on a first install so the
+		// remembered choice exists on disk for the next run to honour, even when
+		// the user just accepted the enabled default.
+		if !configExisted || prevEnabled != wantDNS || newTLD != prevTLD {
 			dnsCfg.DNS.Enabled = wantDNS
 			dnsCfg.DNS.TLD = newTLD
 			if err := config.SaveGlobal(dnsCfg); err != nil {
@@ -256,7 +390,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// already matches the desired state (e.g. fresh install with no
 	// lerd-dns yet, or rerun where the unit is already gone).
 	if !wantDNS {
-		fmt.Println("  --> Tearing down lerd-dns service")
+		feedback.Line("tearing down lerd-dns service")
 		teardownDNS()
 	}
 
@@ -271,12 +405,30 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// must be trusted by the system even when the user picks the DNS-off
 	// path. Without this, browsers reject every per-site cert as "not
 	// trusted" even though the cert is technically valid.
-	fmt.Println("  --> Installing mkcert CA")
+	//
+	// When the CA is already in the system trust store, mkcert -install is a
+	// silent no-op that never prompts, so skip the gold sudo header and swallow
+	// its "already installed" banner. Only a genuine first install announces
+	// the sudo step and runs interactively.
 	mkcertCmd := exec.Command(certs.MkcertPath(), "-install")
-	mkcertCmd.Stdin = os.Stdin
-	mkcertCmd.Stdout = os.Stdout
-	mkcertCmd.Stderr = os.Stderr
+	if certs.CATrusted() {
+		mkcertCmd.Stdout = io.Discard
+		mkcertCmd.Stderr = io.Discard
+	} else {
+		feedback.Sudo("Installing mkcert CA")
+		mkcertCmd.Stdin = os.Stdin
+		mkcertCmd.Stdout = os.Stdout
+		mkcertCmd.Stderr = os.Stderr
+	}
 	mkcertCmd.Run() //nolint:errcheck
+
+	// mkcert only adds the CA to the browser NSS stores when certutil is
+	// present, and it exits 0 with a warning otherwise (which the discard
+	// path above hides). Surface it ourselves so the user knows HTTPS works
+	// for tooling but not the browser, and how to fix or side-step it.
+	if !certs.BrowserTrustAvailable() {
+		feedback.Note(browserTrustGuidance(ostreeBootedFn()))
+	}
 
 	if wantDNS {
 		// 5. DNS config + sudoers
@@ -291,10 +443,11 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		dnsChanged = dnsChanged || confChanged
 		ok()
 
-		fmt.Println("  --> Installing DNS sudoers rule")
+		// InstallSudoers prints its own gold "🔒 Installing DNS sudoers rule"
+		// line when it actually writes the drop-in, so no header is printed here.
 		dns.InstallSudoers() //nolint:errcheck
 	} else {
-		fmt.Println("  --> DNS disabled, skipping dnsmasq and sudoers (mkcert CA still installed)")
+		feedback.Line("DNS disabled, skipping dnsmasq and sudoers (mkcert CA still installed)")
 	}
 
 	// 6. Nginx
@@ -317,6 +470,17 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	ok()
+
+	// Ahead of the regen pass, which reads the registry below: a secondary left
+	// on plain HTTP under a secured main has no 443 block and the main's
+	// wildcard answers its subdomain. This is the reconcile dns:enable re-execs.
+	secured, securedErr := siteops.EnforceGroupSecondaries()
+	if len(secured) > 0 {
+		feedback.Note("restored https for group secondaries: " + strings.Join(secured, ", "))
+	}
+	if securedErr != nil {
+		feedback.Warn("securing group secondaries: %v", securedErr)
+	}
 
 	step("Regenerating vhosts")
 	reg, err := config.LoadSites()
@@ -610,7 +774,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		}
 		ok()
 
-		fmt.Println("  --> Configuring DNS resolver")
+		feedback.Line("configuring DNS resolver")
 		if err := dns.ConfigureResolver(); err != nil {
 			fmt.Printf("    WARN: %v\n", err)
 		}
@@ -628,9 +792,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	migratedSet := make(map[string]bool, len(migrated))
 	for _, c := range migrated {
 		migratedSet[c] = true
-		fmt.Printf("  --> Starting %s (network migration) ", c)
+		step("starting " + c + " (network migration)")
 		if err := podman.StartUnit(c); err != nil {
-			fmt.Printf("WARN: %v\n", err)
+			feedback.Warn("%v", err)
 		} else {
 			ok()
 		}
@@ -646,9 +810,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		if running, _ := podman.ContainerRunning(name); !running {
 			continue
 		}
-		fmt.Printf("  --> Restarting %s (PublishPort changed) ", name)
+		step("restarting " + name + " (PublishPort changed)")
 		if err := services.Mgr.Restart(name); err != nil {
-			fmt.Printf("WARN: %v\n", err)
+			feedback.Warn("%v", err)
 		} else {
 			ok()
 		}
@@ -680,7 +844,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		}
 		ok()
 
-		fmt.Println("  --> Configuring DNS resolver")
+		feedback.Line("configuring DNS resolver")
 		if err := dns.ConfigureResolver(); err != nil {
 			fmt.Printf("    WARN: %v\n", err)
 		}
@@ -749,7 +913,14 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		if err := writeUserServiceWithReload("lerd-tray", content); err != nil {
 			return err
 		}
-		if autostartOn {
+		// The helper dies on every start when its appindicator library is
+		// absent, which an immutable image can't install without layering a
+		// package and rebooting. Leave the unit on disk but don't run it, or
+		// the failures drag the whole systemd user session to "degraded".
+		if missing := tray.MissingLibs(tray.HelperPath()); len(missing) > 0 {
+			disableTrayUnit()
+			feedback.Note("system tray unavailable: this host has no " + strings.Join(missing, ", "))
+		} else if autostartOn {
 			if err := services.Mgr.Enable("lerd-tray"); err != nil {
 				fmt.Printf("    WARN: %v\n", err)
 			}
@@ -794,7 +965,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		// php:rebuild restarts FPM and worker units unconditionally.
 		activeFPM, _ := phpDet.ListInstalled()
 		if podman.NeedsFPMRebuild(activeFPM) || podman.NeedsFrankenPHPRebuild(activeFrankenPHPVersions()) {
-			fmt.Println("\n==> PHP image definitions changed — rebuilding images")
+			feedback.Header("Rebuilding PHP images")
 			self, err := os.Executable()
 			if err != nil {
 				fmt.Printf("  WARN: locating lerd binary for php:rebuild: %v\n", err)
@@ -825,6 +996,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 				})
 			}
 			if len(fpmJobs) > 0 {
+				feedback.Header("Starting PHP-FPM")
 				RunParallel(fpmJobs) //nolint:errcheck
 			}
 		}
@@ -834,11 +1006,11 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 
 	if wantLaravelInstaller {
-		fmt.Println("  --> Installing Laravel installer")
+		step("installing Laravel installer")
 		if err := installLaravelInstaller(); err != nil {
-			fmt.Printf("    WARN: %v\n", err)
+			feedback.Warn("%v", err)
 		} else {
-			fmt.Println("    OK")
+			ok()
 		}
 	}
 
@@ -858,6 +1030,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	if err := addShellShims(wantLerdNode); err != nil {
 		fmt.Printf("    WARN: %v\n", err)
 	}
+	if err := shims.Reconcile(clientShimPrompter()); err != nil {
+		fmt.Printf("    WARN: %v\n", err)
+	}
 	ok()
 
 	if wantLerdNode {
@@ -875,12 +1050,16 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 
 	refreshStoreFrameworks()
+	refreshStorePresets()
 	refreshGlobalMCPSkills()
 	refreshProjectMCPSkills()
 
-	fmt.Println("\nLerd installation complete!")
-	fmt.Println("\n  Dashboard: \033[96mhttp://lerd.localhost\033[0m")
-	fmt.Println("  Terminal:  \033[96mlerd tui\033[0m")
+	feedback.Begin()
+	feedback.Done("lerd installation complete")
+	feedback.Begin()
+	feedback.Note("Dashboard: " + feedback.Val("http://lerd.localhost"))
+	feedback.Note("Terminal:  " + feedback.Val("lerd tui"))
+	feedback.Begin()
 	return nil
 }
 
@@ -918,12 +1097,17 @@ func startPerSiteContainers() {
 			Run:   func(_ io.Writer) error { return podman.StartUnit(unit) },
 		}
 	}
+	feedback.Header("Starting per-site containers")
 	RunParallel(jobs) //nolint:errcheck
 }
 
 // refreshUnreferencedCustomQuadlets rewrites quadlets for globally installed
 // custom services, per-site custom containers, and per-site FrankenPHP
 // containers the earlier per-site walk would skip, so schema changes reach every managed container.
+// writeCustomFPMQuadletFn is the seam tests override to assert the refresh
+// routes a custom-FPM site to its writer without spawning podman.
+var writeCustomFPMQuadletFn = podman.WriteCustomFPMQuadlet
+
 func refreshUnreferencedCustomQuadlets(seenSvc map[string]bool, reg *config.SiteRegistry) {
 	if customs, err := config.ListCustomServices(); err == nil {
 		for _, svc := range customs {
@@ -947,9 +1131,28 @@ func refreshUnreferencedCustomQuadlets(seenSvc map[string]bool, reg *config.Site
 				fmt.Printf("  WARN: refreshing %s quadlet: %v\n", podman.CustomContainerName(s.Name), err)
 			}
 		case s.IsFrankenPHP():
+			// A site stuck on a sub-8.2 PHP with the FrankenPHP runtime (only
+			// reachable on registries written before the version guards landed)
+			// would otherwise be rebuilt at a normalized-up image every refresh,
+			// silently running a different PHP than it reports. Heal it to FPM.
+			if !config.IsFrankenPHPVersion(s.PHPVersion) {
+				site := s
+				if err := siteops.DemoteFrankenPHPToFPM(&site); err != nil {
+					fmt.Printf("  WARN: switching %s off FrankenPHP (no PHP %s image): %v\n", s.Name, s.PHPVersion, err)
+				}
+				continue
+			}
 			entrypoint, env := s.FrankenPHPQuadletSpec()
 			if err := podman.WriteFrankenPHPQuadlet(s.Name, s.Path, s.PHPVersion, entrypoint, env); err != nil {
 				fmt.Printf("  WARN: refreshing %s quadlet: %v\n", podman.FrankenPHPContainerName(s.Name), err)
+			}
+		case s.IsCustomFPM():
+			// Without this branch a custom-FPM site's quadlet is only rewritten on
+			// link, so an upgrade never back-fills additions to the FPM template
+			// (the shared php.ini mount from #944), and `php:ini shared` reports
+			// success while the setting silently never reaches the container.
+			if err := writeCustomFPMQuadletFn(s.Name, s.PHPVersion); err != nil {
+				fmt.Printf("  WARN: refreshing %s quadlet: %v\n", podman.CustomFPMContainerName(s.Name), err)
 			}
 		}
 	}
@@ -984,11 +1187,12 @@ func ensureSystemdLinger() error {
 		return nil
 	}
 
-	fmt.Println("\n  ! systemd user linger is disabled for this account.")
-	fmt.Println("    Without it, lerd's containers (DNS, nginx, PHP-FPM) are torn down")
-	fmt.Println("    by systemd-logind on screen blank, lock, or logout, and lerd will")
-	fmt.Println("    appear to stop working until you manually restart it.")
-	fmt.Print("  --> Enabling linger via `sudo loginctl enable-linger ", user, "` ...\n\n")
+	feedback.Warn("systemd user linger is disabled for this account")
+	feedback.Note("without it, lerd's containers (DNS, nginx, PHP-FPM) are torn down by")
+	feedback.Note("systemd-logind on screen blank, lock, or logout, and lerd will appear")
+	feedback.Note("to stop working until you manually restart it")
+	step("enabling linger via `sudo loginctl enable-linger " + user + "`")
+	fmt.Println()
 
 	cmd := exec.Command("sudo", "loginctl", "enable-linger", user)
 	cmd.Stdin = os.Stdin
@@ -998,7 +1202,7 @@ func ensureSystemdLinger() error {
 		fmt.Println()
 		return fmt.Errorf("enabling linger: %w", err)
 	}
-	fmt.Println("OK")
+	ok()
 	return nil
 }
 
@@ -1017,10 +1221,11 @@ func ensureUnprivilegedPorts() error {
 		return nil // already fine
 	}
 
-	fmt.Printf("\n  ! Port 80/443 require net.ipv4.ip_unprivileged_port_start ≤ 80 (current: %d)\n", val)
-	fmt.Println("    This is needed for rootless Podman to run Nginx on standard HTTP/HTTPS ports.")
+	feedback.Warn("port 80/443 require net.ipv4.ip_unprivileged_port_start ≤ 80 (current: %d)", val)
+	feedback.Note("this is needed for rootless Podman to run Nginx on standard HTTP/HTTPS ports")
 
-	fmt.Print("  --> Setting net.ipv4.ip_unprivileged_port_start=80 ... ")
+	step("setting net.ipv4.ip_unprivileged_port_start=80")
+	fmt.Println()
 	cmds := [][]string{
 		{"sudo", "sysctl", "-w", "net.ipv4.ip_unprivileged_port_start=80"},
 		{"sudo", "sh", "-c", "echo 'net.ipv4.ip_unprivileged_port_start=80' > /etc/sysctl.d/99-lerd-ports.conf"},
@@ -1034,7 +1239,7 @@ func ensureUnprivilegedPorts() error {
 			return fmt.Errorf("setting unprivileged port start: %w", err)
 		}
 	}
-	fmt.Println("OK")
+	ok()
 	return nil
 }
 
@@ -1132,6 +1337,27 @@ func lerdManagesNode() bool {
 	return err == nil
 }
 
+// nodeManageDecision resolves whether lerd should manage Node.js for this
+// install run. The choice is asked once and then remembered: an explicit saved
+// preference always wins silently, and a config predating the field adopts the
+// current on-disk shim state as that choice without asking. Only a genuine
+// first-time install (no saved preference and no shim) prompts, and then only
+// when a system node exists; with none it defaults to managed. Update never
+// prompts. When needPrompt is true the caller runs the prompt and overrides want
+// with the answer.
+func nodeManageDecision(fromUpdate bool, saved *bool, systemNodeDetected, shimPresent bool) (want, needPrompt, promptDefault bool) {
+	if saved != nil {
+		return *saved, false, *saved
+	}
+	if shimPresent || fromUpdate {
+		return shimPresent, false, shimPresent
+	}
+	if systemNodeDetected {
+		return true, true, true
+	}
+	return true, false, true
+}
+
 // ensureNodeManaged is called by the node:install/use/uninstall commands to
 // guard against running fnm operations while the user has opted out of
 // lerd-managed Node. Prompts for confirmation and writes shims on accept.
@@ -1152,6 +1378,7 @@ func ensureNodeManaged() error {
 	if err := addShellShims(true); err != nil {
 		return fmt.Errorf("writing shims: %w", err)
 	}
+	persistNodeManaged(true)
 	return nil
 }
 
@@ -1242,6 +1469,28 @@ func parseDNSMode(flag string) (enabled bool, ok bool) {
 	}
 }
 
+// dnsManageDecision resolves whether lerd should manage DNS for this install
+// run, and whether the question must be asked. The choice is asked once and then
+// remembered: the --dns flag always wins, an update honours the saved choice
+// silently, and any run over an existing config honours the saved choice without
+// re-prompting. Only a genuine first install (no config file yet) asks, and it
+// defaults to managed. After that the mode is flipped with dns:enable /
+// dns:disable, not by re-running the installer. When needPrompt is true the
+// caller runs the prompt and overrides want with the answer.
+func dnsManageDecision(fromUpdate, configExisted bool, flag *bool, savedEnabled bool) (want, needPrompt bool) {
+	if flag != nil {
+		return *flag, false
+	}
+	if fromUpdate || configExisted {
+		return savedEnabled, false
+	}
+	// Oracle fork: a genuine first install defaults to *.localhost rather than
+	// upstream's lerd-managed DNS — no dnsmasq, no resolver edits, no sudo, no
+	// port-53 conflict, and HTTPS still works because the mkcert CA is trusted
+	// either way. The user is still asked, so .test remains one keystroke away.
+	return false, true
+}
+
 // confirmInstallPromptDefault is like confirmInstallPrompt but lets the caller
 // pick the default for an empty answer, so re-running install can mirror the
 // user's previous choice. Falls back to /dev/tty when stdin is not a TTY so
@@ -1249,13 +1498,12 @@ func parseDNSMode(flag string) (enabled bool, ok bool) {
 func confirmInstallPromptDefault(question string, defaultYes bool) bool {
 	src, closer, ok := promptSource()
 	if !ok {
-		hint := "[Y/n]"
 		ans := "yes"
 		if !defaultYes {
-			hint = "[y/N]"
 			ans = "no"
 		}
-		fmt.Printf("  --> %s %s (no terminal, defaulting to %s)\n", question, hint, ans)
+		feedback.Prompt(question, defaultYes)
+		fmt.Println(feedback.Dim("(no terminal, defaulting to " + ans + ")"))
 		return defaultYes
 	}
 	if closer != nil {
@@ -1278,18 +1526,35 @@ func promptSource() (io.Reader, io.Closer, bool) {
 }
 
 func readConfirmAnswer(r io.Reader, question string, defaultYes bool) bool {
-	hint := "[Y/n]"
-	if !defaultYes {
-		hint = "[y/N]"
-	}
-	fmt.Printf("  --> %s %s ", question, hint)
-	reader := bufio.NewReader(r)
-	answer, _ := reader.ReadString('\n')
-	answer = strings.TrimSpace(strings.ToLower(answer))
+	feedback.Prompt(question, defaultYes)
+	answer := strings.TrimSpace(strings.ToLower(readLine(r)))
 	if answer == "" {
 		return defaultYes
 	}
 	return answer != "n" && answer != "no"
+}
+
+// readLine reads a single line, one byte at a time, stopping after the first
+// newline. Reading unbuffered is deliberate: successive prompts share the
+// terminal, so a buffered reader would pull typed-ahead input past this line and
+// discard it, making the next prompt block. Byte-at-a-time leaves the rest in
+// the terminal buffer for the following prompt.
+func readLine(r io.Reader) string {
+	var b strings.Builder
+	buf := make([]byte, 1)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if buf[0] == '\n' {
+				break
+			}
+			b.WriteByte(buf[0])
+		}
+		if err != nil {
+			break
+		}
+	}
+	return b.String()
 }
 
 // downloadFile downloads a URL to a local file, printing a progress bar to w.
@@ -1456,7 +1721,7 @@ fi
 		}
 		return nil
 	default:
-		if err := appendShellRC(filepath.Join(home, ".bashrc"), binDir); err != nil {
+		if err := appendShellRC(bashRCPath(home), binDir); err != nil {
 			return err
 		}
 		bashCompDir := filepath.Join(home, ".local", "share", "bash-completion", "completions")
@@ -1465,6 +1730,16 @@ fi
 		}
 		return nil
 	}
+}
+
+// bashRCPath picks the bash startup file lerd should write its PATH line to.
+// macOS Terminal launches bash as a login shell that reads .bash_profile (not
+// .bashrc); Linux interactive bash reads .bashrc.
+func bashRCPath(home string) string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, ".bash_profile")
+	}
+	return filepath.Join(home, ".bashrc")
 }
 
 func appendShellRC(rcFile, binDir string) error {

@@ -15,9 +15,11 @@ import (
 type secureStubs struct {
 	secureCallCount   int
 	unsecureCallCount int
+	reissueCallCount  int
 	reloadCallCount   int
 	secureErr         error
 	unsecureErr       error
+	reissueErr        error
 	reloadErr         error
 	notifications     []string // "domain:action" entries in call order
 }
@@ -29,6 +31,7 @@ func stubSecureDeps(t *testing.T) *secureStubs {
 	s := &secureStubs{}
 	origSecure := secureCertFn
 	origUnsecure := unsecureCertFn
+	origReissue := reissueCertFn
 	origReload := nginxReloadFn
 	origNotify := notifyDaemonFn
 	secureCertFn = func(_ config.Site) error {
@@ -38,6 +41,10 @@ func stubSecureDeps(t *testing.T) *secureStubs {
 	unsecureCertFn = func(_ config.Site) error {
 		s.unsecureCallCount++
 		return s.unsecureErr
+	}
+	reissueCertFn = func(_ config.Site) error {
+		s.reissueCallCount++
+		return s.reissueErr
 	}
 	nginxReloadFn = func() error {
 		s.reloadCallCount++
@@ -50,6 +57,7 @@ func stubSecureDeps(t *testing.T) *secureStubs {
 	t.Cleanup(func() {
 		secureCertFn = origSecure
 		unsecureCertFn = origUnsecure
+		reissueCertFn = origReissue
 		nginxReloadFn = origReload
 		notifyDaemonFn = origNotify
 	})
@@ -191,6 +199,84 @@ func TestSetSecured_skipsNotificationsOnNginxReloadError(t *testing.T) {
 	}
 	if len(stubs.notifications) != 0 {
 		t.Errorf("daemon notifications fired after nginx reload failure: %v", stubs.notifications)
+	}
+}
+
+// Upstream refuses to secure a site when lerd does not manage DNS. The Oracle
+// fork installs the mkcert CA regardless of the DNS choice and .localhost
+// resolves to the loopback via RFC 6761, so securing works on a DNS-off install
+// — which is the fork's default, making this the common path, not an edge case.
+func TestSetSecured_securesWhenDNSDisabled(t *testing.T) {
+	stubs := stubSecureDeps(t)
+	projectDir := withTempEnv(t)
+
+	gcfg, err := config.LoadGlobal()
+	if err != nil {
+		t.Fatalf("load global: %v", err)
+	}
+	gcfg.DNS.Enabled = false
+	gcfg.DNS.TLD = "localhost"
+	if err := config.SaveGlobal(gcfg); err != nil {
+		t.Fatalf("save global: %v", err)
+	}
+
+	site := &config.Site{Name: "myapp", Domains: []string{"myapp.localhost"}, Path: projectDir}
+	if err := config.AddSite(*site); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetSecured(site, true); err != nil {
+		t.Fatalf("SetSecured: %v", err)
+	}
+	if stubs.secureCallCount != 1 {
+		t.Errorf("certs.SecureSite calls = %d, want 1 with DNS disabled", stubs.secureCallCount)
+	}
+	if !site.Secured {
+		t.Errorf("site.Secured did not flip with DNS disabled")
+	}
+}
+
+func TestRenewCert_reissuesSecuredSiteAndReloads(t *testing.T) {
+	stubs := stubSecureDeps(t)
+
+	site := &config.Site{Name: "myapp", Domains: []string{"myapp.test"}, Secured: true}
+	if err := RenewCert(site); err != nil {
+		t.Fatalf("RenewCert: %v", err)
+	}
+	if stubs.reissueCallCount != 1 {
+		t.Errorf("reissue calls = %d, want 1", stubs.reissueCallCount)
+	}
+	if stubs.reloadCallCount != 1 {
+		t.Errorf("nginx.Reload calls = %d, want 1", stubs.reloadCallCount)
+	}
+}
+
+func TestRenewCert_refusesUnsecuredSite(t *testing.T) {
+	stubs := stubSecureDeps(t)
+
+	site := &config.Site{Name: "myapp", Domains: []string{"myapp.test"}, Secured: false}
+	err := RenewCert(site)
+	if err == nil || !strings.Contains(err.Error(), "not secured") {
+		t.Fatalf("RenewCert err = %v, want a not-secured error", err)
+	}
+	if stubs.reissueCallCount != 0 {
+		t.Errorf("reissue ran on an unsecured site (calls = %d)", stubs.reissueCallCount)
+	}
+	if stubs.reloadCallCount != 0 {
+		t.Errorf("nginx.Reload ran on an unsecured site (calls = %d)", stubs.reloadCallCount)
+	}
+}
+
+func TestRenewCert_abortsOnReissueError(t *testing.T) {
+	stubs := stubSecureDeps(t)
+	stubs.reissueErr = errors.New("mkcert boom")
+
+	site := &config.Site{Name: "myapp", Domains: []string{"myapp.test"}, Secured: true}
+	if err := RenewCert(site); err == nil || !strings.Contains(err.Error(), "mkcert boom") {
+		t.Fatalf("RenewCert err = %v, want mkcert boom", err)
+	}
+	if stubs.reloadCallCount != 0 {
+		t.Errorf("nginx.Reload should not run after a reissue failure (calls = %d)", stubs.reloadCallCount)
 	}
 }
 

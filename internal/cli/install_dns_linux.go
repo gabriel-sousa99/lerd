@@ -4,9 +4,10 @@ package cli
 
 import (
 	"io"
-	"os/exec"
 	"strings"
 
+	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
 )
@@ -25,8 +26,8 @@ func ensureDNSImageForStart() {
 	// Build the dnsmasq image if it doesn't exist. Ignore errors — the image
 	// will be pulled/built during RunParallel if missing.
 	containerfile := "FROM docker.io/library/alpine:latest\nRUN apk add --no-cache dnsmasq\n"
-	if exec.Command("podman", "image", "exists", "lerd-dnsmasq:local").Run() != nil {
-		cmd := exec.Command("podman", "build", "-t", "lerd-dnsmasq:local", "-")
+	if !podman.ImageExists("lerd-dnsmasq:local") {
+		cmd := podman.Cmd("build", "-t", "lerd-dnsmasq:local", "-")
 		cmd.Stdin = strings.NewReader(containerfile)
 		cmd.Run() //nolint:errcheck
 	}
@@ -38,7 +39,7 @@ func pullDNSImages() []BuildJob {
 		{
 			Label: "Pulling alpine:latest",
 			Run: func(w io.Writer) error {
-				cmd := exec.Command("podman", "pull", "docker.io/library/alpine:latest")
+				cmd := podman.Cmd("pull", "docker.io/library/alpine:latest")
 				cmd.Stdout = w
 				cmd.Stderr = w
 				return cmd.Run()
@@ -48,7 +49,7 @@ func pullDNSImages() []BuildJob {
 			Label: "Building dnsmasq image",
 			Run: func(w io.Writer) error {
 				containerfile := "FROM docker.io/library/alpine:latest\nRUN apk add --no-cache dnsmasq\n"
-				cmd := exec.Command("podman", "build", "-t", "lerd-dnsmasq:local", "-")
+				cmd := podman.Cmd("build", "-t", "lerd-dnsmasq:local", "-")
 				cmd.Stdin = strings.NewReader(containerfile)
 				cmd.Stdout = w
 				cmd.Stderr = w
@@ -81,4 +82,24 @@ func teardownDNS() {
 	_ = services.Mgr.Stop("lerd-dns")
 	_ = services.Mgr.RemoveContainerUnit("lerd-dns")
 	_ = services.Mgr.DaemonReload()
+
+	// Only when lerd actually wrote resolver config. install.go calls this on
+	// every run where DNS is off, not just on a true->false flip, so an
+	// unconditional teardown would revert interfaces and restart NetworkManager on
+	// every `lerd install` for someone who never let lerd near their resolver.
+	if !dnsResolverConfigured() {
+		return
+	}
+	// Announced with the lock glyph: the removals run as root. They are granted in
+	// the sudoers drop-in so they do not prompt, but the header keeps the teardown
+	// visible in the output.
+	feedback.Sudo("Removing DNS configuration")
+	dnsTeardown()
 }
+
+// Seams so tests can drive the disable path without shelling out to sudo or
+// depending on what the test host happens to have installed.
+var (
+	dnsTeardown           = dns.Teardown
+	dnsResolverConfigured = dns.ResolverConfigured
+)

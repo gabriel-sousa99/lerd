@@ -1,12 +1,10 @@
 package cli
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -37,19 +35,16 @@ func runConsole(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	version, err := phpDet.DetectVersion(cwd)
+	version, err := phpVersionForDir(cwd)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return fmt.Errorf("cannot detect PHP version: %w", err)
-		}
-		version = cfg.PHP.DefaultVersion
+		return err
 	}
 
 	container := fpmContainerForDir(cwd, version)
 
-	if running, _ := podman.ContainerRunning(container); !running {
-		return fmt.Errorf("PHP %s FPM container is not running — start it with: systemctl --user start %s", version, container)
+	version, container, err = ensureFPMRunning(cwd, version, container)
+	if err != nil {
+		return err
 	}
 
 	podman.EnsurePathMounted(cwd, version)

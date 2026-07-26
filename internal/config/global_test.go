@@ -41,6 +41,38 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	}
 }
 
+// A config returned by LoadGlobal must not share its PHP.Packages map with the
+// cache: php:pkg's AddPackage/RemovePackage mutate the loaded copy in place
+// before SaveGlobal, and that must not corrupt what later LoadGlobal calls see.
+func TestLoadGlobal_PackagesNotAliasedWithCache(t *testing.T) {
+	setConfigDir(t)
+
+	seed, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	seed.AddPackage("vim")
+	if err := SaveGlobal(seed); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+
+	loaded, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	// Mutate the loaded copy without saving — must not reach the cache.
+	loaded.AddPackage("htop")
+
+	again, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	got := again.GetPackages()
+	if len(got) != 1 || got[0] != "vim" {
+		t.Errorf("cache corrupted by an unsaved mutation: GetPackages = %v, want [vim]", got)
+	}
+}
+
 func TestSaveLoadGlobal_RoundTrip(t *testing.T) {
 	setConfigDir(t)
 
@@ -73,6 +105,37 @@ func TestSaveLoadGlobal_RoundTrip(t *testing.T) {
 	}
 	if got.Nginx.HTTPPort != 8080 {
 		t.Errorf("Nginx.HTTPPort = %d, want 8080", got.Nginx.HTTPPort)
+	}
+}
+
+func TestNodeManagedPref(t *testing.T) {
+	setConfigDir(t)
+
+	cfg, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	// A fresh config predates the field, so the preference is unset and callers
+	// fall back to the on-disk shim state.
+	if _, set := cfg.NodeManagedPref(); set {
+		t.Fatal("expected NodeManagedPref unset on a fresh config")
+	}
+
+	cfg.SetNodeManaged(false)
+	if err := SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+
+	got, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal after save: %v", err)
+	}
+	val, set := got.NodeManagedPref()
+	if !set {
+		t.Fatal("expected NodeManagedPref set after SetNodeManaged")
+	}
+	if val {
+		t.Errorf("NodeManagedPref = true, want false (the opt-out must survive a round-trip)")
 	}
 }
 
@@ -273,28 +336,8 @@ func TestXdebug_SetXdebugDefaultsToDebugMode(t *testing.T) {
 }
 
 // ── Extensions ────────────────────────────────────────────────────────────────
-
-func TestExtensions_AddRemoveGet(t *testing.T) {
-	cfg := &GlobalConfig{}
-
-	if exts := cfg.GetExtensions("8.3"); exts != nil {
-		t.Errorf("expected nil extensions, got %v", exts)
-	}
-
-	cfg.AddExtension("8.3", "redis")
-	cfg.AddExtension("8.3", "imagick")
-
-	exts := cfg.GetExtensions("8.3")
-	if len(exts) != 2 {
-		t.Fatalf("expected 2 extensions, got %d: %v", len(exts), exts)
-	}
-
-	cfg.RemoveExtension("8.3", "redis")
-	exts = cfg.GetExtensions("8.3")
-	if len(exts) != 1 || exts[0] != "imagick" {
-		t.Errorf("expected [imagick] after remove, got %v", exts)
-	}
-}
+// Add/remove/get of the declared sets is covered by TestPHPSetAccessors in
+// php_sets_test.go, alongside the migration that produces them.
 
 func TestExtApkDeps_SetGetClear(t *testing.T) {
 	cfg := &GlobalConfig{}
@@ -320,20 +363,12 @@ func TestExtApkDeps_SetGetClear(t *testing.T) {
 
 func TestExtApkDeps_DroppedWhenExtensionRemoved(t *testing.T) {
 	cfg := &GlobalConfig{}
-	cfg.AddExtension("8.4", "ssh2")
-	cfg.AddExtension("8.5", "ssh2")
+	cfg.AddExtension("ssh2")
 	cfg.SetExtApkDeps("ssh2", []string{"libssh2-dev"})
 
-	// Still used by 8.5, so deps stay.
-	cfg.RemoveExtension("8.4", "ssh2")
-	if cfg.GetExtApkDeps("ssh2") == nil {
-		t.Error("deps should remain while another version still uses the extension")
-	}
-
-	// No version uses it anymore, so deps go too.
-	cfg.RemoveExtension("8.5", "ssh2")
+	cfg.RemoveExtension("ssh2")
 	if cfg.GetExtApkDeps("ssh2") != nil {
-		t.Error("deps should be dropped once no version uses the extension")
+		t.Error("deps should be dropped once the extension is no longer declared")
 	}
 }
 
@@ -347,22 +382,38 @@ func TestExtApkDeps_DeepCopied(t *testing.T) {
 	}
 }
 
+// A clone's per-service PublishedPorts map must not alias the original's, or a
+// secondary-port override written into a loaded config would mutate the shared
+// cache (risking a concurrent map read/write in lerd-ui).
+func TestCloneGlobalConfig_PublishedPortsDeepCopied(t *testing.T) {
+	cfg := &GlobalConfig{
+		Services: map[string]ServiceConfig{
+			"mailpit": {PublishedPorts: map[int]int{8025: 8025}},
+		},
+	}
+	clone := cloneGlobalConfig(cfg)
+	clone.Services["mailpit"].PublishedPorts[8025] = 9025
+	if got := cfg.Services["mailpit"].PublishedPorts[8025]; got != 8025 {
+		t.Errorf("mutating the clone must not affect the original: got %d, want 8025", got)
+	}
+}
+
 func TestExtensions_AddIdempotent(t *testing.T) {
 	cfg := &GlobalConfig{}
-	cfg.AddExtension("8.3", "redis")
-	cfg.AddExtension("8.3", "redis")
+	cfg.AddExtension("redis")
+	cfg.AddExtension("redis")
 
-	if len(cfg.GetExtensions("8.3")) != 1 {
+	if len(cfg.GetExtensions()) != 1 {
 		t.Error("duplicate add should be a no-op")
 	}
 }
 
-func TestExtensions_RemoveLastCleansMap(t *testing.T) {
+func TestExtensions_RemoveLastCleansSet(t *testing.T) {
 	cfg := &GlobalConfig{}
-	cfg.AddExtension("8.3", "redis")
-	cfg.RemoveExtension("8.3", "redis")
+	cfg.AddExtension("redis")
+	cfg.RemoveExtension("redis")
 
-	if exts := cfg.GetExtensions("8.3"); len(exts) != 0 {
+	if exts := cfg.GetExtensions(); len(exts) != 0 {
 		t.Errorf("expected empty after removing last ext, got %v", exts)
 	}
 }
@@ -370,20 +421,7 @@ func TestExtensions_RemoveLastCleansMap(t *testing.T) {
 func TestExtensions_RemoveNonExistent(t *testing.T) {
 	cfg := &GlobalConfig{}
 	// Should not panic
-	cfg.RemoveExtension("8.3", "nonexistent")
-}
-
-func TestExtensions_IndependentVersions(t *testing.T) {
-	cfg := &GlobalConfig{}
-	cfg.AddExtension("8.3", "redis")
-	cfg.AddExtension("8.4", "imagick")
-
-	if exts := cfg.GetExtensions("8.3"); len(exts) != 1 || exts[0] != "redis" {
-		t.Errorf("8.3 extensions wrong: %v", exts)
-	}
-	if exts := cfg.GetExtensions("8.4"); len(exts) != 1 || exts[0] != "imagick" {
-		t.Errorf("8.4 extensions wrong: %v", exts)
-	}
+	cfg.RemoveExtension("nonexistent")
 }
 
 // Pre-existing configs from before the dns.enabled field was introduced have
@@ -589,6 +627,49 @@ func TestNotifications_RoundTripsThroughYAML(t *testing.T) {
 	}
 }
 
+// ── Tray icon ─────────────────────────────────────────────────────────────────
+
+func TestTrayIcon_DefaultThemeAdaptive(t *testing.T) {
+	cfg := &GlobalConfig{}
+	if cfg.IsHighContrastTrayIcon() {
+		t.Error("zero-value config should report the theme-adaptive tray icon")
+	}
+}
+
+func TestTrayIcon_Toggle(t *testing.T) {
+	cfg := &GlobalConfig{}
+	cfg.SetHighContrastTrayIcon(true)
+	if !cfg.IsHighContrastTrayIcon() {
+		t.Error("after SetHighContrastTrayIcon(true), IsHighContrastTrayIcon should be true")
+	}
+	cfg.SetHighContrastTrayIcon(false)
+	if cfg.IsHighContrastTrayIcon() {
+		t.Error("after SetHighContrastTrayIcon(false), IsHighContrastTrayIcon should be false")
+	}
+}
+
+func TestTrayIcon_RoundTripsThroughYAML(t *testing.T) {
+	setConfigDir(t)
+	invalidateGlobalCache()
+	t.Cleanup(invalidateGlobalCache)
+
+	cfg, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	cfg.SetHighContrastTrayIcon(true)
+	if err := SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	got, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !got.IsHighContrastTrayIcon() {
+		t.Error("high-contrast tray icon should persist across a YAML round trip")
+	}
+}
+
 func TestDNSManaged(t *testing.T) {
 	var nilCfg *GlobalConfig
 	if !nilCfg.DNSManaged() {
@@ -603,5 +684,126 @@ func TestDNSManaged(t *testing.T) {
 	disabled.DNS.Enabled = false
 	if disabled.DNSManaged() {
 		t.Error("DNSManaged() = true with DNS.Enabled false, want false")
+	}
+}
+
+// TestServiceConfig_HostPorts is the single source both the serviceops port guard
+// and the host-proxy allocator consume, so it must capture the effective primary
+// (the PublishedPort override when set, else the preset-default Port) and every
+// ExtraPorts mapping form — including "ip:host:container", whose host side the old
+// guard parser dropped.
+func TestServiceConfig_HostPorts(t *testing.T) {
+	svc := ServiceConfig{
+		Port:          3306,
+		PublishedPort: 3307,
+		ExtraPorts:    []string{"8082:8081", "127.0.0.1:9090:9090", "7000", "6379/tcp"},
+	}
+	got := map[int]bool{}
+	for _, p := range svc.HostPorts() {
+		got[p] = true
+	}
+	for _, want := range []int{3307, 8082, 9090, 7000, 6379} {
+		if !got[want] {
+			t.Errorf("HostPorts missing %d; got %v", want, got)
+		}
+	}
+	// Once an override moves the service off its default, the quadlet publishes
+	// only the override, so the freed default must NOT stay reserved — otherwise
+	// it can never be reassigned to another service.
+	if got[3306] {
+		t.Errorf("HostPorts still reserved the freed default 3306 after an override: %v", got)
+	}
+	// The container-side ports must never be reserved as host ports.
+	if got[8081] {
+		t.Errorf("HostPorts wrongly reserved container-side port 8081: %v", got)
+	}
+}
+
+// TestServiceConfig_HostPorts_defaultWhenNoOverride reports the preset-default
+// Port when no PublishedPort override is set.
+func TestServiceConfig_HostPorts_defaultWhenNoOverride(t *testing.T) {
+	svc := ServiceConfig{Port: 5432}
+	got := svc.HostPorts()
+	if len(got) != 1 || got[0] != 5432 {
+		t.Errorf("HostPorts = %v, want [5432]", got)
+	}
+}
+
+// ── FPMPorts ─────────────────────────────────────────────────────────────────
+
+func TestFPMPortsFor_RoundTrip(t *testing.T) {
+	setConfigDir(t)
+	cfg, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	cfg.PHP.FPMPorts = map[string][]string{"8.3": {"3000:3000", "5173:5173"}}
+	if err := SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	got := FPMPortsFor("8.3")
+	if len(got) != 2 || got[0] != "3000:3000" || got[1] != "5173:5173" {
+		t.Errorf("FPMPortsFor(8.3) = %v, want [3000:3000 5173:5173]", got)
+	}
+	if v := FPMPortsFor("8.4"); v != nil {
+		t.Errorf("FPMPortsFor(8.4) = %v, want nil", v)
+	}
+}
+
+// The version key carries a dot, so this pins that viper's "::" delimiter keeps
+// "8.3" a single key rather than nesting it under an "8" map.
+func TestFPMPortsFor_DottedVersionKeySurvivesLoad(t *testing.T) {
+	setConfigDir(t)
+	cfg, _ := LoadGlobal()
+	cfg.PHP.FPMPorts = map[string][]string{"8.3": {"9000:9000"}}
+	if err := SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	reloaded, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if got := reloaded.PHP.FPMPorts["8.3"]; len(got) != 1 || got[0] != "9000:9000" {
+		t.Errorf("reloaded FPMPorts[8.3] = %v, want [9000:9000]", got)
+	}
+}
+
+// A version's FPM ports must be reserved so the service port-ownership guard
+// never hands one of them to a service and collides at boot.
+func TestReservedHostPorts_IncludesFPMPorts(t *testing.T) {
+	setConfigDir(t)
+	cfg, _ := LoadGlobal()
+	cfg.PHP.FPMPorts = map[string][]string{"8.3": {"3000:3000"}}
+	if err := SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	if !ReservedHostPorts()[3000] {
+		t.Errorf("ReservedHostPorts must reserve an FPM port 3000; got %v", ReservedHostPorts())
+	}
+}
+
+// A published-port override that moves a service off its preset default must free
+// that default for reuse: the preset's own default port loop must not keep it
+// reserved, matching HostPorts()'s freed-default contract.
+func TestReservedHostPorts_FreesDefaultWhenPublishedOverrideMovesIt(t *testing.T) {
+	setConfigDir(t)
+	cfg, _ := LoadGlobal()
+	svc := cfg.Services["mysql"]
+	def := svc.Port
+	if def == 0 {
+		t.Skip("mysql preset has no default port in this build")
+	}
+	moved := def + 1000
+	svc.PublishedPort = moved
+	cfg.Services["mysql"] = svc
+	if err := SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	reserved := ReservedHostPorts()
+	if reserved[def] {
+		t.Errorf("moved-off default port %d must be freed, but it is still reserved", def)
+	}
+	if !reserved[moved] {
+		t.Errorf("the new published port %d must be reserved; got %v", moved, reserved)
 	}
 }

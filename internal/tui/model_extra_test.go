@@ -4,31 +4,31 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
-func TestNextFocus_SkipsServicesWhenHidden(t *testing.T) {
+func TestNextFocus_SitesTabCyclesSitesAndDetail(t *testing.T) {
 	m := NewModel("test")
 	m.snap = fakeSnap()
-	m.hideServices = true
+	m.activeTab = tabSites
 	m.focus = paneSites
 
+	// Sites tab cycles sites → detail; services is never in the cycle.
 	got := m.nextFocus(+1)
 	if got != paneDetail {
-		t.Fatalf("hideServices + tab should skip to detail, got %d", got)
+		t.Fatalf("sites tab: tab from sites should land on detail, got %d", got)
 	}
 }
 
-func TestNextFocus_NoSitesSkipsDetail(t *testing.T) {
+func TestNextFocus_ServicesTabNoServiceSkipsDetail(t *testing.T) {
 	m := NewModel("test")
-	m.snap = Snapshot{
-		Services: []ServiceRow{{Name: "mysql", State: stateRunning}},
-	}
+	m.snap = Snapshot{} // no services → detail has nothing to show
+	m.activeTab = tabServices
 	m.focus = paneServices
 	got := m.nextFocus(+1)
-	if got != paneSites {
-		t.Fatalf("without sites, tab from services should wrap to sites (skipping detail), got %d", got)
+	if got != paneServices {
+		t.Fatalf("services tab with no service should stay on services, got %d", got)
 	}
 }
 
@@ -53,20 +53,20 @@ func TestFilterInput_CollectsRunes(t *testing.T) {
 	m.filterActive = true
 
 	for _, r := range "be" {
-		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next, _ := m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = next.(*Model)
 	}
 	if m.siteFilter != "be" {
 		t.Fatalf("expected filter 'be', got %q", m.siteFilter)
 	}
 	// Backspace drops one rune.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = next.(*Model)
 	if m.siteFilter != "b" {
 		t.Fatalf("expected filter 'b' after backspace, got %q", m.siteFilter)
 	}
 	// Esc clears and exits input mode.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(*Model)
 	if m.siteFilter != "" || m.filterActive {
 		t.Fatalf("esc should clear filter and leave input, got filter=%q active=%v", m.siteFilter, m.filterActive)
@@ -76,8 +76,9 @@ func TestFilterInput_CollectsRunes(t *testing.T) {
 func TestDetailMode_SToggleSetsFocus(t *testing.T) {
 	m := NewModel("test")
 	m.snap = fakeSnap()
+	m.activeTab = tabSites
 	m.focus = paneSites
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'S', Text: string('S')})
 	m = next.(*Model)
 	if m.detailMode != detailSettings {
 		t.Fatalf("S should enter settings mode, got %d", m.detailMode)
@@ -86,7 +87,7 @@ func TestDetailMode_SToggleSetsFocus(t *testing.T) {
 		t.Fatalf("S should move focus to detail, got %d", m.focus)
 	}
 	// S again → back to site
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'S', Text: string('S')})
 	m = next.(*Model)
 	if m.detailMode != detailSite {
 		t.Fatalf("second S should return to site detail, got %d", m.detailMode)
@@ -96,30 +97,38 @@ func TestDetailMode_SToggleSetsFocus(t *testing.T) {
 func TestHelpModal_Toggle(t *testing.T) {
 	m := NewModel("test")
 	m.snap = fakeSnap()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: '?', Text: string('?')})
 	m = next.(*Model)
 	if !m.helpModalActive {
 		t.Fatalf("? should open the help modal, got helpModalActive=false")
 	}
 	// Esc closes the modal.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(*Model)
 	if m.helpModalActive {
 		t.Fatalf("esc should close the help modal")
 	}
 }
 
-func TestHideServicesToggle(t *testing.T) {
+func TestTabSwitch_CtrlArrowsCycle(t *testing.T) {
 	m := NewModel("test")
 	m.snap = fakeSnap()
-	m.focus = paneServices
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m.switchTab(tabSites)
+	// From Sites: ctrl+right → Services, ctrl+left twice → Dashboard.
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModCtrl})
 	m = next.(*Model)
-	if !m.hideServices {
-		t.Fatalf("v should hide services")
+	if m.activeTab != tabServices {
+		t.Fatalf("ctrl+right from Sites should land on Services, got %d", m.activeTab)
 	}
-	if m.focus == paneServices {
-		t.Fatalf("focus should move off hidden pane, got %d", m.focus)
+	if m.focus != paneServices {
+		t.Fatalf("switching to Services should focus the services pane, got %d", m.focus)
+	}
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModCtrl})
+	m = next.(*Model)
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModCtrl})
+	m = next.(*Model)
+	if m.activeTab != tabDashboard {
+		t.Fatalf("ctrl+left twice should reach Dashboard, got %d", m.activeTab)
 	}
 }
 
@@ -127,8 +136,9 @@ func TestViewRendersUnderSettingsMode(t *testing.T) {
 	m := NewModel("test")
 	m.snap = fakeSnap()
 	m.width, m.height = 150, 40
+	m.switchTab(tabSites)
 	m.detailMode = detailSettings
-	out := m.View()
+	out := m.render()
 	if !strings.Contains(out, "Settings") {
 		t.Fatalf("settings view should include 'Settings' header, got:\n%s", out)
 	}
@@ -139,7 +149,7 @@ func TestViewRendersUnderHelpModal(t *testing.T) {
 	m.snap = fakeSnap()
 	m.width, m.height = 150, 50
 	m.helpModalActive = true
-	out := m.View()
+	out := m.render()
 	if !strings.Contains(out, "Keybindings") {
 		t.Fatalf("help modal should include 'Keybindings' header")
 	}
@@ -153,13 +163,13 @@ func TestDomainInput_CommitRunsLerdAdd(t *testing.T) {
 	m.focus = paneDetail
 	m.openDomainInput()
 	for _, r := range "newdomain" {
-		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next, _ := m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = next.(*Model)
 	}
 	if m.domainInput != "newdomain" {
 		t.Fatalf("expected pending domain 'newdomain', got %q", m.domainInput)
 	}
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(*Model)
 	if cmd == nil {
 		t.Fatalf("enter should return a Cmd")
@@ -176,7 +186,7 @@ func TestDomainInput_EscCancels(t *testing.T) {
 	}
 	m.openDomainInput()
 	m.domainInput = "partial"
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(*Model)
 	if m.domainInputActive || m.domainInput != "" {
 		t.Fatalf("esc should clear input, got active=%v value=%q", m.domainInputActive, m.domainInput)

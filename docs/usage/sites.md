@@ -8,7 +8,7 @@
 | `lerd init --fresh` | Re-run the wizard with existing `.lerd.yaml` values as defaults |
 | `lerd park [dir]` | Register all Laravel projects inside `dir` (defaults to cwd) |
 | `lerd unpark [dir]` | Remove a parked directory and unlink all its sites |
-| `lerd link [domain]` | Register the current directory as a site (domain name without TLD, defaults to directory name) |
+| `lerd link [domain]` | Register the current directory as a site (domain name without TLD, defaults to directory name). On a fresh project in an interactive terminal it runs the `lerd init` wizard first |
 | `lerd unlink` | Unlink the current directory site (removes all domains) |
 | `lerd domain add <name>` | Add an additional domain to the current site |
 | `lerd domain remove <name>` | Remove a domain from the current site |
@@ -21,12 +21,20 @@
 | `lerd pause [name]` | Pause a site: stop its workers and replace the vhost with a landing page |
 | `lerd unpause [name]` | Resume a paused site: restore its vhost and restart previously running workers |
 | `lerd env` | Configure `.env` for the current project with lerd service connection settings |
+| `lerd workspace add <name>` | Create an empty workspace |
+| `lerd workspace rename <old> <new>` | Rename a workspace, keeping its sites |
+| `lerd workspace rm <name>` | Delete a workspace; its sites become ungrouped |
+| `lerd workspace assign <site> <workspace\|none>` | Move a site into a workspace, or out of one with `none` |
+| `lerd workspace move <name> <position>` | Reposition a workspace in the display order (`0` is first) |
+| `lerd workspace list` | List the workspaces and their sites |
 
 ---
 
 ## Project initialisation
 
 `lerd init` runs an interactive wizard, writes the answers to `.lerd.yaml` in the project root, and then applies the configuration: linking the site, enabling HTTPS if requested, picking a database, and starting any required services.
+
+`lerd link` and `lerd init` overlap on purpose. When you run `lerd link` on a project that has no `.lerd.yaml` yet and you're in an interactive terminal, link routes straight into the init wizard, so you don't have to know to reach for `init` first. If the project already has a `.lerd.yaml`, link just applies it. And in a non-interactive shell (a script, CI, `lerd park`, or any piped invocation) link always does a fast, bare auto-detected registration with no wizard, so automation never blocks on a prompt. Passing an explicit domain (`lerd link myapp`) also skips the wizard and links directly.
 
 ```bash
 cd ~/Projects/my-app
@@ -232,12 +240,30 @@ Toggling workers from the CLI (`lerd queue:start`, `lerd schedule:stop`, etc.) o
 
 ---
 
+## Request timing
+
+The Overview of a PHP site carries a **Request timing** section that reads the always-on nginx access feed to show how the site is responding as you work, no debug bridge needed. A range picker (15 minutes up to 7 days) drives the whole view: headline figures for the typical and p95 response times, the request count and error rate, a response-time distribution, a throughput chart, the slowest routes, and a table of every route with its p50 and p95. A **Recent requests** tab lists the latest calls with their time, method, path, status, and duration.
+
+Routes are grouped after collapsing id-like path segments, so `/users/123` and `/users/456` aggregate as one `GET /users/:id` entry, and query strings are dropped before anything is recorded. Requests nginx serves without the app are left out: static assets by file extension, anything with a zero request time (a static file nginx answers directly, like `manifest.json` or `robots.txt`), and upgraded connections such as WebSockets, so a page's dozens of asset requests don't drown out its app routes. An upgrade is logged once, when the socket closes, carrying the whole lifetime of the connection as its request time, so a long-lived Reverb or Vite HMR socket would otherwise read as one route taking thousands of seconds. The first request after a site has sat idle past the idle-suspend timeout is treated as a **cold start**: its wake cost is kept out of every timing figure (the site and per-route percentiles and the distribution) while still counting toward the request total, and it's marked in the Recent list, so a wake never makes a route look slow. The last-seen time is seeded from the durable store on startup, so a wake right after a daemon restart is still recognised as cold rather than counted as warm. Requests are written to a small SQLite store in the data directory, so the history survives a restart and any range up to the seven-day retention window can be read back; the watcher also keeps an in-memory window, which is what the doctor and slow-route notifications read. The same table is available to AI assistants over MCP as `diag route_timing`, and `diag optimize_route` pairs each slow route with the N+1 and slow queries captured against it.
+
+The same flagged routes also surface as a `Response Time` warning in the site doctor (`lerd site:doctor`, the dashboard doctor card, and the MCP `diag site_doctor` action), so the nudge reaches you even when you're on another tab. The doctor reads the watcher's snapshot rather than re-measuring, so it stays quiet on a healthy or idle site. If you've enabled notifications, a route crossing the threshold also fires a `slow_route` push. It's edge-triggered: one push when the route goes slow, then it rearms once the route drops back within the typical band, so you're told again if it regresses later (see [Notifications](../features/notifications.md)).
+
+This is a local, single-developer signal meant to catch a route that is dragging, not a production analytics system. Each flagged route carries a **Profile** button that does the whole handoff in one click: it arms the SPX profiler, waits for it to actually be armed, then opens the route in a new tab so that request is captured and switches you to the Profiler where the fresh capture lands on top. Profiling is global and stays off until you ask for it, so the button turns it on for every request until you turn it back off. A non-navigable route (a POST, say) can't be opened for you, so there the button just arms profiling and opens the Profiler for you to reproduce it (see [Profiler](../features/profiler.md)).
+
+A [git worktree](../features/git-worktrees.md) is timed as its own thing. Requests to `feature-x.myapp.test` are recorded against that branch, not against the main checkout, so switching the worktree picker re-scopes the whole panel to the branch you're on and its routes open and profile on the worktree's own subdomain. The worktree's traffic still counts toward the parent when the sites list is ordered by use, since the project is the same project. The doctor's `Response Time` check and the `slow_route` push follow the same rule when they run against a worktree.
+
+When debug capture is on, each route also gains an **Inspect queries** button that jumps to the Debug tab's Queries lens filtered to that route, the one place that renders captured queries. The Debug lenses share a single search within a site's Debug view, so the filter carries over as you switch between Queries, Dumps, and the kind lenses, and the search matches the request path as well as the SQL and file. Captured queries only exist for requests hit while capture was on, so a route you haven't exercised with the debugger shows nothing until you reload it. See [Queries](../features/queries.md) for the capture itself.
+
+---
+
 ## Name collision handling
 
 When a directory is parked or linked and another site is already registered with the same name:
 
 - **Same path**: treated as a re-link of the same site. The existing registration is updated and the TLS state is preserved.
 - **Different path**: the new site is registered with a numeric suffix (`myapp-2`, `myapp-3`, etc.) so both sites can coexist.
+
+Paths are compared after resolving symlinks, and the resolved path is what gets stored. On atomic images (Fedora Silverblue, Bazzite, and other ostree systems) `/home` is a symlink to `/var/home`, so linking a project through either spelling maps to the one site instead of registering it twice.
 
 ---
 
@@ -258,6 +284,8 @@ For **HTTPS** the catch-all uses `ssl_reject_handshake on;`, so the browser sees
 ## Unlink behaviour
 
 When you unlink a site that lives inside a parked directory, the vhost is removed but the registry entry is kept and marked as *ignored*; the watcher will not re-register it on its next scan. Running `lerd link` in that directory clears the ignored flag and restores the site.
+
+Either way, unlinking also drops the site's per-site request-timing and idle state: its rows in the durable request store, its entries in the persisted request-timing and idle-activity snapshots, and the running watcher's in-memory copy, so an unlinked site leaves no stale traffic history behind. A site's git worktrees are covered too.
 
 ---
 
@@ -317,6 +345,42 @@ Commands that benefit from this auto-start:
 | `lerd db:import` | Imports a SQL dump |
 | `lerd db:export` | Exports a database |
 | `lerd db:shell` | Opens an interactive DB shell |
+
+---
+
+## Workspaces
+
+Once you have more than a handful of sites, one flat list stops being useful. Workspaces let you group sites the way you actually think about them, separating client work from experiments.
+
+A workspace is purely organisational. It never touches nginx, domains, certificates or `.env`, and it never changes how a site is served. It is also not the same thing as a [site group](site-groups.md), which binds a main site's subdomains together and does rewrite vhosts and certificates. A site can belong to a group and a workspace at the same time.
+
+Workspaces are a personal preference rather than project state, so they live in your global config at `~/.config/lerd/config.yaml` and are never written to `.lerd.yaml` or the site registry:
+
+```yaml
+workspaces:
+  - name: Client Work
+    sites: [astrolov, acme]
+  - name: Side Projects
+    sites: [blog]
+```
+
+A site that appears in no workspace is ungrouped. An empty workspace is fine and survives a restart, so you can create one before you have anything to put in it. The order of the list is the order the sections are shown in. Unlinking a site drops it from its workspace, so a different project linked under the same name later starts out ungrouped.
+
+Only a group main is ever written to the list. A [group secondary](site-groups.md) always displays in its main's workspace, so it has no membership of its own and `lerd workspace assign` will point you at the main instead. The name `none` is reserved: it is how you ungroup a site from the command line, and it labels the ungrouped option in the picker.
+
+### In the web UI
+
+The sites sidebar renders one collapsible section per workspace, followed by the ungrouped sites and then the paused ones. Collapse state is remembered per browser.
+
+Drag a site row between sections to move it. Dragging a [site group](site-groups.md) main carries its secondaries with it, since a secondary always shows in its main's workspace. Drag a workspace header to reorder the sections; that moves whole blocks and never changes the order of sites within them. Rename and delete live in the menu on each header, and deleting a workspace only ungroups its sites, it never removes them. The **Add workspace** button sits next to the sort control at the bottom of the list.
+
+Each site's detail header also has a workspace picker, which can create a new workspace and move the site into it in one step.
+
+The Sites Overview groups its tiles by workspace too. Empty workspaces are hidden there, since the sidebar is where you manage them, and each tile still shows its framework as a badge. Until you create your first workspace the overview keeps grouping by framework, the way it always has.
+
+### In the TUI
+
+Press `o` in the sites pane to cycle the sort order until it reads `sort: workspace`. Sites are then listed under a header per workspace, with the ungrouped ones trailing. The TUI shows workspaces but does not edit them; use the web UI or `lerd workspace`.
 
 ---
 

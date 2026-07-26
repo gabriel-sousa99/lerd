@@ -23,7 +23,7 @@ func isContainerUnit(unit string) bool { return unitlog.IsContainerUnit(unit) }
 
 func serviceRecentLogs(unit string) string {
 	if isContainerUnit(unit) {
-		out, err := exec.Command(podman.PodmanBin(), "logs", "--tail", "20", unit).CombinedOutput()
+		out, err := podman.Cmd("logs", "--tail", "20", unit).CombinedOutput()
 		if err != nil {
 			return ""
 		}
@@ -42,6 +42,16 @@ func logStreamCmd(ctx context.Context, unit string) *exec.Cmd {
 	path := lerdLogPath(unit)
 	script := `for i in $(seq 1 10); do [ -f "` + path + `" ] && break; sleep 0.5; done; exec tail -f -n 100 "` + path + `"`
 	return exec.CommandContext(ctx, "/bin/sh", "-c", script)
+}
+
+// logFollowScript returns the shell command a spawned terminal runs to follow
+// a unit's logs. Same two sources as streamUnitLogs: `podman logs -f` for
+// container units, a tail of the launchd log file for native ones.
+func logFollowScript(unit string) string {
+	if isContainerUnit(unit) {
+		return podman.PodmanBin() + " logs -f --tail 100 " + unit
+	}
+	return `tail -f -n 100 "` + lerdLogPath(unit) + `"`
 }
 
 // streamUnitLogs streams logs for a unit as SSE.

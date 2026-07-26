@@ -2,9 +2,52 @@ package config
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// UIClient{Network,Addr} must give the CLI a transport that actually exists on
+// the host: macOS has no lerd-ui unix socket (server binds it Linux-only), so
+// the client dials the TCP loopback; Linux stays on the unix socket.
+func TestUIClientTransport_matchesOS(t *testing.T) {
+	net, addr := UIClientNetwork(), UIClientAddr()
+	if runtime.GOOS == "darwin" {
+		if net != "tcp" {
+			t.Errorf("UIClientNetwork() = %q on darwin, want tcp", net)
+		}
+		if addr != "127.0.0.1:7073" {
+			t.Errorf("UIClientAddr() = %q on darwin, want 127.0.0.1:7073", addr)
+		}
+		return
+	}
+	if net != "unix" {
+		t.Errorf("UIClientNetwork() = %q on %s, want unix", net, runtime.GOOS)
+	}
+	if addr != UISocketPath() {
+		t.Errorf("UIClientAddr() = %q, want UISocketPath() %q", addr, UISocketPath())
+	}
+}
+
+// AccessLogTarget must give nginx a syslog server it can reach: macOS ships the
+// feed to host.containers.internal over gvproxy UDP (nginx is in the VM), Linux
+// stays on the bind-mounted unix socket. The watcher's listen addr must pair.
+func TestAccessLogTarget_matchesOS(t *testing.T) {
+	target := AccessLogTarget()
+	if runtime.GOOS == "darwin" {
+		want := "host.containers.internal:" + AccessFeedUDPPort
+		if target != want {
+			t.Errorf("AccessLogTarget() = %q on darwin, want %q", target, want)
+		}
+		if addr := AccessFeedListenAddr(); addr != "127.0.0.1:"+AccessFeedUDPPort {
+			t.Errorf("AccessFeedListenAddr() = %q on darwin, want 127.0.0.1:%s", addr, AccessFeedUDPPort)
+		}
+		return
+	}
+	if want := "unix:" + AccessSocketPath(); target != want {
+		t.Errorf("AccessLogTarget() = %q on %s, want %q", target, runtime.GOOS, want)
+	}
+}
 
 // ── XDG overrides ─────────────────────────────────────────────────────────────
 
@@ -87,6 +130,24 @@ func TestPHPUserIniFile_ContainsVersion(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "98-user.ini") {
 		t.Errorf("PHPUserIniFile(8.4) = %q, expected suffix 98-user.ini", got)
+	}
+}
+
+func TestSharedIniFile_IsVersionAgnosticAndSortsBelowUserIni(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	got := SharedIniFile()
+	if !strings.HasSuffix(got, filepath.Join("php", "shared", "95-shared.ini")) {
+		t.Errorf("SharedIniFile() = %q, expected suffix php/shared/95-shared.ini", got)
+	}
+	// The shared file must load before the per-version 98-user.ini so the
+	// per-version value wins on a conflicting key. conf.d loads alphabetically,
+	// so the basename must sort earlier.
+	shared := filepath.Base(SharedIniFile())
+	perVersion := filepath.Base(PHPUserIniFile("8.4"))
+	if !(shared < perVersion) {
+		t.Errorf("shared ini basename %q must sort before per-version %q", shared, perVersion)
 	}
 }
 

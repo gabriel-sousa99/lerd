@@ -67,3 +67,26 @@ button {
     display: none;
   }
 }
+/* SCM-style added-line decorations for the env insert preview (see
+   MonacoEditor highlightLines). Monaco renders these class names in its own
+   DOM, so they must be global rather than component-scoped. */
+.lerd-added-line {
+  background: rgba(16, 185, 129, 0.1);
+}
+.lerd-added-gutter {
+  background: #10b981;
+  width: 3px !important;
+  margin-left: 3px;
+}
+
+/* iOS Safari zooms into any focused field whose font is under 16px. Monaco's
+   keystroke capture is a hidden textarea that inherits the 12px editor font, so
+   focusing the Tinker editor zooms the page and throws the fixed-position
+   suggest widget off-screen. The textarea is invisible (Monaco paints text in
+   its own view layers) so bumping it to 16px stops the zoom with no visual
+   change. Scoped to touch pointers so desktop is untouched. */
+@media (pointer: coarse) {
+  .monaco-editor .inputarea {
+    font-size: 16px !important;
+  }
+}

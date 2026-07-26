@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -12,15 +13,19 @@ import (
 
 // Site represents a single registered Lerd site.
 type Site struct {
-	Name          string   `yaml:"-"`
-	Domains       []string `yaml:"-"`
-	Path          string   `yaml:"path"`
-	PHPVersion    string   `yaml:"php_version"`
-	NodeVersion   string   `yaml:"node_version"`
-	Secured       bool     `yaml:"secured"`
-	Ignored       bool     `yaml:"ignored,omitempty"`
-	Paused        bool     `yaml:"paused,omitempty"`
-	PausedWorkers []string `yaml:"paused_workers,omitempty"`
+	Name        string   `yaml:"-"`
+	Domains     []string `yaml:"-"`
+	Path        string   `yaml:"path"`
+	PHPVersion  string   `yaml:"php_version"`
+	NodeVersion string   `yaml:"node_version"`
+	Secured     bool     `yaml:"secured"`
+	// SecuredBeforeDNSOff records that the site was on HTTPS when lerd DNS was
+	// last disabled, so re-enabling can restore it even for a site with no
+	// .lerd.yaml to carry the intent. Cleared once HTTPS is restored.
+	SecuredBeforeDNSOff bool     `yaml:"secured_before_dns_off,omitempty"`
+	Ignored             bool     `yaml:"ignored,omitempty"`
+	Paused              bool     `yaml:"paused,omitempty"`
+	PausedWorkers       []string `yaml:"paused_workers,omitempty"`
 	// Pinned excludes the site from idle-suspend: its workers stay running even
 	// when the global idle policy is on, so a site you want always-warm never
 	// sleeps.
@@ -62,6 +67,10 @@ type Site struct {
 	// (e.g. "npm run start:dev"). Empty means proxy-only: the user runs the
 	// server themselves and lerd only wires the proxy.
 	HostCommand string `yaml:"host_command,omitempty"`
+	// ApprovedCommands holds exact command strings the user has consented to run
+	// on the host for this site (project-origin custom host workers and commands).
+	// Keyed by the exact string so a changed command re-prompts.
+	ApprovedCommands []string `yaml:"approved_commands,omitempty"`
 	// Group is the group key shared by a main site and its secondaries. It is
 	// set to the main site's name. Empty when the site is not grouped.
 	Group string `yaml:"group,omitempty"`
@@ -124,9 +133,29 @@ func (s *Site) IsHostProxy() bool {
 	return s.HostPort > 0
 }
 
+// IsProxyOnly returns true when the site is a host-proxy site lerd runs nothing
+// for: nginx forwards to a dev server the user starts themselves, so there is no
+// supervised process to stop.
+func (s *Site) IsProxyOnly() bool {
+	return s.IsHostProxy() && s.HostCommand == ""
+}
+
 // HostProxyWorkerName is the worker name of a host-proxy site's supervised
 // dev server. There is exactly one per site.
 const HostProxyWorkerName = "app"
+
+// StripeWorkerName is the Stripe webhook listener, run through its own unit
+// (lerd-stripe-<site>) rather than declared by any framework.
+const StripeWorkerName = "stripe"
+
+// IsBuiltinWorker reports whether name is a lerd-managed worker that lives
+// outside a framework's worker definitions: the Stripe listener and the
+// host-proxy dev server. A validator checking a site's workers against its
+// framework must treat these as valid rather than undefined, the same way the
+// running-worker collector and the orphan scan already special-case them.
+func IsBuiltinWorker(name string) bool {
+	return name == StripeWorkerName || name == HostProxyWorkerName
+}
 
 // HostProxyWorkerUnit returns the worker unit name for a host-proxy site's dev
 // server (lerd-app-<site>). Single source of truth for the cli (which starts
@@ -163,6 +192,7 @@ type siteYAML struct {
 	PHPVersion            string              `yaml:"php_version"`
 	NodeVersion           string              `yaml:"node_version"`
 	Secured               bool                `yaml:"secured"`
+	SecuredBeforeDNSOff   bool                `yaml:"secured_before_dns_off,omitempty"`
 	Ignored               bool                `yaml:"ignored,omitempty"`
 	Paused                bool                `yaml:"paused,omitempty"`
 	PausedWorkers         []string            `yaml:"paused_workers,omitempty"`
@@ -178,6 +208,7 @@ type siteYAML struct {
 	HostPort              int                 `yaml:"host_port,omitempty"`
 	HostSSL               bool                `yaml:"host_ssl,omitempty"`
 	HostCommand           string              `yaml:"host_command,omitempty"`
+	ApprovedCommands      []string            `yaml:"approved_commands,omitempty"`
 	Group                 string              `yaml:"group,omitempty"`
 	GroupSubdomain        string              `yaml:"group_subdomain,omitempty"`
 	GroupSharedDB         bool                `yaml:"group_shared_db,omitempty"`
@@ -193,6 +224,7 @@ func (s Site) toYAML() siteYAML {
 		PHPVersion:            s.PHPVersion,
 		NodeVersion:           s.NodeVersion,
 		Secured:               s.Secured,
+		SecuredBeforeDNSOff:   s.SecuredBeforeDNSOff,
 		Ignored:               s.Ignored,
 		Paused:                s.Paused,
 		PausedWorkers:         s.PausedWorkers,
@@ -208,6 +240,7 @@ func (s Site) toYAML() siteYAML {
 		HostPort:              s.HostPort,
 		HostSSL:               s.HostSSL,
 		HostCommand:           s.HostCommand,
+		ApprovedCommands:      s.ApprovedCommands,
 		Group:                 s.Group,
 		GroupSubdomain:        s.GroupSubdomain,
 		GroupSharedDB:         s.GroupSharedDB,
@@ -228,6 +261,7 @@ func (sy siteYAML) toSite() Site {
 		PHPVersion:            sy.PHPVersion,
 		NodeVersion:           sy.NodeVersion,
 		Secured:               sy.Secured,
+		SecuredBeforeDNSOff:   sy.SecuredBeforeDNSOff,
 		Ignored:               sy.Ignored,
 		Paused:                sy.Paused,
 		PausedWorkers:         sy.PausedWorkers,
@@ -243,6 +277,7 @@ func (sy siteYAML) toSite() Site {
 		HostPort:              sy.HostPort,
 		HostSSL:               sy.HostSSL,
 		HostCommand:           sy.HostCommand,
+		ApprovedCommands:      sy.ApprovedCommands,
 		Group:                 sy.Group,
 		GroupSubdomain:        sy.GroupSubdomain,
 		GroupSharedDB:         sy.GroupSharedDB,
@@ -370,10 +405,43 @@ func SaveSites(reg *SiteRegistry) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(SitesFile(), data, 0644); err != nil {
+	if err := writeFileAtomic(SitesFile(), data, 0644); err != nil {
 		return err
 	}
 	invalidateSitesCache()
+	return nil
+}
+
+// writeFileAtomic writes data to path through a uniquely named temp file in the
+// same directory followed by a rename. The rename is atomic on the same
+// filesystem, so a crash, a restart mid-write, or a second concurrent writer can
+// never leave sites.yaml half-written or interleaved; a reader always sees a
+// complete file and the last full write wins. A unique temp name (rather than a
+// fixed path.tmp) keeps two concurrent writers from clobbering each other's temp.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	guardRealWrite(path)
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
 	return nil
 }
 
@@ -385,6 +453,16 @@ func AddSite(site Site) error {
 	// path), closing the injection even for callers that bypass SiteNameAndDomain.
 	if ContainsUnitInjectionChars(site.Name) || strings.ContainsRune(site.Name, '/') {
 		return fmt.Errorf("invalid site name %q: must not contain newline, NUL, or slash", site.Name)
+	}
+	// Store the resolved path so two spellings of one directory (on ostree hosts
+	// /home is a symlink to /var/home, and os.Getwd can return either) register
+	// and de-duplicate as a single site rather than two (#930).
+	site.Path = CanonicalPath(site.Path)
+	// The filesystem root can never be a site: lerd bind-mounts a site's path into
+	// its containers, and mounting / over a container's own rootfs shadows its
+	// entrypoint so it cannot start (issue #884).
+	if filepath.Clean(site.Path) == "/" {
+		return fmt.Errorf("invalid site path %q: lerd would bind-mount / into every container and shadow its rootfs", site.Path)
 	}
 	siteWriteMu.Lock()
 	defer siteWriteMu.Unlock()
@@ -402,6 +480,59 @@ func AddSite(site Site) error {
 
 	reg.Sites = append(reg.Sites, site)
 	return SaveSites(reg)
+}
+
+// CommandApproved reports whether the user has consented to run command on the
+// host for this site (see ApprovedCommands).
+func (s Site) CommandApproved(command string) bool {
+	for _, c := range s.ApprovedCommands {
+		if c == command {
+			return true
+		}
+	}
+	return false
+}
+
+// HostCommandAllowed reports whether a project-supplied host command may run for
+// a site without prompting. disabled is true when the global switch refuses all
+// project host commands; otherwise allowed is true when the global skip is set or
+// the user already approved this exact command for the site.
+func HostCommandAllowed(siteName, command string) (allowed, disabled bool) {
+	gcfg, _ := LoadGlobal()
+	if gcfg.HostCommands.Disabled {
+		return false, true
+	}
+	if gcfg.HostCommands.SkipConfirmation {
+		return true, false
+	}
+	site, _ := FindSite(siteName)
+	return site != nil && site.CommandApproved(command), false
+}
+
+// ApproveSiteCommand records that the user consented to run command on the host
+// for the named site, so future runs and boot restore don't re-prompt. No-op if
+// already recorded or the site is unknown.
+func ApproveSiteCommand(siteName, command string) error {
+	if command == "" {
+		return nil
+	}
+	siteWriteMu.Lock()
+	defer siteWriteMu.Unlock()
+	reg, err := LoadSites()
+	if err != nil {
+		return err
+	}
+	for i := range reg.Sites {
+		if reg.Sites[i].Name != siteName {
+			continue
+		}
+		if reg.Sites[i].CommandApproved(command) {
+			return nil
+		}
+		reg.Sites[i].ApprovedCommands = append(reg.Sites[i].ApprovedCommands, command)
+		return SaveSites(reg)
+	}
+	return nil
 }
 
 // RemoveSite removes a site by name from the registry.
@@ -496,6 +627,26 @@ func SetSiteIdleSuspendedWorkers(name string, workers []string) error {
 	return fmt.Errorf("site %q not found", name)
 }
 
+// SetSitePinned atomically updates just a site's idle-suspend pin flag. Like
+// SetSiteIdleSuspendedWorkers it rewrites only that field under the write lock, so
+// `lerd idle pin/unpin` can't clobber a concurrent SetSiteIdleSuspendedWorkers
+// write the idle engine makes for the same site.
+func SetSitePinned(name string, pinned bool) error {
+	siteWriteMu.Lock()
+	defer siteWriteMu.Unlock()
+	reg, err := LoadSites()
+	if err != nil {
+		return err
+	}
+	for i := range reg.Sites {
+		if reg.Sites[i].Name == name {
+			reg.Sites[i].Pinned = pinned
+			return SaveSites(reg)
+		}
+	}
+	return fmt.Errorf("site %q not found", name)
+}
+
 // SetWorktreeIdleSuspendedWorkers atomically updates a single worktree's
 // idle-suspended worker list (keyed by the worktree's unit-slug base). Passing an
 // empty list clears that worktree's entry, and clearing the last entry drops the
@@ -546,6 +697,28 @@ func FindSite(name string) (*Site, error) {
 	return nil, fmt.Errorf("site %q not found", name)
 }
 
+// FindSiteByRef looks up a site by its internal name first, then by any of its
+// domains, so a caller can pass either identifier.
+func FindSiteByRef(ref string) (*Site, error) {
+	if s, err := FindSite(ref); err == nil {
+		return s, nil
+	}
+	return FindSiteByDomain(ref)
+}
+
+// ResolveSiteRef maps a site reference that may be a name or any of the site's
+// domains to the canonical site name. An unknown reference is returned unchanged,
+// so callers still surface their own "not found" error rather than a rewrite.
+func ResolveSiteRef(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	if s, err := FindSiteByRef(ref); err == nil {
+		return s.Name
+	}
+	return ref
+}
+
 // FindSiteByPath returns the site whose path matches, or an error if not found.
 func FindSiteByPath(path string) (*Site, error) {
 	reg, err := LoadSites()
@@ -553,13 +726,29 @@ func FindSiteByPath(path string) (*Site, error) {
 		return nil, err
 	}
 
+	target := CanonicalPath(path)
 	for _, s := range reg.Sites {
-		if s.Path == path {
+		if CanonicalPath(s.Path) == target {
 			s := s
 			return &s, nil
 		}
 	}
 	return nil, fmt.Errorf("site with path %q not found", path)
+}
+
+// CanonicalPath resolves symlinks in p so two spellings of the same directory
+// compare equal. On ostree hosts /home is a symlink to /var/home, so os.Getwd
+// can hand back either form for one project, which otherwise registers and
+// lists twice (#930). Falls back to a cleaned path when the target can't be
+// resolved, e.g. it no longer exists, so callers always get a usable value.
+func CanonicalPath(p string) string {
+	if p == "" {
+		return p
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // FindSiteByDomain returns the site that has the given domain (checks all domains),

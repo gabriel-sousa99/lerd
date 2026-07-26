@@ -2,11 +2,11 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/logsource"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -14,10 +14,11 @@ import (
 )
 
 // `lerd xdebug pause` drives Xdebug's control socket (Xdebug >= 3.3) to break
-// the IDE debugger into an already-running PHP process — a queue/Horizon worker,
-// a CLI script, a FrankenPHP/Octane worker — without a trigger cookie or
-// per-request connection attempts. It shells out to the upstream `xdebugctl`
-// tool, which is baked into the FPM image (see lerd-php-fpm.Containerfile).
+// the IDE debugger into an already-running PHP process — a queue/Horizon worker
+// or a CLI script — without a trigger cookie or per-request connection attempts.
+// It shells out to the upstream `xdebugctl` tool, which is baked into the FPM
+// image (see lerd-php-fpm.Containerfile); FrankenPHP and custom-container sites
+// run their own image without it, so the command is PHP-FPM only.
 const xdebugctlInContainer = "/usr/local/bin/xdebugctl"
 
 func newXdebugPauseCmd() *cobra.Command {
@@ -26,9 +27,10 @@ func newXdebugPauseCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pause [site]",
 		Short: "(experimental) Break the IDE debugger into a running PHP process via Xdebug's control socket",
-		Long: "Use Xdebug's control socket to make a running PHP process (a queue/Horizon worker, a CLI\n" +
-			"script, a FrankenPHP worker) connect to your IDE and break in — no trigger cookie, no\n" +
-			"per-request overhead. Requires Xdebug debug mode enabled for the site's PHP version\n" +
+		Long: "Use Xdebug's control socket to make a running PHP process (a queue/Horizon worker or a\n" +
+			"CLI script) connect to your IDE and break in — no trigger cookie, no per-request\n" +
+			"overhead. PHP-FPM sites only: FrankenPHP and custom-container sites run their own image\n" +
+			"without xdebugctl. Requires Xdebug debug mode enabled for the site's PHP version\n" +
 			"(`lerd xdebug on`) and your IDE listening on port 9003.\n\n" +
 			"Run with --list to see the candidate processes, then --pid to target one.",
 		Args: cobra.MaximumNArgs(1),
@@ -99,9 +101,10 @@ func runXdebugPause(args []string, pid int, list bool) error {
 	if err != nil {
 		return fmt.Errorf("xdebugctl pause: %w", err)
 	}
-	fmt.Printf("Sent pause to PID %d in %s — your IDE (listening on :9003) should break in.\n", pid, container)
+	feedback.Begin()
+	feedback.Done(fmt.Sprintf("sent pause to PID %d in %s — your IDE (listening on :9003) should break in", pid, container))
 	if cfg, err := config.LoadGlobal(); err == nil && cfg.GetXdebugStart(version) == "yes" {
-		fmt.Println("Tip: `lerd xdebug on --on-demand` stops every other request/worker from also connecting to your IDE.")
+		feedback.Note("`lerd xdebug on --on-demand` stops every other request/worker from also connecting to your IDE")
 	}
 	return nil
 }
@@ -110,15 +113,7 @@ func resolvePauseSite(args []string) (*config.Site, error) {
 	if len(args) == 1 {
 		return config.FindSite(args[0])
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-	site, err := config.FindSiteByPath(cwd)
-	if err != nil {
-		return nil, fmt.Errorf("no lerd site here — run inside a project or pass a site name")
-	}
-	return site, nil
+	return ensureSiteForCwd()
 }
 
 func pauseSiteVersion(site *config.Site) string {

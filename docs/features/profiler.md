@@ -45,6 +45,14 @@ lerd profile run artisan app:heavy-report
 
 The command runs as `php <command>` inside the project's container with SPX enabled, and the report lands in the same Profiler view alongside the HTTP reports. This works whether or not the global profiler is on.
 
+Add `--flat` to print a text flat profile, the top functions by wall time and call count, straight to the terminal instead of sending it to the Profiler view:
+
+```bash
+lerd profile run --flat artisan app:heavy-report
+```
+
+This is the same report the MCP `profiler_report` action returns, so an AI assistant can read where the time went rather than opening the flame-graph UI it cannot see.
+
 Because the `php` shim runs PHP inside the container, you can also profile any shim'd PHP tool by setting `SPX_ENABLED=1` in front of it. lerd forwards every `SPX_*` variable from your shell into the container, so `SPX_ENABLED=1 composer update` or `SPX_ENABLED=1 php artisan migrate` is profiled too. When SPX is enabled and you have not set `SPX_REPORT`, lerd defaults it to `full` so the run shows up in the Profiler view rather than only printing a flat profile to the terminal. Other SPX knobs work the same way, for example `SPX_SAMPLING_PERIOD=100 SPX_ENABLED=1 composer update`.
 
 ## Open the SPX UI directly
@@ -57,7 +65,7 @@ This opens `http://profiler.localhost/?SPX_UI_URI=/`, the same UI the Profiler v
 
 ## Scope and limits
 
-- **PHP-FPM sites only.** FrankenPHP and custom-container sites run images that don't carry the SPX extension, so their requests are not profiled.
+- **PHP-FPM sites only.** FrankenPHP and custom-container sites run images that don't carry the SPX extension, so their requests are not profiled. Their site panel still ranks the slowest routes, it just doesn't offer to profile one, and neither do host-proxy or static sites.
 - **Sampling, not exact counts.** SPX is a tracing profiler that records wall and CPU time accurately. It is built for "where did the time go", not for exact call counts.
 - **Local only.** The profiler is never reachable through tunnels or LAN shares.
 - **Reports accumulate** in `~/.local/share/lerd/spx/`. Clear them all at once with the **Clear data** button in the Profiler view header, `lerd profile clear`, or `profiler_clear` via MCP; the SPX UI can also delete reports individually.
@@ -69,3 +77,6 @@ AI assistants can drive the profiler through three tools:
 - `profiler_toggle({ enable })` turns profiling on or off globally.
 - `profiler_status()` reports whether profiling is on and the SPX web UI URL.
 - `profiler_clear()` deletes every captured report and returns how many were removed.
+- `profiler_report({ site, args })` runs a reproducible command (`args`, e.g. `["artisan","app:heavy-report"]`) under SPX and returns the flat profile as text, the top functions by wall time and call count. It is the CPU-bound analog of `analyze_queries`: when a route is slow but the cost is not in its queries, this hands back the functions behind it instead of a browser URL. It profiles a CLI command, not a live HTTP request.
+
+For **routes**, the capture happens passively. While the profiler is on, every request is profiled to disk, so `diag optimize_route` attaches a `profile` block to each slow route: the top functions by exclusive wall time from that route's freshest capture, distilled to a few outliers rather than the raw trace. Turn the profiler on, exercise the route with real traffic (authenticated requests and all, no synthetic call to fake), and the CPU hotspots show up next to the route's N+1 queries in one answer. A route with no capture (profiler was off when it was hit) simply carries no profile.

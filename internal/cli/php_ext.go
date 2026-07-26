@@ -4,15 +4,21 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
 )
 
 var validExtNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// rebuildFPMImage is a seam so the add path's revert-on-failure can be tested
+// without building an image.
+var rebuildFPMImage = podman.RebuildFPMImage
 
 // NewPhpExtCmd returns the php:ext parent command.
 func NewPhpExtCmd() *cobra.Command {
@@ -28,15 +34,20 @@ func NewPhpExtCmd() *cobra.Command {
 
 func newPhpExtAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "add <ext> [version]",
-		Short: "Install a custom PHP extension (rebuilds the FPM image)",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:   "add <ext>",
+		Short: "Install a custom PHP extension on every PHP version",
+		Long: "Adds an extension to your declared set, which applies to every PHP image lerd builds.\n" +
+			"The version you are on is rebuilt and verified now; other versions rebuild the next time they are used.",
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ext := args[0]
 			if !validExtNameRe.MatchString(ext) {
 				return fmt.Errorf("invalid extension name %q: must contain only letters, digits, hyphens, and underscores", ext)
 			}
-			version, err := phpExtVersion(args[1:])
+			if err := rejectPerVersionArg(args[1:], "php:ext add "+ext); err != nil {
+				return err
+			}
+			version, err := phpExtVersion(nil)
 			if err != nil {
 				return err
 			}
@@ -46,38 +57,58 @@ func newPhpExtAddCmd() *cobra.Command {
 				return err
 			}
 
-			cfg, err := config.LoadGlobal()
-			if err != nil {
-				return err
-			}
-
-			cfg.AddExtension(version, ext)
-			if len(deps) > 0 {
-				cfg.SetExtApkDeps(ext, deps)
-			}
-			if err := config.SaveGlobal(cfg); err != nil {
+			// Re-adding an extension that is already declared must not let a
+			// failed verify remove the working one on the way out.
+			alreadyDeclared := false
+			if err := config.UpdateGlobal(func(c *config.GlobalConfig) {
+				alreadyDeclared = slices.Contains(c.GetExtensions(), ext)
+				c.AddExtension(ext)
+				if len(deps) > 0 {
+					c.SetExtApkDeps(ext, deps)
+				}
+			}); err != nil {
 				return fmt.Errorf("saving config: %w", err)
 			}
 
-			fmt.Printf("Adding extension %q to PHP %s image...\n", ext, version)
+			feedback.Begin()
+			feedback.Line("adding extension " + feedback.Val(ext) + " to every PHP version")
 			if len(deps) > 0 {
-				fmt.Printf("  with Alpine packages: %s\n", strings.Join(deps, " "))
+				feedback.Note("alpine packages: " + strings.Join(deps, " "))
 			}
-			if err := podman.RebuildFPMImage(version, false); err != nil {
-				return err
+			// The build records what this version realised, so the revert
+			// re-reads rather than saving a copy loaded before the build.
+			revert := func() {
+				if saveErr := config.UpdateGlobal(func(c *config.GlobalConfig) {
+					c.RemoveExtension(ext)
+					c.SetExtApkDeps(ext, nil)
+				}); saveErr != nil {
+					feedback.Warn("reverting config: %v", saveErr)
+				}
+			}
+
+			// A failed rebuild has to revert too, or the extension stays declared,
+			// every version's image reads as stale, and the build that cannot
+			// succeed is retried on every command that follows.
+			if err := rebuildFPMImage(version, false); err != nil {
+				if alreadyDeclared {
+					return err
+				}
+				revert()
+				return fmt.Errorf("rebuild failed (config reverted): %w", err)
 			}
 
 			if err := podman.VerifyExtensionLoaded(version, ext); err != nil {
-				cfg.RemoveExtension(version, ext)
-				if saveErr := config.SaveGlobal(cfg); saveErr != nil {
-					fmt.Printf("[WARN] reverting config: %v\n", saveErr)
+				if alreadyDeclared {
+					return fmt.Errorf("extension %q did not load on PHP %s: %w", ext, version, err)
 				}
+				revert()
 				return fmt.Errorf("extension %q was not installed (config reverted): %w", ext, err)
 			}
 
 			applyPHPImageChange(version)
 
-			fmt.Printf("Extension %q installed for PHP %s.\n", ext, version)
+			feedback.Done("extension " + feedback.Val(ext) + " installed for PHP " + version)
+			reportOtherVersionsStale(version)
 			return nil
 		},
 	}
@@ -87,37 +118,36 @@ func newPhpExtAddCmd() *cobra.Command {
 
 func newPhpExtRemoveCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove <ext> [version]",
-		Short: "Remove a custom PHP extension (rebuilds the FPM image)",
+		Use:   "remove <ext>",
+		Short: "Remove a custom PHP extension from every PHP version",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ext := args[0]
 			if !validExtNameRe.MatchString(ext) {
 				return fmt.Errorf("invalid extension name %q: must contain only letters, digits, hyphens, and underscores", ext)
 			}
-			version, err := phpExtVersion(args[1:])
+			if err := rejectPerVersionArg(args[1:], "php:ext remove "+ext); err != nil {
+				return err
+			}
+			version, err := phpExtVersion(nil)
 			if err != nil {
 				return err
 			}
 
-			cfg, err := config.LoadGlobal()
-			if err != nil {
-				return err
-			}
-
-			cfg.RemoveExtension(version, ext)
-			if err := config.SaveGlobal(cfg); err != nil {
+			if err := config.UpdateGlobal(func(c *config.GlobalConfig) { c.RemoveExtension(ext) }); err != nil {
 				return fmt.Errorf("saving config: %w", err)
 			}
 
-			fmt.Printf("Removing extension %q from PHP %s image...\n", ext, version)
+			feedback.Begin()
+			feedback.Line("removing extension " + feedback.Val(ext) + " from every PHP version")
 			if err := podman.RebuildFPMImage(version, false); err != nil {
 				return err
 			}
 
 			applyPHPImageChange(version)
 
-			fmt.Printf("Extension %q removed for PHP %s.\n", ext, version)
+			feedback.Done("extension " + feedback.Val(ext) + " removed for PHP " + version)
+			reportOtherVersionsStale(version)
 			return nil
 		},
 	}
@@ -125,27 +155,22 @@ func newPhpExtRemoveCmd() *cobra.Command {
 
 func newPhpExtListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list [version]",
-		Short: "List custom PHP extensions for a version",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			version, err := phpExtVersion(args)
-			if err != nil {
-				return err
-			}
-
+		Use:   "list",
+		Short: "List your custom PHP extensions and where they did not build",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.LoadGlobal()
 			if err != nil {
 				return err
 			}
 
-			exts := cfg.GetExtensions(version)
+			exts := cfg.GetExtensions()
 			if len(exts) == 0 {
-				fmt.Printf("No custom extensions configured for PHP %s.\n", version)
+				fmt.Println("No custom extensions configured.")
 				return nil
 			}
 
-			fmt.Printf("Custom extensions for PHP %s:\n", version)
+			fmt.Println("Declared, for every PHP version:")
 			for _, ext := range exts {
 				if deps := cfg.GetExtApkDeps(ext); len(deps) > 0 {
 					fmt.Printf("  - %s (apk: %s)\n", ext, strings.Join(deps, " "))
@@ -153,9 +178,40 @@ func newPhpExtListCmd() *cobra.Command {
 					fmt.Printf("  - %s\n", ext)
 				}
 			}
+			printPerVersionStatus(cfg, extensionsOf)
 			return nil
 		},
 	}
+}
+
+// rejectPerVersionArg turns the old per-version form into a teachable error.
+// Silently ignoring it would leave users believing the set is still scoped to
+// the version they named, which is the bug this model removes.
+func rejectPerVersionArg(rest []string, cmd string) error {
+	if len(rest) == 0 {
+		return nil
+	}
+	return fmt.Errorf("extensions and packages now apply to every PHP version, so %q takes no version.\n"+
+		"Run '%s', then 'lerd php:rebuild %s' if you want that image rebuilt right away", rest[0], cmd, rest[0])
+}
+
+// reportOtherVersionsStale tells the user which installed versions still carry
+// the old set. They rebuild on next use; naming them beats a silent wait.
+func reportOtherVersionsStale(rebuilt string) {
+	installed, err := phpDet.ListInstalled()
+	if err != nil {
+		return
+	}
+	var others []string
+	for _, v := range installed {
+		if v != rebuilt {
+			others = append(others, v)
+		}
+	}
+	if len(others) == 0 {
+		return
+	}
+	feedback.Note("PHP " + strings.Join(others, ", ") + " rebuild on next use, or run 'lerd php:rebuild' now")
 }
 
 // phpExtVersion resolves the PHP version from args, cwd detection, or global default.

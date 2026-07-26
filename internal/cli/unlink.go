@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
@@ -62,7 +63,10 @@ func runUnlink(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("no site registered for %s — link it first with lerd link", cwd)
 	}
-	return UnlinkSite(site.Name)
+	feedback.Begin()
+	unlinkErr := UnlinkSite(site.Name)
+	feedback.Begin()
+	return unlinkErr
 }
 
 // UnlinkSite removes the nginx vhost for the named site. For sites under a parked
@@ -84,28 +88,60 @@ func UnlinkSite(name string) error {
 		parkedDirs = cfg.ParkedDirectories
 	}
 
+	step := feedback.Start("unlinking " + name)
 	if err := siteops.UnlinkSiteCore(site, parkedDirs); err != nil {
+		step.Fail(err)
 		return err
 	}
-
-	fmt.Printf("Unlinked: %s (%s)\n", name, site.PrimaryDomain())
+	step.OK(feedback.Val(site.PrimaryDomain()))
 
 	// Offer to remove the cached custom container image.
 	if site.IsCustomContainer() && podman.CustomImageExists(site.Name) {
-		if isInteractive() {
-			fmt.Print("Remove the container image? [y/N] ")
-			var answer string
-			fmt.Scanln(&answer) //nolint:errcheck
-			if answer != "" && (answer[0] == 'y' || answer[0] == 'Y') {
-				_ = podman.RemoveCustomImage(site.Name)
-				podman.RemoveContainerfileHash(site.Name)
-				fmt.Println("Image removed.")
-			}
+		if isInteractive() && feedback.Confirm("Remove the container image?", false) {
+			_ = podman.RemoveCustomImage(site.Name)
+			podman.RemoveContainerfileHash(site.Name)
+			feedback.Line("image removed")
 		}
 	}
+
+	// Offer to remove the framework definition when this was the last site
+	// using it and the definition is removable (store-installed or user-defined,
+	// never a built-in). It is safe to remove: lerd re-fetches it from the store
+	// the moment another site needs it.
+	offerRemoveOrphanedFramework(site.Framework)
 
 	autoStopUnusedServices()
 	autoStopUnusedFPMs()
 
 	return nil
+}
+
+// offerRemoveOrphanedFramework prompts, in interactive sessions only, to delete
+// a framework definition once no remaining active site references it. Built-in
+// frameworks are never offered.
+func offerRemoveOrphanedFramework(fw string) {
+	if !isInteractive() || !frameworkIsOrphaned(fw) {
+		return
+	}
+	if feedback.Confirm(fmt.Sprintf("No sites use the %q framework anymore. Remove its definition?", fw), false) {
+		if err := config.RemoveFramework(fw); err != nil {
+			feedback.Warn("could not remove framework %q: %v", fw, err)
+			return
+		}
+		feedback.Line("framework definition removed")
+	}
+}
+
+// frameworkIsOrphaned reports whether fw has a removable definition (store or
+// user, never built-in) that no remaining active site references.
+func frameworkIsOrphaned(fw string) bool {
+	if fw == "" {
+		return false
+	}
+	for _, name := range config.UnusedInstalledFrameworks() {
+		if name == fw {
+			return true
+		}
+	}
+	return false
 }

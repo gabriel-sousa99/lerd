@@ -87,8 +87,8 @@ lerd env
 The one reserved key, `LERD_EXTERNAL_SERVICES`, lists services lerd should treat as externally managed (you run your own instance). For each named service lerd still writes its connection variables into `.env`, but it does **not** start the container and does **not** create the project database or S3 bucket. Combine it with the connection overrides that point at your own instance:
 
 ```dotenv
-# .env.lerd_override — point this project at my host postgres
-DB_HOST=127.0.0.1
+# .env.lerd_override: point this project at a host (system) database
+DB_HOST=host.containers.internal
 DB_PORT=5432
 DB_USERNAME=postgres
 DB_PASSWORD=mysecret
@@ -96,7 +96,11 @@ DB_PASSWORD=mysecret
 LERD_EXTERNAL_SERVICES=postgres
 ```
 
+Use `host.containers.internal` for the host rather than `127.0.0.1`. The override is read inside the PHP-FPM container, where `127.0.0.1` is the container's own loopback, not your machine. lerd keeps a `host.containers.internal` entry in the container that resolves to the host, so a containerized app reaches a host MySQL, MariaDB or Postgres over it with no extra setup. For MySQL use `DB_PORT=3306`.
+
 The value is comma or space separated, so `LERD_EXTERNAL_SERVICES=postgres, redis` opts both out. The reserved key is consumed by lerd and is never written into `.env`.
+
+The variables lerd writes for an external service are the ones your framework reads, since they are what the override file then overrides. An external MariaDB on Symfony gets the `DATABASE_URL` Doctrine reads, not the Laravel-shaped `DB_*` keys Symfony has no use for. A framework whose env file is a returned PHP array, as Magento's `app/etc/env.php` is, cannot take an override at all: its keys are dotted paths and `.env.lerd_override` is dotenv, so there is no key lerd could write that you would then point at your own instance. lerd writes nothing for it, tells you so, and leaves the connection in `env.php` to you.
 
 Example output with an override file present:
 
@@ -115,7 +119,9 @@ Done.
 
 The site detail panel has an **Env** tab that opens the project's env files in an inline editor with line numbers and dotenv syntax highlighting (`KEY`, comments, quoted values). On a worktree the editor opens that worktree's files, not the parent's.
 
-A dropdown at the start of the toolbar lists every env file the project has (`.env`, `.env.local`, `.env.testing`, `.env.example`, `.env.production`, anything matching `^\.env(\.[A-Za-z][\w-]*)?$`). Our own timestamped backups, temp files, and `.env.before_lerd` never appear in the dropdown. Pick the file you want to edit; the editor, save, and revert flows all scope to it.
+A dropdown at the start of the toolbar lists every env file the project has (`.env`, `.env.local`, `.env.testing`, `.env.example`, `.env.production`, anything matching `^\.env(\.[A-Za-z][\w-]*)?$`). Our own timestamped backups, temp files, and `.env.before_lerd` never appear in the dropdown. Pick the file you want to edit; the editor, save, and revert flows all scope to it. Next to the dropdown the toolbar shows the path of the file you are editing, shortened to `~` under your home directory, with the full path on hover. On a worktree tab that path points into the worktree's checkout, so it is always clear which file on disk a save will land on.
+
+The file the framework actually reads is pre-selected and listed first, so it matches the file the doctor and service wiring use. For most frameworks that is the root `.env`, but Symfony opens `.env.local` (falling back to the committed `.env` when no `.env.local` exists) and CakePHP opens `config/.env` in the subdirectory. The version is resolved from the project (for example Symfony 7 versus 8), so per-version differences are respected. Frameworks whose configuration is PHP source rather than a dotenv file (WordPress, Magento) have no Env tab.
 
 Edits stay client-side until you click **Save**, which opens a confirmation modal with a single checkbox: **Back up the current file first**. The box is unchecked by default; tick it to have lerd copy the current contents to `<file>.bkp.<YYYYMMDD-HHMMSS>` in the same directory before the new file lands. Each env file has its own backups, so `.env.testing.bkp.20260528-103045` belongs only to `.env.testing` and won't appear when you have `.env` open.
 
@@ -173,3 +179,15 @@ When called via the MCP server (AI assistants), `env_check` returns structured J
   "out_of_sync_count": 3
 }
 ```
+
+## Filling in missing keys
+
+`env:check` tells you *what* is missing; `lerd env:check --fix` fills it in. For each `.env` file that lacks keys from `.env.example`, it shows a unified diff of the exact lines it would add, then inserts them on confirmation:
+
+```bash
+lerd env:check --fix
+```
+
+The keys are not appended at the bottom. Each missing key is placed next to the neighbours it has in `.env.example`, so a missing `DB_PORT` lands inside your `DB_*` block rather than orphaned at the end, and a key's inline comment in the example is carried along with it. Values are copied verbatim from the example (placeholders and all), existing values are never changed, and keys your `.env` has beyond the example are left untouched, so the operation is purely additive and safe to run. When stdin is not a terminal (a script or the CI), it prints the diff and the count without applying anything.
+
+In the dashboard's **Env** tab, the same placement powers the *Insert missing keys* banner: when the framework's `.env` is missing keys the app actually needs, a *Review keys* button opens a modal that lists every candidate key with the value it would get, so you see exactly what is about to be written before anything changes. Each row has a checkbox; the keys the app genuinely requires start ticked, the ones it reads with a code default start unticked, using the same required-versus-optional classification the site doctor uses for its env drift check. Tick the keys you want, click *Add*, and they drop into the editor each placed beside its example neighbours and marked with a green change bar in the gutter. The editor stays editable, so you can fill in the real values, delete any key you change your mind on, then Save as usual (the green bars track your edits and clear once you save).

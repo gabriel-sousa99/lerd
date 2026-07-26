@@ -4,11 +4,11 @@ package cli
 
 import (
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
@@ -77,7 +77,7 @@ func migrateWorkersOnModeChangeStreaming(fromMode, toMode string, emit func(Work
 		// quadlets and plain service units — it boots out of launchd
 		// and stops the container if any.
 		if err := podman.StopUnit(step.Unit); err != nil {
-			fmt.Printf("[WARN] stopping %s: %v\n", step.Unit, err)
+			feedback.Warn("stopping %s: %v", step.Unit, err)
 		}
 
 		emit(WorkerModePhaseEvent{Phase: "migrating_worker", Unit: step.Unit, Step: "cleaning"})
@@ -98,7 +98,7 @@ func migrateWorkersOnModeChangeStreaming(fromMode, toMode string, emit func(Work
 	for _, step := range steps {
 		emit(WorkerModePhaseEvent{Phase: "migrating_worker", Unit: step.Unit, Step: "starting"})
 		if err := restartWorkerByUnitName(step.Unit); err != nil {
-			fmt.Printf("[WARN] restart %s in %s mode: %v\n", step.Unit, step.To, err)
+			feedback.Warn("restart %s in %s mode: %v", step.Unit, step.To, err)
 		}
 	}
 
@@ -123,7 +123,7 @@ func sweepOrphanWorkerContainers() {
 	if len(prefixes) == 0 {
 		return
 	}
-	out, err := exec.Command(podman.PodmanBin(), "ps", "-a", "--format", "{{.Names}}").Output()
+	out, err := podman.Cmd("ps", "-a", "--format", "{{.Names}}").Output()
 	if err != nil {
 		return
 	}

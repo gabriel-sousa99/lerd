@@ -6,8 +6,8 @@
 |---|---|
 | `lerd install` | One-time setup: directories, network, binaries, DNS, nginx, watcher |
 | `lerd start` | Start DNS, nginx, PHP-FPM containers, and all installed services; warns about port conflicts and builds or pulls any missing images first |
-| `lerd stop` | Stop DNS, nginx, PHP-FPM containers, and all running services |
-| `lerd quit` | Stop all Lerd processes and containers including the UI, watcher, and tray; on macOS also stops the Podman Machine VM |
+| `lerd stop` | Stop nginx, PHP-FPM containers, and all running services; leaves the `lerd-dns` forwarder running as install-level plumbing so `.test` keeps resolving |
+| `lerd quit` | Stop all Lerd processes and containers including the UI, watcher, tray, and the `lerd-dns` forwarder; on macOS also stops the Podman Machine VM |
 | `lerd update` | Check for updates and update after confirmation |
 | `lerd update --beta` | Update to the latest pre-release build |
 | `lerd update --rollback` | Revert to the previously installed version |
@@ -17,6 +17,7 @@
 | `lerd autostart enable` | Start Lerd automatically on every login |
 | `lerd autostart disable` | Disable autostart on login |
 | `lerd tray` | Launch the system tray applet (detaches from terminal) |
+| `lerd tray icon [default\|high-contrast]` | Choose the running-icon style; high-contrast shows an always-visible green icon for mixed themes like KDE Breeze Twilight; no argument prints the current style |
 | `lerd dns:check` | Walk the DNS chain (container, dnsmasq config, port 5300, dig at 5300, resolver hookup, interface routing, system lookup) and print the layered status with a remediation hint per failure |
 | `lerd status` | Health summary: DNS, nginx, PHP-FPM containers, watcher, services, cert expiry, LAN exposure and dashboard remote access; shows a notice if an update is available |
 | `lerd which` | Show resolved PHP version, Node version, document root, and nginx config for the current site |
@@ -24,7 +25,15 @@
 | `lerd man [page]` | Browse the built-in documentation in the terminal; pass a page name to jump directly (e.g. `lerd man sites`) |
 | `lerd tui` | Open a btop-style terminal dashboard with live site / service / worker status, per-site detail pane, inline domain and version editing, shell drop-in, log tailing, filter + sort, and global settings |
 | `lerd check` | Validate `.lerd.yaml` syntax, services, and PHP version before setup |
-| `lerd doctor` | Full environment diagnostic: podman, systemd, DNS, ports, PHP images, config validity |
+| `lerd doctor` | Full environment diagnostic: podman, systemd, DNS, ports, PHP images, config validity; also reports how much podman disk is reclaimable. Add `--fix` to apply the safe automatic repairs (confirming each; `--yes` to skip prompts, `--dry-run` to preview); privileged and external-state findings are left for you to run. `--json` emits the findings, each tagged with a fix tier, for tooling |
+| `lerd site:doctor [domain]` | App-level health checks for a single site (env file, env drift, application key, a configured SQLite database that is missing or empty, composer/node dependency install + lock, `composer audit`/`npm audit`, PHP version range, routes running well above the site's typical response time, plus the framework's own checks). A broken database suppresses the framework migration check so the remedy isn't repeated. Defaults to the site in the current directory; pass a domain to target another. Add `--json` for machine-readable output |
+| `lerd cleanup` | Reclaim podman disk from orphaned lerd images (old PHP build and base images a rebuild left behind), unused service images no installed service references any more (e.g. an old `mysql:8.0` after upgrading, keeping each service's current image and its one-back rollback target), and dangling untagged images. Previews the list and confirms before removing. Never touches a tagged image in use, your databases, or volumes |
+| `lerd cleanup --dry-run` | Show what would be reclaimed and the approximate size, remove nothing |
+| `lerd cleanup --safe` | Only reclaim images provably built by lerd, leave unused service and dangling images alone |
+| `lerd cleanup --yes` | Remove without the confirmation prompt |
+| `lerd cleanup auto on` | Enable automatic cleanup (the default): the watcher's daily deep sweep plus immediate reaping after a PHP rebuild or service update/remove |
+| `lerd cleanup auto off` | Disable automatic cleanup; `lerd cleanup` still works on demand |
+| `lerd cleanup auto status` | Show whether automatic cleanup is enabled |
 | `lerd bug-report [-o file] [--log-lines n] [--show-real-names]` | Dump doctor output, config files, unit state, recent logs, network state and env vars to a plain-text file you can attach to a GitHub issue. Site names, domains, parked paths, home paths and the username are anonymized by default; `--show-real-names` keeps raw values |
 | `lerd logs [-f] [target]` | Show logs for the current project's FPM container, `nginx`, a service name, or a PHP version |
 
@@ -54,13 +63,14 @@ Setup steps include common tasks (composer install, npm install, lerd env) plus 
 |---|---|
 | `lerd park [dir]` | Register all Laravel projects inside `dir` (defaults to cwd) |
 | `lerd unpark [dir]` | Remove a parked directory and unlink all its sites |
-| `lerd link [name]` | Register the current directory as a site; prompts to import data when `laravel/sail` is detected in `composer.json`. **Non-PHP projects** (Node.js, Python, Go, etc.) must have `Containerfile.lerd` and `.lerd.yaml` with `container: {port: N}` already written before calling this, see [Custom Containers](../usage/custom-containers.md) |
+| `lerd link [name]` | Register the current directory as a site. On a fresh project with no `.lerd.yaml`, an interactive terminal routes through the `lerd init` wizard first (PHP version, HTTPS, services) before linking; prompts to import data when `laravel/sail` is detected in `composer.json`. **Non-PHP projects** (Node.js, Python, Go, etc.) must have `Containerfile.lerd` and `.lerd.yaml` with `container: {port: N}` already written before calling this, see [Custom Containers](../usage/custom-containers.md) |
 | `lerd link [name] --domain foo.test` | Register with a custom domain |
 | `lerd unlink [name]` | Stop serving the site |
 | `lerd sites` | Table view of all registered sites |
 | `lerd open [name]` | Open the site in the default browser |
 | `lerd share [name]` | Expose the site publicly via ngrok, cloudflared, or Expose (auto-detected) |
 | `lerd secure [name]` | Issue a mkcert TLS cert and enable HTTPS, updates `APP_URL` in `.env` |
+| `lerd secure --renew [name]` | Reissue a secured site's TLS cert on demand, resetting its expiry |
 | `lerd unsecure [name]` | Remove TLS and switch back to HTTP, updates `APP_URL` in `.env` |
 | `lerd pause [name]` | Pause a site: stop workers (and custom container if applicable), replace vhost with landing page |
 | `lerd unpause [name]` | Resume a paused site: start container, restore vhost, restart workers |
@@ -71,6 +81,12 @@ Setup steps include common tasks (composer install, npm install, lerd env) plus 
 | `lerd group db <share\|separate>` | Switch the current secondary between sharing the main's database and keeping its own |
 | `lerd group remove` | Ungroup the current secondary, restoring a standalone domain |
 | `lerd group list` | List all site groups and their members |
+| `lerd workspace add <name>` | Create an empty workspace, a display-only grouping of sites. See [Workspaces](../usage/sites.md#workspaces) |
+| `lerd workspace rename <old> <new>` | Rename a workspace, keeping its sites |
+| `lerd workspace rm <name>` | Delete a workspace; its sites stay linked and become ungrouped |
+| `lerd workspace assign <site> <workspace\|none>` | Move a site into a workspace, or out of one with `none`; assign a group main, not a secondary |
+| `lerd workspace move <name> <position>` | Reposition a workspace in the display order (`0` is first) |
+| `lerd workspace list` | List the workspaces and their sites |
 | `lerd env` | Configure `.env` for the current project with lerd service connection settings; backs up the original as `.env.before_lerd` on first run (skipped if lerd has already written to the file) |
 | `lerd env:restore` | Restore `.env` from the pre-lerd backup (`.env.before_lerd`) |
 | `lerd env:override [KEY=VALUE ...]` | Create/seed a personal, gitignored `.env.lerd_override` whose values win over lerd's defaults on `lerd env`; `LERD_EXTERNAL_SERVICES=` marks services lerd should not start or provision |
@@ -113,14 +129,24 @@ Supported PHP versions: **8.5**, **8.4**, **8.3**, **8.2**, **8.1**, and the fro
 | `lerd xdebug on [version] [--mode MODE] [--on-demand]` | Enable Xdebug for a PHP version. `--mode` defaults to `debug`; accepts `coverage`, `develop`, `profile`, `trace`, `gcstats`, or comma combos like `debug,coverage`. `--on-demand` sets `start_with_request=trigger` so nothing auto-connects |
 | `lerd xdebug off [version]` | Disable Xdebug |
 | `lerd xdebug status` | Show Xdebug enabled/disabled state and active mode for all installed PHP versions |
-| `lerd xdebug pause [site] [--list] [--pid PID]` | Break the IDE debugger into a running worker/CLI process via Xdebug's control socket (`xdebugctl`). `--list` shows candidate processes, `--pid` targets one |
-| `lerd php:ext add <ext> [version] [--apk-deps PKG[,PKG]]` | Add a custom PHP extension and rebuild the FPM image. `--apk-deps` accepts additional Alpine packages that the extension needs at build time (e.g. `--apk-deps libwebp-dev,libpng-dev` for `gd` with WebP support); the package list is persisted in `~/.config/lerd/config.yaml` so future rebuilds reapply it |
-| `lerd php:ext remove <ext> [version]` | Remove a custom PHP extension and rebuild |
-| `lerd php:ext list [version]` | List custom extensions for a PHP version |
-| `lerd php:ini [version]` | Open the user php.ini for a PHP version in `$EDITOR` |
+| `lerd xdebug pause [site] [--list] [--pid PID]` | (experimental, PHP-FPM sites only) Break the IDE debugger into a running worker/CLI process via Xdebug's control socket (`xdebugctl`). `--list` shows candidate processes, `--pid` targets one |
+| `lerd php:ext add <ext> [--apk-deps PKG[,PKG]]` | Add a custom PHP extension to every PHP image and rebuild the current version. `--apk-deps` accepts additional Alpine packages that the extension needs at build time (e.g. `--apk-deps libwebp-dev,libpng-dev` for `gd` with WebP support); the package list is persisted in `~/.config/lerd/config.yaml` so future rebuilds reapply it |
+| `lerd php:ext remove <ext>` | Remove a custom PHP extension from every PHP image and rebuild |
+| `lerd php:ext list` | List your declared extensions, and what each PHP version's image actually loaded |
+| `lerd php:pkg add <package...>` | Add extra Alpine packages to every FPM image and rebuild the current version; the list is persisted so future rebuilds reapply it |
+| `lerd php:pkg remove <package...>` | Remove extra Alpine packages from every FPM image and rebuild |
+| `lerd php:pkg list` | List your declared Alpine packages, and what each PHP version's image actually installed |
+| `lerd php:ports add <host:container...> [--php VERSION]` | Publish extra host ports on the version's shell (FPM) container so a process in `lerd shell` is reachable at `localhost:PORT`; a bare number publishes straight through, and a busy host port shifts to the next free one |
+| `lerd php:ports remove <host...> [--php VERSION]` | Unpublish host ports from the version's shell container |
+| `lerd php:ports list [--php VERSION]` | List the extra host ports published for a PHP version |
+| `lerd php:ini [version\|shared]` | Open a PHP version's php.ini in `$EDITOR`, or the shared file (`php:ini shared`) applied to every version |
 | `lerd pest:browser install [version]` | Set up in-container Pest browser testing: bake musl chromium into the FPM image, download the Playwright registry into a persistent volume, and shim Playwright's glibc browser to it |
 | `lerd pest:browser remove [version]` | Remove chromium from the FPM image and disable Pest browser testing (the Playwright cache volume is left intact) |
 | `lerd pest:browser doctor [version]` | Diagnose the Pest browser testing setup (plugin, chromium, playwright, shim) for a PHP version |
+| `lerd php:bun install [version] [--pin VERSION]` | Install (or update) a musl bun into the container's persistent `/root/.bun` volume, shared across every PHP version; `--pin` fixes a specific bun version instead of latest |
+| `lerd php:bun update [version]` | Update the container's bun in place (`bun upgrade`) |
+| `lerd php:bun version [version]` | Show the bun version installed in the PHP-FPM container |
+| `lerd php:bun remove` | Remove the in-container bun and clear its persistent volume |
 | `lerd dump on` | Enable the debug bridge so `dump()` / `dd()` calls ship to the lerd dashboard, TUI, and MCP tools |
 | `lerd dump off` | Disable the debug bridge and restore FPM containers to their default state |
 | `lerd dump status` | Show whether the bridge is enabled and how many events are buffered |
@@ -134,7 +160,8 @@ Supported PHP versions: **8.5**, **8.4**, **8.3**, **8.2**, **8.1**, and the fro
 | `lerd profile clear` | Delete all captured SPX profile reports |
 | `lerd notify on` | Enable lerd notifications globally (dashboard banners + Web Push fanout) |
 | `lerd notify off` | Globally mute lerd notifications; bypasses per-device prefs |
-| `lerd notify status` | Show whether notifications are globally enabled |
+| `lerd notify target <browser\|native>` | Choose the delivery sink: browser (WebSocket + Web Push) or native desktop notifications (Linux) |
+| `lerd notify status` | Show whether notifications are globally enabled and the current delivery sink |
 
 ## Runtime
 
@@ -147,6 +174,7 @@ Switch the PHP runtime for the current site between shared PHP-FPM and per-site 
 | `lerd runtime frankenphp --worker` | Enable FrankenPHP with worker mode (Laravel Octane or Symfony's FrankenPHP adapter with `--watch`) |
 | `lerd runtime frankenphp --no-worker` | Switch to FrankenPHP and explicitly disable worker mode |
 | `lerd runtime fpm` | Back to shared PHP-FPM; clears the runtime field from `.lerd.yaml` |
+| `lerd octane:reload [on\|off]` | Toggle Octane auto-reload on file changes (`octane:start --watch`) for the current FrankenPHP worker-mode site; with no argument prints the current state. Needs the `chokidar` npm package |
 
 ## Node
 
@@ -159,6 +187,7 @@ Switch the PHP runtime for the current site between shared PHP-FPM and per-site 
 | `lerd node [args...]` | Run `node` using the project's pinned version via fnm |
 | `lerd npm [args...]` | Run `npm` using the project's pinned Node version via fnm |
 | `lerd npx [args...]` | Run `npx` using the project's pinned Node version via fnm |
+| `lerd js:runtime [bun\|node\|auto]` | Pin the current site's JS runtime in `.lerd.yaml` (the CLI equivalent of the dashboard's bun/Node toggle); with no argument prints the current runtime |
 
 ## Services
 
@@ -172,12 +201,16 @@ Switch the PHP runtime for the current site between shared PHP-FPM and per-site 
 | `lerd service update <name> [tag]` | Pull a newer image and restart; with no tag applies the safe in-strategy update, with a tag targets an explicit upgrade |
 | `lerd service migrate <name> <target-tag>` | SQL dump + restore for cross-version mysql / postgres moves; old data dir and dump preserved under `~/.local/share/lerd/backups` |
 | `lerd service rollback <name>` | Swap back to the previously-running image; toggles, so a second rollback redoes the update |
-| `lerd service expose <name> <host:container>` | Publish an extra port on a built-in service (persisted, auto-restarts if running) |
+| `lerd service expose <name> <host:container>` | Publish an extra port on any bundled preset service (persisted, auto-restarts if running) |
 | `lerd service expose <name> <host:container> --remove` | Remove a previously exposed port |
+| `lerd service port <name> <port>` | Move a service's primary published host port without touching its container-internal port; persisted and auto-restarts if running |
+| `lerd service port <name> <port> --container <cport>` | Move a specific mapping of a multi-port service (e.g. Mailpit's `8025` web UI behind the `1025` SMTP primary), named by its container-internal port |
+| `lerd service port <name> --reset` | Reset a service to its preset default published port (same as `port <name> 0`); combine with `--container` to reset one mapping |
 | `lerd service pin <name>` | Pin a service so it is never auto-stopped when no sites use it |
 | `lerd service unpin <name>` | Unpin a service so it can be auto-stopped when unused |
 | `lerd service add [file.yaml]` | Register a new custom service (from a YAML file or flags) |
-| `lerd service preset [name]` | List bundled presets, or install one (use `--version` for multi-version presets) |
+| `lerd service preset [name]` | List presets, or install one (use `--version` for multi-version presets); a store-only preset is fetched on demand |
+| `lerd service search [query]` | Browse the external service-preset store; filter by name, description, or family |
 | `lerd service remove <name> [--purge]` | Stop and remove a service (custom or default). With `--purge`, also rename the data dir aside (recoverable as `<name>.pre-remove-<ts>`) |
 | `lerd service reinstall <name> [--reset-data]` | Stop, remove, and reinstall at the current version. With `--reset-data`, rename the data dir aside and recreate linked sites' databases or buckets on the fresh service |
 | `lerd minio:migrate` | Migrate existing MinIO data to RustFS |
@@ -223,6 +256,7 @@ For projects that use `laravel/horizon`, lerd detects it automatically from `com
 |---|---|
 | `lerd horizon:start` | Start Laravel Horizon for the current project as a persistent background service |
 | `lerd horizon:stop` | Stop Horizon |
+| `lerd horizon:reload [on\|off]` | Toggle Horizon auto-reload on file changes for the current site; with no argument prints the current state. Needs the `chokidar` npm package |
 
 ## Reverb
 
@@ -248,13 +282,27 @@ Requires [Laravel Broadcasting](https://laravel.com/docs/13.x/broadcasting) with
 | `lerd worker stop <name>` | Stop a named framework worker |
 | `lerd worker list` | List all workers defined for the current project's framework |
 
+## Idle-suspend
+
+Activity-driven worker suspension: lerd gracefully stops each site's suspendable workers (queue, scheduler, Horizon, Reverb, Stripe listener, Vite) after a period of no activity and resumes them on the next request, CLI command, MCP call, or source-file save. See the [idle-suspend](../usage/idle-suspend.md) page for the full behaviour.
+
+| Command | Description |
+|---|---|
+| `lerd idle on` | Enable idle-suspend globally |
+| `lerd idle off` | Disable idle-suspend and resume every suspended worker |
+| `lerd idle status` | Show each site's idle-suspend policy and last-active time |
+| `lerd idle timeout <duration>` | Set the idle timeout (e.g. `30m`, `2h`) |
+| `lerd idle pin <site>` | Pin a site so idle-suspend never sleeps it |
+| `lerd idle unpin <site>` | Unpin a site so idle-suspend can sleep it again |
+
 ## Framework definitions
 
 | Command | Description |
 |---|---|
 | `lerd framework list` | List all available framework definitions and their workers |
 | `lerd framework add <name>` | Add or update a framework definition (flags or `--from-file`) |
-| `lerd framework remove <name>` | Remove a user-defined framework definition |
+| `lerd framework remove <name>` | Remove a framework definition (confirms if a site still uses it) |
+| `lerd framework prune` | Remove installed definitions no site uses |
 
 ## Stripe
 
@@ -263,6 +311,14 @@ Requires [Laravel Broadcasting](https://laravel.com/docs/13.x/broadcasting) with
 | `lerd stripe:listen` | Start a Stripe webhook listener for the current project as a background service |
 | `lerd stripe:listen stop` | Stop the Stripe webhook listener |
 | `lerd stripe:config` | Show or set the webhook path and secret env key in `.lerd.yaml` without starting the listener |
+
+## Authentication
+
+| Command | Description |
+|---|---|
+| `lerd auth ssh [key...]` | Load SSH keys into a shared `lerd-ssh-agent` sidecar so `lerd composer` can reach private git repositories, including passphrase-protected keys. Defaults to `~/.ssh/id_*`. The agent socket lives on a named volume shared into the FPM containers, so it works on macOS where the host agent can't cross the podman-machine boundary. Unlocked keys stay in the agent's memory and clear when it stops |
+| `lerd auth ssh --list` | List the keys currently loaded into the agent |
+| `lerd auth ssh --remove` | Remove all keys and stop the agent |
 
 ## Console & runtime passthrough
 
@@ -280,8 +336,10 @@ Requires [Laravel Broadcasting](https://laravel.com/docs/13.x/broadcasting) with
 | Command | Description |
 |---|---|
 | `lerd mcp:enable-global` | Register lerd MCP at user scope across every supported assistant (Claude Code, Cursor, Junie, Codex, Gemini, Copilot, Antigravity, Windsurf), available in every session regardless of directory |
+| `lerd mcp:disable-global` | Unregister the user-scope lerd MCP server and remove the user-scope skill files (inverse of `mcp:enable-global`) |
 | `lerd mcp:inject` | Inject the lerd MCP config and AI skill files into the current project |
 | `lerd mcp:inject --path <dir>` | Inject into a specific project directory |
+| `lerd mcp:eject` | Remove the lerd MCP config and AI skill files from the current project (inverse of `mcp:inject`); use `--path <dir>` to target another directory |
 
 ## Dashboard
 

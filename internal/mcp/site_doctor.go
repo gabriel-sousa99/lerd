@@ -1,0 +1,32 @@
+package mcp
+
+import (
+	"context"
+	"os"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/sitedoctor"
+)
+
+// execSiteDoctor runs the framework-agnostic site doctor for a site (by domain)
+// or for a project path / the cwd, returning the structured check report.
+func execSiteDoctor(args map[string]any) (any, *rpcError) {
+	var path, fwName string
+	if ref := strArg(args, "site"); ref != "" {
+		site, err := config.FindSiteByRef(ref)
+		if err != nil {
+			return toolErr("site not found: " + ref), nil
+		}
+		path, fwName = site.Path, site.Framework
+	} else {
+		path = strArg(args, "path")
+		if path == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return toolErr(err.Error()), nil
+			}
+			path = cwd
+		}
+	}
+	return toolJSON(sitedoctor.RunForPath(context.Background(), path, fwName)), nil
+}

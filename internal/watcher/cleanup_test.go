@@ -1,0 +1,66 @@
+package watcher
+
+import (
+	"testing"
+	"time"
+
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
+)
+
+// The daily sweep must run the managed tier so upgraded service images are
+// reclaimed unattended, without reaping a user's foreign dangling images the way
+// the interactive deep tier does.
+func TestRunAutoCleanup_UsesManagedSweep(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+	stampPathFn = func() string { return tmp + "/auto-cleanup.stamp" }
+	called := false
+	autoSweep = func() (int, int64, error) { called = true; return 0, 0, nil }
+	t.Cleanup(func() {
+		stampPathFn = defaultStampPath
+		autoSweep = cleanup.SweepManaged
+	})
+
+	runAutoCleanup(time.Unix(2_000_000_000, 0))
+	if !called {
+		t.Error("auto cleanup should invoke the managed sweep")
+	}
+}
+
+func TestCleanupDue(t *testing.T) {
+	now := time.Unix(1_000_000_000, 0)
+	cases := []struct {
+		name string
+		last time.Time
+		want bool
+	}{
+		{"never run (zero time)", time.Time{}, true},
+		{"ran 25h ago", now.Add(-25 * time.Hour), true},
+		{"ran exactly at interval", now.Add(-autoCleanupInterval), true},
+		{"ran 1h ago", now.Add(-1 * time.Hour), false},
+		{"ran just now", now, false},
+	}
+	for _, c := range cases {
+		if got := cleanupDue(now, c.last); got != c.want {
+			t.Errorf("%s: cleanupDue = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestAutoCleanupStampRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	stampPathFn = func() string { return dir + "/auto-cleanup.stamp" }
+	t.Cleanup(func() { stampPathFn = defaultStampPath })
+
+	// No stamp yet → zero time (so a first sweep is always due).
+	if !lastAutoCleanup().IsZero() {
+		t.Fatalf("expected zero time before any stamp, got %v", lastAutoCleanup())
+	}
+
+	now := time.Unix(1_700_000_000, 0)
+	stampAutoCleanup(now)
+	if got := lastAutoCleanup(); !got.Equal(now) {
+		t.Errorf("round-trip = %v, want %v", got, now)
+	}
+}

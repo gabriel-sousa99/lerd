@@ -3,6 +3,8 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -177,10 +179,61 @@ func TestIsPortConflict(t *testing.T) {
 
 func TestEnsurePodmanMachineRunning_linux(t *testing.T) {
 	// On Linux this is a no-op — should not panic
-	ensurePodmanMachineRunning()
+	_ = ensurePodmanMachineRunning()
 }
 
 func TestMigrateExecWorkerPlists_linux(t *testing.T) {
 	// On Linux this is a no-op — should not panic
 	migrateExecWorkerPlists()
+}
+
+// TestStopUnitSet_KeepsDNSRunning pins that `lerd stop` excludes lerd-dns even
+// when lerd manages DNS, while coreUnits (the start path) still includes it.
+// The resolver keeps pointing .test at lerd-dns until uninstall, so stopping
+// it would strand that pointer at a dead :5300.
+func TestStopUnitSet_KeepsDNSRunning(t *testing.T) {
+	withTempXDG(t)
+	cfg := &config.GlobalConfig{}
+	cfg.DNS.Enabled = true
+	if err := config.SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+
+	if !slices.Contains(coreUnits(), "lerd-dns") {
+		t.Fatal("coreUnits must include lerd-dns when DNS is managed (start path)")
+	}
+	if slices.Contains(stopUnitSet(), "lerd-dns") {
+		t.Error("stopUnitSet must exclude lerd-dns so it stays running across `lerd stop`")
+	}
+}
+
+// TestQuitProcessUnits_FullTeardown pins that `lerd quit` is a full teardown: it
+// stops lerd-dns (unlike `lerd stop`), and stops lerd-watcher before lerd-dns so
+// the watcher can't restart dns after it goes down.
+func TestQuitProcessUnits_FullTeardown(t *testing.T) {
+	units := quitProcessUnits()
+	dns := slices.Index(units, "lerd-dns")
+	watcher := slices.Index(units, "lerd-watcher")
+	if dns < 0 {
+		t.Fatal("quit must stop lerd-dns for a full teardown")
+	}
+	if watcher < 0 {
+		t.Fatal("quit must stop lerd-watcher")
+	}
+	if watcher > dns {
+		t.Errorf("lerd-watcher (%d) must be stopped before lerd-dns (%d) so the watcher can't restart dns", watcher, dns)
+	}
+}
+
+// A user who disabled DNS must not get the DNS sudoers drop-in written (or a sudo
+// prompt) on start: ConfigureResolver already returns early when disabled, and the
+// sibling InstallSudoers must respect the same opt-out.
+func TestRunStart_skipsSudoersRefreshWhenDNSDisabled(t *testing.T) {
+	src, err := os.ReadFile("startstop.go")
+	if err != nil {
+		t.Fatalf("reading startstop.go: %v", err)
+	}
+	if !strings.Contains(string(src), "if dnsEnabled() && canPromptForPassword() {") {
+		t.Error("the sudoers refresh must be gated on dnsEnabled(), or a disabled-DNS host still installs DNS grants on start")
+	}
 }

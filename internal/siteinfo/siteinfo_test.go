@@ -87,6 +87,28 @@ func TestEnrichVersions_CustomContainerSkipped(t *testing.T) {
 			t.Error("PHPVersion should not be empty for a non-container site")
 		}
 	})
+
+	// A custom-FPM site's PHP version is fixed by its Containerfile FROM line. The
+	// detection-and-persist enrichment path must not override it, or it drifts the
+	// stored version away from the image the container runs (it did, clobbering the
+	// link-pinned value, until enrichVersions learned to skip custom-FPM).
+	t.Run("custom-FPM site keeps its pinned PHP version", func(t *testing.T) {
+		dir := t.TempDir()
+		// .php-version says 8.4, but the site is pinned to 8.3 by its FROM line.
+		if err := os.WriteFile(filepath.Join(dir, ".php-version"), []byte("8.4\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		e := &EnrichedSite{Name: "cfpm", Path: dir, PHPVersion: "8.3"}
+		s := config.Site{Name: "cfpm", Path: dir, PHPVersion: "8.3", Runtime: "fpm-custom"}
+		e.enrichVersions(s, nil, false)
+
+		if e.PHPVersion != "8.3" {
+			t.Errorf("PHPVersion = %q, want 8.3 (pinned by FROM, not re-detected)", e.PHPVersion)
+		}
+		if e.PHPVersionChanged {
+			t.Error("PHPVersionChanged should be false for a custom-FPM site")
+		}
+	})
 }
 
 // ── Enrich: UsesPHP detection ──────────────────────────────────────────────
@@ -542,36 +564,30 @@ func TestHasLogFiles(t *testing.T) {
 	})
 }
 
-// ── LatestLogTime ───────────────────────────────────────────────────────────
-
-func TestLatestLogTime(t *testing.T) {
-	t.Run("no framework returns empty", func(t *testing.T) {
-		got := latestLogTime(false, nil, "/tmp")
-		if got != "" {
-			t.Errorf("got %q, want empty", got)
-		}
-	})
-
-	t.Run("returns timestamp for existing logs", func(t *testing.T) {
-		dir := t.TempDir()
-		logDir := filepath.Join(dir, "storage", "logs")
-		os.MkdirAll(logDir, 0755)
-		os.WriteFile(filepath.Join(logDir, "laravel.log"), []byte("log entry"), 0644)
-
-		fw := &config.Framework{
-			Logs: []config.FrameworkLogSource{{Path: "storage/logs/*.log"}},
-		}
-		got := latestLogTime(true, fw, dir)
-		if got == "" {
-			t.Error("expected non-empty timestamp")
-		}
-	})
-}
-
 // ── Service auto-detection ──────────────────────────────────────────────────
 
+// installQuadlets points QuadletDir() at a temp XDG_CONFIG_HOME and writes a
+// quadlet file for each named default preset so enrichServices sees it as
+// installed.
+func installQuadlets(t *testing.T, names ...string) {
+	t.Helper()
+	cfg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	dir := filepath.Join(cfg, "containers", "systemd")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		path := filepath.Join(dir, "lerd-"+n+".container")
+		if err := os.WriteFile(path, []byte("[Container]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestEnrichServices(t *testing.T) {
-	t.Run("detects services from .env", func(t *testing.T) {
+	t.Run("detects installed services from .env", func(t *testing.T) {
+		installQuadlets(t, "mysql", "redis")
 		dir := t.TempDir()
 		envContent := "DB_HOST=lerd-mysql\nCACHE_STORE=lerd-redis\n"
 		os.WriteFile(filepath.Join(dir, ".env"), []byte(envContent), 0644)
@@ -591,6 +607,26 @@ func TestEnrichServices(t *testing.T) {
 		}
 		if svcMap["postgres"] {
 			t.Error("expected postgres to NOT be detected")
+		}
+	})
+
+	t.Run("skips a referenced but uninstalled service", func(t *testing.T) {
+		installQuadlets(t, "redis") // mysql intentionally not installed
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, ".env"), []byte("DB_HOST=lerd-mysql\nCACHE_STORE=lerd-redis\n"), 0644)
+
+		e := &EnrichedSite{Path: dir}
+		e.enrichServices()
+
+		svcMap := make(map[string]bool)
+		for _, s := range e.Services {
+			svcMap[s] = true
+		}
+		if svcMap["mysql"] {
+			t.Error("expected removed mysql to be skipped, got a ghost badge")
+		}
+		if !svcMap["redis"] {
+			t.Error("expected installed redis to still be detected")
 		}
 	})
 

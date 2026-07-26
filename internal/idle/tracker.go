@@ -100,10 +100,15 @@ func (t *Tracker) Seed(sites []string, at time.Time) {
 	}
 }
 
-// Forget drops a site's record, e.g. when a site is removed. No-op if absent.
+// Forget drops a site's record when the site is removed, covering both the bare
+// site key and its "<site>/<branch>" worktree keys. No-op if absent.
 func (t *Tracker) Forget(site string) {
 	t.mu.Lock()
-	delete(t.last, site)
+	for key := range t.last {
+		if keyBelongsTo(key, site) {
+			delete(t.last, key)
+		}
+	}
 	t.mu.Unlock()
 }
 
@@ -141,6 +146,43 @@ func LoadActivity(path string) map[string]int64 {
 	return m
 }
 
+// RemoveActivity drops a site's last-active entries from the persisted file,
+// covering both the bare site key and its "<site>/<branch>" worktree keys, so an
+// unlinked site stops lingering in the idle-activity file. A missing file is a
+// no-op. Written atomically via a temp file + rename, matching Save.
+func RemoveActivity(path, site string) error {
+	m := LoadActivity(path)
+	if m == nil {
+		return nil
+	}
+	changed := false
+	for key := range m {
+		if keyBelongsTo(key, site) {
+			delete(m, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// keyBelongsTo reports whether an activity key is the site's own key or one of
+// its "<site>/<branch>" worktree keys. A site name can't contain "/", so the
+// prefix test is unambiguous.
+func keyBelongsTo(key, site string) bool {
+	return key == site || strings.HasPrefix(key, site+"/")
+}
+
 // normalizeHost strips a :port suffix and lowercases, so "Myapp.test:443" and
 // "myapp.test" resolve to the same site.
 func normalizeHost(host string) string {
@@ -152,9 +194,10 @@ func normalizeHost(host string) string {
 }
 
 // ParseAccessHost extracts the request host from one nginx access datagram. The
-// access feed logs a minimal "$host" message through syslog framing, so the host
-// is the final whitespace-delimited token of the line. Returns "" for nginx's
-// "-" placeholder (a request with no Host header) or an unparseable line.
+// feed ships a pipe-delimited "$host|$status|..." message as the final
+// whitespace token (surviving syslog framing), so the host is the token's first
+// pipe field. A bare "$host" line (no pipe) is still accepted for compatibility.
+// Returns "" for nginx's "-" placeholder or an unparseable line.
 func ParseAccessHost(datagram []byte) string {
 	line := strings.TrimRight(string(datagram), "\n\x00 ")
 	if line == "" {
@@ -165,7 +208,10 @@ func ParseAccessHost(datagram []byte) string {
 		return ""
 	}
 	host := fields[len(fields)-1]
-	if host == "-" || strings.HasSuffix(host, ":") {
+	if i := strings.IndexByte(host, '|'); i >= 0 {
+		host = host[:i]
+	}
+	if host == "" || host == "-" || strings.HasSuffix(host, ":") {
 		return ""
 	}
 	return host

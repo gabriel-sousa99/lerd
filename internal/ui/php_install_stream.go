@@ -75,7 +75,8 @@ func handlePhpVersionInstallStream(w http.ResponseWriter, r *http.Request, versi
 	// Build goroutine writes podman's stdout+stderr into the pipe.
 	go func() {
 		defer pw.Close()
-		buildErr <- podman.BuildFPMImageTo(version, false, pw)
+		_, err := podman.BuildFPMImageTo(version, false, pw)
+		buildErr <- err
 	}()
 
 	// Stream the pipe line-by-line into SSE log frames.

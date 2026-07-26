@@ -159,6 +159,93 @@ func ReadKey(path, key string) string {
 	return ""
 }
 
+// ReadValues reads path once and returns all non-comment key/value pairs, with
+// each value unquoted the same way ReadKey unquotes a single key. On a duplicate
+// key the first occurrence wins, matching ReadKey, which returns its first
+// match. Returns an empty (non-nil) map when the file is missing, so callers can
+// range freely. Prefer this over repeated ReadKey calls when checking several
+// keys from one file: ReadKey re-opens and rescans the whole file on every call.
+func ReadValues(path string) map[string]string {
+	out := map[string]string{}
+	f, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if k = strings.TrimSpace(k); k != "" {
+			if _, seen := out[k]; !seen {
+				out[k] = strings.Trim(strings.TrimSpace(v), `"'`)
+			}
+		}
+	}
+	return out
+}
+
+// ReferencesContainer reports whether content references the lerd container
+// hostname "lerd-<serviceName>" as a whole token, so bare "postgres" is not
+// matched by a "lerd-postgres-18" reference (and vice versa). Commented-out
+// lines are ignored so a disabled "#DB_HOST=lerd-mysql" doesn't keep a removed
+// service's badge alive on the site page.
+func ReferencesContainer(content, serviceName string) bool {
+	needle := "lerd-" + serviceName
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if lineReferencesNeedle(stripInlineComment(line), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripInlineComment drops a trailing "# ..." comment from an .env line. A '#'
+// only starts a comment when preceded by whitespace (dotenv convention), so a
+// '#' inside a value (e.g. a password) is preserved.
+func stripInlineComment(line string) string {
+	for i := 1; i < len(line); i++ {
+		if line[i] == '#' && (line[i-1] == ' ' || line[i-1] == '\t') {
+			return line[:i]
+		}
+	}
+	return line
+}
+
+// lineReferencesNeedle reports whether line contains needle as a whole token
+// (the next byte, if any, is not part of a service name).
+func lineReferencesNeedle(line, needle string) bool {
+	for i := 0; ; {
+		j := strings.Index(line[i:], needle)
+		if j < 0 {
+			return false
+		}
+		end := i + j + len(needle)
+		if end >= len(line) || !isServiceNameByte(line[end]) {
+			return true
+		}
+		i += j + 1
+	}
+}
+
+// isServiceNameByte reports whether b can be part of a service name following
+// the "lerd-" prefix (alphanumerics and '-', as in postgres-18 or mysql-5-7).
+func isServiceNameByte(b byte) bool {
+	return b == '-' ||
+		(b >= '0' && b <= '9') ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z')
+}
+
 // ReadKeys returns all non-comment key names from the .env file at path,
 // in the order they appear.
 func ReadKeys(path string) ([]string, error) {

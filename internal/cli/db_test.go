@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,6 +28,30 @@ func TestDbImportCmdMySQLPasswordNotInArgs(t *testing.T) {
 		if strings.HasPrefix(arg, "-psecret123") || strings.HasPrefix(arg, "-p=secret123") {
 			t.Errorf("password passed via -p flag: %q", arg)
 		}
+	}
+}
+
+func TestDbImportCmdMySQLRaisesClientPacket(t *testing.T) {
+	for _, conn := range []string{"mysql", "mariadb"} {
+		env := &dbEnv{connection: conn, database: "shop", username: "root", password: "lerd"}
+		cmd, err := dbImportCmd(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(strings.Join(cmd.Args, " "), "--max-allowed-packet=") {
+			t.Errorf("%s import must raise the client max_allowed_packet so a large dump is not capped at 16MB: %v", conn, cmd.Args)
+		}
+	}
+}
+
+func TestDbImportCmdPostgresHasNoPacketFlag(t *testing.T) {
+	env := &dbEnv{connection: "pgsql", database: "shop", username: "postgres", password: "lerd"}
+	cmd, err := dbImportCmd(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(cmd.Args, " "), "max-allowed-packet") {
+		t.Errorf("postgres import must not carry a mysql-only flag: %v", cmd.Args)
 	}
 }
 
@@ -105,5 +131,69 @@ func TestDbCmdUnsupportedConnection(t *testing.T) {
 	_, err = dbExportCmd(env)
 	if err == nil {
 		t.Error("expected error for unsupported connection")
+	}
+}
+
+func TestLerdServiceFromHost(t *testing.T) {
+	cases := map[string]string{
+		"lerd-mariadb-11-8": "mariadb-11-8",
+		"lerd-mysql":        "mysql",
+		"lerd-postgres-18":  "postgres-18",
+		"  lerd-mysql ":     "mysql",
+		"127.0.0.1":         "",
+		"db.example.com":    "",
+		"":                  "",
+		"lerd-":             "",
+	}
+	for host, want := range cases {
+		if got := lerdServiceFromHost(host); got != want {
+			t.Errorf("lerdServiceFromHost(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
+func writeEnvFixture(t *testing.T, lines string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(lines), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestLoadDBEnvTargetsActualServiceFromHost(t *testing.T) {
+	// A mariadb-backed site: mysql dialect, but the container is the mariadb one.
+	dir := writeEnvFixture(t, "DB_CONNECTION=mysql\nDB_HOST=lerd-mariadb-11-8\nDB_DATABASE=shop\n")
+	env, err := loadDBEnv(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.service != "mariadb-11-8" {
+		t.Errorf("service = %q, want mariadb-11-8", env.service)
+	}
+	if env.connection != "mysql" {
+		t.Errorf("connection = %q, want mysql", env.connection)
+	}
+}
+
+func TestLoadDBEnvCanonicalHostUnchanged(t *testing.T) {
+	dir := writeEnvFixture(t, "DB_CONNECTION=pgsql\nDB_HOST=lerd-postgres\nDB_DATABASE=shop\n")
+	env, err := loadDBEnv(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.service != "postgres" {
+		t.Errorf("service = %q, want postgres", env.service)
+	}
+}
+
+func TestLoadDBEnvNonLerdHostFallsBackToCanonical(t *testing.T) {
+	dir := writeEnvFixture(t, "DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n")
+	env, err := loadDBEnv(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.service != "mysql" {
+		t.Errorf("service = %q, want mysql (canonical fallback)", env.service)
 	}
 }

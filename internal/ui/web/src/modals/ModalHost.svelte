@@ -12,6 +12,7 @@
   import AddPhpModal from './AddPhpModal.svelte';
   import ConfirmEnvSaveModal from './ConfirmEnvSaveModal.svelte';
   import ConfirmEnvRestoreModal from './ConfirmEnvRestoreModal.svelte';
+  import EnvProposeModal from './EnvProposeModal.svelte';
   import ConfirmNginxSaveModal from './ConfirmNginxSaveModal.svelte';
   import ConfirmNginxRestoreModal from './ConfirmNginxRestoreModal.svelte';
   import ConfirmNginxResetModal from './ConfirmNginxResetModal.svelte';
@@ -22,9 +23,13 @@
   import ConfirmPhpIniRestoreModal from './ConfirmPhpIniRestoreModal.svelte';
   import ConfirmPhpIniResetModal from './ConfirmPhpIniResetModal.svelte';
   import ConfirmPhpRemoveModal from './ConfirmPhpRemoveModal.svelte';
+  import ConfirmWorkspaceDeleteModal from './ConfirmWorkspaceDeleteModal.svelte';
   import ConfirmTuningSaveModal from './ConfirmTuningSaveModal.svelte';
   import ConfirmTuningRestoreModal from './ConfirmTuningRestoreModal.svelte';
   import ConfirmTuningResetModal from './ConfirmTuningResetModal.svelte';
+  import ConfirmSiteUnlinkModal from './ConfirmSiteUnlinkModal.svelte';
+  import ConfirmServiceInstallModal from './ConfirmServiceInstallModal.svelte';
+  import ErrorModal from './ErrorModal.svelte';
 </script>
 
 {#if $modal.kind === 'domain' && $modal.site}
@@ -51,6 +56,8 @@
   <ConfirmEnvSaveModal />
 {:else if $modal.kind === 'envRestore' && $modal.envRestore}
   <ConfirmEnvRestoreModal />
+{:else if $modal.kind === 'envPropose' && $modal.envPropose}
+  <EnvProposeModal />
 {:else if $modal.kind === 'nginxSave' && $modal.nginxSave}
   <ConfirmNginxSaveModal />
 {:else if $modal.kind === 'nginxRestore' && $modal.nginxRestore}
@@ -77,4 +84,12 @@
   <ConfirmTuningRestoreModal />
 {:else if $modal.kind === 'tuningReset' && $modal.tuningReset}
   <ConfirmTuningResetModal />
+{:else if $modal.kind === 'workspaceDelete' && $modal.workspaceDelete}
+  <ConfirmWorkspaceDeleteModal />
+{:else if $modal.kind === 'siteUnlink' && $modal.siteUnlink}
+  <ConfirmSiteUnlinkModal />
+{:else if $modal.kind === 'serviceInstall' && $modal.serviceInstall}
+  <ConfirmServiceInstallModal />
+{:else if $modal.kind === 'error' && $modal.error}
+  <ErrorModal />
 {/if}

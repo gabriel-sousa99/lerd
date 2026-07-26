@@ -1,17 +1,28 @@
 package certs
 
 import (
+	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
+
+// certReissueWindow is how close to NotAfter a leaf cert may drift before the
+// IssueCert reuse path stops trusting it and reissues. Mirrors the 30-day
+// threshold `lerd status` warns at, so the self-heal kicks in as the warning
+// starts rather than waiting for the cert to actually expire.
+const certReissueWindow = 30 * 24 * time.Hour
 
 // issueCertMu serialises issueCertAtomic calls per primaryDomain. Two
 // concurrent reissues for the same site (e.g. boot scanWorktrees racing the
@@ -52,16 +63,41 @@ func InstallCA() error {
 
 // IssueCert issues a TLS certificate covering all the given domains using mkcert.
 // The cert files are named after primaryDomain. Each domain also gets a wildcard entry.
-// If the cert and key files already exist they are reused without re-running mkcert.
+// An existing cert/key pair is reused without re-running mkcert only while the
+// cert is still valid and more than certReissueWindow from NotAfter; a cert that
+// is expired, near expiry, or unreadable falls through to the atomic reissue so
+// an ordinary start or watcher pass self-heals an aging cert.
 func IssueCert(primaryDomain string, allDomains []string, certsDir string) error {
 	certFile := filepath.Join(certsDir, primaryDomain+".crt")
 	keyFile := filepath.Join(certsDir, primaryDomain+".key")
 	if _, certErr := os.Stat(certFile); certErr == nil {
 		if _, keyErr := os.Stat(keyFile); keyErr == nil {
-			return nil
+			if !certNeedsReissue(certFile, certReissueWindow) {
+				return nil
+			}
 		}
 	}
 	return issueCertAtomic(primaryDomain, allDomains, certsDir)
+}
+
+// certNeedsReissue reports whether the PEM cert at path should be reissued: it
+// returns true when the file is unreadable, not a parseable certificate, or
+// within window of (or past) its NotAfter. An unreadable or malformed cert is
+// treated as needing reissue rather than trusted.
+func certNeedsReissue(path string, window time.Duration) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return true
+	}
+	parsed, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return true
+	}
+	return time.Until(parsed.NotAfter) < window
 }
 
 // IssueCertForce regenerates the certificate for primaryDomain even if files
@@ -99,25 +135,31 @@ func issueCertAtomic(primaryDomain string, allDomains []string, certsDir string)
 	args := []string{"-cert-file", tmpCert, "-key-file", tmpKey}
 	args = append(args, sans...)
 
+	// Capture mkcert's chatty success banner instead of letting it spill into
+	// the CLI's clean step output; surface it only when the command fails.
 	cmd := exec.Command(MkcertPath(), args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var mkOut bytes.Buffer
+	cmd.Stdout = &mkOut
+	cmd.Stderr = &mkOut
 	if err := cmd.Run(); err != nil {
 		os.Remove(tmpCert) //nolint:errcheck
 		os.Remove(tmpKey)  //nolint:errcheck
-		return fmt.Errorf("mkcert for %s: %w", primaryDomain, err)
+		return fmt.Errorf("mkcert for %s: %w\n%s", primaryDomain, err, strings.TrimSpace(mkOut.String()))
 	}
 
-	// Two-phase rename: back up the previous cert (if any), swap in the
-	// new cert, then swap in the new key. If the key rename fails the
-	// cert is rolled back so we don't leave a cert/key mismatch on disk
-	// — nginx with mismatched cert and key refuses to start the site,
-	// which is worse than the transient mkcert failure we're guarding
-	// against in the first place.
+	// Swap the new cert and key in with os.Rename, which atomically replaces
+	// the target in place. Crucially the previous cert is COPIED aside, not
+	// moved: moving it would unlink certFile for the instant between the two
+	// renames, and a concurrent `nginx -s reload` (the watcher or UI reissuing
+	// the same site while the CLI reloads) that lands in that window crashes
+	// with "cannot load certificate ... No such file". Copying keeps a complete
+	// cert at certFile at every moment while still letting us roll back to the
+	// previous cert if the key rename fails (a cert/key mismatch is worse than a
+	// transient issue failure: nginx refuses to start the site).
 	bakCert := certFile + ".bak." + strconv.Itoa(os.Getpid())
 	hadPrevCert := false
 	if _, err := os.Stat(certFile); err == nil {
-		if err := os.Rename(certFile, bakCert); err != nil {
+		if err := copyFile(certFile, bakCert); err != nil {
 			os.Remove(tmpCert) //nolint:errcheck
 			os.Remove(tmpKey)  //nolint:errcheck
 			return fmt.Errorf("backing up cert for %s: %w", primaryDomain, err)
@@ -128,15 +170,16 @@ func issueCertAtomic(primaryDomain string, allDomains []string, certsDir string)
 		os.Remove(tmpCert) //nolint:errcheck
 		os.Remove(tmpKey)  //nolint:errcheck
 		if hadPrevCert {
-			os.Rename(bakCert, certFile) //nolint:errcheck
+			os.Remove(bakCert) //nolint:errcheck
 		}
 		return fmt.Errorf("renaming cert for %s: %w", primaryDomain, err)
 	}
 	if err := os.Rename(tmpKey, keyFile); err != nil {
-		os.Remove(tmpKey)   //nolint:errcheck
-		os.Remove(certFile) //nolint:errcheck
+		os.Remove(tmpKey) //nolint:errcheck
 		if hadPrevCert {
-			os.Rename(bakCert, certFile) //nolint:errcheck
+			os.Rename(bakCert, certFile) //nolint:errcheck — atomic restore of prev cert
+		} else {
+			os.Remove(certFile) //nolint:errcheck
 		}
 		return fmt.Errorf("renaming key for %s: %w", primaryDomain, err)
 	}
@@ -144,6 +187,25 @@ func issueCertAtomic(primaryDomain string, allDomains []string, certsDir string)
 		os.Remove(bakCert) //nolint:errcheck
 	}
 	return nil
+}
+
+// copyFile copies src to dst, creating or truncating dst. Used to back up the
+// previous cert without unlinking it, so the live cert path is never absent.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close() //nolint:errcheck
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close() //nolint:errcheck
+		return err
+	}
+	return out.Close()
 }
 
 // CertExists returns true if the certificate for the domain already exists.

@@ -11,6 +11,8 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/logcolor"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
@@ -50,8 +52,8 @@ BindsTo=%s.service
 
 [Service]
 Type=oneshot
-ExecStart=%s exec -w %s --env=LERD_SITE=%s %s %s
-`, label, siteName, fpmUnit, fpmUnit, podman.PodmanBin(), sitePath, siteName, container, command)
+ExecStart=%s exec -w %s --env=LERD_SITE=%s %s%s %s
+`, label, siteName, fpmUnit, fpmUnit, podman.PodmanBin(), podman.ShellQuote(sitePath), siteName, workerColorArgs(), container, command)
 
 		timerUnit := fmt.Sprintf(`[Unit]
 Description=Lerd %s timer (%s)
@@ -86,11 +88,11 @@ Type=simple
 Restart=%s
 RestartSec=5
 SuccessExitStatus=1 130 143
-ExecStart=%s exec -w %s --env=LERD_SITE=%s %s %s
+ExecStart=%s exec -w %s --env=LERD_SITE=%s%s %s%s %s
 
 [Install]
 WantedBy=default.target
-`, label, siteName, fpmUnit, fpmUnit, restart, podman.PodmanBin(), sitePath, siteName, container, command)
+`, label, siteName, fpmUnit, fpmUnit, restart, podman.PodmanBin(), podman.ShellQuote(sitePath), siteName, workerExecEnvFlags(sitePath), workerColorArgs(), container, command)
 
 	// A previous run may have written a sibling .timer for this unit
 	// (e.g. before the framework yaml dropped its `schedule:` field).
@@ -122,7 +124,7 @@ func writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, resta
 	envPath := config.BinDir() + ":" + filepath.Join(home, ".local", "bin") + ":/usr/local/bin:/usr/bin:/bin"
 
 	shellCommand := command
-	if bun := bunRunnerFor(sitePath); bun != "" {
+	if bun := bunRunnerFor(sitePath, false); bun != "" {
 		// bun is self-contained: rewrite npm/npx/node to bun/bunx and run it
 		// directly, no fnm wrap. Put ~/.bun/bin on PATH so a bare `bun` resolves.
 		shellCommand = nodeDet.Bunify(command)
@@ -161,12 +163,12 @@ Restart=%s
 RestartSec=5
 WorkingDirectory=%s
 Environment=PATH=%s
-SuccessExitStatus=1 130 143
+%sSuccessExitStatus=1 130 143
 ExecStart=/bin/sh -c '%s'
 
 [Install]
 WantedBy=default.target
-`, label, siteName, fpmOrder, restart, sitePath, envPath, escaped)
+`, label, siteName, fpmOrder, restart, sitePath, envPath, logcolor.QuadletEnvLines(), escaped)
 
 	_ = services.Mgr.RemoveTimerUnit(unitName)
 	return services.Mgr.WriteServiceUnitIfChanged(unitName, unit)
@@ -190,6 +192,15 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 	// auto-reload keeps its reload command across lerd start and reboots,
 	// instead of silently coming back in standard mode.
 	command := resolveWorkerCommand(sitePath, workerName, w)
+	// A project-supplied host worker only restores on boot if the user already
+	// approved the resolved command it will actually run; otherwise skip silently
+	// so a cloned repo's host worker (or an unapproved reload command) can't run
+	// unattended on reboot.
+	if w.Host && w.ProjectOrigin {
+		if allowed, _ := config.HostCommandAllowed(siteName, command); !allowed {
+			return
+		}
+	}
 	if w.Proxy != nil && w.Proxy.PortEnvKey != "" {
 		envPath := filepath.Join(sitePath, ".env")
 		port := envfile.ReadKey(envPath, w.Proxy.PortEnvKey)
@@ -214,7 +225,7 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 
 	changed, err := writeWorkerUnitFile(unitName, label, displaySite, sitePath, phpVersion, command, restart, w.Schedule, fpmUnit, w.Host)
 	if err != nil {
-		fmt.Printf("[WARN] writing worker unit %s: %v\n", unitName, err)
+		feedback.Warn("writing worker unit %s: %v", unitName, err)
 		return
 	}
 	if changed {
@@ -223,7 +234,7 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 			enableTarget = unitName + ".timer"
 		}
 		if err := services.Mgr.Enable(enableTarget); err != nil {
-			fmt.Printf("[WARN] enable %s: %v\n", enableTarget, err)
+			feedback.Warn("enable %s: %v", enableTarget, err)
 		}
 	}
 }

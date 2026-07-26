@@ -1,0 +1,82 @@
+<h2>Painel de detalhes — proxy Fullstack</h2>
+<p class="subtitle">Como você visualiza e gerencia o proxy depois de criado. Confirme se a leitura do roteamento está clara.</p>
+
+<style>
+  .lerd { --red:#e5484d; --card:#1d2027; --border:#2a2e37; --muted:#8b909a; --txt:#e6e8ec; }
+  .lerd .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;color:var(--txt);font-size:13px;max-width:680px;margin:0 auto;box-shadow:0 12px 40px rgba(0,0,0,.45)}
+  .lerd .ph{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);gap:12px}
+  .lerd .ph h1{margin:0;font-size:16px;font-weight:600}
+  .lerd .ph a{font-family:monospace;font-size:11.5px;color:var(--red);text-decoration:none}
+  .lerd .badge{display:inline-block;font-size:10px;text-transform:uppercase;letter-spacing:.05em;background:rgba(229,72,77,.15);color:#fca5a5;border:1px solid rgba(229,72,77,.3);border-radius:6px;padding:2px 7px;margin-left:8px;vertical-align:middle}
+  .lerd .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+  .lerd .b{padding:6px 11px;border-radius:8px;font-size:12px;border:1px solid var(--border);background:transparent;color:var(--txt);white-space:nowrap}
+  .lerd .b.danger{color:#fca5a5;border-color:rgba(229,72,77,.4)}
+  .lerd .sec{padding:14px 18px;border-bottom:1px solid var(--border)}
+  .lerd .sec .st{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px}
+  .lerd .ir{display:flex;justify-content:space-between;padding:3px 0;font-size:12.5px}
+  .lerd .ir .k{color:var(--muted)}
+  .lerd .ir .v{font-family:monospace}
+  .lerd .route{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:9px;margin-bottom:7px;background:#0f1115}
+  .lerd .route .dot{width:8px;height:8px;border-radius:50%;flex:none}
+  .lerd .route .path{font-family:monospace;font-size:12.5px;min-width:120px}
+  .lerd .route .ar{color:var(--muted)}
+  .lerd .route .up{font-family:monospace;font-size:12px;color:var(--muted)}
+  .lerd .route .tag{margin-left:auto;font-size:10px;text-transform:uppercase;letter-spacing:.04em;padding:2px 7px;border-radius:5px}
+  .lerd .green{background:#86efac}.lerd .gray{background:#52555d}
+  .lerd .tspa{background:rgba(134,239,172,.12);color:#86efac}
+  .lerd .tapi{background:rgba(252,165,165,.12);color:#fca5a5}
+</style>
+
+<div class="lerd">
+  <div class="panel">
+    <div class="ph">
+      <div>
+        <h1>retencao.localhost <span class="badge">fullstack</span></h1>
+        <a href="#">https://retencao.localhost</a>
+      </div>
+      <div class="acts">
+        <button class="b">Edit</button>
+        <button class="b">Unsecure</button>
+        <button class="b">Pause</button>
+        <button class="b danger">Delete</button>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="st">Roteamento (origem única)</div>
+      <div class="route">
+        <span class="dot green"></span>
+        <span class="path">/</span><span class="ar">→</span><span class="up">:9000</span>
+        <span class="tag tspa">SPA</span>
+      </div>
+      <div class="route">
+        <span class="dot green"></span>
+        <span class="path">/api</span><span class="ar">→</span><span class="up">:8000</span>
+        <span class="tag tapi">API</span>
+      </div>
+      <div class="route">
+        <span class="dot green"></span>
+        <span class="path">/sanctum</span><span class="ar">→</span><span class="up">:8000</span>
+        <span class="tag tapi">API</span>
+      </div>
+      <div class="route">
+        <span class="dot green"></span>
+        <span class="path">/broadcasting</span><span class="ar">→</span><span class="up">:8000</span>
+        <span class="tag tapi">API</span>
+      </div>
+      <div class="route">
+        <span class="dot gray"></span>
+        <span class="path">/storage</span><span class="ar">→</span><span class="up">:8000</span>
+        <span class="tag tapi">API</span>
+      </div>
+      <p style="font-size:11px;color:var(--muted);margin:8px 2px 0">● verde = porta respondendo · cinza = sem resposta. O ponto faz polling leve das portas upstream.</p>
+    </div>
+
+    <div class="sec" style="border-bottom:none">
+      <div class="st">Detalhes</div>
+      <div class="ir"><span class="k">Domínio</span><span class="v">retencao.localhost</span></div>
+      <div class="ir"><span class="k">TLS</span><span class="v">mkcert · 1 cert</span></div>
+      <div class="ir"><span class="k">Cookie</span><span class="v">first-party (same-origin)</span></div>
+    </div>
+  </div>
+</div>

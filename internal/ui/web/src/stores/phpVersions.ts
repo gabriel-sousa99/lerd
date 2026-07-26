@@ -1,3 +1,4 @@
+import { m } from '../paraglide/messages.js';
 import { writable } from 'svelte/store';
 import { apiJson, apiFetch, decodeJSONResult } from '$lib/api';
 import { readSSE } from '$lib/sse';
@@ -5,18 +6,53 @@ import type { SiteNginxBackup, LoadNginxBackupsResult, ResetNginxResult, SaveNgi
 
 export const phpVersions = writable<string[]>([]);
 
-// phpOptionsForSite returns the versions to offer in a site's PHP dropdown.
+export interface PhpOption {
+  value: string;
+  disabled?: boolean;
+  description?: string;
+}
+
+// cmpVersion compares two "major.minor" strings numerically.
+function cmpVersion(a: string, b: string): number {
+  const [aMaj, aMin] = a.split('.').map((n) => parseInt(n, 10) || 0);
+  const [bMaj, bMin] = b.split('.').map((n) => parseInt(n, 10) || 0);
+  return aMaj !== bMaj ? aMaj - bMaj : aMin - bMin;
+}
+
+// outOfFrameworkRange reports whether a PHP version falls outside the
+// framework's [min, max] range. An empty bound means unconstrained on that side.
+function outOfFrameworkRange(v: string, min?: string, max?: string): boolean {
+  if (min && cmpVersion(v, min) < 0) return true;
+  if (max && cmpVersion(v, max) > 0) return true;
+  return false;
+}
+
+// phpOptionsForSite returns the options to offer in a site's PHP dropdown.
 // FrankenPHP sites are limited to the versions dunglas/frankenphp publishes an
 // image for, intersected with what's installed, plus the site's current version
 // so the control never renders blank. Other runtimes offer every installed one.
+// When the framework declares a PHP range (min/max), versions outside it are
+// kept in the list but disabled, so the constraint is visible rather than
+// silently hidden. The site's current version is never disabled. min/max are
+// empty when the framework version was guessed, leaving every version enabled.
 export function phpOptionsForSite(
   runtime: string | undefined,
   installed: string[],
   frankenphpVersions: string[],
-  current: string
-): string[] {
-  if (runtime !== 'frankenphp') return installed;
-  return frankenphpVersions.filter((v) => installed.includes(v) || v === current);
+  current: string,
+  min?: string,
+  max?: string
+): PhpOption[] {
+  const base =
+    runtime === 'frankenphp'
+      ? frankenphpVersions.filter((v) => installed.includes(v) || v === current)
+      : installed;
+  return base.map((v) => {
+    const disabled = v !== current && outOfFrameworkRange(v, min, max);
+    return disabled
+      ? { value: v, disabled: true, description: `needs PHP ${min || '*'} to ${max || '*'}` }
+      : { value: v };
+  });
 }
 
 export async function loadPhpVersions() {
@@ -88,6 +124,32 @@ export const startPhp = (v: string) => phpAction(v, 'start');
 export const stopPhp = (v: string) => phpAction(v, 'stop');
 export const removePhp = (v: string) => phpAction(v, 'remove');
 
+// setFpmPorts replaces the extra host ports published on a version's shared FPM
+// container. The server shifts any colliding host port to the next free one, so
+// the returned list may differ from what was sent; the status broadcast carries
+// the resolved set, so the caller reseeds from it rather than the response.
+export async function setFpmPorts(
+  version: string,
+  ports: string[]
+): Promise<{ ok: boolean; error?: string; ports?: string[] }> {
+  try {
+    const res = await apiFetch('/api/php-versions/' + encodeURIComponent(version) + '/ports', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ports })
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      error?: string;
+      ports?: string[];
+    };
+    if (res.ok && data.ok) return { ok: true, ports: data.ports };
+    return { ok: false, error: data.error || m.common_failed() };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
+  }
+}
+
 export interface PhpIni {
   path: string;
   content: string;
@@ -124,7 +186,7 @@ export async function savePhpIni(v: string, content: string, backup: boolean = f
       exists: data.exists
     };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
@@ -132,18 +194,18 @@ export async function loadPhpIniBackups(v: string): Promise<LoadNginxBackupsResu
   try {
     const res = await apiFetch(phpConfigUrl(v, 'backups'));
     if (!res.ok) {
-      return { ok: false, list: [], error: `Failed to load backups (${res.status})` };
+      return { ok: false, list: [], error: m.common_backupsLoadFailed({ status: res.status }) };
     }
     const list = (await res.json()) as SiteNginxBackup[];
     return { ok: true, list: Array.isArray(list) ? list : [] };
   } catch (e) {
-    return { ok: false, list: [], error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, list: [], error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
 export async function loadPhpIniBackupContent(v: string, name: string): Promise<string> {
   const res = await apiFetch(phpConfigUrl(v, 'backups/' + encodeURIComponent(name)));
-  if (!res.ok) throw new Error(`Failed to load backup (${res.status})`);
+  if (!res.ok) throw new Error(m.common_backupLoadFailed({ status: res.status }));
   return await res.text();
 }
 
@@ -153,7 +215,7 @@ export async function resetPhpIni(v: string): Promise<ResetNginxResult> {
     const data = await decodeJSONResult<{ ok?: boolean; error?: string }>(res);
     return { ok: Boolean(data.ok), error: data.error };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
@@ -167,6 +229,41 @@ export async function restorePhpIni(v: string, name: string = ''): Promise<Resto
     const data = await decodeJSONResult<{ ok?: boolean; error?: string; restored?: string; content?: string }>(res);
     return { ok: Boolean(data.ok), error: data.error, restored: data.restored, content: data.content };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
+  }
+}
+
+export interface PhpSetState {
+  declared: string[];
+  has: string[] | null;
+  cannot: string[] | null;
+}
+
+export interface PhpExtensionsReport {
+  version: string;
+  built: boolean;
+  needs_rebuild: boolean;
+  extensions: PhpSetState;
+  packages: PhpSetState;
+  modules?: string[];
+}
+
+export interface PhpExtensionsResult {
+  ok: boolean;
+  error?: string;
+  report?: PhpExtensionsReport;
+  modules_error?: string;
+}
+
+// fetchPhpExtensions reads what a version's image actually carries. Reading
+// `php -m` starts a container, so this is only called when the tab is opened;
+// the backend caches the result against the image ID.
+export async function fetchPhpExtensions(v: string): Promise<PhpExtensionsResult> {
+  try {
+    const res = await apiFetch('/api/php-versions/' + encodeURIComponent(v) + '/extensions');
+    const data = await decodeJSONResult<PhpExtensionsResult>(res);
+    return { ok: Boolean(data.ok), error: data.error, report: data.report, modules_error: data.modules_error };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }

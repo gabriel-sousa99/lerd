@@ -1,34 +1,17 @@
-import { writable } from 'svelte/store';
-import { apiJson, apiFetch } from '$lib/api';
-
-export interface PhpExtension {
-  name: string;
-  apk_deps?: string[];
-}
-
-interface ListResponse {
-  version: string;
-  extensions: PhpExtension[];
-}
+import { apiFetch } from '$lib/api';
 
 interface ActionResponse {
   ok: boolean;
   error?: string;
 }
 
-// Per-version map so the dashboard can swap PHP tabs without a fetch.
-export const phpExtensions = writable<Record<string, PhpExtension[]>>({});
-
-export async function loadPhpExtensions(version: string): Promise<void> {
-  try {
-    const res = await apiJson<ListResponse>(
-      '/api/php-versions/' + encodeURIComponent(version) + '/extensions'
-    );
-    phpExtensions.update((m) => ({ ...m, [version]: res.extensions ?? [] }));
-  } catch {
-    /* swallow: keep previous state */
-  }
-}
+// Reading the declared/loaded extension set is fetchPhpExtensions' job (see
+// $stores/phpVersions): it reports what the image actually carries, not just
+// what config declares. These two only mutate; callers refetch that report
+// afterwards so the list reflects the rebuilt image rather than the request.
+//
+// The declared set is global — it applies to every PHP image — so `version`
+// selects which image is rebuilt and bounced now, not which set is edited.
 
 export async function addPhpExtension(
   version: string,
@@ -36,26 +19,18 @@ export async function addPhpExtension(
   apkDeps: string[] = []
 ): Promise<ActionResponse> {
   try {
-    const res = await apiFetch(
-      '/api/php-versions/' + encodeURIComponent(version) + '/extensions',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ extension: ext, apk_deps: apkDeps })
-      }
-    );
-    const json = (await res.json()) as ActionResponse;
-    if (json.ok) await loadPhpExtensions(version);
-    return json;
+    const res = await apiFetch('/api/php-versions/' + encodeURIComponent(version) + '/extensions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ extension: ext, apk_deps: apkDeps })
+    });
+    return (await res.json()) as ActionResponse;
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
-export async function removePhpExtension(
-  version: string,
-  ext: string
-): Promise<ActionResponse> {
+export async function removePhpExtension(version: string, ext: string): Promise<ActionResponse> {
   try {
     const res = await apiFetch(
       '/api/php-versions/' +
@@ -64,9 +39,7 @@ export async function removePhpExtension(
         encodeURIComponent(ext),
       { method: 'DELETE' }
     );
-    const json = (await res.json()) as ActionResponse;
-    if (json.ok) await loadPhpExtensions(version);
-    return json;
+    return (await res.json()) as ActionResponse;
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

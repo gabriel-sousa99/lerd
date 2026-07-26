@@ -10,6 +10,12 @@
 # only via CLI, which execs into the shared FPM container. Both stay FPM-only.
 FROM docker.io/dunglas/frankenphp:php{{.Version}}-alpine
 
+# User-requested extra Alpine packages (lerd php:pkg) plus any apk build deps a
+# custom extension needs to compile. Installed BEFORE the extension loop below so
+# a custom extension that builds on FPM can find its deps here too; empty until
+# opted in.
+{{.CustomPackages}}
+
 # Runtime extensions + Xdebug. install-php-extensions (shipped in the base) builds
 # each for the ZTS runtime, pulls its runtime libs, and trims the build toolchain.
 # The core set installs in one step; the PECL-built extensions, any user custom
@@ -25,8 +31,10 @@ RUN install-php-extensions {{.CoreExtensions}} \
     && rm -rf /tmp/* /var/cache/apk/*
 
 # nodejs+npm so the Octane file-watcher (lerd octane:reload on) and JS tooling
-# work without an apk add at container start, matching the FPM image.
-RUN apk add --no-cache nodejs npm && rm -rf /var/cache/apk/*
+# work without an apk add at container start; git + openssh-client so git over
+# SSH (private composer packages, source installs run inside this container)
+# works without auth failures. All matching the FPM image.
+RUN apk add --no-cache nodejs npm git openssh-client && rm -rf /var/cache/apk/*
 
 # lerd_devtools: lerd's engine-level Debug-window capture (queries, mail, views,
 # events, jobs, http), compiled here for the ZTS base since install-php-extensions
@@ -40,9 +48,6 @@ RUN apk add --no-cache --virtual .lerd-devtools-build autoconf make g++ \
          && make -j"$(nproc)" && make install && docker-php-ext-enable lerd_devtools; } || true; \
     apk del .lerd-devtools-build || true; \
     rm -rf /tmp/lerd-devtools /var/cache/apk/*
-
-# User-requested extra Alpine packages (lerd php:pkg). Empty until opted in.
-{{.CustomPackages}}
 
 # Lerd mkcert CA so the app trusts local .test HTTPS from inside the container.
 {{.MkcertCA}}

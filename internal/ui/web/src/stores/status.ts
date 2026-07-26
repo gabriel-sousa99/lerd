@@ -5,9 +5,13 @@ import { version } from './version';
 
 export interface PHPStatus {
   version: string;
+  // Full build (e.g. "8.5.8"), filled in asynchronously by the backend. Falls
+  // back to the minor `version` until the probe lands.
+  patch?: string;
   running: boolean;
   xdebug_enabled: boolean;
   xdebug_mode?: string;
+  ports?: string[];
 }
 
 export interface StatusResponse {
@@ -22,6 +26,12 @@ export interface StatusResponse {
   using_system_bun: boolean;
   watcher_running: boolean;
   frankenphp_php_versions: string[];
+  home: string;
+  // Workspace names in display order, empty ones included.
+  workspaces?: string[];
+  // Identifier of the lerd-ui process that answered. A change means the server
+  // restarted, so the page is reloaded onto the assets it now serves.
+  instance?: string;
 }
 
 const empty: StatusResponse = {
@@ -35,7 +45,9 @@ const empty: StatusResponse = {
   bun_version: '',
   using_system_bun: false,
   watcher_running: false,
-  frankenphp_php_versions: []
+  frankenphp_php_versions: [],
+  home: '',
+  workspaces: []
 };
 
 export const status = writable<StatusResponse>(empty);
@@ -43,18 +55,39 @@ export const statusLoaded = writable<boolean>(false);
 
 export async function loadStatus() {
   try {
-    const res = await apiJson<StatusResponse>('/api/status');
-    status.set({ ...empty, ...res });
-    statusLoaded.set(true);
+    applyStatus(await apiJson<StatusResponse>('/api/status'));
   } catch {
     /* keep previous */
   }
 }
 
-export function applyStatus(data: unknown) {
+let serverInstance: string | null = null;
+
+// noteInstance reloads the page when the server that answers is a different
+// process than the one this page loaded from. A restarted lerd-ui otherwise
+// leaves an open dashboard running the previous build's assets against it.
+function noteInstance(instance: string | undefined, reload: () => void) {
+  if (!instance) return;
+  if (serverInstance === null) {
+    serverInstance = instance;
+    return;
+  }
+  if (serverInstance !== instance) {
+    serverInstance = instance;
+    reload();
+  }
+}
+
+const reloadPage = () => {
+  if (typeof location !== 'undefined') location.reload();
+};
+
+export function applyStatus(data: unknown, reload: () => void = reloadPage) {
   if (!data || typeof data !== 'object') return;
-  status.set({ ...empty, ...(data as StatusResponse) });
+  const next = data as StatusResponse;
+  status.set({ ...empty, ...next });
   statusLoaded.set(true);
+  noteInstance(next.instance, reload);
 }
 
 wsMessage.subscribe((msg) => {

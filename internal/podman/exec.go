@@ -2,14 +2,25 @@ package podman
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/imgledger"
+)
+
+// execCommand and execCommandContext are the single seam every podman
+// invocation in this package is built on. Tests override them to fake the
+// shell-out; the no-direct-exec guard keeps callers outside from bypassing it.
+var (
+	execCommand        = exec.Command
+	execCommandContext = exec.CommandContext
 )
 
 // ShellQuote single-quotes s so it is safe as one argument inside an
@@ -20,6 +31,7 @@ func ShellQuote(s string) string {
 
 // PodmanBin returns the full path to the podman binary. On macOS it searches
 // well-known Homebrew locations when PATH is restricted (e.g. launchd services).
+// Resolved fresh each call: tests override PATH per-case to force a fake binary.
 func PodmanBin() string {
 	if p, err := exec.LookPath("podman"); err == nil {
 		return p
@@ -38,12 +50,18 @@ func PodmanBin() string {
 // Cmd returns an exec.Cmd for podman with the given arguments, using PodmanBin()
 // so the binary is found even under launchd's restricted PATH.
 func Cmd(args ...string) *exec.Cmd {
-	return exec.Command(PodmanBin(), args...)
+	return execCommand(PodmanBin(), args...)
+}
+
+// CmdContext is Cmd bound to a context, for callers that stream output or need
+// cancellation (log tailing, nginx -t with a timeout, container migration).
+func CmdContext(ctx context.Context, args ...string) *exec.Cmd {
+	return execCommandContext(ctx, PodmanBin(), args...)
 }
 
 // Run executes podman with the given arguments and returns stdout.
 func Run(args ...string) (string, error) {
-	cmd := exec.Command(PodmanBin(), args...)
+	cmd := execCommand(PodmanBin(), args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -60,9 +78,13 @@ func RunSilent(args ...string) error {
 	return err
 }
 
-// ImageExists returns true if the named image is present in the local store.
+// ImageExists returns true if the named image is present in the local store. It
+// applies the same host rewrite as the pull path (postgis/postgis ->
+// imresamu/postgis on Apple Silicon), so the check tests the name actually
+// stored and doesn't force a needless re-pull. PlatformImage is identity for
+// every other image and platform.
 func ImageExists(image string) bool {
-	return RunSilent("image", "exists", image) == nil
+	return RunSilent("image", "exists", PlatformImage(image)) == nil
 }
 
 // LocalImageDigest returns every known digest for the locally-stored image,
@@ -90,24 +112,36 @@ func LocalImageDigest(image string) []string {
 	return digests
 }
 
-// pullArgs builds the `podman pull` argv for image, splicing in any
-// host-specific flags (e.g. --platform=linux/amd64 for postgis on Apple
-// Silicon, where the image ships no arm64 manifest). Keeping every pull path
-// on this helper means pull and run never disagree on platform.
+// pullArgs builds the `podman pull` argv for image, first applying the
+// host-specific image rewrite (postgis/postgis -> imresamu/postgis on Apple
+// Silicon) and then splicing in any platform flags (e.g. --platform=linux/amd64
+// for mysql:5.7). Keeping every pull path on this helper means pull and run
+// never disagree on the image or its platform.
 func pullArgs(image string) []string {
+	image = PlatformImage(image)
 	args := append([]string{"pull"}, PlatformPullArgs(image)...)
 	return append(args, image)
 }
 
-// PullImageTo pulls the named image, writing progress output to w.
-func PullImageTo(image string, w io.Writer) error {
-	cmd := exec.Command(PodmanBin(), pullArgs(image)...)
-	cmd.Stdout = w
-	cmd.Stderr = w
+// runPull builds and runs `podman pull image`, sending podman's stdout and
+// stderr to the given writers so the three entry points share one error-wrap
+// and one platform-aware argv (pullArgs).
+func runPull(image string, stdout, stderr io.Writer) error {
+	cmd := Cmd(pullArgs(image)...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("pulling %s: %w", image, err)
 	}
+	// Record the ref lerd pulled (platform-resolved, matching the stored image)
+	// so cleanup can tell its own catalog leftovers from images the user pulled.
+	imgledger.Record(PlatformImage(image))
 	return nil
+}
+
+// PullImageTo pulls the named image, writing progress output to w.
+func PullImageTo(image string, w io.Writer) error {
+	return runPull(image, w, w)
 }
 
 // PullImageWithProgress pulls the named image and invokes onLine for each
@@ -116,12 +150,9 @@ func PullImageWithProgress(image string, onLine func(string)) error {
 	if onLine == nil {
 		return PullImageIfMissing(image)
 	}
-	cmd := exec.Command(PodmanBin(), pullArgs(image)...)
 	w := &lineWriter{onLine: onLine}
-	cmd.Stdout = w
-	cmd.Stderr = w
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("pulling %s: %w", image, err)
+	if err := runPull(image, w, w); err != nil {
+		return err
 	}
 	w.flush()
 	return nil
@@ -164,13 +195,7 @@ func PullImageIfMissing(image string) error {
 	if ImageExists(image) {
 		return nil
 	}
-	cmd := exec.Command(PodmanBin(), pullArgs(image)...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("pulling %s: %w", image, err)
-	}
-	return nil
+	return runPull(image, os.Stdout, os.Stderr)
 }
 
 // ServiceImage returns the OCI image name embedded in a named quadlet template.
@@ -271,6 +296,29 @@ func ContainerRunning(name string) (bool, error) {
 		return false, nil
 	}
 	return strings.TrimSpace(out) == "true", nil
+}
+
+// ContainerStartedAt returns the running container's last start time and whether
+// it is currently running. A stopped or missing container reports (zero, false).
+// Used to tell whether a bind-mounted config file has been rewritten since the
+// container booted, i.e. whether it is running stale config.
+func ContainerStartedAt(name string) (time.Time, bool) {
+	// Render StartedAt via its .Format method: the bare {{.State.StartedAt}} emits
+	// Go's time.String() ("2006-01-02 15:04:05 -0700 MST"), not RFC3339, which does
+	// not round-trip through time.Parse.
+	out, err := Run("inspect", `--format={{.State.Running}}|{{.State.StartedAt.Format "2006-01-02T15:04:05.999999999Z07:00"}}`, name)
+	if err != nil {
+		return time.Time{}, false
+	}
+	parts := strings.SplitN(strings.TrimSpace(out), "|", 2)
+	if len(parts) != 2 || parts[0] != "true" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // ContainerExists returns true if the named container exists (running or not).

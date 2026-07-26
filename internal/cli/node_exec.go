@@ -20,7 +20,7 @@ func NewNodeCmd() *cobra.Command {
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runWithFnm("node", args)
+			return runWithFnm("node", args, true)
 		},
 	}
 }
@@ -33,7 +33,7 @@ func NewNpmCmd() *cobra.Command {
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runWithFnm("npm", args)
+			return runWithFnm("npm", args, true)
 		},
 	}
 }
@@ -46,7 +46,7 @@ func NewNpxCmd() *cobra.Command {
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runWithFnm("npx", args)
+			return runWithFnm("npx", args, true)
 		},
 	}
 }
@@ -78,16 +78,19 @@ func runNpmCaptured(dir string, args ...string) (string, error) {
 	cmdArgs := append([]string{"exec", "--using=" + version, "--", "npm"}, args...)
 	cmd := exec.Command(fnm, cmdArgs...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "npm_config_prefix="+config.NodeGlobalDir())
+	cmd.Env = append(shimLeadingEnv(os.Environ()), "npm_config_prefix="+config.NodeGlobalDir())
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
 // bunRunnerFor returns the host bun binary to use for dir, or "" to fall back
-// to npm/fnm. When the project is configured for bun but no bun is installed it
-// prints a one-line install hint and returns "" so the caller uses npm instead
-// of failing. lerd never installs or version-manages the host bun itself.
-func bunRunnerFor(dir string) string {
+// to npm/fnm. When the project is configured for bun but no bun is installed and
+// warn is set it prints a one-line install hint and returns "" so the caller uses
+// npm instead of failing. warn is true only for interactive CLI runs; the worker
+// unit-generation path (which also runs on the daemon-side idle resume) passes
+// false so the hint doesn't spam the daemon's stderr on every reconcile. lerd
+// never installs or version-manages the host bun itself.
+func bunRunnerFor(dir string, warn bool) string {
 	// An explicit `js_runtime: node` pins the project to Node and opts out of
 	// both bun detection and the no-Node fallback — for apps bun can't run, e.g.
 	// NestJS with native addons. (JSRuntime normalizes node/nodejs/npm.)
@@ -96,7 +99,7 @@ func bunRunnerFor(dir string) string {
 	}
 	bun := nodeDet.BunPath()
 	if nodeDet.UsesBun(dir) {
-		if bun == "" {
+		if bun == "" && warn {
 			fmt.Fprintln(os.Stderr, "lerd: this project uses bun but bun isn't installed — falling back to npm.")
 			fmt.Fprintln(os.Stderr, "      install it with: curl -fsSL https://bun.sh/install | bash")
 		}
@@ -117,17 +120,20 @@ func systemNodeAvailable() bool {
 	return nodeDet.SystemNodeAvailable()
 }
 
-// runBun execs the host bun binary in dir, streaming to the terminal and
-// os.Exit'ing on failure to mirror runWithFnm's CLI behaviour. bun is
-// self-contained, so unlike node it needs no fnm wrapper or version pin.
-func runBun(dir, bun string, args []string) error {
+// runBun execs the host bun binary in dir, streaming to the terminal. bun is
+// self-contained, so unlike node it needs no fnm wrapper or version pin. When
+// exitOnFail is set it os.Exit's with the child's code to mirror runWithFnm's
+// CLI behaviour; callers that fold the run behind a feedback step (setup) pass
+// false so the non-zero exit is returned and the step loop can report it.
+func runBun(dir, bun string, args []string, exitOnFail bool) error {
 	cmd := exec.Command(bun, args...)
 	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = shimLeadingEnv(os.Environ())
 	if err := cmd.Run(); err != nil {
-		if exit, ok := err.(*exec.ExitError); ok {
+		if exit, ok := err.(*exec.ExitError); ok && exitOnFail {
 			os.Exit(exit.ExitCode())
 		}
 		return err
@@ -135,11 +141,13 @@ func runBun(dir, bun string, args []string) error {
 	return nil
 }
 
-// runJSInstall installs JS dependencies in dir: `bun install` when the project
-// uses bun (frozen adds --frozen-lockfile), otherwise `npm ci`/`npm install`
-// via fnm.
+// runJSInstall installs JS dependencies in dir with the project's package
+// manager: bun when the project uses bun, else pnpm/yarn (via corepack, which
+// ships with Node so neither needs a separate global install) or npm, picked
+// from the lockfile / packageManager field. frozen uses each manager's
+// lockfile-respecting install.
 func runJSInstall(dir string, frozen bool) error {
-	if bun := bunRunnerFor(dir); bun != "" {
+	if bun := bunRunnerFor(dir, true); bun != "" {
 		args := []string{"install"}
 		// --frozen-lockfile only makes sense when a bun lockfile exists; npm's
 		// package-lock (the `frozen` arg) doesn't apply to bun.
@@ -149,24 +157,69 @@ func runJSInstall(dir string, frozen bool) error {
 				break
 			}
 		}
-		return runBun(dir, bun, args)
+		return runBun(dir, bun, args, false)
 	}
-	if frozen {
-		return runWithFnm("npm", []string{"ci"})
+	switch nodeDet.PackageManager(dir) {
+	case "pnpm":
+		args := []string{"pnpm", "install"}
+		if frozen {
+			args = append(args, "--frozen-lockfile")
+		}
+		return runWithFnm("corepack", args, false)
+	case "yarn":
+		// --immutable covers yarn berry; classic (v1) ignores it and does a
+		// normal install, which is what we want with a lockfile present.
+		args := []string{"yarn", "install"}
+		if frozen {
+			args = append(args, "--immutable")
+		}
+		return runWithFnm("corepack", args, false)
+	default:
+		if frozen {
+			return runWithFnm("npm", []string{"ci"}, false)
+		}
+		return runWithFnm("npm", []string{"install"}, false)
 	}
-	return runWithFnm("npm", []string{"install"})
 }
 
-// runJSScript runs a package.json script in dir via `bun run <script>` when the
-// project uses bun, otherwise `npm run <script>` via fnm.
+// runJSScript runs a package.json script in dir with the project's package
+// manager (`bun run` / `pnpm run` / `yarn run` / `npm run`).
 func runJSScript(dir, script string) error {
-	if bun := bunRunnerFor(dir); bun != "" {
-		return runBun(dir, bun, []string{"run", script})
+	if bun := bunRunnerFor(dir, true); bun != "" {
+		return runBun(dir, bun, []string{"run", script}, false)
 	}
-	return runWithFnm("npm", []string{"run", script})
+	switch nodeDet.PackageManager(dir) {
+	case "pnpm":
+		return runWithFnm("corepack", []string{"pnpm", "run", script}, false)
+	case "yarn":
+		return runWithFnm("corepack", []string{"yarn", "run", script}, false)
+	default:
+		return runWithFnm("npm", []string{"run", script}, false)
+	}
 }
 
-func runWithFnm(bin string, args []string) error {
+// shimLeadingEnv prepends lerd's bin dir (home of the `php` shim) to PATH so
+// child processes (e.g. Vite's wayfinder step) resolve `php` to lerd's managed
+// version instead of a global host php ahead of the shim on PATH — issue #381.
+func shimLeadingEnv(env []string) []string {
+	binDir := config.BinDir()
+	out := make([]string, 0, len(env)+1)
+	found := false
+	for _, kv := range env {
+		if name, val, ok := strings.Cut(kv, "="); ok && strings.EqualFold(name, "PATH") {
+			out = append(out, name+"="+binDir+string(os.PathListSeparator)+val)
+			found = true
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !found {
+		out = append(out, "PATH="+binDir)
+	}
+	return out
+}
+
+func runWithFnm(bin string, args []string, exitOnFail bool) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -202,9 +255,15 @@ func runWithFnm(bin string, args []string) error {
 
 	manageGlobals := bin == "npm" || bin == "npx"
 	prefix := config.NodeGlobalDir()
+	cmd.Env = shimLeadingEnv(os.Environ())
+	if bin == "corepack" {
+		// First use of a manager downloads it; don't block on the interactive
+		// "Corepack is about to download…" prompt in a non-interactive setup.
+		cmd.Env = append(cmd.Env, "COREPACK_ENABLE_DOWNLOAD_PROMPT=0")
+	}
 	if manageGlobals {
 		if err := os.MkdirAll(filepath.Join(prefix, "bin"), 0o755); err == nil {
-			cmd.Env = append(os.Environ(), "npm_config_prefix="+prefix)
+			cmd.Env = append(cmd.Env, "npm_config_prefix="+prefix)
 		}
 	}
 	runErr := cmd.Run()
@@ -214,7 +273,7 @@ func runWithFnm(bin string, args []string) error {
 		}
 	}
 	if runErr != nil {
-		if exit, ok := runErr.(*exec.ExitError); ok {
+		if exit, ok := runErr.(*exec.ExitError); ok && exitOnFail {
 			os.Exit(exit.ExitCode())
 		}
 		return runErr

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -14,12 +15,6 @@ import (
 // validExtName matches the same shape `lerd php:ext add` accepts.
 // Letters, digits, hyphens, underscores — no shell metacharacters.
 var validExtName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-
-// phpExtItem is the shape returned by listPhpExtensions for each row.
-type phpExtItem struct {
-	Name    string   `json:"name"`
-	ApkDeps []string `json:"apk_deps,omitempty"`
-}
 
 // addPhpExtRequest is the JSON body POSTed when adding an extension.
 type addPhpExtRequest struct {
@@ -33,31 +28,15 @@ type phpExtResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-// handlePhpExtensionsList responds with the configured custom extensions for a
-// PHP version. Path: GET /api/php-versions/{version}/extensions
-func handlePhpExtensionsList(w http.ResponseWriter, r *http.Request) {
-	version := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/php-versions/"), "/extensions")
-	if !validVersion.MatchString(version) {
-		http.NotFound(w, r)
-		return
-	}
-	cfg, err := config.LoadGlobal()
-	if err != nil {
-		writeJSON(w, phpExtResponse{Error: err.Error()})
-		return
-	}
-	exts := cfg.GetExtensions(version)
-	items := make([]phpExtItem, 0, len(exts))
-	for _, name := range exts {
-		items = append(items, phpExtItem{Name: name, ApkDeps: cfg.GetExtApkDeps(name)})
-	}
-	writeJSON(w, map[string]any{"version": version, "extensions": items})
-}
-
 // handlePhpExtensionAdd installs a custom extension. Synchronous: blocks until
 // the FPM image is rebuilt and verified, which takes 1–3 minutes. The Svelte
 // frontend keeps a spinner up while the request is in flight.
 // Path: POST /api/php-versions/{version}/extensions
+//
+// The declared extension set is global — it applies to every PHP image — so the
+// {version} in the path selects which image is rebuilt and bounced now, not
+// which extensions are declared. Reading the set back is handlePHPExtensions'
+// job (GET on this path), which also reports what the image actually loaded.
 func handlePhpExtensionAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
@@ -94,7 +73,11 @@ func handlePhpExtensionAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg.AddExtension(version, ext)
+	// Only roll back a declaration this request introduced. When the extension
+	// was already declared (for another image, say), a failed rebuild here must
+	// not silently undeclare it out from under those.
+	alreadyDeclared := slices.Contains(cfg.GetExtensions(), ext)
+	cfg.AddExtension(ext)
 	if len(deps) > 0 {
 		cfg.SetExtApkDeps(ext, deps)
 	}
@@ -102,18 +85,22 @@ func handlePhpExtensionAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, phpExtResponse{Error: "saving config: " + err.Error()})
 		return
 	}
+	rollback := func() {
+		if alreadyDeclared {
+			return
+		}
+		cfg.RemoveExtension(ext)
+		_ = config.SaveGlobal(cfg)
+	}
 
 	if err := podman.RebuildFPMImage(version, false); err != nil {
-		// Roll back the config write so the user can retry cleanly.
-		cfg.RemoveExtension(version, ext)
-		_ = config.SaveGlobal(cfg)
+		rollback()
 		writeJSON(w, phpExtResponse{Error: "rebuild failed: " + err.Error()})
 		return
 	}
 
 	if err := podman.VerifyExtensionLoaded(version, ext); err != nil {
-		cfg.RemoveExtension(version, ext)
-		_ = config.SaveGlobal(cfg)
+		rollback()
 		writeJSON(w, phpExtResponse{Error: fmt.Sprintf("extension did not load after rebuild (config reverted): %v", err)})
 		return
 	}
@@ -153,7 +140,7 @@ func handlePhpExtensionRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, phpExtResponse{Error: err.Error()})
 		return
 	}
-	cfg.RemoveExtension(version, ext)
+	cfg.RemoveExtension(ext)
 	if err := config.SaveGlobal(cfg); err != nil {
 		writeJSON(w, phpExtResponse{Error: "saving config: " + err.Error()})
 		return

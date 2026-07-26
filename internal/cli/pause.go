@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
@@ -27,6 +29,7 @@ func NewPauseCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			feedback.Begin()
 			return PauseSite(name)
 		},
 	}
@@ -44,6 +47,7 @@ func NewUnpauseCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			feedback.Begin()
 			return UnpauseSite(name)
 		},
 	}
@@ -57,7 +61,7 @@ func PauseSite(name string) error {
 		return fmt.Errorf("site %q not found", name)
 	}
 	if site.Paused {
-		fmt.Printf("%s is already paused.\n", name)
+		feedback.Line(name + " is already paused")
 		return nil
 	}
 
@@ -108,10 +112,7 @@ func PauseSite(name string) error {
 
 	nginx.ReloadOrWarn("")
 
-	fmt.Printf("Paused: %s (%s)\n", name, site.PrimaryDomain())
-	if len(running) > 0 {
-		fmt.Printf("  Workers stopped: %s\n", strings.Join(running, ", "))
-	}
+	feedback.Start("pausing " + name).OK(feedback.Val(site.PrimaryDomain()))
 
 	autoStopUnusedServices()
 
@@ -160,6 +161,25 @@ func setSiteContainerAutostart(site *config.Site, on bool) bool {
 	return os.WriteFile(path, []byte(out), 0644) == nil
 }
 
+// hostProxyEnvRefresh regenerates a site's .env by re-running `lerd env`. A
+// package var so tests can stub the re-exec; production points it at runLerdEnv.
+var hostProxyEnvRefresh = runLerdEnv
+
+// refreshHostProxyEnvOnResume regenerates a host-proxy site's .env as it unpauses,
+// so a published port that moved while it was paused (and was skipped by the
+// move-time follow) is picked up before its dev server comes back. Container sites
+// reach services by name on the unchanged internal port, so this no-ops for them.
+// Reports whether a refresh ran.
+func refreshHostProxyEnvOnResume(site *config.Site) bool {
+	if site == nil || !site.IsHostProxy() {
+		return false
+	}
+	if err := hostProxyEnvRefresh(site.Path); err != nil {
+		feedback.Warn("refreshing host-proxy env on resume: %v", err)
+	}
+	return true
+}
+
 // UnpauseSite restores the site's nginx vhost, restarts any workers that were
 // running when the site was paused, and clears the paused state.
 func UnpauseSite(name string) error {
@@ -168,7 +188,7 @@ func UnpauseSite(name string) error {
 		return fmt.Errorf("site %q not found", name)
 	}
 	if !site.Paused {
-		fmt.Printf("%s is not paused.\n", name)
+		feedback.Line(name + " is not paused")
 		return nil
 	}
 
@@ -249,7 +269,7 @@ func UnpauseSite(name string) error {
 			_ = podman.StartUnit(podman.CustomFPMContainerName(site.Name))
 		} else if phpVersion != "" {
 			if err := ensureFPMQuadlet(phpVersion); err != nil {
-				fmt.Printf("[WARN] ensuring FPM for PHP %s: %v\n", phpVersion, err)
+				feedback.Warn("ensuring FPM for PHP %s: %v", phpVersion, err)
 			}
 		}
 
@@ -281,6 +301,11 @@ func UnpauseSite(name string) error {
 
 	startServicesForSite(site.Path)
 
+	// A port move that landed while this site was paused skipped it (the follow
+	// excludes paused sites), so a host-proxy site's .env can still point at a
+	// vacated published port. Regenerate before the dev server resumes below.
+	refreshHostProxyEnvOnResume(site)
+
 	resumed := site.PausedWorkers
 	for _, w := range resumed {
 		resumeWorkerByName(site, w, phpVersion)
@@ -294,16 +319,13 @@ func UnpauseSite(name string) error {
 
 	if site.LANPort != 0 {
 		if _, err := LANShareStart(site.Name); err != nil {
-			fmt.Printf("[WARN] restoring LAN share: %v\n", err)
+			feedback.Warn("restoring LAN share: %v", err)
 		}
 	}
 
 	// The shared paused.html is left in place for other paused sites.
 
-	fmt.Printf("Resumed: %s (%s)\n", name, site.PrimaryDomain())
-	if len(resumed) > 0 {
-		fmt.Printf("  Workers restarted: %s\n", strings.Join(resumed, ", "))
-	}
+	feedback.Start("resuming " + name).OK(feedback.Val(site.PrimaryDomain()))
 	return nil
 }
 
@@ -347,7 +369,7 @@ func startServicesForSiteNoticed(sitePath, siteName string) {
 
 	headerPrinted := false
 	for _, name := range candidates {
-		if !strings.Contains(envContent, "lerd-"+name) {
+		if !envfile.ReferencesContainer(envContent, name) {
 			continue
 		}
 		if siteName != "" && !headerPrinted && !lerdSystemd.IsServiceActive("lerd-"+name) {
@@ -355,7 +377,7 @@ func startServicesForSiteNoticed(sitePath, siteName string) {
 			headerPrinted = true
 		}
 		if err := ensureServiceRunning(name); err != nil {
-			fmt.Printf("  [WARN] could not start %s: %v\n", name, err)
+			feedback.Warn("could not start %s: %v", name, err)
 		}
 	}
 }
@@ -421,11 +443,17 @@ func collectRunningWorkers(site *config.Site) []string {
 // (lerd-<w>-<site>-<wtBase>). Only workers a framework marks per_worktree:true
 // run per worktree (for Laravel, just vite), so only those are enumerated.
 func collectRunningWorktreeWorkers(site *config.Site, wtPath string) []string {
+	return collectRunningWorktreeWorkersByBase(site, config.WorktreeUnitSlug(filepath.Base(wtPath)))
+}
+
+// collectRunningWorktreeWorkersByBase is collectRunningWorktreeWorkers keyed by
+// the worktree's unit-slug base directly, for callers that hold the base (e.g. a
+// persisted WorktreeIdleSuspended key) but not the checkout path.
+func collectRunningWorktreeWorkersByBase(site *config.Site, wtBase string) []string {
 	fw, ok := config.GetFrameworkForDir(site.Framework, site.Path)
 	if !ok || fw.Workers == nil {
 		return nil
 	}
-	wtBase := config.WorktreeUnitSlug(filepath.Base(wtPath))
 	names := make([]string, 0, len(fw.Workers))
 	for wName, w := range fw.Workers {
 		if w.IsPerWorktree() {
@@ -620,6 +648,82 @@ func writePausedHTML(_ *config.Site) error {
 	return os.WriteFile(filepath.Join(dir, "paused.html"), []byte(pausedPageHTML), 0644)
 }
 
+// wakingPageHTML is the static landing page served while an idle-suspended
+// host-proxy site's dev server is starting back up. Unlike the paused page it
+// has no Resume button: the request that loaded it already drove idle-resume, so
+// it just auto-refreshes (native meta refresh) until the proxy vhost is restored
+// and the reload lands on the live app.
+const wakingPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="3">
+  <title>Waking up</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      background: #0f1117;
+      color: #e5e7eb;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+    }
+    .card {
+      background: #1a1d27;
+      border: 1px solid #2d3142;
+      border-radius: 14px;
+      padding: 2.5rem 3rem;
+      max-width: 420px;
+      width: calc(100% - 2rem);
+      text-align: center;
+    }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      margin: 0 auto 1.25rem;
+      border: 3px solid #2d3142;
+      border-top-color: #FF2D20;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    h1 { font-size: 1.2rem; font-weight: 600; margin: 0 0 0.5rem; }
+    .host {
+      font-size: 0.85rem;
+      color: #FF2D20;
+      font-family: ui-monospace, 'Cascadia Code', monospace;
+      margin: 0 0 1rem;
+      word-break: break-all;
+    }
+    p { font-size: 0.85rem; color: #9ca3af; margin: 0; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spinner"></div>
+    <h1>Waking the dev server</h1>
+    <p class="host" id="host"></p>
+    <p>This site was idle and is starting back up. This page refreshes automatically.</p>
+  </div>
+  <script>document.getElementById('host').textContent = location.hostname;</script>
+</body>
+</html>
+`
+
+// writeWakingHTML ensures the shared idle-waking landing page exists in the same
+// directory as the paused page.
+func writeWakingHTML(_ *config.Site) error {
+	dir := config.PausedDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "waking.html"), []byte(wakingPageHTML), 0644)
+}
+
 // pauseWorktrees generates paused HTML and nginx vhosts for every worktree of
 // a site that is being paused. The resume button on each worktree page unpauses
 // the parent site (which restores all worktree vhosts as well).
@@ -634,14 +738,14 @@ func pauseWorktrees(site *config.Site) {
 		// host-proxy worktree's dev server (which also frees its host port). The
 		// unit suffix is the slugged checkout basename, so pass that.
 		if err := StopAllWorkersForWorktree(site.Name, filepath.Base(wt.Path)); err != nil {
-			fmt.Printf("  [WARN] stopping worktree workers %s: %v\n", wt.Domain, err)
+			feedback.Warn("stopping worktree workers %s: %v", wt.Domain, err)
 		}
 		if err := writePausedWorktreeHTML(wt, site); err != nil {
-			fmt.Printf("  [WARN] paused page for worktree %s: %v\n", wt.Domain, err)
+			feedback.Warn("paused page for worktree %s: %v", wt.Domain, err)
 			continue
 		}
 		if err := nginx.GeneratePausedWorktreeVhost(wt.Domain, site.PrimaryDomain(), config.PausedDir(), site.Secured); err != nil {
-			fmt.Printf("  [WARN] paused vhost for worktree %s: %v\n", wt.Domain, err)
+			feedback.Warn("paused vhost for worktree %s: %v", wt.Domain, err)
 		}
 	}
 }
@@ -657,7 +761,7 @@ func unpauseHostProxyWorktrees(site *config.Site) {
 	}
 	for _, wt := range worktrees {
 		if err := SetupHostProxyWorktree(*site, wt.Path, wt.Domain); err != nil {
-			fmt.Printf("  [WARN] restoring worktree %s: %v\n", wt.Domain, err)
+			feedback.Warn("restoring worktree %s: %v", wt.Domain, err)
 		}
 	}
 }
@@ -678,7 +782,7 @@ func unpauseWorktrees(site *config.Site, phpVersion string) {
 			vhostErr = nginx.GenerateWorktreeVhost(wt.Domain, wt.Path, effectivePHP, site.Name, wt.Branch)
 		}
 		if vhostErr != nil {
-			fmt.Printf("  [WARN] restoring worktree vhost %s: %v\n", wt.Domain, vhostErr)
+			feedback.Warn("restoring worktree vhost %s: %v", wt.Domain, vhostErr)
 		}
 	}
 }

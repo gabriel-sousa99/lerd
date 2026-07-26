@@ -165,6 +165,21 @@ func PHPUserIniFile(version string) string {
 	return filepath.Join(DataDir(), "php", version, "98-user.ini")
 }
 
+// SharedIniFile returns the host path for the version-agnostic shared php.ini.
+// A single copy is bind-mounted into every PHP container below the per-version
+// 98-user.ini, so a setting placed here applies to all versions while any
+// per-version file still overrides it (conf.d loads alphabetically, last wins).
+func SharedIniFile() string {
+	return filepath.Join(DataDir(), "php", "shared", "95-shared.ini")
+}
+
+// SharedIniBkpDir holds timestamped backups of the shared ini produced by the
+// editor, next to (not inside) the shared dir so no FPM container's conf.d scan
+// loads a backup as live config.
+func SharedIniBkpDir() string {
+	return filepath.Join(DataDir(), "php", "shared", "ini.bkp")
+}
+
 // SitePHPUserIniFile is the per-site user php.ini for a runtime site that runs
 // its own container (FrankenPHP). Unlike PHPUserIniFile (shared by every site on
 // a PHP version), this is scoped to one site so its php.ini is independent.
@@ -381,6 +396,24 @@ func StoreFrameworksDir() string {
 	return filepath.Join(DataDir(), "frameworks")
 }
 
+// StoreIndexFile returns the path to the locally cached framework store index.
+// The store package refreshes it in the background; offline detection and
+// listing read it so a fresh machine can resolve any framework without a
+// definition already on disk.
+func StoreIndexFile() string {
+	return filepath.Join(StoreFrameworksDir(), "index.json")
+}
+
+// StorePresetsDir returns the directory for store-installed service-preset YAML
+// files, fetched from the external service store. It sits under the preset-source
+// seam as a layer above the embedded bundle: a valid preset here is served in
+// place of (or in addition to) the built-in of the same name, while the embed
+// bundle stays as the permanent offline fallback. Distinct from ConfigDir()/services
+// (user-defined custom services) so store presets and user services never mix.
+func StorePresetsDir() string {
+	return filepath.Join(DataDir(), "service-presets")
+}
+
 // UpdateCheckFile returns the path to the cached update-check state file.
 func UpdateCheckFile() string {
 	return filepath.Join(DataDir(), "update-check.json")
@@ -425,21 +458,84 @@ func UISocketPath() string {
 	return filepath.Join(RunDir(), "lerd-ui.sock")
 }
 
-// IdleActivityFile is where lerd-ui persists the per-site last-active times so a
-// restart (deploy, `lerd start`) restores the idle countdowns instead of
-// re-seeding everything to now. Lives in RunDir alongside the other runtime
-// state.
+// UIClientNetwork / UIClientAddr give the transport a CLI process uses to reach
+// the running lerd-ui daemon. On macOS the unix socket is never created (the
+// server binds it Linux-only, see internal/ui/server.go), so the CLI dials the
+// same TCP loopback the dashboard uses; on Linux it stays on the unix socket.
+// Mirrors the DumpsListenNetwork/Addr split. The port matches lerd-ui's fixed
+// listen port (internal/ui/server.go listenAddr).
+func UIClientNetwork() string {
+	if runtime.GOOS == "darwin" {
+		return "tcp"
+	}
+	return "unix"
+}
+
+// UIClientAddr is the address paired with UIClientNetwork.
+func UIClientAddr() string {
+	if runtime.GOOS == "darwin" {
+		return "127.0.0.1:7073"
+	}
+	return UISocketPath()
+}
+
+// IdleActivityFile is where the lerd-watcher persists per-site last-active times
+// so a restart restores the idle countdowns instead of re-seeding to now; lerd-ui
+// and the CLI read it to render each site's idle state. Lives in RunDir.
 func IdleActivityFile() string {
 	return filepath.Join(RunDir(), "idle-activity.json")
 }
 
-// AccessSocketPath is the unix datagram socket lerd-ui binds to receive the
-// nginx access feed (one "$host" line per request) that drives idle-suspend's
+// RequestStatsFile is where the watcher persists its rolling per-site request
+// timing snapshot for lerd-ui to read, since the two run as separate processes
+// and only the watcher binds the nginx access feed. Ephemeral, lives in RunDir.
+func RequestStatsFile() string {
+	return filepath.Join(RunDir(), "request-stats.json")
+}
+
+// RequestStatsDB is the durable SQLite store of individual requests the watcher
+// writes and lerd-ui reads to build the request-timing analytics view over any
+// window. Unlike the ephemeral snapshot it lives in DataDir so history survives
+// a reboot.
+func RequestStatsDB() string {
+	return filepath.Join(DataDir(), "request-stats.db")
+}
+
+// AccessSocketPath is the unix datagram socket the lerd-watcher binds to receive
+// the nginx access feed (one "$host" line per request) that drives idle-suspend's
 // per-site last-active tracking. It lives in RunDir, which is bind-mounted into
 // the lerd-nginx container at the same path, so nginx's syslog access_log can
 // reach it without container→host TCP routing.
 func AccessSocketPath() string {
 	return filepath.Join(RunDir(), "lerd-access.sock")
+}
+
+// AccessFeedUDPPort is the UDP port the watcher binds on darwin for the nginx
+// access feed: nginx runs in the podman-machine VM where the host unix socket
+// isn't reachable, so the feed travels over gvproxy UDP (like DumpsTCPPort).
+const AccessFeedUDPPort = "9914"
+
+// AccessFeedListenAddr is the host address the watcher binds for the darwin UDP
+// access feed. Loopback matches the gvproxy host.containers.internal forward.
+func AccessFeedListenAddr() string {
+	return "127.0.0.1:" + AccessFeedUDPPort
+}
+
+// AccessLogTarget is the nginx syslog `server=` for the access feed: the
+// bind-mounted unix socket on Linux, or host.containers.internal over gvproxy
+// UDP on macOS where nginx lives in the VM and the host socket isn't reachable.
+func AccessLogTarget() string {
+	if runtime.GOOS == "darwin" {
+		return "host.containers.internal:" + AccessFeedUDPPort
+	}
+	return "unix:" + AccessSocketPath()
+}
+
+// ControlSocketPath is the unix datagram socket the lerd-watcher binds for
+// idle-suspend control messages: "enable"/"disable" from the CLI and dashboard
+// toggle, and "activity <site>" from the CLI shims and MCP.
+func ControlSocketPath() string {
+	return filepath.Join(RunDir(), "lerd-idle-control.sock")
 }
 
 // stoppedMarkerPath is the sentinel `lerd stop` writes and `lerd start` clears.
@@ -455,6 +551,7 @@ func MarkStopped() error {
 	if err := os.MkdirAll(RunDir(), 0755); err != nil {
 		return err
 	}
+	guardRealWrite(stoppedMarkerPath())
 	return os.WriteFile(stoppedMarkerPath(), []byte("stopped\n"), 0644)
 }
 
@@ -469,6 +566,21 @@ func ClearStopped() error {
 // IsStopped reports whether lerd was intentionally stopped via `lerd stop`.
 func IsStopped() bool {
 	_, err := os.Stat(stoppedMarkerPath())
+	return err == nil
+}
+
+// PprofMarkerPath is the sentinel that unlocks lerd-ui's profiling endpoints.
+// Exported so the CLI and docs can name the exact file a user has to create.
+func PprofMarkerPath() string {
+	return filepath.Join(RunDir(), "pprof.enabled")
+}
+
+// PprofEnabled reports whether profiling has been unlocked. Deliberately read
+// per request rather than at startup: a daemon that is burning CPU right now
+// has to be profilable without a restart, since restarting it discards the
+// very state worth capturing.
+func PprofEnabled() bool {
+	_, err := os.Stat(PprofMarkerPath())
 	return err == nil
 }
 

@@ -1,16 +1,23 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/shims"
+	"github.com/gabriel-sousa99/lerd/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -69,6 +76,7 @@ func NewServiceCmd() *cobra.Command {
 	cmd.AddCommand(newServiceListCmd())
 	cmd.AddCommand(newServiceAddCmd())
 	cmd.AddCommand(newServicePresetCmd())
+	cmd.AddCommand(newServiceSearchCmd())
 	cmd.AddCommand(newServiceUpdateCmd())
 	cmd.AddCommand(newServiceRollbackCmd())
 	cmd.AddCommand(newServiceMigrateCmd())
@@ -78,6 +86,7 @@ func NewServiceCmd() *cobra.Command {
 	cmd.AddCommand(newServiceExposeCmd())
 	cmd.AddCommand(newServicePinCmd())
 	cmd.AddCommand(newServiceUnpinCmd())
+	cmd.AddCommand(newServicePortCmd())
 
 	return cmd
 }
@@ -124,17 +133,20 @@ func newServiceStartCmd() *cobra.Command {
 				}
 			}
 
-			fmt.Printf("Starting %s...\n", unit)
+			feedback.Begin()
+			svcStep := feedback.Start("starting " + unit)
 			if err := podman.StartUnit(unit); err != nil {
+				svcStep.Fail(err)
 				return err
 			}
+			svcStep.OK("")
 			_ = config.SetServicePaused(name, false)
 			_ = config.SetServiceManuallyStarted(name, true)
 
 			// Start any custom services that depend on this one.
 			for _, dep := range config.CustomServicesDependingOn(name) {
 				if err := ensureServiceRunning(dep); err != nil {
-					fmt.Printf("  [WARN] could not start dependent service %s: %v\n", dep, err)
+					feedback.Warn("could not start dependent service %s: %v", dep, err)
 				}
 			}
 
@@ -157,6 +169,9 @@ func newServiceStopCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
+			feedback.Begin()
+			// StopServiceAndDependents emits its own "stopping <service>" step
+			// (per service in the dependency cascade), so don't wrap it here.
 			StopServiceAndDependents(name)
 			_ = config.SetServicePaused(name, true)
 			_ = config.SetServiceManuallyStarted(name, false)
@@ -187,10 +202,10 @@ func serviceUpdateHint(name, status string) string {
 	}
 	parts := []string{}
 	if avail.Available && avail.LatestTag != "" {
-		parts = append(parts, "\033[32m→ "+avail.LatestTag+"\033[0m")
+		parts = append(parts, feedback.Green("→ "+avail.LatestTag))
 	}
 	if avail.UpgradeTag != "" {
-		parts = append(parts, "\033[33m⇧ "+avail.UpgradeTag+"\033[0m")
+		parts = append(parts, feedback.Amber("⇧ "+avail.UpgradeTag))
 	}
 	return strings.Join(parts, " ")
 }
@@ -225,25 +240,26 @@ v1.7.6 → v1.42.1) — this may require manual data migration; you've been warn
 			emit := func(ev serviceops.PhaseEvent) {
 				switch ev.Phase {
 				case "checking_registry":
-					fmt.Println("Checking registry...")
+					feedback.Line("checking registry")
 				case "pulling_image":
 					if ev.Message != "" {
-						fmt.Println("  " + strings.TrimSpace(ev.Message))
+						feedback.Note(strings.TrimSpace(ev.Message))
 					} else if ev.Image != "" {
-						fmt.Println("Pulling " + ev.Image)
+						feedback.Line("pulling " + ev.Image)
 					}
 				case "writing_quadlet":
-					fmt.Println("Writing quadlet for " + ev.Image)
+					feedback.Line("writing quadlet for " + ev.Image)
 				case "restarting_unit":
-					fmt.Println("Restarting " + ev.Unit)
+					feedback.Line("restarting " + ev.Unit)
 				case "done":
 					if ev.Message != "" {
-						fmt.Println(ev.Message)
+						feedback.Done(ev.Message)
 					} else {
-						fmt.Println("Done. Now on " + ev.Image)
+						feedback.Done("now on " + feedback.Val(ev.Image))
 					}
 				}
 			}
+			feedback.Begin()
 			return serviceops.UpdateServiceStreaming(name, targetImage, emit)
 		},
 	}
@@ -281,35 +297,38 @@ Supported families: mysql, mariadb, postgres.`,
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Migrating %s: %s → %s\n", name, avail.CurrentImage, targetImage)
-			fmt.Println("Dumps and the previous data dir will be preserved under ~/.local/share/lerd/backups.")
+			feedback.Begin()
+			feedback.Line("migrating " + name + ": " + avail.CurrentImage + " → " + feedback.Val(targetImage))
+			feedback.Note("dumps and the previous data dir are kept under ~/.local/share/lerd/backups")
 			emit := func(ev serviceops.PhaseEvent) {
 				switch ev.Phase {
 				case "dumping_data":
-					fmt.Println("Dumping: " + ev.Message)
+					feedback.Line("dumping: " + ev.Message)
 				case "stopping_unit":
-					fmt.Println("Stopping " + ev.Unit)
+					feedback.Line("stopping " + ev.Unit)
 				case "swapping_data_dir":
-					fmt.Println("Moving data dir aside")
+					feedback.Line("moving data dir aside")
 				case "pulling_image":
 					if ev.Message != "" {
-						fmt.Println("  " + strings.TrimSpace(ev.Message))
+						feedback.Note(strings.TrimSpace(ev.Message))
 					} else if ev.Image != "" {
-						fmt.Println("Pulling " + ev.Image)
+						feedback.Line("pulling " + ev.Image)
 					}
 				case "writing_quadlet":
-					fmt.Println("Writing quadlet for " + ev.Image)
+					feedback.Line("writing quadlet for " + ev.Image)
 				case "restarting_unit":
-					fmt.Println("Restarting " + ev.Unit)
+					feedback.Line("restarting " + ev.Unit)
 				case "waiting_ready":
-					fmt.Println("Waiting for new container to be ready")
+					feedback.Line("waiting for the new container to be ready")
 				case "restoring_data":
-					fmt.Println("Restoring " + ev.Message)
+					feedback.Line("restoring " + ev.Message)
+				case "restore_warnings":
+					feedback.Warn("%s", ev.Message)
 				case "done":
 					if ev.Message != "" {
-						fmt.Println(ev.Message)
+						feedback.Note(ev.Message)
 					}
-					fmt.Println("Migration complete.")
+					feedback.Done("migration complete")
 				}
 			}
 			return serviceops.MigrateService(name, targetImage, emit)
@@ -331,18 +350,19 @@ Errors when no previous image is recorded — i.e. the service was never updated
 				switch ev.Phase {
 				case "pulling_image":
 					if ev.Message != "" {
-						fmt.Println("  " + strings.TrimSpace(ev.Message))
+						feedback.Note(strings.TrimSpace(ev.Message))
 					} else if ev.Image != "" {
-						fmt.Println("Pulling " + ev.Image)
+						feedback.Line("pulling " + ev.Image)
 					}
 				case "writing_quadlet":
-					fmt.Println("Writing quadlet for " + ev.Image)
+					feedback.Line("writing quadlet for " + ev.Image)
 				case "restarting_unit":
-					fmt.Println("Restarting " + ev.Unit)
+					feedback.Line("restarting " + ev.Unit)
 				case "done":
-					fmt.Println("Rolled back to " + ev.Image)
+					feedback.Done("rolled back to " + feedback.Val(ev.Image))
 				}
 			}
+			feedback.Begin()
 			return serviceops.RollbackService(name, emit)
 		},
 	}
@@ -369,10 +389,13 @@ func newServiceRestartCmd() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "[WARN] regenerating quadlet for %s failed: %v; restarting with the existing one\n", name, err)
 				}
 			}
-			fmt.Printf("Restarting %s...\n", unit)
+			feedback.Begin()
+			svcStep := feedback.Start("restarting " + unit)
 			if err := podman.RestartUnit(unit); err != nil {
+				svcStep.Fail(err)
 				return err
 			}
+			svcStep.OK("")
 			printEnvVars(name)
 			return nil
 		},
@@ -405,21 +428,30 @@ func newServiceListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all services and their status",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Printf("%-20s %-10s %-10s %s\n", "Service", "Version", "Status", "Update")
-			fmt.Printf("%s\n", strings.Repeat("─", 60))
+			var rows [][]string
+			statusCell := func(name, status string) string {
+				cell := colorStatus(status)
+				if status == "inactive" {
+					if reason := serviceInactiveReason(name); reason != "" {
+						cell += feedback.Dim(reason)
+					}
+				}
+				return cell
+			}
 			for _, svc := range knownServices() {
+				// A removed default preset (no unit) is not installed; it lives in
+				// the preset picker as installable, so it shouldn't linger here as
+				// "unknown". ServiceInstalled is the #678 single source of truth.
+				if !serviceops.ServiceInstalled(svc) {
+					continue
+				}
 				unit := "lerd-" + svc
 				status, err := podman.UnitStatus(unit)
 				if err != nil {
 					status = "unknown"
 				}
 				ver := podman.ServiceVersionLabel(podman.InstalledImage(unit))
-				fmt.Printf("%-20s %-10s %-10s %s\n", svc, ver, colorStatus(status), serviceUpdateHint(svc, status))
-				if status == "inactive" {
-					if reason := serviceInactiveReason(svc); reason != "" {
-						fmt.Printf("  %s\n", strings.TrimSpace(reason))
-					}
-				}
+				rows = append(rows, []string{svc, ver, statusCell(svc, status), serviceUpdateHint(svc, status)})
 			}
 			customs, _ := config.ListCustomServices()
 			for _, svc := range customs {
@@ -429,16 +461,13 @@ func newServiceListCmd() *cobra.Command {
 					status = "unknown"
 				}
 				ver := podman.ServiceVersionLabel(svc.Image)
-				fmt.Printf("%-20s %-10s %-10s %s  [custom]\n", svc.Name, ver, colorStatus(status), serviceUpdateHint(svc.Name, status))
-				if status == "inactive" {
-					if reason := serviceInactiveReason(svc.Name); reason != "" {
-						fmt.Printf("  %s\n", strings.TrimSpace(reason))
-					}
-				}
+				name := svc.Name + " " + feedback.Dim("[custom]")
+				rows = append(rows, []string{name, ver, statusCell(svc.Name, status), serviceUpdateHint(svc.Name, status)})
 				if len(svc.DependsOn) > 0 {
-					fmt.Printf("  depends on: %s\n", strings.Join(svc.DependsOn, ", "))
+					rows = append(rows, []string{feedback.Dim("↳ depends on: " + strings.Join(svc.DependsOn, ", ")), "", "", ""})
 				}
 			}
+			feedback.Table([]string{"Service", "Version", "Status", "Update"}, rows)
 			return nil
 		},
 	}
@@ -587,7 +616,9 @@ stopped, removed, exposed, or pinned with the usual service subcommands.`,
 			name := args[0]
 			pickedVersion := version
 			if pickedVersion == "" {
-				if loaded, err := config.LoadPreset(name); err == nil && len(loaded.Versions) > 0 {
+				// EnsurePreset fetches a store-only preset so the version picker can
+				// show its versions on first install, not just built-ins.
+				if loaded, err := config.EnsurePreset(name); err == nil && len(loaded.Versions) > 0 {
 					if isInteractive() {
 						pickedVersion, err = promptPresetVersion(loaded)
 						if err != nil {
@@ -606,6 +637,9 @@ stopped, removed, exposed, or pinned with the usual service subcommands.`,
 			}
 			if len(svc.DependsOn) > 0 {
 				fmt.Printf("Depends on: %s (will be auto-started)\n", strings.Join(svc.DependsOn, ", "))
+			}
+			if err := shims.Reconcile(clientShimPrompter()); err != nil {
+				fmt.Printf("    WARN: client shims: %v\n", err)
 			}
 			return nil
 		},
@@ -641,16 +675,55 @@ func promptPresetVersion(p *config.Preset) (string, error) {
 			Title(fmt.Sprintf("Which %s version do you want to install?", p.Name)).
 			Options(options...).
 			Value(&picked),
-	)).WithTheme(huh.ThemeCatppuccin())
+	)).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin))
 	if err := form.Run(); err != nil {
 		return "", err
 	}
 	return picked, nil
 }
 
-// printPresetList prints the bundled presets in a simple table.
+// ListInstallablePresets returns every preset a user can install: the local
+// presets (embedded defaults plus anything already cached) merged with the
+// external store index for add-ons that aren't local yet. The store fetch is
+// best-effort — offline, the local set is returned so the picker still works.
+// Store entries carry enough (versions, image, description) to render the
+// picker; the full definition is fetched on install.
+func ListInstallablePresets() ([]config.PresetMeta, error) {
+	metas, err := config.ListPresets()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(metas))
+	for _, m := range metas {
+		seen[m.Name] = true
+	}
+	if idx, ierr := store.NewServiceClient().FetchServiceIndex(); ierr == nil {
+		for _, e := range idx.Services {
+			if seen[e.Name] {
+				continue
+			}
+			seen[e.Name] = true
+			metas = append(metas, config.PresetMeta{
+				Name:           e.Name,
+				Description:    e.Description,
+				Dashboard:      e.Dashboard,
+				DependsOn:      e.DependsOn,
+				Image:          e.Image,
+				Versions:       e.Versions,
+				DefaultVersion: e.DefaultVersion,
+				Category:       e.Category,
+				Icon:           e.Icon,
+				AdminFor:       e.AdminFor,
+			})
+		}
+	}
+	sort.Slice(metas, func(i, j int) bool { return metas[i].Name < metas[j].Name })
+	return metas, nil
+}
+
+// printPresetList prints the installable presets (local + store) in a table.
 func printPresetList() error {
-	presets, err := config.ListPresets()
+	presets, err := ListInstallablePresets()
 	if err != nil {
 		return err
 	}
@@ -658,8 +731,7 @@ func printPresetList() error {
 		fmt.Println("No presets bundled with this build.")
 		return nil
 	}
-	fmt.Printf("%-14s %-10s %s\n", "Preset", "Status", "Description")
-	fmt.Printf("%s\n", strings.Repeat("─", 60))
+	var rows [][]string
 	for _, p := range presets {
 		status := "available"
 		if len(p.Versions) == 0 {
@@ -667,23 +739,19 @@ func printPresetList() error {
 				status = "installed"
 			}
 		} else {
-			anyInstalled := false
 			for _, v := range p.Versions {
 				if serviceops.ServiceInstalled(config.PresetVersionServiceName(p.Name, v)) {
-					anyInstalled = true
+					status = "installed"
 					break
 				}
 			}
-			if anyInstalled {
-				status = "installed"
-			}
 		}
-		fmt.Printf("%-14s %-10s %s\n", p.Name, status, p.Description)
+		rows = append(rows, []string{p.Name, status, p.Description})
 		if len(p.DependsOn) > 0 {
-			fmt.Printf("%-14s %-10s depends on: %s\n", "", "", strings.Join(p.DependsOn, ", "))
+			rows = append(rows, []string{"", "", feedback.Dim("depends on: " + strings.Join(p.DependsOn, ", "))})
 		}
 		if p.Dashboard != "" {
-			fmt.Printf("%-14s %-10s dashboard:  %s\n", "", "", p.Dashboard)
+			rows = append(rows, []string{"", "", feedback.Dim("dashboard: " + p.Dashboard)})
 		}
 		for _, v := range p.Versions {
 			versionStatus := "available"
@@ -694,16 +762,70 @@ func printPresetList() error {
 			if serviceops.ServiceInstalled(config.PresetVersionServiceName(p.Name, v)) {
 				versionStatus = "installed"
 			}
-			marker := " "
+			name := "↳ " + v.Tag
 			if v.Tag == p.DefaultVersion {
-				marker = "*"
+				name = "↳ * " + v.Tag
 			}
-			fmt.Printf("%-14s %-10s %s %-9s %-13s %s\n", "", "", marker, versionStatus, v.Tag, label)
+			rows = append(rows, []string{name, versionStatus, label})
 		}
 	}
+	feedback.Table([]string{"Preset", "Status", "Description"}, rows)
 	fmt.Println("\n* = default version")
 	fmt.Println("Install with: lerd service preset <name> [--version <tag>]")
 	return nil
+}
+
+// newServiceSearchCmd returns the `service search` command, which queries the
+// external service-preset store so users can discover presets that aren't
+// bundled with this build. Install any hit with `lerd service preset <name>`,
+// which fetches it on demand.
+func newServiceSearchCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "search [query]",
+		Short: "Search the external service-preset store",
+		Long: `Search the external service-preset store for installable presets.
+
+Run with no query to list everything the store offers:
+  lerd service search
+
+Filter by a substring of the name, description, or family:
+  lerd service search search-engine
+
+Install any result with the usual command, which fetches it on demand:
+  lerd service preset <name>`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			query := ""
+			if len(args) > 0 {
+				query = args[0]
+			}
+			results, err := store.NewServiceClient().SearchServices(query)
+			if err != nil {
+				return fmt.Errorf("searching the service store: %w", err)
+			}
+			if len(results) == 0 {
+				fmt.Println("No matching presets in the service store.")
+				return nil
+			}
+			var rows [][]string
+			for _, e := range results {
+				where := "store"
+				if serviceops.ServiceInstalled(e.Name) {
+					where = "installed"
+				} else if config.PresetExists(e.Name) {
+					where = "local"
+				}
+				family := e.Family
+				if family == "" {
+					family = "-"
+				}
+				rows = append(rows, []string{e.Name, family, where, e.Description})
+			}
+			feedback.Table([]string{"Name", "Family", "Where", "Description"}, rows)
+			fmt.Println("\nInstall with: lerd service preset <name>")
+			return nil
+		},
+	}
 }
 
 // InstallPresetByName is a thin wrapper around serviceops.InstallPresetByName
@@ -727,24 +849,28 @@ func newServiceRemoveCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
 
+			feedback.Begin()
 			if purge {
-				dataPath := config.DataSubDir(name)
-				fmt.Printf("Removing service %q and ALL its data at %s.\n", name, dataPath)
+				feedback.Note("removing service " + name + " and ALL its data at " + config.DataSubDir(name))
 			}
 
 			emit := func(e serviceops.PhaseEvent) {
 				switch e.Phase {
 				case "stopping_unit":
-					fmt.Printf("Stopping %s...\n", e.Unit)
+					feedback.Line("stopping " + e.Unit)
 				case "removing_data":
-					fmt.Printf("Renaming data dir aside: %s\n", e.Message)
+					feedback.Line("renaming data dir aside: " + e.Message)
 				case "done":
-					fmt.Printf("Removed service %q.\n", name)
+					feedback.Done("removed service " + feedback.Val(name))
 				}
 			}
 
 			if err := serviceops.RemoveService(name, serviceops.RemoveOptions{RemoveData: purge}, emit); err != nil {
 				return err
+			}
+
+			if err := shims.Reconcile(nil); err != nil {
+				fmt.Printf("    WARN: client shims: %v\n", err)
 			}
 
 			if !purge {
@@ -769,28 +895,29 @@ func newServiceReinstallCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
+			feedback.Begin()
 			emit := func(e serviceops.PhaseEvent) {
 				switch e.Phase {
 				case "reinstall_starting":
-					fmt.Printf("Reinstalling %s...\n", name)
+					feedback.Line("reinstalling " + name)
 				case "stopping_unit":
-					fmt.Printf("  stopping %s\n", e.Unit)
+					feedback.Note("stopping " + e.Unit)
 				case "removing_data":
-					fmt.Printf("  renaming data dir aside: %s\n", e.Message)
+					feedback.Note("renaming data dir aside: " + e.Message)
 				case "pulling_image":
 					if e.Message == "" && e.Image != "" {
-						fmt.Printf("  pulling %s\n", e.Image)
+						feedback.Note("pulling " + e.Image)
 					}
 				case "starting_unit":
-					fmt.Printf("  starting %s\n", e.Unit)
+					feedback.Note("starting " + e.Unit)
 				case "waiting_ready":
-					fmt.Printf("  waiting for %s to be ready\n", e.Unit)
+					feedback.Note("waiting for " + e.Unit + " to be ready")
 				case "reprovisioning_sites":
-					fmt.Printf("  reprovisioning linked sites: %s\n", e.Message)
+					feedback.Note("reprovisioning linked sites: " + e.Message)
 				case "reprovisioning_site":
-					fmt.Printf("    %s\n", e.Message)
+					feedback.Note(e.Message)
 				case "reprovisioning_skipped":
-					fmt.Printf("  reprovisioning skipped: %s\n", e.Message)
+					feedback.Note("reprovisioning skipped: " + e.Message)
 				}
 			}
 			if err := serviceops.ReinstallService(name, resetData, emit); err != nil {
@@ -844,62 +971,22 @@ func newServiceExposeCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name, port := args[0], args[1]
-			if !isKnownService(name) {
-				return fmt.Errorf("%q is not a built-in service", name)
-			}
-			cfg, err := config.LoadGlobal()
-			if err != nil {
-				return err
-			}
-			svcCfg := cfg.Services[name]
 			if remove {
-				svcCfg.ExtraPorts = removePort(svcCfg.ExtraPorts, port)
-			} else {
-				if !containsPort(svcCfg.ExtraPorts, port) {
-					svcCfg.ExtraPorts = append(svcCfg.ExtraPorts, port)
+				if err := serviceops.RemoveExtraPort(name, port); err != nil {
+					return err
 				}
-			}
-			cfg.Services[name] = svcCfg
-			if err := config.SaveGlobal(cfg); err != nil {
-				return err
-			}
-			if err := ensureServiceQuadlet(name); err != nil {
-				return err
-			}
-			status, _ := podman.UnitStatus("lerd-" + name)
-			if status == "active" {
-				fmt.Printf("Restarting lerd-%s to apply port changes...\n", name)
-				_ = podman.RestartUnit("lerd-" + name)
-			}
-			if remove {
 				fmt.Printf("Removed extra port %s from %s.\n", port, name)
-			} else {
-				fmt.Printf("Added extra port %s to %s.\n", port, name)
+				return nil
 			}
+			if err := serviceops.AddExtraPort(name, port); err != nil {
+				return err
+			}
+			fmt.Printf("Added extra port %s to %s.\n", port, name)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&remove, "remove", false, "Remove the port mapping instead of adding it")
+	cmd.Flags().BoolVar(&remove, "remove", false, "Remove the port mapping instead of adding it (accepts the host port or the full host:container spec)")
 	return cmd
-}
-
-func containsPort(ports []string, port string) bool {
-	for _, p := range ports {
-		if p == port {
-			return true
-		}
-	}
-	return false
-}
-
-func removePort(ports []string, port string) []string {
-	out := ports[:0]
-	for _, p := range ports {
-		if p != port {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // printEnvVars prints the recommended .env variables for a service.
@@ -936,7 +1023,7 @@ func newServicePinCmd() *cobra.Command {
 			}
 			fmt.Printf("Pinned %s — it will not be auto-stopped when no sites use it.\n", name)
 			if err := ensureServiceRunning(name); err != nil {
-				fmt.Printf("  [WARN] could not start %s: %v\n", name, err)
+				feedback.Warn("could not start %s: %v", name, err)
 			}
 			return nil
 		},
@@ -957,6 +1044,121 @@ func newServiceUnpinCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// newServicePortCmd returns the `service port` command, which moves a service's
+// published host port (e.g. lerd-mysql 3306 → 3307) so a host server can keep the
+// default port. The container-internal port is untouched. Works for any built-in
+// or installed custom service.
+func newServicePortCmd() *cobra.Command {
+	var reset bool
+	var container int
+	cmd := &cobra.Command{
+		Use:   "port <service> [port]",
+		Short: "Set or reset a service's published host port",
+		Long: `Move a service's published host port without touching its
+container-internal port. For example:
+
+    lerd service port mysql 3307
+
+frees 127.0.0.1:3306 for a host-installed MySQL while lerd-mysql stays reachable
+on 3307. Containerized apps reach the service over the lerd network by name, so
+they are unaffected. Works for any built-in or installed service. Use --reset
+(or "port mysql 0") to return to the default.
+
+A multi-port service exposes more than its primary port (mailpit's 8025 web UI
+behind the 1025 SMTP port). Target a specific mapping with --container, the
+container-internal port of the mapping to move:
+
+    lerd service port mailpit 8026 --container 8025`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			name := args[0]
+			newPort := 0
+			if !reset {
+				if len(args) < 2 {
+					return fmt.Errorf("provide a port, or pass --reset to use the default")
+				}
+				p, err := strconv.Atoi(args[1])
+				if err != nil {
+					return fmt.Errorf("invalid port %q: must be 0-65535", args[1])
+				}
+				newPort = p
+			}
+			set := func() (serviceops.PortChange, error) {
+				if container > 0 {
+					return serviceops.SetPublishedPortFor(name, container, newPort)
+				}
+				return serviceops.SetPublishedPort(name, newPort)
+			}
+			res, err := set()
+			if err != nil {
+				if errors.Is(err, serviceops.ErrPortInUse) {
+					return fmt.Errorf("%w; pick another (check: %s)", err, FindListenerCmd(strconv.Itoa(newPort)))
+				}
+				return err
+			}
+			switch {
+			case res.NoOp && res.Actual == 0:
+				fmt.Printf("%s already uses its default published port.\n", name)
+			case res.NoOp:
+				fmt.Printf("%s is already published on port %d.\n", name, res.Actual)
+			case !res.Installed && res.Requested == 0:
+				fmt.Printf("%s is not installed; cleared its saved published-port override.\n", name)
+			case !res.Installed:
+				fmt.Printf("%s is not installed; saved published port %d for the next install.\n", name, res.Requested)
+			case res.Actual == 0:
+				fmt.Printf("Reset %s to its default published port.\n", name)
+			case res.Requested == 0:
+				fmt.Printf("%s stays published on 127.0.0.1:%d — a host server owns its default port.\n", name, res.Actual)
+			default:
+				fmt.Printf("lerd-%s now publishes 127.0.0.1:%d (container-internal port unchanged).\n", name, res.Actual)
+				fmt.Printf("Update host clients pointed at lerd's %s to port %d; containerized apps are unaffected.\n", name, res.Actual)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&reset, "reset", false, "Reset to the preset default published port")
+	cmd.Flags().IntVar(&container, "container", 0, "Container-internal port of a specific mapping to move (multi-port services)")
+	return cmd
+}
+
+// refreshHostProxySitesForService regenerates the .env of every host-proxy site
+// that uses service, so a published-port change — set manually via `lerd service
+// port` or by the auto port-ownership guard — is reflected in the loopback
+// host:port those sites connect through. Container sites are left untouched: they
+// reach the service by name over the lerd network on its unchanged
+// container-internal port, which a published-port move never alters. Per site it
+// warns rather than failing, so one unwritable site can't block the rest.
+func refreshHostProxySitesForService(service string) {
+	refreshed := 0
+	for _, s := range config.SitesUsingService(service) {
+		if !s.IsHostProxy() {
+			continue
+		}
+		if err := runLerdEnv(s.Path); err != nil {
+			fmt.Printf("Warning: could not refresh host-proxy site %q for the new %s port: %v\n", s.Name, service, err)
+			continue
+		}
+		refreshed++
+	}
+	if refreshed > 0 {
+		fmt.Printf("Refreshed %d host-proxy site(s) to follow %s's published port.\n", refreshed, service)
+	}
+}
+
+// Wire the port-ownership guard's shift callback to the host-proxy refresh so any
+// quadlet-write path that auto-shifts a DB port (install, start, reinstall) keeps
+// host-proxy sites pointed at the right loopback port. `lerd service port` silences
+// this hook and refreshes once itself (see newServicePortCmd).
+func init() {
+	serviceops.OnPublishedPortShift = func(service string, _ int) {
+		refreshHostProxySitesForService(service)
+	}
+	// Route reconcile's "is the unit installed" check through the platform
+	// service manager (launchd plist on macOS, .container quadlet on Linux) so
+	// it matches `lerd start`'s notion of an installed unit.
+	serviceops.UnitInstalledFn = services.Mgr.ContainerUnitInstalled
 }
 
 // StartServiceDependencies and StopServiceAndDependents are thin wrappers so
@@ -1008,7 +1210,11 @@ func activePHPVersions() map[string]bool {
 		}
 		phpMin, phpMax := "", ""
 		if s.Framework != "" {
-			if fw, fwOk := config.GetFrameworkForDir(s.Framework, s.Path); fwOk {
+			// A guessed framework definition's PHP range must not constrain the
+			// site (a Laravel 6 served by the Laravel 10 def still runs on 7.4),
+			// so skip its range and let the real detected version drive which
+			// FPM unit coreUnits starts.
+			if fw, fwOk := config.GetFrameworkForDir(s.Framework, s.Path); fwOk && !fw.VersionGuessed {
 				phpMin, phpMax = fw.PHP.Min, fw.PHP.Max
 			}
 		}
@@ -1064,7 +1270,7 @@ func autoStopUnusedFPMs() {
 		status, _ := podman.UnitStatus(unit)
 		if status == "active" || status == "activating" {
 			if err := podman.StopUnit(unit); err != nil {
-				fmt.Printf("[WARN] stopping %s: %v\n", unit, err)
+				feedback.Warn("stopping %s: %v", unit, err)
 			}
 		}
 	}
@@ -1083,11 +1289,11 @@ func serviceInactiveReason(name string) string {
 func colorStatus(status string) string {
 	switch status {
 	case "active":
-		return "\033[32m" + status + "\033[0m"
+		return feedback.Green(status)
 	case "inactive":
-		return "\033[33m" + status + "\033[0m"
+		return feedback.Amber(status)
 	case "failed":
-		return "\033[31m" + status + "\033[0m"
+		return feedback.Red(status)
 	default:
 		return status
 	}

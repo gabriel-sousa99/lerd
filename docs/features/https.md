@@ -3,7 +3,7 @@
 Lerd uses [mkcert](https://github.com/FiloSottile/mkcert), a locally-trusted CA that your browser will accept without warnings.
 
 > [!NOTE]
-> HTTPS is only available when lerd is managing DNS. If you installed in disabled-DNS mode (`dns.enabled: false`, sites under `*.localhost`), the mkcert root CA was never installed, the `lerd init` wizard skips the "Enable HTTPS?" question, the per-site HTTPS toggle in the dashboard becomes a muted lock icon, and `lerd secure` refuses with `HTTPS requires lerd-managed DNS, set dns.enabled: true and re-run lerd install`. See [DNS](dns.md) for the toggle and how to switch back.
+> HTTPS is only available when lerd is managing DNS. If you installed in disabled-DNS mode (`dns.enabled: false`, sites under `*.localhost`), the mkcert root CA was never installed, the `lerd init` wizard skips the "Enable HTTPS?" question, the per-site HTTPS toggle in the dashboard becomes a muted lock icon, and `lerd secure` refuses with `HTTPS requires lerd-managed DNS, set dns.enabled: true and re-run lerd install`. A project whose committed `.lerd.yaml` carries `secured: true` is linked over http on a disabled-DNS install rather than registered as a non-functional HTTPS site. See [DNS](dns.md) for the toggle and how to switch back.
 
 ```bash
 cd ~/Lerd/my-app
@@ -22,6 +22,50 @@ lerd unsecure
 HTTPS can also be enabled during `lerd init` or `lerd setup`, the wizard asks the question upfront and applies it as part of the configuration step.
 
 Certificates are stored in `~/.local/share/lerd/certs/sites/`.
+
+---
+
+## Browser trust (certutil / nss-tools)
+
+mkcert installs the local CA into two places: the system trust store, used by curl, PHP, wget and openssl, and the browser NSS databases used by Firefox and Chrome/Chromium. Writing to the browser stores needs `certutil`, which ships in `nss-tools`. When `certutil` is missing mkcert still trusts the system store, so command-line tools accept `.test` HTTPS, but browsers show a certificate warning. `lerd doctor` reports this under "browser HTTPS trust (certutil)", and `lerd install` / `lerd dns:enable` print a note when it applies.
+
+On ordinary distributions install nss-tools and re-run `lerd dns:repair`:
+
+```bash
+sudo dnf install nss-tools        # Fedora
+sudo apt install libnss3-tools    # Debian / Ubuntu
+sudo pacman -S nss                # Arch
+lerd dns:repair
+```
+
+On atomic images (Fedora Silverblue, Bazzite, Kinoite, CoreOS) the package has to be layered and the machine rebooted first:
+
+```bash
+rpm-ostree install nss-tools
+systemctl reboot
+lerd dns:repair
+```
+
+If you would rather not install a package at all, run `lerd dns:disable` to serve your sites over plain http on `*.localhost`, which needs no certificate.
+
+> [!NOTE]
+> On atomic desktops a Flatpak Firefox or Chrome keeps its own trust store inside the sandbox, which mkcert cannot reach even once certutil is installed. A native (non-Flatpak) browser, or Chrome using the shared `~/.pki/nssdb`, picks up the CA normally.
+
+---
+
+## Automatic renewal
+
+mkcert issues each leaf certificate with a lifetime of a little over two years. Lerd renews a secured site's certificate on its own before it lapses: whenever a certificate is within roughly 30 days of its `NotAfter` (or has already expired, gone missing, or been corrupted), the next ordinary `lerd start` or watcher pass reissues it in place. A still-valid certificate comfortably clear of that window is left untouched, so the renewal check is cheap and silent. `lerd status` continues to surface the same 30-day expiry warning under `[TLS Certificates]`, but you no longer need to act on it manually; a long-lived site that just keeps running self-heals its own certificate.
+
+To reset the clock on demand, without toggling HTTPS off and on, run:
+
+```bash
+cd ~/Lerd/my-app
+lerd secure --renew
+# Reissues the certificate for my-app.test (covering worktree SANs), reloads nginx
+```
+
+`lerd secure --renew` only applies to already-secured sites; on an HTTP site it tells you to run `lerd secure` first. From an AI assistant the same action is available as the `tls_renew` action on the `site` MCP tool.
 
 ---
 

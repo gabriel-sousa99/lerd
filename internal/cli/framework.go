@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/store"
 	"github.com/pmezard/go-difflib/difflib"
 	"github.com/spf13/cobra"
@@ -24,8 +25,8 @@ func NewFrameworkCmd() *cobra.Command {
 	cmd.AddCommand(newFrameworkAddCmd())
 	cmd.AddCommand(newFrameworkRemoveCmd())
 	cmd.AddCommand(newFrameworkSearchCmd())
-	cmd.AddCommand(newFrameworkInstallCmd())
 	cmd.AddCommand(newFrameworkUpdateCmd())
+	cmd.AddCommand(newFrameworkPruneCmd())
 	return cmd
 }
 
@@ -58,22 +59,20 @@ func runFrameworkList(check bool) error {
 		client := store.NewClient()
 		idx, err := client.FetchIndex()
 		if err != nil {
-			fmt.Printf("[WARN] could not fetch store index: %v\n", err)
+			feedback.Warn("could not fetch store index: %v", err)
 		} else {
 			storeIndex = idx
 		}
 	}
 
+	var headers []string
 	if check {
-		fmt.Printf("%-15s %-8s %-10s %-10s %s\n", "Name", "Version", "Source", "Latest", "Status")
-		fmt.Printf("%-15s %-8s %-10s %-10s %s\n",
-			"───────────────", "────────", "──────────", "──────────", "──────────────────────")
+		headers = []string{"Name", "Version", "Source", "Latest", "Status"}
 	} else {
-		fmt.Printf("%-15s %-8s %-10s %-10s %s\n", "Name", "Version", "Source", "PublicDir", "Workers")
-		fmt.Printf("%-15s %-8s %-10s %-10s %s\n",
-			"───────────────", "────────", "──────────", "──────────", "──────────────────────")
+		headers = []string{"Name", "Version", "Source", "PublicDir", "Workers"}
 	}
 
+	rows := make([][]string, 0, len(frameworks))
 	for _, info := range frameworks {
 		version := info.Version
 		if version == "" && cwd != "" {
@@ -85,8 +84,7 @@ func runFrameworkList(check bool) error {
 
 		if check {
 			latest, status := storeStatus(info, storeIndex)
-			fmt.Printf("%-15s %-8s %-10s %-10s %s\n",
-				info.Name, version, info.Source, latest, status)
+			rows = append(rows, []string{info.Name, version, string(info.Source), latest, status})
 		} else {
 			var workerNames []string
 			for name := range info.Workers {
@@ -97,10 +95,10 @@ func runFrameworkList(check bool) error {
 			if workers == "" {
 				workers = "—"
 			}
-			fmt.Printf("%-15s %-8s %-10s %-10s %s\n",
-				info.Name, version, info.Source, info.PublicDir, workers)
+			rows = append(rows, []string{info.Name, version, string(info.Source), info.PublicDir, workers})
 		}
 	}
+	feedback.Table(headers, rows)
 	return nil
 }
 
@@ -254,7 +252,8 @@ YAML file format:
 				return fmt.Errorf("saving framework: %w", err)
 			}
 
-			fmt.Printf("Framework %q saved (%s).\n", fw.Name, config.FrameworksDir()+"/"+fw.Name+".yaml")
+			feedback.Begin()
+			feedback.Done(fmt.Sprintf("framework %q saved (%s)", fw.Name, config.FrameworksDir()+"/"+fw.Name+".yaml"))
 			if fw.Name == "laravel" {
 				fmt.Println("Custom workers merged with built-in Laravel definition.")
 			} else {
@@ -282,18 +281,23 @@ YAML file format:
 
 func newFrameworkRemoveCmd() *cobra.Command {
 	var all bool
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "remove <name>[@version]",
 		Short: "Remove a framework definition (user-defined or store-installed)",
 		Long: `Remove a framework definition. If multiple versions are installed and no
 version is specified, you will be prompted to choose which to remove.
 
-Use --all to remove all versions without prompting.
+If any linked site still uses the framework, you are asked to confirm first.
+
+Use --all to remove all versions without prompting, and --force to skip the
+in-use confirmation.
 
 Examples:
   lerd framework remove symfony          # prompt if multiple versions
   lerd framework remove symfony@7        # remove specific version
-  lerd framework remove symfony --all    # remove all versions`,
+  lerd framework remove symfony --all    # remove all versions
+  lerd framework remove symfony --force  # skip the in-use confirmation`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name, version := parseNameVersion(args[0])
@@ -305,7 +309,7 @@ Examples:
 					}
 					return err
 				}
-				fmt.Printf("Custom laravel overlay removed (built-in definition remains).\n")
+				feedback.Done("custom laravel overlay removed (built-in definition remains)")
 				return nil
 			}
 
@@ -314,18 +318,38 @@ Examples:
 				return fmt.Errorf("framework %q not found", name)
 			}
 
-			// Specific version requested.
+			// Specific version requested: this removes one cached definition, not
+			// the framework, so the name-level in-use guard does not apply.
 			if version != "" {
 				for _, f := range files {
 					if f.Version == version {
 						if err := config.RemoveFrameworkFile(f.Path); err != nil {
 							return err
 						}
-						fmt.Printf("Removed %s@%s.\n", name, version)
+						feedback.Done(fmt.Sprintf("removed %s@%s", name, version))
 						return nil
 					}
 				}
 				return fmt.Errorf("framework %q version %q not found", name, version)
+			}
+
+			// Removing every definition for the name. Confirm if an active site
+			// still uses it, unless it is built-in (the binary definition remains,
+			// so a site never breaks) or --force is given.
+			if !force && !config.IsBuiltinFramework(name) {
+				if sites := config.SitesUsingFramework(name); len(sites) > 0 {
+					fmt.Printf("Framework %q is still used by %s: %s\n",
+						name, pluralizeSites(len(sites)), strings.Join(sites, ", "))
+					if !promptConfirm("Remove it anyway?") {
+						feedback.Note("aborted")
+						return nil
+					}
+				}
+			}
+
+			builtinNote := ""
+			if config.IsBuiltinFramework(name) {
+				builtinNote = " (built-in definition remains)"
 			}
 
 			// Single file or --all: remove everything.
@@ -333,7 +357,7 @@ Examples:
 				if err := config.RemoveFramework(name); err != nil {
 					return err
 				}
-				fmt.Printf("Framework %q removed.\n", name)
+				feedback.Done(fmt.Sprintf("framework %q removed%s", name, builtinNote))
 				return nil
 			}
 
@@ -361,7 +385,7 @@ Examples:
 				if err := config.RemoveFramework(name); err != nil {
 					return err
 				}
-				fmt.Printf("Framework %q removed (all versions).\n", name)
+				feedback.Done(fmt.Sprintf("framework %q removed (all versions)%s", name, builtinNote))
 				return nil
 			}
 
@@ -377,12 +401,82 @@ Examples:
 			if v == "" {
 				v = "unversioned"
 			}
-			fmt.Printf("Removed %s (%s).\n", name, v)
+			feedback.Done(fmt.Sprintf("removed %s (%s)", name, v))
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Remove all versions without prompting")
+	cmd.Flags().BoolVar(&force, "force", false, "Skip the confirmation when a site still uses the framework")
 	return cmd
+}
+
+func pluralizeSites(n int) string {
+	if n == 1 {
+		return "1 site"
+	}
+	return fmt.Sprintf("%d sites", n)
+}
+
+func newFrameworkPruneCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Remove installed framework definitions no site uses",
+		Long: `Remove store-installed and user-defined framework definitions that no linked
+site references. Built-in definitions are never touched.
+
+This is safe: lerd re-fetches a definition from the store automatically the
+moment a site needs one that is no longer present locally, so a pruned
+framework comes back on its own if it is needed again.
+
+Examples:
+  lerd framework prune          # list unused, then confirm
+  lerd framework prune --force  # remove without confirming`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			unused := config.UnusedInstalledFrameworks()
+			if len(unused) == 0 {
+				feedback.Done("no unused frameworks to prune")
+				return nil
+			}
+
+			fmt.Printf("The following %s used by any site:\n", pruneSubject(len(unused)))
+			for _, name := range unused {
+				fmt.Printf("  %s\n", name)
+			}
+
+			if !force && !promptConfirm("Remove them?") {
+				feedback.Note("aborted")
+				return nil
+			}
+
+			removed, failed := config.RemoveFrameworks(unused)
+			for _, name := range failed {
+				feedback.Warn("could not remove %q", name)
+			}
+			if len(removed) == 0 {
+				return fmt.Errorf("could not prune any frameworks")
+			}
+			feedback.Done(fmt.Sprintf("pruned %s", pluralizeFrameworks(len(removed))))
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "Remove without confirming")
+	return cmd
+}
+
+func pruneSubject(n int) string {
+	if n == 1 {
+		return "framework is not"
+	}
+	return "frameworks are not"
+}
+
+func pluralizeFrameworks(n int) string {
+	if n == 1 {
+		return "1 framework"
+	}
+	return fmt.Sprintf("%d frameworks", n)
 }
 
 func newFrameworkSearchCmd() *cobra.Command {
@@ -410,78 +504,13 @@ Examples:
 				return nil
 			}
 
-			fmt.Printf("%-15s %-15s %-12s %s\n", "Name", "Label", "Latest", "Versions")
-			fmt.Printf("%-15s %-15s %-12s %s\n",
-				"───────────────", "───────────────", "────────────", "──────────────────────")
+			rows := make([][]string, 0, len(results))
 			for _, entry := range results {
-				fmt.Printf("%-15s %-15s %-12s %s\n",
-					entry.Name, entry.Label, entry.Latest, strings.Join(entry.Versions, ", "))
+				rows = append(rows, []string{
+					entry.Name, entry.Label, entry.Latest, strings.Join(entry.Versions, ", "),
+				})
 			}
-			return nil
-		},
-	}
-}
-
-func newFrameworkInstallCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "install <name>[@version]",
-		Short: "Install a framework definition from the store",
-		Long: `Download and install a framework definition from the community store.
-
-If no version is specified, the version is auto-detected from composer.lock
-in the current directory, falling back to the latest available version.
-
-Examples:
-  lerd framework install symfony
-  lerd framework install laravel@11
-  lerd framework install wordpress@6`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			name, version := parseNameVersion(args[0])
-
-			client := store.NewClient()
-
-			// Auto-detect version from cwd if not specified
-			if version == "" {
-				cwd, _ := os.Getwd()
-				if cwd != "" {
-					if idx, err := client.FetchIndex(); err == nil {
-						for _, entry := range idx.Frameworks {
-							if entry.Name == name {
-								version = store.ResolveVersion(cwd, entry.Detect, entry.Versions, "")
-								break
-							}
-						}
-					}
-				}
-			}
-
-			fw, err := client.FetchFramework(name, version)
-			if err != nil {
-				return err
-			}
-
-			// Check if already exists locally
-			if _, ok := config.GetFramework(name); ok {
-				fmt.Printf("Framework %q already exists locally. Overwriting with store definition.\n", name)
-			}
-
-			if err := config.SaveStoreFramework(fw); err != nil {
-				return fmt.Errorf("saving framework: %w", err)
-			}
-			// Remove old user-defined file so the store version takes effect.
-			config.RemoveUserFramework(name)
-
-			versionStr := fw.Version
-			if versionStr == "" {
-				versionStr = "latest"
-			}
-			filename := fw.Name + ".yaml"
-			if fw.Version != "" {
-				filename = fw.Name + "@" + fw.Version + ".yaml"
-			}
-			fmt.Printf("Installed %s@%s (%s).\n", fw.Name, versionStr, fw.Label)
-			fmt.Printf("Saved to %s/%s\n", config.StoreFrameworksDir(), filename)
+			feedback.Table([]string{"Name", "Label", "Latest", "Versions"}, rows)
 			return nil
 		},
 	}
@@ -491,13 +520,17 @@ func newFrameworkUpdateCmd() *cobra.Command {
 	var diff bool
 	cmd := &cobra.Command{
 		Use:   "update [name[@version]]",
-		Short: "Update installed framework definitions from the store",
+		Short: "Update framework definitions from the store",
 		Long: `Re-fetch framework definitions from the store.
 
-If a name is given, only that framework is updated.
-If no name is given, every cached version of every installed framework is
-re-fetched (e.g. laravel@10, @11, @12, @13 are all refreshed individually,
-not just the latest).
+Definitions normally auto-fetch when you link a project and refresh on their own
+in the background; this is the manual trigger.
+
+If a name is given, only that framework is fetched (installing it if it isn't
+cached yet).
+If no name is given, the cached store catalogue is refreshed and every cached
+version of every installed framework is re-fetched (e.g. laravel@10, @11, @12,
+@13 are all refreshed individually, not just the latest).
 Use --diff to preview changes before applying.
 
 Examples:
@@ -547,12 +580,14 @@ func updateSingleFramework(client *store.Client, name, version string, showDiff 
 	}
 	// Remove old user-defined file if it exists — the store version should take effect.
 	config.RemoveUserFramework(name)
-	fmt.Printf("Updated %s@%s (%s).\n", remote.Name, versionOrLatest(remote), remote.Label)
+	feedback.Done(fmt.Sprintf("updated %s@%s (%s)", remote.Name, versionOrLatest(remote), remote.Label))
 	return nil
 }
 
 func updateAllFrameworks(client *store.Client, showDiff bool) error {
-	idx, err := client.FetchIndex()
+	// Refresh the cached catalogue first, so the manual update also pulls newly
+	// published frameworks and versions even on a machine with nothing installed.
+	idx, err := client.RefreshIndex()
 	if err != nil {
 		return err
 	}
@@ -579,14 +614,14 @@ func updateAllFrameworks(client *store.Client, showDiff bool) error {
 		}
 		remote, fetchErr := client.FetchFramework(info.Name, info.Version)
 		if fetchErr != nil {
-			fmt.Printf("  [WARN] %s@%s: %v\n", info.Name, info.Version, fetchErr)
+			feedback.Warn("%s@%s: %v", info.Name, info.Version, fetchErr)
 			continue
 		}
 
 		if showDiff {
 			changed, diffErr := showFrameworkDiff(info.Name, info.Framework, remote)
 			if diffErr != nil {
-				fmt.Printf("  [WARN] %s@%s: %v\n", info.Name, info.Version, diffErr)
+				feedback.Warn("%s@%s: %v", info.Name, info.Version, diffErr)
 				continue
 			}
 			if !changed {
@@ -596,17 +631,17 @@ func updateAllFrameworks(client *store.Client, showDiff bool) error {
 		}
 
 		if saveErr := config.SaveStoreFramework(remote); saveErr != nil {
-			fmt.Printf("  [WARN] %s@%s: %v\n", info.Name, info.Version, saveErr)
+			feedback.Warn("%s@%s: %v", info.Name, info.Version, saveErr)
 			continue
 		}
 		config.RemoveUserFramework(info.Name)
-		fmt.Printf("  Updated %s@%s\n", remote.Name, versionOrLatest(remote))
+		feedback.Note(fmt.Sprintf("updated %s@%s", remote.Name, versionOrLatest(remote)))
 		updated++
 	}
 	if updated == 0 {
-		fmt.Println("No frameworks to update.")
+		feedback.Line("no frameworks to update")
 	} else {
-		fmt.Printf("Updated %d framework(s).\n", updated)
+		feedback.Done(fmt.Sprintf("updated %d framework(s)", updated))
 	}
 	return nil
 }
@@ -647,12 +682,12 @@ func showFrameworkDiff(name string, local, remote *config.Framework) (bool, erro
 	fmt.Printf("\n%s:\n", name)
 	for _, line := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
 		switch {
-		case strings.HasPrefix(line, "+"):
-			fmt.Printf("\033[32m%s\033[0m\n", line)
-		case strings.HasPrefix(line, "-"):
-			fmt.Printf("\033[31m%s\033[0m\n", line)
 		case strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++"):
-			fmt.Printf("\033[34m%s\033[0m\n", line)
+			fmt.Println(feedback.Dim(line))
+		case strings.HasPrefix(line, "+"):
+			fmt.Println(feedback.Green(line))
+		case strings.HasPrefix(line, "-"):
+			fmt.Println(feedback.Red(line))
 		default:
 			fmt.Println(line)
 		}

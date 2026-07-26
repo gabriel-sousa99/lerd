@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,21 +28,28 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
+	"github.com/gabriel-sousa99/lerd/internal/activityping"
 	"github.com/gabriel-sousa99/lerd/internal/applog"
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/cfgedit"
 	"github.com/gabriel-sousa99/lerd/internal/cli"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/grouping"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	lerdNode "github.com/gabriel-sousa99/lerd/internal/node"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/phpsets"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/profiler"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/gabriel-sousa99/lerd/internal/services"
+	"github.com/gabriel-sousa99/lerd/internal/shims"
+	"github.com/gabriel-sousa99/lerd/internal/sitedoctor"
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
@@ -173,17 +181,25 @@ func Start(currentVersion string) error {
 
 	mux := http.NewServeMux()
 
+	// Gated inside the handler (marker file plus loopback), so a daemon
+	// without profiling turned on answers as if the route did not exist.
+	mux.HandleFunc("/debug/pprof/", handlePprof)
+
 	mux.HandleFunc("/api/status", withCORS(handleStatus))
 	mux.HandleFunc("/api/sites", withCORS(handleSites))
 	mux.HandleFunc("/api/services", withCORS(handleServices))
 	mux.HandleFunc("/api/ws", handleWS)
+	mux.HandleFunc("/api/lsp/php", handleLSPPhp)
 	mux.HandleFunc("/api/webhooks/mailpit", handleMailpitWebhook)
 	mux.HandleFunc("/api/push/vapid-public-key", withCORS(handlePushVAPIDPublicKey))
 	mux.HandleFunc("/api/push/subscribe", withCORS(handlePushSubscribe))
 	mux.HandleFunc("/api/push/unsubscribe", withCORS(handlePushUnsubscribe))
 	mux.HandleFunc("/api/push/devices", withCORS(handlePushDevices))
 	mux.HandleFunc("/api/push/test", withCORS(handlePushTest))
+	mux.HandleFunc("/api/notifications/target", withCORS(handleNotifyTarget))
+	mux.HandleFunc("/api/notifications/kinds", withCORS(handleNotifyKinds))
 	mux.HandleFunc("/api/lan-qr/", withCORS(handleLANQR))
+	mux.HandleFunc("/api/dashboard-qr", withCORS(handleDashboardQR))
 
 	// Cross-process notifier for CLI/MCP. Loopback-only. PollNow in a
 	// goroutine so the handler returns under the CLI's 500 ms POST
@@ -197,25 +213,11 @@ func Start(currentVersion string) error {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// Activity feed for idle-suspend from the CLI/shims: a php/composer/npm/
-	// artisan/tinker run in a project dir pings here so working on a site via
-	// the terminal (no page loads) keeps it awake and wakes it if it was asleep.
-	mux.HandleFunc("/api/internal/activity", func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopbackRequest(r) {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		if site := r.URL.Query().Get("site"); site != "" && activityTracker != nil {
-			activityTracker.TouchSite(site, time.Now())
-			idleEng.OnActivity(site)
-			publishSitesChanged() // push the wake/active state to dashboards live
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-
 	mux.HandleFunc("/api/services/presets", withCORS(handleServicePresets))
 	mux.HandleFunc("/api/services/presets/", withCORS(publishAfter(handleServicePresetInstall, eventbus.KindServices, eventbus.KindStatus)))
 	mux.HandleFunc("/api/services/", withCORS(publishAfter(handleServiceAction, eventbus.KindServices, eventbus.KindStatus, eventbus.KindSites)))
+	mux.HandleFunc("/api/databases", withCORS(handleDatabases))
+	mux.HandleFunc("/api/databases/", withCORS(handleDatabaseAction))
 	mux.HandleFunc("/api/version", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		handleVersion(w, r, currentVersion)
 	}))
@@ -238,12 +240,17 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/sites/worktree-options", withCORS(handleSiteWorktreeOptions))
 	mux.HandleFunc("/api/sites/worktree-add", withCORS(publishAfter(handleSiteWorktreeAdd, eventbus.KindSites)))
 	mux.HandleFunc("/api/browse", withCORS(handleBrowse))
+	mux.HandleFunc("/api/workspaces", withCORS(publishAfter(handleWorkspaces, eventbus.KindStatus, eventbus.KindSites)))
+	mux.HandleFunc("/api/workspaces/", withCORS(publishAfter(handleWorkspaceRoutes, eventbus.KindStatus, eventbus.KindSites)))
 	mux.HandleFunc("/api/sites/", withCORS(publishAfter(handleSiteAction, eventbus.KindSites, eventbus.KindServices)))
 	mux.HandleFunc("/api/proxies", withCORS(publishAfter(handleProxies, eventbus.KindProxies)))
 	mux.HandleFunc("/api/proxies/", withCORS(publishAfter(handleProxyAction, eventbus.KindProxies)))
+	mux.HandleFunc("/api/logs/terminal", withCORS(handleLogTerminal))
 	mux.HandleFunc("/api/logs/", withCORS(handleLogs))
 	mux.HandleFunc("/api/dumps", withCORS(handleDumpsList))
 	mux.HandleFunc("/api/queries/analyze", withCORS(handleQueriesAnalyze))
+	mux.HandleFunc("/api/queries/route-timing", withCORS(handleRouteTiming))
+	mux.HandleFunc("/api/queries/optimize", withCORS(handleOptimize))
 	mux.HandleFunc("/api/dumps/stream", withCORS(handleDumpsStream))
 	mux.HandleFunc("/api/dumps/status", withCORS(handleDumpsStatus))
 	mux.HandleFunc("/api/dumps/clear", withCORS(handleDumpsClear))
@@ -253,27 +260,30 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/devtools/status", withCORS(handleDevtoolsStatus))
 	mux.HandleFunc("/api/devtools/workers", withCORS(publishAfter(handleDevtoolsWorkers, eventbus.KindDevtoolsStatus)))
 	mux.HandleFunc("/api/open-editor", withCORS(handleOpenEditor))
+	mux.HandleFunc("/api/open-folder", withCORS(handleOpenFolder))
 	mux.HandleFunc("/api/profiler/toggle", withCORS(publishAfter(handleProfilerToggle, eventbus.KindProfilerStatus)))
 	mux.HandleFunc("/api/profiler/status", withCORS(handleProfilerStatus))
 	mux.HandleFunc("/api/profiler/clear", withCORS(handleProfilerClear))
 	mux.HandleFunc("/_spx/", handleSpxProxy)
 	mux.HandleFunc("/_svc/", handleDashProxy)
-	mux.HandleFunc("/api/queue/", withCORS(handleQueueLogs))
-	mux.HandleFunc("/api/horizon/", withCORS(handleHorizonLogs))
-	mux.HandleFunc("/api/stripe/", withCORS(handleStripeLogs))
-	mux.HandleFunc("/api/schedule/", withCORS(handleScheduleLogs))
-	mux.HandleFunc("/api/reverb/", withCORS(handleReverbLogs))
-	mux.HandleFunc("/api/worker/", withCORS(handleWorkerLogs))
+	mux.HandleFunc("/api/queue/", withCORS(handleUnitLogStream))
+	mux.HandleFunc("/api/horizon/", withCORS(handleUnitLogStream))
+	mux.HandleFunc("/api/stripe/", withCORS(handleUnitLogStream))
+	mux.HandleFunc("/api/schedule/", withCORS(handleUnitLogStream))
+	mux.HandleFunc("/api/reverb/", withCORS(handleUnitLogStream))
+	mux.HandleFunc("/api/worker/", withCORS(handleUnitLogStream))
 	mux.HandleFunc("/api/app-logs/", withCORS(handleAppLogs))
-	mux.HandleFunc("/api/watcher/logs", withCORS(handleWatcherLogs))
+	mux.HandleFunc("/api/watcher/logs", withCORS(handleUnitLogStream))
 	mux.HandleFunc("/api/watcher/start", withCORS(handleWatcherStart))
 	mux.HandleFunc("/api/settings", withCORS(handleSettings))
 	mux.HandleFunc("/api/settings/autostart", withCORS(handleSettingsAutostart))
 	mux.HandleFunc("/api/settings/worker-mode", withCORS(handleSettingsWorkerMode))
 	mux.HandleFunc("/api/settings/idle-suspend", withCORS(publishAfter(handleSettingsIdleSuspend, eventbus.KindSites)))
+	mux.HandleFunc("/api/settings/dns-upstream", withCORS(handleSettingsDNSUpstream))
 	mux.HandleFunc("/api/workers/health", withCORS(handleWorkersHealth))
 	mux.HandleFunc("/api/workers/heal", withCORS(handleWorkersHeal))
 	mux.HandleFunc("/api/stats", withCORS(handleStats))
+	mux.HandleFunc("/api/disk", withCORS(handleDisk))
 	mux.HandleFunc("/api/xdebug/", withCORS(publishAfter(handleXdebugAction, eventbus.KindStatus)))
 	mux.HandleFunc("/api/lerd/start", withCORS(handleLerdStart))
 	mux.HandleFunc("/api/lerd/stop", withCORS(handleLerdStop))
@@ -287,7 +297,7 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/manifest.webmanifest", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/manifest+json")
 		base := "http://" + r.Host
-		w.Write([]byte(`{"name":"Lerd","short_name":"Lerd","description":"Local Laravel development environment","start_url":"` + base + `/","display":"standalone","background_color":"#0d0d0d","theme_color":"#FF2D20","icons":[{"src":"` + base + `/icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"` + base + `/icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"` + base + `/icons/icon-maskable-192.png","sizes":"192x192","type":"image/png","purpose":"maskable"},{"src":"` + base + `/icons/icon-maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"},{"src":"` + base + `/icons/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}`)) //nolint:errcheck
+		w.Write([]byte(`{"name":"Lerd","short_name":"Lerd","description":"Local Laravel development environment","start_url":"` + base + `/","display":"standalone","background_color":"#0d0d0d","theme_color":"#FF2D20","protocol_handlers":[{"protocol":"web+lerd","url":"` + base + `/?lerd=%s"}],"icons":[{"src":"` + base + `/icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"` + base + `/icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"` + base + `/icons/icon-maskable-192.png","sizes":"192x192","type":"image/png","purpose":"maskable"},{"src":"` + base + `/icons/icon-maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"},{"src":"` + base + `/icons/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}`)) //nolint:errcheck
 	})
 	mux.HandleFunc("/icons/icon.svg", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
@@ -330,10 +340,6 @@ func Start(currentVersion string) error {
 	mux.Handle("/", serveSvelte())
 
 	handler := withRemoteControlGate(mux)
-
-	// Start the idle-suspend activity feed: bind the nginx access socket and
-	// seed per-site last-active times. Best-effort; never blocks serving.
-	startAccessFeed()
 
 	// Unix socket listener for the lerd.localhost nginx vhost. Linux only:
 	// on macOS, lerd-nginx runs inside the podman-machine VM and unix
@@ -499,33 +505,36 @@ func graphicalEnv() []string {
 	return out
 }
 
-// openTerminalAt opens the user's preferred terminal emulator in dir.
-// It checks $TERMINAL first, then falls back to a list of common emulators.
-func openTerminalAt(dir string) error {
-	type termCmd struct {
-		bin  string
-		args []string
-	}
+// terminalCmd is a terminal emulator binary and the args that open it at a dir.
+type terminalCmd struct {
+	bin  string
+	args []string
+}
 
-	candidates := []termCmd{}
+// terminalDirCandidates returns the ordered emulator candidates for opening a
+// new terminal at dir. $TERMINAL leads, then a fixed fallback list.
+func terminalDirCandidates(dir string) []terminalCmd {
+	candidates := []terminalCmd{}
 
 	if t := os.Getenv("TERMINAL"); t != "" {
-		candidates = append(candidates, termCmd{t, []string{}})
+		candidates = append(candidates, terminalCmd{t, []string{}})
 	}
 
 	candidates = append(candidates,
-		termCmd{"kitty", []string{"--directory", dir}},
-		termCmd{"foot", []string{"--working-directory", dir}},
-		termCmd{"alacritty", []string{"--working-directory", dir}},
-		termCmd{"wezterm", []string{"start", "--cwd", dir}},
-		termCmd{"ghostty", []string{"--working-directory=" + dir}},
-		termCmd{"ptyxis", []string{"--working-directory", dir}},
-		termCmd{"konsole", []string{"--separate", "--workdir", dir}},
-		termCmd{"gnome-terminal", []string{"--working-directory", dir}},
-		termCmd{"xfce4-terminal", []string{"--working-directory", dir}},
-		termCmd{"tilix", []string{"--working-directory", dir}},
-		termCmd{"terminator", []string{"--working-directory", dir}},
-		termCmd{"xterm", []string{"-e", "sh", "-c", `cd "$0" && exec "$SHELL"`, dir}},
+		terminalCmd{"kitty", []string{"--directory", dir}},
+		terminalCmd{"foot", []string{"--working-directory", dir}},
+		terminalCmd{"alacritty", []string{"--working-directory", dir}},
+		terminalCmd{"wezterm", []string{"start", "--cwd", dir}},
+		terminalCmd{"ghostty", []string{"--working-directory=" + dir}},
+		// ptyxis is single-instance: --working-directory is honoured only
+		// alongside --new-window/--tab/-x, so a bare launch lands in $HOME.
+		terminalCmd{"ptyxis", []string{"--new-window", "--working-directory", dir}},
+		terminalCmd{"konsole", []string{"--separate", "--workdir", dir}},
+		terminalCmd{"gnome-terminal", []string{"--working-directory", dir}},
+		terminalCmd{"xfce4-terminal", []string{"--working-directory", dir}},
+		terminalCmd{"tilix", []string{"--working-directory", dir}},
+		terminalCmd{"terminator", []string{"--working-directory", dir}},
+		terminalCmd{"xterm", []string{"-e", "sh", "-c", `cd "$0" && exec "$SHELL"`, dir}},
 	)
 
 	if runtime.GOOS == "darwin" {
@@ -533,12 +542,18 @@ func openTerminalAt(dir string) error {
 		// command — cleaner than `do script "cd ... && exec $SHELL"` which types
 		// the command visibly into the shell. iTerm2 supports the same via open.
 		if _, err := os.Stat("/Applications/iTerm.app"); err == nil {
-			candidates = append(candidates, termCmd{"open", []string{"-a", "iTerm", dir}})
+			candidates = append(candidates, terminalCmd{"open", []string{"-a", "iTerm", dir}})
 		}
-		candidates = append(candidates, termCmd{"open", []string{"-a", "Terminal", dir}})
+		candidates = append(candidates, terminalCmd{"open", []string{"-a", "Terminal", dir}})
 	}
 
-	for _, t := range candidates {
+	return candidates
+}
+
+// openTerminalAt opens the user's preferred terminal emulator in dir.
+// It checks $TERMINAL first, then falls back to a list of common emulators.
+func openTerminalAt(dir string) error {
+	for _, t := range terminalDirCandidates(dir) {
 		bin, err := exec.LookPath(t.bin)
 		if err != nil {
 			continue
@@ -652,7 +667,19 @@ type StatusResponse struct {
 	// image for, so the UI can limit a FrankenPHP site's version dropdown to
 	// the ones it can actually run (intersected client-side with installed).
 	FrankenPHPVersions []string `json:"frankenphp_php_versions"`
+	// Home is the user's home directory, so the UI can shorten displayed paths
+	// under it to a leading ~ without shipping the absolute path in the label.
+	Home string `json:"home"`
+	// Workspaces are the configured workspace names in display order, empty
+	// ones included, so the sidebar can render a section the user just created.
+	Workspaces []string `json:"workspaces"`
+	// Instance identifies this lerd-ui process. An open dashboard reloads when
+	// it changes, so a restarted server never leaves a stale page behind.
+	Instance string `json:"instance"`
 }
+
+// serverInstance identifies this lerd-ui process for the lifetime of the run.
+var serverInstance = strconv.FormatInt(time.Now().UnixNano(), 36)
 
 type DNSStatus struct {
 	OK      bool   `json:"ok"`
@@ -667,10 +694,12 @@ type ServiceCheck struct {
 }
 
 type PHPStatus struct {
-	Version       string `json:"version"`
-	Running       bool   `json:"running"`
-	XdebugEnabled bool   `json:"xdebug_enabled"`
-	XdebugMode    string `json:"xdebug_mode,omitempty"`
+	Version       string   `json:"version"`
+	Patch         string   `json:"patch,omitempty"`
+	Running       bool     `json:"running"`
+	XdebugEnabled bool     `json:"xdebug_enabled"`
+	XdebugMode    string   `json:"xdebug_mode,omitempty"`
+	Ports         []string `json:"ports,omitempty"`
 }
 
 func handleStatus(w http.ResponseWriter, _ *http.Request) {
@@ -697,10 +726,12 @@ func buildStatus() StatusResponse {
 		short := strings.ReplaceAll(v, ".", "")
 		running := podman.Cache.Running("lerd-php" + short + "-fpm")
 		xdebugMode := ""
+		var ports []string
 		if cfg != nil {
 			xdebugMode = cfg.GetXdebugMode(v)
+			ports = cfg.PHP.FPMPorts[v]
 		}
-		phpStatuses = append(phpStatuses, PHPStatus{Version: v, Running: running, XdebugEnabled: xdebugMode != "", XdebugMode: xdebugMode})
+		phpStatuses = append(phpStatuses, PHPStatus{Version: v, Patch: podman.FPMPHPVersion(v), Running: running, XdebugEnabled: xdebugMode != "", XdebugMode: xdebugMode, Ports: ports})
 	}
 
 	phpDefault := ""
@@ -718,6 +749,11 @@ func buildStatus() StatusResponse {
 		bunVersion = lerdNode.BunVersion()
 	}
 	usingSystemBun := bunAvailable && !nodeManagedByLerd && !lerdNode.SystemNodeAvailable()
+	homeDir, _ := os.UserHomeDir()
+	workspaces := cfg.WorkspaceNames()
+	if workspaces == nil {
+		workspaces = []string{}
+	}
 	return StatusResponse{
 		DNS:                DNSStatus{OK: dnsStatus == dns.StatusOK, Status: string(dnsStatus), VPN: dns.VPNActive(), Enabled: dnsEnabled, TLD: tld},
 		Nginx:              ServiceCheck{Running: nginxRunning},
@@ -730,6 +766,9 @@ func buildStatus() StatusResponse {
 		UsingSystemBun:     usingSystemBun,
 		WatcherRunning:     watcherRunning,
 		FrankenPHPVersions: config.FrankenPHPVersions(),
+		Home:               homeDir,
+		Workspaces:         workspaces,
+		Instance:           serverInstance,
 	}
 }
 
@@ -743,6 +782,8 @@ type WorktreeResponse struct {
 	Domain              string         `json:"domain"`
 	Path                string         `json:"path"`
 	PHPVersion          string         `json:"php_version,omitempty"`
+	PHPMin              string         `json:"php_min,omitempty"`
+	PHPMax              string         `json:"php_max,omitempty"`
 	NodeVersion         string         `json:"node_version,omitempty"`
 	PHPVersionOverride  bool           `json:"php_version_override,omitempty"`
 	NodeVersionOverride bool           `json:"node_version_override,omitempty"`
@@ -765,6 +806,9 @@ type WorkerStatus struct {
 	Label   string `json:"label"`
 	Running bool   `json:"running"`
 	Failing bool   `json:"failing,omitempty"`
+	// Unreachable: the unit is active but its server isn't accepting connections.
+	// Distinct from Failing (systemd failed) so the row shows its own state.
+	Unreachable bool `json:"unreachable,omitempty"`
 }
 
 // ConflictingDomain describes a domain declared in .lerd.yaml that wasn't
@@ -785,45 +829,54 @@ type SiteResponse struct {
 	ConflictingDomains []ConflictingDomain `json:"conflicting_domains,omitempty"`
 	Path               string              `json:"path"`
 	PHPVersion         string              `json:"php_version"`
-	UsesPHP            bool                `json:"uses_php"`
-	NodeVersion        string              `json:"node_version"`
-	JSRuntime          string              `json:"js_runtime,omitempty"`
-	TLS                bool                `json:"tls"`
-	Framework          string              `json:"framework"`
-	FPMRunning         bool                `json:"fpm_running"`
-	IsLaravel          bool                `json:"is_laravel"`
-	FrameworkLabel     string              `json:"framework_label"`
-	QueueRunning       bool                `json:"queue_running"`
-	QueueFailing       bool                `json:"queue_failing,omitempty"`
-	StripeRunning      bool                `json:"stripe_running"`
-	StripeSecretSet    bool                `json:"stripe_secret_set"`
-	StripeWebhookPath  string              `json:"stripe_webhook_path,omitempty"`
-	ScheduleRunning    bool                `json:"schedule_running"`
-	ScheduleFailing    bool                `json:"schedule_failing,omitempty"`
-	ReverbRunning      bool                `json:"reverb_running"`
-	ReverbFailing      bool                `json:"reverb_failing,omitempty"`
-	HasReverb          bool                `json:"has_reverb"`
-	HasHorizon         bool                `json:"has_horizon"`
-	HorizonRunning     bool                `json:"horizon_running"`
-	HorizonFailing     bool                `json:"horizon_failing,omitempty"`
-	HorizonReload      bool                `json:"horizon_reload,omitempty"`       // horizon runs via horizon:listen (auto-reload)
-	HorizonReloadReady bool                `json:"horizon_reload_ready,omitempty"` // chokidar present, so auto-reload can be enabled without installing it
-	OctaneReload       bool                `json:"octane_reload,omitempty"`        // FrankenPHP worker serves via octane:start --watch (auto-reload)
-	OctaneReloadReady  bool                `json:"octane_reload_ready,omitempty"`  // FrankenPHP worker mode + chokidar present, so auto-reload can be enabled
-	HasQueueWorker     bool                `json:"has_queue_worker"`
-	HasScheduleWorker  bool                `json:"has_schedule_worker"`
-	FrameworkWorkers   []WorkerStatus      `json:"framework_workers,omitempty"`
-	HasAppLogs         bool                `json:"has_app_logs"`
-	LatestLogTime      string              `json:"latest_log_time,omitempty"`
-	HasFavicon         bool                `json:"has_favicon"`
-	HasEnv             bool                `json:"has_env"`
-	Paused             bool                `json:"paused"`
+	// PHPMin/PHPMax are the framework's supported PHP range. The dashboard
+	// disables out-of-range versions in the picker. Empty when there is no
+	// framework or its version was guessed (clamped), so nothing is disabled.
+	PHPMin             string         `json:"php_min,omitempty"`
+	PHPMax             string         `json:"php_max,omitempty"`
+	UsesPHP            bool           `json:"uses_php"`
+	NodeVersion        string         `json:"node_version"`
+	JSRuntime          string         `json:"js_runtime,omitempty"`
+	TLS                bool           `json:"tls"`
+	Framework          string         `json:"framework"`
+	FPMRunning         bool           `json:"fpm_running"`
+	IsLaravel          bool           `json:"is_laravel"`
+	FrameworkLabel     string         `json:"framework_label"`
+	QueueRunning       bool           `json:"queue_running"`
+	QueueFailing       bool           `json:"queue_failing,omitempty"`
+	StripeRunning      bool           `json:"stripe_running"`
+	StripeSecretSet    bool           `json:"stripe_secret_set"`
+	StripeWebhookPath  string         `json:"stripe_webhook_path,omitempty"`
+	ScheduleRunning    bool           `json:"schedule_running"`
+	ScheduleFailing    bool           `json:"schedule_failing,omitempty"`
+	ReverbRunning      bool           `json:"reverb_running"`
+	ReverbFailing      bool           `json:"reverb_failing,omitempty"`
+	HasReverb          bool           `json:"has_reverb"`
+	HasHorizon         bool           `json:"has_horizon"`
+	HorizonRunning     bool           `json:"horizon_running"`
+	HorizonFailing     bool           `json:"horizon_failing,omitempty"`
+	HorizonReload      bool           `json:"horizon_reload,omitempty"`       // horizon runs via horizon:listen (auto-reload)
+	HorizonReloadReady bool           `json:"horizon_reload_ready,omitempty"` // chokidar present, so auto-reload can be enabled without installing it
+	OctaneReload       bool           `json:"octane_reload,omitempty"`        // FrankenPHP worker serves via octane:start --watch (auto-reload)
+	OctaneReloadReady  bool           `json:"octane_reload_ready,omitempty"`  // FrankenPHP worker mode + chokidar present, so auto-reload can be enabled
+	HasQueueWorker     bool           `json:"has_queue_worker"`
+	HasScheduleWorker  bool           `json:"has_schedule_worker"`
+	FrameworkWorkers   []WorkerStatus `json:"framework_workers,omitempty"`
+	HasAppLogs         bool           `json:"has_app_logs"`
+	HasFavicon         bool           `json:"has_favicon"`
+	HasEnv             bool           `json:"has_env"`
+	Paused             bool           `json:"paused"`
 	// Pinned excludes the site from idle-suspend (kept always-warm).
 	Pinned bool `json:"pinned,omitempty"`
 	// LastActive is the unix-seconds time the site last saw a request, from the
 	// idle-suspend activity feed. Zero (omitted) means no activity recorded yet
 	// this lerd-ui session.
 	LastActive int64 `json:"last_active,omitempty"`
+	// LastRequestAt (unix milliseconds) and RequestCount are the site's traffic
+	// over the request store's retention window, worktrees included, filtered to
+	// the requests the app actually served. The sites list orders by them.
+	LastRequestAt int64 `json:"last_request_at,omitempty"`
+	RequestCount  int   `json:"request_count,omitempty"`
 	// IdleSuspended is true when the idle engine has gracefully stopped this
 	// site's workers (a subset of Idle: only sites that had workers to stop).
 	IdleSuspended bool `json:"idle_suspended,omitempty"`
@@ -840,17 +893,30 @@ type SiteResponse struct {
 	// Services lists the service names this site uses, sourced from the
 	// project's .lerd.yaml. Used by the dashboard to render service badges
 	// on the site detail panel.
-	Services         []string `json:"services,omitempty"`
-	LANPort          int      `json:"lan_port,omitempty"`
-	LANShareURL      string   `json:"lan_share_url,omitempty"`
-	CustomContainer  bool     `json:"custom_container,omitempty"`
-	ContainerPort    int      `json:"container_port,omitempty"`
-	ContainerImage   string   `json:"container_image,omitempty"`
-	Runtime          string   `json:"runtime,omitempty"`
-	RuntimeWorker    bool     `json:"runtime_worker,omitempty"`
-	HostProxy        bool     `json:"host_proxy,omitempty"`
-	HostPort         int      `json:"host_port,omitempty"`
-	HostHasDevServer bool     `json:"host_has_dev_server,omitempty"`
+	Services []string `json:"services,omitempty"`
+	// DBDatabase is the site's DB_DATABASE, so the overview's database card can
+	// open the admin tool straight to this site's database.
+	DBDatabase       string `json:"db_database,omitempty"`
+	LANPort          int    `json:"lan_port,omitempty"`
+	LANShareURL      string `json:"lan_share_url,omitempty"`
+	CustomContainer  bool   `json:"custom_container,omitempty"`
+	ContainerPort    int    `json:"container_port,omitempty"`
+	ContainerImage   string `json:"container_image,omitempty"`
+	Runtime          string `json:"runtime,omitempty"`
+	RuntimeWorker    bool   `json:"runtime_worker,omitempty"`
+	HostProxy        bool   `json:"host_proxy,omitempty"`
+	HostPort         int    `json:"host_port,omitempty"`
+	HostHasDevServer bool   `json:"host_has_dev_server,omitempty"`
+	// DoctorApplicable is false when no doctor check can apply (a host-proxy
+	// Python/Ruby/Go site with no framework and no composer/package manifest), so
+	// the dashboard hides the button rather than opening an empty modal. Not
+	// omitempty: the dashboard keys on the explicit false to hide.
+	DoctorApplicable bool `json:"doctor_applicable"`
+	// CanProfile is false when SPX cannot profile the site's requests (no PHP,
+	// or PHP served by something other than FPM), so the dashboard's timing
+	// panel offers no profile action. Not omitempty: the dashboard keys on the
+	// explicit false.
+	CanProfile bool `json:"can_profile"`
 	// Grouping — Group is the group key (main site's name); GroupSubdomain is the
 	// label a secondary occupies; GroupMainDomain is the group main's base domain.
 	// MultiTenant flags a main whose project declares env_overrides (wildcard
@@ -860,6 +926,9 @@ type SiteResponse struct {
 	GroupMainDomain string `json:"group_main_domain,omitempty"`
 	GroupSharedDB   bool   `json:"group_shared_db,omitempty"`
 	MultiTenant     bool   `json:"multi_tenant,omitempty"`
+	// Workspace is the display-only grouping the site belongs to, if any. A
+	// group secondary reports its main's workspace so a group renders whole.
+	Workspace string `json:"workspace,omitempty"`
 }
 
 func handleSites(w http.ResponseWriter, _ *http.Request) {
@@ -885,6 +954,12 @@ func buildSites() []SiteResponse {
 		idleTimeout = idleCfg.IdleSuspendTimeout()
 	}
 	idleNow := time.Now()
+	// Last-active times live in the lerd-watcher process and are persisted to a
+	// file we read once per snapshot; suspended state comes from the site config.
+	idleActivity := loadIdleActivity()
+	// Traffic per site key, read once per snapshot, so the sites list can order by
+	// what has actually been used rather than by log-file mtime.
+	siteUsage := loadSiteUsage()
 
 	// Per-site list of workers the engine suspended, so the dashboard can keep
 	// showing their dots dimmed instead of dropping them.
@@ -910,21 +985,27 @@ func buildSites() []SiteResponse {
 	// Map each group key to its main site's base domain so secondaries can
 	// report group_main_domain without a second lookup.
 	groupMainDomain := map[string]string{}
+	groupMainName := map[string]string{}
 	for _, e := range enriched {
 		if e.Group != "" && e.GroupSubdomain == "" {
 			groupMainDomain[e.Group] = e.PrimaryDomain()
+			groupMainName[e.Group] = e.Name
 		}
 	}
+
+	// Workspace membership is display-only and lives in the global config.
+	siteWorkspace := idleCfg.SiteWorkspaceMap()
 
 	sites := make([]SiteResponse, 0, len(enriched))
 	for _, e := range enriched {
 		var fwWorkers []WorkerStatus
 		for _, fw := range e.FrameworkWorkers {
 			fwWorkers = append(fwWorkers, WorkerStatus{
-				Name:    fw.Name,
-				Label:   fw.Label,
-				Running: fw.Running,
-				Failing: fw.Failing,
+				Name:        fw.Name,
+				Label:       fw.Label,
+				Running:     fw.Running,
+				Failing:     fw.Failing,
+				Unreachable: fw.Unreachable,
 			})
 		}
 
@@ -935,6 +1016,12 @@ func buildSites() []SiteResponse {
 				OwnedBy: cd.OwnedBy,
 			})
 		}
+
+		usage := siteUsage[e.Name]
+
+		// Pinned and proxy-only sites are exempt from suspension, so they never
+		// report idle either.
+		idleExempt := pinnedSites[e.Name] || e.IsProxyOnly()
 
 		var worktreeResponses []WorktreeResponse
 		for _, wt := range e.Worktrees {
@@ -947,18 +1034,25 @@ func buildSites() []SiteResponse {
 			var wtWorkers []WorkerStatus
 			for _, fw := range wt.FrameworkWorkers {
 				wtWorkers = append(wtWorkers, WorkerStatus{
-					Name:    fw.Name,
-					Label:   fw.Label,
-					Running: fw.Running,
-					Failing: fw.Failing,
+					Name:        fw.Name,
+					Label:       fw.Label,
+					Running:     fw.Running,
+					Failing:     fw.Failing,
+					Unreachable: fw.Unreachable,
 				})
 			}
+			// Idle state keys a worktree by its checkout dir (what the worker units
+			// are named after), request traffic by its branch (what the store and the
+			// timing API share). Same worktree, two key schemes.
 			wtKeyStr := wtKey(e.Name, config.WorktreeUnitSlug(filepath.Base(wt.Path)))
+			usage = addUsage(usage, siteUsage[reqstats.Key(e.Name, wt.Branch)])
 			worktreeResponses = append(worktreeResponses, WorktreeResponse{
 				Branch:               wt.Branch,
 				Domain:               wt.Domain,
 				Path:                 wt.Path,
 				PHPVersion:           wt.PHPVersion,
+				PHPMin:               e.FrameworkPHPMin,
+				PHPMax:               e.FrameworkPHPMax,
 				NodeVersion:          wt.NodeVersion,
 				PHPVersionOverride:   wt.PHPVersionOverride,
 				NodeVersionOverride:  wt.NodeVersionOverride,
@@ -969,8 +1063,8 @@ func buildSites() []SiteResponse {
 				LANPort:              lanPort,
 				LANShareURL:          lanURL,
 				FrameworkWorkers:     wtWorkers,
-				LastActive:           siteLastActiveUnix(wtKeyStr),
-				Idle:                 siteIsIdle(wtKeyStr, e.Paused, pinnedSites[e.Name], idleOn, idleTimeout, idleNow),
+				LastActive:           idleActivity[wtKeyStr],
+				Idle:                 idleSiteIsIdle(idleActivity, wtKeyStr, e.Paused, idleExempt, idleOn, idleTimeout, idleNow),
 				IdleSuspendedWorkers: wtSuspendedWorkers[wtKeyStr],
 			})
 		}
@@ -986,6 +1080,8 @@ func buildSites() []SiteResponse {
 			ConflictingDomains:   conflicting,
 			Path:                 e.Path,
 			PHPVersion:           e.PHPVersion,
+			PHPMin:               e.FrameworkPHPMin,
+			PHPMax:               e.FrameworkPHPMax,
 			UsesPHP:              e.UsesPHP,
 			NodeVersion:          e.NodeVersion,
 			JSRuntime:            projectJSRuntime(e.Path),
@@ -1015,18 +1111,20 @@ func buildSites() []SiteResponse {
 			HasScheduleWorker:    e.HasScheduleWorker,
 			FrameworkWorkers:     fwWorkers,
 			HasAppLogs:           e.HasAppLogs,
-			LatestLogTime:        e.LatestLogTime,
 			HasFavicon:           e.HasFavicon,
-			HasEnv:               siteHasEnv(e.Path),
+			HasEnv:               siteHasEnv(e.FrameworkName, e.Path),
 			Paused:               e.Paused,
-			LastActive:           siteLastActiveUnix(e.Name),
-			IdleSuspended:        siteIsIdleSuspended(e.Name),
-			Idle:                 siteIsIdle(e.Name, e.Paused, pinnedSites[e.Name], idleOn, idleTimeout, idleNow),
+			LastActive:           idleActivity[e.Name],
+			LastRequestAt:        unixMilliOrZero(usage.LastAt),
+			RequestCount:         usage.Count,
+			IdleSuspended:        len(suspendedWorkers[e.Name]) > 0,
+			Idle:                 idleSiteIsIdle(idleActivity, e.Name, e.Paused, idleExempt, idleOn, idleTimeout, idleNow),
 			IdleSuspendedWorkers: suspendedWorkers[e.Name],
 			Pinned:               pinnedSites[e.Name],
 			Branch:               e.Branch,
 			Worktrees:            worktreeResponses,
 			Services:             e.Services,
+			DBDatabase:           envfile.ReadKey(filepath.Join(e.Path, ".env"), "DB_DATABASE"),
 			LANPort:              e.LANPort,
 			LANShareURL:          cli.LANShareURL(e.LANPort),
 			CustomContainer:      e.ContainerPort > 0,
@@ -1037,14 +1135,49 @@ func buildSites() []SiteResponse {
 			HostProxy:            e.HostPort > 0,
 			HostPort:             e.HostPort,
 			HostHasDevServer:     e.HostPort > 0 && e.HostCommand != "",
-			Group:                e.Group,
-			GroupSubdomain:       e.GroupSubdomain,
-			GroupMainDomain:      groupMainDomain[e.Group],
-			GroupSharedDB:        e.GroupSharedDB,
-			MultiTenant:          e.Group != "" && e.GroupSubdomain == "" && siteHasEnvOverrides(e.Path),
+			DoctorApplicable:     sitedoctor.AppliesForPath(e.Path, e.FrameworkName),
+			CanProfile: profiler.ProfilableSite(config.Site{
+				Runtime: e.Runtime, ContainerPort: e.ContainerPort, HostPort: e.HostPort,
+			}, e.UsesPHP),
+			Group:           e.Group,
+			GroupSubdomain:  e.GroupSubdomain,
+			GroupMainDomain: groupMainDomain[e.Group],
+			GroupSharedDB:   e.GroupSharedDB,
+			MultiTenant:     e.Group != "" && e.GroupSubdomain == "" && siteHasEnvOverrides(e.Path),
+			Workspace:       resolveSiteWorkspace(e, groupMainName, siteWorkspace),
 		})
 	}
 	return sites
+}
+
+// ServicePortMapping describes one published port of a service: its
+// container-internal port, its preset-default host port, and the current host
+// override (0 = on the default). The ports modal renders and edits these.
+type ServicePortMapping struct {
+	Container int `json:"container"`
+	Default   int `json:"default"`
+	Published int `json:"published,omitempty"`
+}
+
+// secondaryPortMappings returns a service's published mappings past the primary
+// (index 0), pairing each with its current host override from the config.
+func secondaryPortMappings(defaultPorts []string, sc config.ServiceConfig) []ServicePortMapping {
+	var out []ServicePortMapping
+	for i, spec := range defaultPorts {
+		if i == 0 {
+			continue
+		}
+		c := podman.ContainerPort(spec)
+		if c == 0 {
+			continue
+		}
+		out = append(out, ServicePortMapping{
+			Container: c,
+			Default:   podman.PrimaryHostPort([]string{spec}),
+			Published: sc.PublishedPorts[c],
+		})
+	}
+	return out
 }
 
 // ServiceResponse is the response for GET /api/services.
@@ -1056,11 +1189,43 @@ type ServiceResponse struct {
 	Dashboard         string            `json:"dashboard,omitempty"`
 	DashboardExternal bool              `json:"dashboard_external,omitempty"`
 	ConnectionURL     string            `json:"connection_url,omitempty"`
-	Custom            bool              `json:"custom,omitempty"`
-	IsDefault         bool              `json:"is_default,omitempty"`
+	Category          string            `json:"category,omitempty"`
+	Icon              string            `json:"icon,omitempty"`
+	AdminFor          []string          `json:"admin_for,omitempty"`
+	// Preset this service was installed from ("mariadb" for "mariadb-11-8"), so
+	// the UI can match it against another preset's admin_for without guessing.
+	Preset string `json:"preset,omitempty"`
+	// Port is the host (published) port the service is exposed on: the
+	// published-port override when set, else the preset/version default. 0 when
+	// the service publishes no host port (e.g. a worker). The UI shows it in the
+	// status pill so a moved port reads at a glance.
+	Port int `json:"port,omitempty"`
+	// PublishedPort is the user's published-port override (0 when unset, i.e.
+	// using the default). DefaultPort is the preset/version default host port.
+	// ExtraPorts are the extra published mappings. The ports modal reads these
+	// to show the current state and a reset-to-default affordance.
+	PublishedPort int      `json:"published_port,omitempty"`
+	DefaultPort   int      `json:"default_port,omitempty"`
+	ExtraPorts    []string `json:"extra_ports,omitempty"`
+	// SecondaryPorts are the service's published mappings past the primary (a
+	// multi-port service like mailpit or rustfs), each with its container-internal
+	// port, preset-default host port, and current override. The ports modal renders
+	// one editable host-port field per entry so every published port is movable.
+	SecondaryPorts []ServicePortMapping `json:"secondary_ports,omitempty"`
+	Custom         bool                 `json:"custom,omitempty"`
+	IsDefault      bool                 `json:"is_default,omitempty"`
+	// PresetOwned is true when lerd ships this service as a bundled preset
+	// (default-stack or optional like gotenberg). The ports modal keys the
+	// extra-ports affordance off this, not is_default, so every service we
+	// provide can publish extra ports while genuinely custom services can't.
+	PresetOwned bool `json:"preset_owned,omitempty"`
 	// Tunable is true when the service exposes a user-editable runtime config
 	// override (see config.ServiceTuningMount), so the UI can show a Tuning tab.
-	Tunable            bool     `json:"tunable,omitempty"`
+	Tunable bool `json:"tunable,omitempty"`
+	// IsDatabase is true for a database engine (mysql/mariadb/postgres/mongo),
+	// so the detail view can show its Databases tab. Excludes sqlite and admin
+	// UIs, which are not queryable engines.
+	IsDatabase         bool     `json:"is_database,omitempty"`
 	SiteCount          int      `json:"site_count"`
 	SiteDomains        []string `json:"site_domains,omitempty"`
 	Pinned             bool     `json:"pinned"`
@@ -1089,6 +1254,10 @@ type ServiceResponse struct {
 	MigrationSupported bool           `json:"migration_supported"`
 	CanRollback        bool           `json:"can_rollback"`
 	PortConflicts      []PortConflict `json:"port_conflicts,omitempty"`
+	// ClientShims are the client tools this service exposes as host shims
+	// (mysqldump, pg_dump…), each with whether the host already has the tool and
+	// the user's current decision. The service card renders a toggle per tool.
+	ClientShims []shims.Info `json:"client_shims,omitempty"`
 }
 
 // PortConflict reports a host port lerd wants to bind that is already taken
@@ -1119,37 +1288,172 @@ func portConflictsFor(unit, ssOutput string) []PortConflict {
 	return out
 }
 
-func buildServiceResponse(name string) ServiceResponse {
-	return buildServiceResponseWithPortList(name, "")
+// effectiveHostPort returns the host port a service is exposed on, mirroring the
+// precedence CollectPortChecks uses so the pill, the boot-time check and the
+// connection URL all agree: the published-port override, else the configured
+// port (which a non-canonical preset version seeds to its own host port, e.g.
+// postgres 18 → 5418), else the primary host port from the default mappings.
+// 0 when none applies (no host port published, e.g. a worker). services is the
+// caller's already-loaded cfg.Services map so a full services-list rebuild loads
+// (and deep-clones) the global config once rather than once per service.
+func effectiveHostPort(services map[string]config.ServiceConfig, name string, defaultPorts []string) int {
+	if sc, ok := services[name]; ok {
+		if sc.PublishedPort > 0 {
+			return sc.PublishedPort
+		}
+		if sc.Port > 0 {
+			return sc.Port
+		}
+	}
+	return podman.PrimaryHostPort(defaultPorts)
 }
 
-func buildServiceResponseWithPortList(name, ssOutput string) ServiceResponse {
+// loadServicesMap returns cfg.Services, or nil when the global config can't be
+// loaded — the single load behind a one-off buildServiceResponse.
+func loadServicesMap() map[string]config.ServiceConfig {
+	if cfg, err := config.LoadGlobal(); err == nil && cfg != nil {
+		return cfg.Services
+	}
+	return nil
+}
+
+func buildServiceResponse(name string) ServiceResponse {
+	return buildServiceResponseWithPortList(loadServicesMap(), name, "", nil)
+}
+
+// buildServiceResponseWithPortList is the single builder for a service's UI
+// response, covering both built-in default presets and custom/add-on services.
+// The definition source differs (bundled preset helpers vs the stored YAML), so
+// it is resolved once up front; every response field is then set in this one
+// place. Do not add a second builder for a service kind — a field set here must
+// never be silently missing for the other kind (that is exactly how client_shims
+// went missing for add-ons).
+// custom is the already-loaded definition for an add-on service (passed by the
+// presetNameOf returns the preset a service was installed from, falling back to
+// the service name for default-stack services that are their own preset.
+func presetNameOf(name string, custom *config.CustomService) string {
+	if custom != nil && custom.Preset != "" {
+		return custom.Preset
+	}
+	if config.PresetExists(name) {
+		return name
+	}
+	return ""
+}
+
+// servicePresentation resolves a service's discovery metadata from its preset,
+// so a service installed before these fields existed still renders correctly.
+// A genuinely user-defined service falls back to its own stored YAML.
+func servicePresentation(name string, custom *config.CustomService) (category, icon string, adminFor []string) {
+	presetName := name
+	if custom != nil && custom.Preset != "" {
+		presetName = custom.Preset
+	}
+	if p, err := config.LoadPreset(presetName); err == nil {
+		return p.Category, p.Icon, p.AdminFor
+	}
+	if custom != nil {
+		return custom.Category, custom.Icon, custom.AdminFor
+	}
+	return "", "", nil
+}
+
+// list rebuild so it is not re-read and an error cannot blank the card); pass
+// nil for a default preset or to have it loaded by name.
+func buildServiceResponseWithPortList(services map[string]config.ServiceConfig, name, ssOutput string, custom *config.CustomService) ServiceResponse {
 	unit := "lerd-" + name
 	status, _ := podman.UnitStatus(unit)
 	if status == "" {
 		status = "inactive"
 	}
 
-	envMap := map[string]string{}
-	for _, kv := range config.DefaultPresetEnvVars(name) {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) == 2 {
-			envMap[parts[0]] = parts[1]
+	// Resolve the definition source once: a default preset reads from the
+	// bundled preset helpers, a custom/add-on service from its stored YAML.
+	isDefault := config.IsDefaultPreset(name)
+	if !isDefault && custom == nil {
+		custom, _ = config.LoadCustomService(name)
+	}
+
+	var (
+		envKVs       []string
+		presetPorts  []string
+		dashboardRaw string
+		dashExternal bool
+		connURL      string
+		dependsOn    []string
+	)
+	switch {
+	case isDefault:
+		envKVs = config.DefaultPresetEnvVars(name)
+		presetPorts = config.PresetPorts(name)
+		dashboardRaw = config.DefaultPresetDashboard(name)
+		connURL = config.DefaultPresetConnectionURL(name)
+	case custom != nil:
+		envKVs = custom.EnvVars
+		presetPorts = custom.Ports
+		dashboardRaw = custom.Dashboard
+		dashExternal = custom.DashboardExternal
+		connURL = custom.ConnectionURL
+		dependsOn = custom.DependsOn
+		// Bundled dashboards that asked to open externally (cross-origin cookie
+		// trouble) are proxied same-origin under /_svc/<name>/ so they embed in
+		// the iframe overlay; user custom services keep the new tab.
+		if dashProxyEligible(custom) {
+			dashboardRaw, dashExternal = dashProxyPath(name), false
 		}
 	}
 
+	handle := "lerd-" + name
+	envMap := map[string]string{}
+	for _, kv := range envKVs {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) == 2 {
+			v := strings.ReplaceAll(parts[1], "{{site}}", handle)
+			v = strings.ReplaceAll(v, "{{site_testing}}", handle+"_testing")
+			envMap[parts[0]] = v
+		}
+	}
+
+	hostPort := effectiveHostPort(services, name, presetPorts)
+	defaultPort := podman.PrimaryHostPort(presetPorts)
+	if sc, ok := services[name]; ok && sc.Port > 0 {
+		defaultPort = sc.Port
+	}
+	// Prefer the installed quadlet's image; fall back to the stored definition so
+	// a custom service whose quadlet is momentarily absent keeps its version.
+	image := podman.InstalledImage(unit)
+	if image == "" && custom != nil {
+		image = custom.Image
+	}
+	category, icon, adminFor := servicePresentation(name, custom)
 	resp := ServiceResponse{
-		Name:          name,
-		Status:        status,
-		Version:       podman.ServiceVersionLabel(podman.InstalledImage(unit)),
-		EnvVars:       envMap,
-		Dashboard:     config.DefaultPresetDashboard(name),
-		ConnectionURL: config.DefaultPresetConnectionURL(name),
-		SiteCount:     countSitesUsingService(name),
-		SiteDomains:   sitesUsingService(name),
-		Pinned:        config.ServiceIsPinned(name),
-		Paused:        config.ServiceIsPaused(name),
-		IsDefault:     config.IsDefaultPreset(name),
+		Name:              name,
+		Status:            status,
+		Version:           podman.ServiceVersionLabel(image),
+		EnvVars:           envMap,
+		Dashboard:         serviceops.WithDashboardPort(dashboardRaw, presetPorts, services[name]),
+		DashboardExternal: dashExternal,
+		ConnectionURL:     serviceops.WithURLPort(connURL, hostPort),
+		Category:          category,
+		Icon:              icon,
+		AdminFor:          adminFor,
+		Preset:            presetNameOf(name, custom),
+		Port:              hostPort,
+		SiteCount:         countSitesUsingService(name),
+		SiteDomains:       sitesUsingService(name),
+		Pinned:            config.ServiceIsPinned(name),
+		Paused:            config.ServiceIsPaused(name),
+		IsDefault:         isDefault,
+		IsDatabase:        name != "sqlite" && config.IsDBServiceName(name),
+		Custom:            custom != nil,
+		PresetOwned:       config.PresetExists(name),
+		DefaultPort:       defaultPort,
+		DependsOn:         dependsOn,
+	}
+	resp.SecondaryPorts = secondaryPortMappings(presetPorts, services[name])
+	if sc, ok := services[name]; ok {
+		resp.PublishedPort = sc.PublishedPort
+		resp.ExtraPorts = sc.ExtraPorts
 	}
 	// Only advertise Tunable when the service is actually installed.
 	// ResolveServiceForTuning resolves built-in default presets even when
@@ -1165,6 +1469,7 @@ func buildServiceResponseWithPortList(name, ssOutput string) ServiceResponse {
 				resp.Tunable = true
 			}
 		}
+		resp.ClientShims = shims.ServiceShims(name)
 	}
 	// Default-preset services advertise update availability so the dashboard
 	// can show an "→ v8.4.3" badge. Stopped services also run the check so the
@@ -1228,57 +1533,27 @@ func buildServicesList() []ServiceResponse {
 	// this rebuild; portConflictsFor is a no-op when ssOutput is empty.
 	ssOutput := cli.PortListOutput()
 
+	// Load the global config once for the whole rebuild; effectiveHostPort reads
+	// the shared Services map instead of re-loading (and deep-cloning) it per service.
+	svcCfg := loadServicesMap()
+
 	defaultNames := siteinfo.KnownServices()
 	services := make([]ServiceResponse, 0, len(defaultNames))
 	for _, name := range defaultNames {
-		services = append(services, buildServiceResponseWithPortList(name, ssOutput))
+		// A removed default preset (no unit) is not installed, so it belongs in
+		// the preset picker as installable, not lingering here as "inactive".
+		// ServiceInstalled is the #678 single source of truth.
+		if !serviceops.ServiceInstalled(name) {
+			continue
+		}
+		services = append(services, buildServiceResponseWithPortList(svcCfg, name, ssOutput, nil))
 	}
+	// Optional presets (gotenberg, mongo, …) and user services materialise as
+	// custom services; they go through the SAME builder as the default presets
+	// so every field is populated identically for both kinds.
 	customs, _ := config.ListCustomServices()
 	for _, svc := range customs {
-		unit := "lerd-" + svc.Name
-		status, _ := podman.UnitStatus(unit)
-		if status == "" {
-			status = "inactive"
-		}
-		displayHandle := "lerd-" + svc.Name
-		envMap := map[string]string{}
-		for _, kv := range svc.EnvVars {
-			parts := strings.SplitN(kv, "=", 2)
-			if len(parts) == 2 {
-				v := strings.ReplaceAll(parts[1], "{{site}}", displayHandle)
-				v = strings.ReplaceAll(v, "{{site_testing}}", displayHandle+"_testing")
-				envMap[parts[0]] = v
-			}
-		}
-		var conflicts []PortConflict
-		if status != "active" {
-			conflicts = portConflictsFor(unit, ssOutput)
-		}
-		_, tunable := config.ServiceTuningMount(svc)
-		// Bundled dashboards that asked to open externally (cross-origin cookie
-		// trouble) are instead proxied same-origin under /_svc/<name>/ so they
-		// embed in the iframe overlay; user custom services keep the new tab.
-		dashboard, dashboardExternal := svc.Dashboard, svc.DashboardExternal
-		if dashProxyEligible(svc) {
-			dashboard, dashboardExternal = dashProxyPath(svc.Name), false
-		}
-		services = append(services, ServiceResponse{
-			Name:              svc.Name,
-			Status:            status,
-			Version:           podman.ServiceVersionLabel(svc.Image),
-			EnvVars:           envMap,
-			Dashboard:         dashboard,
-			DashboardExternal: dashboardExternal,
-			ConnectionURL:     svc.ConnectionURL,
-			Custom:            true,
-			Tunable:           tunable,
-			SiteCount:         countSitesUsingService(svc.Name),
-			SiteDomains:       sitesUsingService(svc.Name),
-			Pinned:            config.ServiceIsPinned(svc.Name),
-			Paused:            config.ServiceIsPaused(svc.Name),
-			DependsOn:         svc.DependsOn,
-			PortConflicts:     conflicts,
-		})
+		services = append(services, buildServiceResponseWithPortList(svcCfg, svc.Name, ssOutput, svc))
 	}
 	for _, siteName := range listActiveQueueWorkers() {
 		services = append(services, ServiceResponse{
@@ -1427,6 +1702,9 @@ type PresetResponse struct {
 	Versions       []config.PresetVersion `json:"versions,omitempty"`
 	DefaultVersion string                 `json:"default_version,omitempty"`
 	InstalledTags  []string               `json:"installed_tags,omitempty"`
+	Category       string                 `json:"category,omitempty"`
+	Icon           string                 `json:"icon,omitempty"`
+	AdminFor       []string               `json:"admin_for,omitempty"`
 }
 
 // handleServicePresets returns the list of bundled presets and whether each is
@@ -1436,7 +1714,7 @@ func handleServicePresets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	presets, err := config.ListPresets()
+	presets, err := cli.ListInstallablePresets()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1484,6 +1762,9 @@ func handleServicePresets(w http.ResponseWriter, r *http.Request) {
 			Versions:       p.Versions,
 			DefaultVersion: p.DefaultVersion,
 			InstalledTags:  installedTags,
+			Category:       p.Category,
+			Icon:           p.Icon,
+			AdminFor:       p.AdminFor,
 		})
 	}
 	writeJSON(w, out)
@@ -1992,6 +2273,16 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if action == "ports" && r.Method == http.MethodPost {
+		handleServicePorts(w, r, name)
+		return
+	}
+
+	if action == "shims" && r.Method == http.MethodPost {
+		handleServiceShims(w, r, name)
+		return
+	}
+
 	if action == "update" && r.Method == http.MethodPost {
 		targetTag := r.URL.Query().Get("tag")
 		var targetImage string
@@ -2343,6 +2634,118 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleServicePorts sets a service's published host port and (for built-in
+// services) its extra published ports in one request, routing both through the
+// shared serviceops layer so the Web UI enforces the same validation, guard and
+// host-proxy refresh as the CLI and MCP. A nil/zero published_port resets to the
+// preset default.
+// servicePortsMu serializes port-modal saves so their snapshot/apply/restore
+// sequences can't interleave across concurrent requests.
+var servicePortsMu sync.Mutex
+
+func handleServicePorts(w http.ResponseWriter, r *http.Request, name string) {
+	var body struct {
+		PublishedPort  *int           `json:"published_port"`
+		PublishedPorts map[string]int `json:"published_ports"`
+		ExtraPorts     []string       `json:"extra_ports"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	fail := func(err error) {
+		writeJSON(w, ServiceActionResponse{
+			ServiceResponse: buildServiceResponse(name),
+			OK:              false,
+			Error:           err.Error(),
+		})
+	}
+	port := 0
+	if body.PublishedPort != nil {
+		port = *body.PublishedPort
+	}
+	apply := func() error {
+		if _, err := serviceops.SetPublishedPort(name, port); err != nil {
+			return err
+		}
+		// Secondary published ports keyed by container-internal port (a multi-port
+		// service's UI/console mapping). Each moves through the same shared gate.
+		for cs, hp := range body.PublishedPorts {
+			c, err := strconv.Atoi(cs)
+			if err != nil {
+				continue
+			}
+			if _, err := serviceops.SetPublishedPortFor(name, c, hp); err != nil {
+				return err
+			}
+		}
+		// Extra ports apply to any preset lerd ships; genuinely custom services
+		// declare their ports in their own YAML.
+		if config.PresetExists(name) {
+			if err := serviceops.SetExtraPorts(name, body.ExtraPorts); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// A modal save applies the primary, secondaries, and extras in sequence.
+	// Snapshot first so a failure partway through rolls the whole save back to a
+	// consistent state. The lock spans snapshot, apply and restore so two
+	// concurrent saves can't interleave and restore each other's wrong baseline.
+	servicePortsMu.Lock()
+	snapshot, canRestore := serviceops.SnapshotPublishedPorts(name)
+	err := apply()
+	if err != nil && canRestore {
+		_ = serviceops.RestorePublishedPorts(name, snapshot)
+	}
+	servicePortsMu.Unlock()
+	if err != nil {
+		fail(err)
+		return
+	}
+	writeJSON(w, ServiceActionResponse{
+		ServiceResponse: buildServiceResponse(name),
+		OK:              true,
+	})
+}
+
+// handleServiceShims records the user's decision for one client-tool shim and
+// reconciles the shim dir so it takes effect immediately. Mirrors the ports
+// handler's request/response shape so the frontend refreshes off the returned
+// service state.
+func handleServiceShims(w http.ResponseWriter, r *http.Request, name string) {
+	var body struct {
+		Tool    string `json:"tool"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Tool == "" {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	// A shared same-family tool is managed only from its owning service, so a
+	// toggle from a non-owner is rejected (its toggle is disabled in the UI).
+	if owner := shims.ToolOwner(body.Tool); owner != "" && owner != name {
+		writeJSON(w, ServiceActionResponse{
+			ServiceResponse: buildServiceResponse(name),
+			OK:              false,
+			Error:           fmt.Sprintf("%s is provided by %s; manage it there", body.Tool, owner),
+		})
+		return
+	}
+	if err := shims.Set(body.Tool, body.Enabled); err != nil {
+		writeJSON(w, ServiceActionResponse{
+			ServiceResponse: buildServiceResponse(name),
+			OK:              false,
+			Error:           err.Error(),
+		})
+		return
+	}
+	writeJSON(w, ServiceActionResponse{
+		ServiceResponse: buildServiceResponse(name),
+		OK:              true,
+	})
+}
+
 // ensureServiceQuadlet writes the unit file for a default-preset service.
 // Delegates to serviceops so install + runtime + MCP all generate the same
 // quadlet (and re-materialise file mounts like mysql's lerd.cnf).
@@ -2409,8 +2812,13 @@ type VersionResponse struct {
 	Changelog string `json:"changelog,omitempty"`
 }
 
-func handleVersion(w http.ResponseWriter, _ *http.Request, currentVersion string) {
-	info, _ := lerdUpdate.CachedUpdateCheck(currentVersion)
+func handleVersion(w http.ResponseWriter, r *http.Request, currentVersion string) {
+	check := lerdUpdate.CachedUpdateCheck
+	if r.URL.Query().Get("refresh") != "" {
+		// An explicit user-initiated check bypasses the 24h cache for a live answer.
+		check = lerdUpdate.ForceUpdateCheck
+	}
+	info, _ := check(currentVersion)
 	writeJSON(w, buildVersionResponse(currentVersion, info))
 }
 
@@ -2495,17 +2903,8 @@ func handleSiteEnvRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	envFile, ok := envFileFromQuery(r)
+	dir, envFile, ok := resolveEnvTarget(w, r, site)
 	if !ok {
-		http.Error(w, "invalid file", http.StatusBadRequest)
-		return
-	}
-
-	branch := r.URL.Query().Get("branch")
-	ensureWorktreeEnvIfBranch(site, branch)
-	dir := resolveSitePath(site, branch)
-	if dir == "" {
-		http.NotFound(w, r)
 		return
 	}
 
@@ -2546,17 +2945,8 @@ func handleSiteEnvWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	envFile, ok := envFileFromQuery(r)
+	dir, envFile, ok := resolveEnvTarget(w, r, site)
 	if !ok {
-		http.Error(w, "invalid file", http.StatusBadRequest)
-		return
-	}
-
-	branch := r.URL.Query().Get("branch")
-	ensureWorktreeEnvIfBranch(site, branch)
-	dir := resolveSitePath(site, branch)
-	if dir == "" {
-		http.NotFound(w, r)
 		return
 	}
 
@@ -2582,10 +2972,15 @@ func handleSiteEnvWrite(w http.ResponseWriter, r *http.Request) {
 // are not behind any include glob, so backups and write-staging share the
 // project dir; backups are named "{envFile}.bkp.{ts}".
 func envCfgFile(dir, envFile string) cfgedit.File {
+	// envFile may be nested (CakePHP config/.env), so the backup dir is the
+	// file's own dir and the name is its base. Keying BkpDir/BkpName off the
+	// joined path keeps backups next to the file and listable; a root .env
+	// still resolves to BkpDir=dir, BkpName=.env as before.
+	full := filepath.Join(dir, envFile)
 	return cfgedit.File{
-		Path:    filepath.Join(dir, envFile),
-		BkpDir:  dir,
-		BkpName: envFile,
+		Path:    full,
+		BkpDir:  filepath.Dir(full),
+		BkpName: filepath.Base(full),
 	}
 }
 
@@ -2600,26 +2995,52 @@ var envExcludedFiles = map[string]bool{
 	".env.before_lerd": true,
 }
 
-// envFileFromQuery extracts the ?file= parameter and validates it against
-// envFileRe and envExcludedFiles. An empty ?file= defaults to ".env" so
-// callers that pre-date the multi-file UI keep working.
-func envFileFromQuery(r *http.Request) (string, bool) {
+// envFileFromQuery extracts the ?file= parameter and validates it. An empty
+// ?file= defaults to the framework's declared env file. That file is always
+// allowed even when it lives in a subdirectory (CakePHP config/.env), which
+// envFileRe rejects; every other name must be a root dotenv variant.
+func envFileFromQuery(r *http.Request, defaultFile string) (string, bool) {
 	f := r.URL.Query().Get("file")
 	if f == "" {
-		return ".env", true
+		return defaultFile, true
 	}
-	if !envFileRe.MatchString(f) {
-		return "", false
+	if f == defaultFile {
+		return f, true
 	}
-	if envExcludedFiles[f] {
+	if envExcludedFiles[f] || !envFileRe.MatchString(f) {
 		return "", false
 	}
 	return f, true
 }
 
-// listEnvFiles enumerates the project's editable env files in dir.
-// .env always appears first; the rest are alphabetical.
-func listEnvFiles(dir string) ([]string, error) {
+// resolveEnvTarget resolves the branch directory and the target env file for a
+// site env request, shared by all five /env endpoints so they agree on the file
+// set. It writes the error and returns ok=false when the branch dir is unknown
+// (404) or the framework has no editable dotenv / the file is invalid (400).
+func resolveEnvTarget(w http.ResponseWriter, r *http.Request, site *config.Site) (dir, envFile string, ok bool) {
+	branch := r.URL.Query().Get("branch")
+	ensureWorktreeEnvIfBranch(site, branch)
+	dir = resolveSitePath(site, branch)
+	if dir == "" {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	def, has := frameworkEnvFile(site.Framework, dir)
+	if !has {
+		http.Error(w, "invalid file", http.StatusBadRequest)
+		return "", "", false
+	}
+	envFile, ok = envFileFromQuery(r, def)
+	if !ok {
+		http.Error(w, "invalid file", http.StatusBadRequest)
+		return "", "", false
+	}
+	return dir, envFile, true
+}
+
+// listEnvFiles enumerates the project's editable env files in dir. The
+// framework's declared file appears first; the rest are alphabetical.
+func listEnvFiles(frameworkName, dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -2633,22 +3054,37 @@ func listEnvFiles(dir string) ([]string, error) {
 			continue
 		}
 		name := e.Name()
-		if envExcludedFiles[name] {
-			continue
-		}
-		if !envFileRe.MatchString(name) {
+		if envExcludedFiles[name] || !envFileRe.MatchString(name) {
 			continue
 		}
 		out = append(out, name)
 	}
 	sort.Strings(out)
+
+	primary, ok := frameworkEnvFile(frameworkName, dir)
+	if !ok {
+		// Framework has no editable dotenv (WordPress, Magento): read/write/
+		// backup all 400, so /env/files must not list root dotenvs either.
+		return nil, nil
+	}
+	// The root scan only sees names envFileRe accepts, so it misses a declared
+	// file that is nested (CakePHP config/.env) or simply named something else.
+	// Surface it whenever it is on disk, then hoist it: the file the framework
+	// actually reads is the one to pre-select, and the rest stay alphabetical.
+	scanned := false
 	for i, n := range out {
-		if n == ".env" && i != 0 {
-			out[0], out[i] = out[i], out[0]
+		if n == primary {
+			out = append(out[:i], out[i+1:]...)
+			scanned = true
 			break
 		}
 	}
-	return out, nil
+	if !scanned {
+		if info, statErr := os.Stat(filepath.Join(dir, primary)); statErr != nil || info.IsDir() {
+			return out, nil
+		}
+	}
+	return append([]string{primary}, out...), nil
 }
 
 // SiteEnvBackup is one row in the GET /api/sites/{domain}/env/backups list.
@@ -2660,16 +3096,8 @@ func handleSiteEnvBackupContent(w http.ResponseWriter, r *http.Request, site *co
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	envFile, ok := envFileFromQuery(r)
+	dir, envFile, ok := resolveEnvTarget(w, r, site)
 	if !ok {
-		http.Error(w, "invalid file", http.StatusBadRequest)
-		return
-	}
-	branch := r.URL.Query().Get("branch")
-	ensureWorktreeEnvIfBranch(site, branch)
-	dir := resolveSitePath(site, branch)
-	if dir == "" {
-		http.NotFound(w, r)
 		return
 	}
 	data, err := envCfgFile(dir, envFile).ReadBackup(name)
@@ -2691,16 +3119,8 @@ func handleSiteEnvBackups(w http.ResponseWriter, r *http.Request, site *config.S
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	envFile, ok := envFileFromQuery(r)
+	dir, envFile, ok := resolveEnvTarget(w, r, site)
 	if !ok {
-		http.Error(w, "invalid file", http.StatusBadRequest)
-		return
-	}
-	branch := r.URL.Query().Get("branch")
-	ensureWorktreeEnvIfBranch(site, branch)
-	dir := resolveSitePath(site, branch)
-	if dir == "" {
-		http.NotFound(w, r)
 		return
 	}
 	list, err := envCfgFile(dir, envFile).ListBackups()
@@ -2726,7 +3146,7 @@ func handleSiteEnvFiles(w http.ResponseWriter, r *http.Request, site *config.Sit
 		http.NotFound(w, r)
 		return
 	}
-	files, err := listEnvFiles(dir)
+	files, err := listEnvFiles(site.Framework, dir)
 	if err != nil {
 		http.Error(w, "listing env files: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -2735,6 +3155,123 @@ func handleSiteEnvFiles(w http.ResponseWriter, r *http.Request, site *config.Sit
 		files = []string{}
 	}
 	writeJSON(w, files)
+}
+
+// SiteEnvProposeResponse previews inserting the .env.example keys a site's env
+// file is missing. Current and Merged feed a diff editor; Added lists the keys
+// the merge inserts, Required/Optional the doctor's classification so the UI can
+// offer to also pull in the optional (has-a-code-default) keys. Every slice is
+// non-nil so the client can render without null guards.
+type SiteEnvProposeResponse struct {
+	File       string                `json:"file"`
+	Current    string                `json:"current"`
+	Merged     string                `json:"merged"`
+	Added      []string              `json:"added"`
+	AddedLines []int                 `json:"addedLines"`
+	Required   []string              `json:"required"`
+	Optional   []string              `json:"optional"`
+	Entries    []SiteEnvProposeEntry `json:"entries"`
+}
+
+// SiteEnvProposeEntry is one missing example key with the value that would be
+// written for it (verbatim from .env.example) and whether the app requires it,
+// so the UI can list every candidate key with its value for the user to pick.
+type SiteEnvProposeEntry struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`
+	Required bool   `json:"required"`
+}
+
+// handleSiteEnvPropose returns a proposed .env that inserts the framework env
+// file's missing example keys next to their neighbours. It targets the
+// framework-resolved env file (the same one the env_drift check inspects), so
+// ?file is not honoured; ?branch selects a worktree, ?optional=1 also pulls in
+// the keys the app reads with a code default.
+func handleSiteEnvPropose(w http.ResponseWriter, r *http.Request, site *config.Site) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	branch := r.URL.Query().Get("branch")
+	ensureWorktreeEnvIfBranch(site, branch)
+	dir := resolveSitePath(site, branch)
+	if dir == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// GetFrameworkForDir, like the Env tab's own resolver: GetFramework returns
+	// the Go built-in and ignores the versioned store yaml, so it would propose
+	// against a different file than the one the tab has open and the banner
+	// (gated on the two agreeing) could never appear.
+	var fw *config.Framework
+	if f, ok := config.GetFrameworkForDir(site.Framework, dir); ok {
+		fw = f
+	}
+	prop, ok := sitedoctor.ProposeEnvMerge(dir, fw)
+	if !ok {
+		writeJSON(w, SiteEnvProposeResponse{File: ".env", Added: []string{}, AddedLines: []int{}, Required: []string{}, Optional: []string{}, Entries: []SiteEnvProposeEntry{}})
+		return
+	}
+
+	values := envfile.ExampleValues(prop.ExampleContent)
+	entries := make([]SiteEnvProposeEntry, 0, len(prop.Required)+len(prop.Optional))
+	for _, k := range prop.Required {
+		entries = append(entries, SiteEnvProposeEntry{Key: k, Value: values[k], Required: true})
+	}
+	for _, k := range prop.Optional {
+		entries = append(entries, SiteEnvProposeEntry{Key: k, Value: values[k], Required: false})
+	}
+
+	// ?keys=A,B stages exactly the picked keys (intersected with the missing
+	// set so the caller can't inject arbitrary example lines); without it we
+	// fall back to all required keys, plus the optional ones when ?optional=1.
+	include := make(map[string]bool, len(prop.Required)+len(prop.Optional))
+	if sel := r.URL.Query().Get("keys"); sel != "" {
+		missing := make(map[string]bool, len(entries))
+		for _, e := range entries {
+			missing[e.Key] = true
+		}
+		for _, k := range strings.Split(sel, ",") {
+			if k = strings.TrimSpace(k); missing[k] {
+				include[k] = true
+			}
+		}
+	} else {
+		for _, k := range prop.Required {
+			include[k] = true
+		}
+		if r.URL.Query().Get("optional") == "1" {
+			for _, k := range prop.Optional {
+				include[k] = true
+			}
+		}
+	}
+	res := envfile.MergeMissing(prop.ExampleContent, prop.EnvContent, include)
+
+	addedLines := res.AddedLines
+	if addedLines == nil {
+		addedLines = []int{}
+	}
+	writeJSON(w, SiteEnvProposeResponse{
+		File:       prop.EnvFile,
+		Current:    prop.EnvContent,
+		Merged:     res.Merged,
+		Added:      nonNilStrings(res.Added),
+		AddedLines: addedLines,
+		Required:   nonNilStrings(prop.Required),
+		Optional:   nonNilStrings(prop.Optional),
+		Entries:    entries,
+	})
+}
+
+// nonNilStrings returns s unchanged unless it is nil, in which case it returns
+// an empty slice so JSON encodes [] rather than null.
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // SiteEnvRestoreRequest carries the previewed backup name so the restore
@@ -2756,16 +3293,8 @@ func handleSiteEnvRestore(w http.ResponseWriter, r *http.Request, site *config.S
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	envFile, ok := envFileFromQuery(r)
+	dir, envFile, ok := resolveEnvTarget(w, r, site)
 	if !ok {
-		http.Error(w, "invalid file", http.StatusBadRequest)
-		return
-	}
-	branch := r.URL.Query().Get("branch")
-	ensureWorktreeEnvIfBranch(site, branch)
-	dir := resolveSitePath(site, branch)
-	if dir == "" {
-		http.NotFound(w, r)
 		return
 	}
 	// Always attempt the decode: an empty body parses as the zero value via
@@ -2814,6 +3343,30 @@ func handleLANQR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	png, err := qrcode.Encode(shareURL, qrcode.Medium, 160)
+	if err != nil {
+		http.Error(w, "qr encode: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeContent(w, r, "qr.png", time.Time{}, bytes.NewReader(png))
+}
+
+// handleDashboardQR serves a QR code PNG encoding the dashboard's own LAN URL
+// (http://<lan-ip>:7073) so a phone can scan straight into the remote
+// dashboard. Only meaningful while LAN exposure is on; 404 otherwise.
+func handleDashboardQR(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := config.LoadGlobal()
+	if cfg == nil || !cfg.LAN.Exposed {
+		http.NotFound(w, r)
+		return
+	}
+	ip := uiPrimaryLANIP()
+	if ip == "" {
+		http.NotFound(w, r)
+		return
+	}
+	png, err := qrcode.Encode("http://"+ip+":7073", qrcode.Medium, 160)
 	if err != nil {
 		http.Error(w, "qr encode: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -3026,11 +3579,13 @@ func handleSiteNginxRestore(w http.ResponseWriter, r *http.Request, domain strin
 }
 
 // nginxHttpTemplate seeds the global http-level override editor when no file
-// exists yet. Loaded inside http{} after lerd's defaults, so user values win.
+// exists yet. Loaded inside http{}; a lerd default of the same name is
+// commented out of nginx.conf on save so nginx sees no duplicate.
 const nginxHttpTemplate = `# Lerd global nginx http-level overrides.
 #
-# Loaded inside the http { } block, after lerd's defaults, so your values win.
-# Lerd never overwrites this file; saving reloads nginx.
+# Loaded inside the http { } block. Anything you set here replaces lerd's own
+# default for that directive. Lerd never overwrites this file; saving reloads
+# nginx. Note client_max_body_size already defaults to 0 (unlimited).
 
 # client_max_body_size 100m;
 # gzip on;
@@ -3043,6 +3598,56 @@ const nginxHttpTemplate = `# Lerd global nginx http-level overrides.
 type SiteActionResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+	// Warning carries a change the user should know about but that did not fail
+	// the action: a PHP version clamped to the framework's range, or a target
+	// image that never built part of the declared extension set.
+	Warning string `json:"warning,omitempty"`
+}
+
+// handlePHPExtensions reports what a PHP version's image actually carries: its
+// own `php -m`, plus the declared extension/package sets measured against it.
+// Reading php -m starts a container, so it is cached against the image ID in
+// phpsets and only paid for when someone opens the tab.
+func handlePHPExtensions(w http.ResponseWriter, r *http.Request, version string) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	report, err := phpsets.ModulesReport(cfg, version)
+	if err != nil {
+		// The sets are still worth reporting when only php -m failed.
+		writeJSON(w, map[string]any{"ok": true, "report": report, "modules_error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "report": report})
+}
+
+// phpSwitchWarning renders what the dashboard should tell the user about a PHP
+// switch that succeeded but did not do exactly what they asked, so the dropdown
+// never silently lands a site on an image missing its extensions.
+func phpSwitchWarning(res siteops.PHPVersionResult) string {
+	var parts []string
+	if res.Clamped {
+		parts = append(parts, fmt.Sprintf("PHP %s is outside the range this framework supports, so %s was used instead.", res.Requested, res.Version))
+	}
+	if res.Demoted {
+		parts = append(parts, fmt.Sprintf("FrankenPHP has no image for PHP %s, so the site was switched to FPM.", res.Version))
+	}
+	switch {
+	case res.NotInstalled:
+		parts = append(parts, fmt.Sprintf("PHP %s has no image yet. Run 'lerd php:rebuild %s' to build it.", res.Version, res.Version))
+	case res.Stale:
+		parts = append(parts, fmt.Sprintf("The PHP %s image predates your custom extensions and packages. Run 'lerd php:rebuild %s' to bring it up to date.", res.Version, res.Version))
+	case len(res.Missing) > 0:
+		parts = append(parts, fmt.Sprintf("PHP %s cannot load: %s. They did not build on this version, and a rebuild will not change that.",
+			res.Version, strings.Join(res.Missing, ", ")))
+	}
+	return strings.Join(parts, " ")
 }
 
 func handleSiteAction(w http.ResponseWriter, r *http.Request) {
@@ -3059,6 +3664,12 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if doctorRoute(w, r, domain, parts[1:]) {
+		return
+	}
+	if statsRoute(w, r, domain, parts[1:]) {
+		return
+	}
+	if analyticsRoute(w, r, domain, parts[1:]) {
 		return
 	}
 	// /nginx subroutes (backups, restore) sit alongside the GET/POST on
@@ -3100,6 +3711,11 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		case "files":
 			if len(parts) == 3 {
 				handleSiteEnvFiles(w, r, site)
+				return
+			}
+		case "propose":
+			if len(parts) == 3 {
+				handleSiteEnvPropose(w, r, site)
 				return
 			}
 		case "backups":
@@ -3176,61 +3792,20 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, SiteActionResponse{Error: "version parameter required"})
 			return
 		}
-		if branch := r.URL.Query().Get("branch"); branch != "" {
-			if err := setWorktreePHPVersion(site, branch, version); err != nil {
-				writeJSON(w, SiteActionResponse{Error: err.Error()})
-				return
-			}
-			needsReload = true
-			break
-		}
-		// Write .php-version into project directory (keeps CLI php and other tools in sync).
-		if err := os.WriteFile(filepath.Join(site.Path, ".php-version"), []byte(version+"\n"), 0644); err != nil {
-			writeJSON(w, SiteActionResponse{Error: "writing .php-version: " + err.Error()})
+		// Funnel through the shared helper so the clamp, the .php-version and
+		// .lerd.yaml pins, the FrankenPHP fallback, the quadlet and the vhost all
+		// stay in sync with the CLI and MCP paths. It reloads nginx itself.
+		res, err := siteops.SetSitePHPVersion(site, version, siteops.PHPVersionOpts{Branch: r.URL.Query().Get("branch")})
+		if err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
-		if site.IsCustomContainer() {
-			writeJSON(w, SiteActionResponse{Error: "custom container sites do not use PHP versions"})
-			return
-		}
-		if site.IsHostProxy() {
-			writeJSON(w, SiteActionResponse{Error: "host-proxy sites do not use PHP versions"})
-			return
-		}
-		_ = config.SetProjectPHPVersion(site.Path, version)
-		site.PHPVersion = version
-		if site.IsFrankenPHP() {
-			if err := config.AddSite(*site); err != nil {
-				writeJSON(w, SiteActionResponse{Error: "updating site registry: " + err.Error()})
-				return
-			}
-			if err := siteops.FinishFrankenPHPLink(*site); err != nil {
-				writeJSON(w, SiteActionResponse{Error: "re-linking FrankenPHP site: " + err.Error()})
-				return
-			}
-			break
-		}
-		// Persist php_version in sites.yaml so the next dashboard load reflects
-		// the choice and dependent UIs (status snapshot, sidebar grouping) get
-		// the right value. Without this AddSite call the registry stays on the
-		// previous version even though the vhost + .php-version were updated —
-		// fork fix for the "selecting 7.4 on a site doesn't stick" bug.
-		if err := config.AddSite(*site); err != nil {
-			writeJSON(w, SiteActionResponse{Error: "updating site registry: " + err.Error()})
-			return
-		}
-		if site.Secured {
-			if err := certs.SecureSite(*site); err != nil {
-				writeJSON(w, SiteActionResponse{Error: "regenerating SSL vhost: " + err.Error()})
-				return
-			}
-		} else {
-			if err := nginx.GenerateVhost(*site, version); err != nil {
-				writeJSON(w, SiteActionResponse{Error: "regenerating vhost: " + err.Error()})
-				return
-			}
-		}
-		needsReload = true
+		// SetSitePHPVersion persists php_version in sites.yaml itself, so the
+		// next dashboard load reflects the choice and dependent UIs (status
+		// snapshot, sidebar grouping) get the right value — the fork fix for
+		// "selecting 7.4 on a site doesn't stick" now lives in the helper.
+		writeJSON(w, SiteActionResponse{OK: true, Warning: phpSwitchWarning(res)})
+		return
 	case "node":
 		version := r.URL.Query().Get("version")
 		if version == "" {
@@ -3790,43 +4365,6 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
-	case "tinker:symbols":
-		branch := r.URL.Query().Get("branch")
-		tinkerPath := resolveSitePath(site, branch)
-		if tinkerPath == "" {
-			http.NotFound(w, r)
-			return
-		}
-		ensureWorktreeEnvIfBranch(site, branch)
-		writeJSON(w, cli.CollectTinkerSymbols(tinkerPath))
-		return
-	case "tinker:lint":
-		var body struct {
-			Code string `json:"code"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
-			writeJSON(w, map[string]any{"ok": false, "error": "invalid body: " + err.Error()})
-			return
-		}
-		branch := r.URL.Query().Get("branch")
-		tinkerPath := resolveSitePath(site, branch)
-		if tinkerPath == "" {
-			writeJSON(w, map[string]any{"ok": false, "error": "unknown worktree branch"})
-			return
-		}
-		ensureWorktreeEnvIfBranch(site, branch)
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		diags, err := cli.LintTinkerCode(ctx, tinkerPath, body.Code)
-		resp := map[string]any{
-			"ok":          err == nil,
-			"diagnostics": diags,
-		}
-		if err != nil {
-			resp["error"] = err.Error()
-		}
-		writeJSON(w, resp)
-		return
 	case "tinker":
 		var body struct {
 			Code string `json:"code"`
@@ -3885,6 +4423,28 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			if len(parts) == 3 && (parts[2] == "start" || parts[2] == "stop") {
 				workerName := parts[1]
 				branch := r.URL.Query().Get("branch")
+				// A host-proxy site's dev server (the "app" worker) IS the site:
+				// nothing runs behind the proxy vhost but the dev command itself.
+				// Stopping just its unit leaves the vhost proxying to a now-dead
+				// port, so every request 502s. Route the parent app worker's
+				// start/stop through pause/unpause, which swap the vhost to the
+				// paused page (and back) and keep registry state consistent so the
+				// paused page's Resume button works. Worktree dev servers keep the
+				// plain worker path; their vhosts are handled by (un)pauseWorktrees.
+				if lifecycle, ok := hostProxyAppLifecycleOp(site.IsHostProxy(), workerName, branch, parts[2]); ok {
+					var opErr error
+					if lifecycle == "pause" {
+						opErr = cli.PauseSite(site.Name)
+					} else {
+						opErr = cli.UnpauseSite(site.Name)
+					}
+					if opErr != nil {
+						writeJSON(w, SiteActionResponse{Error: opErr.Error()})
+						return
+					}
+					writeJSON(w, SiteActionResponse{OK: true})
+					return
+				}
 				targetPath := site.Path
 				if branch != "" {
 					wtPath := resolveSitePath(site, branch)
@@ -3947,6 +4507,26 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, SiteActionResponse{OK: true})
 }
 
+// hostProxyAppLifecycleOp maps a worker start/stop on a host-proxy site's parent
+// dev-server worker ("app") to the site-level lifecycle op that also swaps the
+// proxy vhost: "stop" -> "pause", "start" -> "unpause". It returns ok=false for
+// anything that must take the normal per-worker path — a different worker, a
+// worktree target (branch set), or a non-host-proxy site — so only the parent
+// app worker is rerouted. Without this, stopping the app worker leaves the proxy
+// vhost pointing at the dead dev-server port and every request to the site 502s.
+func hostProxyAppLifecycleOp(isHostProxy bool, workerName, branch, op string) (string, bool) {
+	if !isHostProxy || workerName != config.HostProxyWorkerName || branch != "" {
+		return "", false
+	}
+	switch op {
+	case "stop":
+		return "pause", true
+	case "start":
+		return "unpause", true
+	}
+	return "", false
+}
+
 func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 	// path: /api/php-versions/{version}/{remove|set-default|config|start|stop|extensions[/<ext>]|...}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/php-versions/"), "/")
@@ -3955,16 +4535,19 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Custom extension management — fork addition. Three shapes share the
-	// /api/php-versions/{version}/extensions/... prefix; dispatch here so the
-	// existing 2-part action handler stays single-purpose.
-	if parts[1] == "extensions" {
+	// Custom extension management — fork addition. The mutating shapes share the
+	// /api/php-versions/{version}/extensions/... prefix; dispatch them here so
+	// the existing 2-part action handler stays single-purpose.
+	//
+	// GET is deliberately NOT claimed here: it belongs to handlePHPExtensions
+	// below, which reports what the image actually carries (declared vs loaded)
+	// and is what the dashboard's extensions tab reads. The fork used to serve
+	// its own declared-only list on this route, which shadowed that report.
+	if parts[1] == "extensions" && r.Method != http.MethodGet {
 		switch {
-		case len(parts) == 2 && r.Method == http.MethodGet:
-			handlePhpExtensionsList(w, r)
 		case len(parts) == 2 && r.Method == http.MethodPost:
 			handlePhpExtensionAdd(w, r)
-		case len(parts) == 3 && (r.Method == http.MethodDelete || r.Method == http.MethodPost):
+		case len(parts) == 3 && r.Method == http.MethodDelete:
 			handlePhpExtensionRemove(w, r)
 		default:
 			http.NotFound(w, r)
@@ -3973,13 +4556,14 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 	}
 	version, action := parts[0], parts[1]
 	// The php.ini editor (config) also accepts a "site:<name>" scope for a
-	// FrankenPHP site's own per-site ini; every other action is version-only.
-	isSiteScope := strings.HasPrefix(version, "site:")
-	if isSiteScope && action != "config" {
+	// FrankenPHP site's own per-site ini and a "shared" scope for the
+	// version-agnostic file; every other action is version-only.
+	isIniScope := strings.HasPrefix(version, "site:") || version == "shared"
+	if isIniScope && action != "config" {
 		http.NotFound(w, r)
 		return
 	}
-	if !isSiteScope && !validVersion.MatchString(version) {
+	if !isIniScope && !validVersion.MatchString(version) {
 		http.NotFound(w, r)
 		return
 	}
@@ -4006,6 +4590,12 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.NotFound(w, r)
+		return
+	}
+
+	// A read, so it sits above the POST-only gate below, as `config` does.
+	if action == "extensions" && len(parts) == 2 {
+		handlePHPExtensions(w, r, version)
 		return
 	}
 
@@ -4060,6 +4650,20 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 		// `event: done` carrying ok/error; the frontend uses the ok flag to
 		// decide whether to drop the beforeunload warning.
 		handlePhpVersionInstallStream(w, r, version)
+	case "ports":
+		var body struct {
+			Ports []string `json:"ports"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		resolved, err := podman.SetFPMPorts(version, body.Ports)
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "ports": resolved})
 	default:
 		http.NotFound(w, r)
 	}
@@ -4372,7 +4976,7 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pr, pw := io.Pipe()
-	cmd := exec.CommandContext(streamCtx, podman.PodmanBin(), "logs", "-f", "--tail", tail, container)
+	cmd := podman.CmdContext(streamCtx, "logs", "-f", "--tail", tail, container)
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 
@@ -4407,33 +5011,16 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 
 var allowedQueueUnit = regexp.MustCompile(`^[a-z0-9-]+$`)
 
-func handleHorizonLogs(w http.ResponseWriter, r *http.Request) {
-	// path: /api/horizon/<sitename>/logs
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/horizon/"), "/")
-	if len(parts) != 2 || parts[1] != "logs" || !allowedQueueUnit.MatchString(parts[0]) {
-		http.NotFound(w, r)
-		return
-	}
-	streamUnitLogs(w, r, "lerd-horizon-"+parts[0])
-}
-
-func handleQueueLogs(w http.ResponseWriter, r *http.Request) {
-	// path: /api/queue/<sitename>/logs
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/queue/"), "/")
-	if len(parts) != 2 || parts[1] != "logs" || !allowedQueueUnit.MatchString(parts[0]) {
-		http.NotFound(w, r)
-		return
-	}
-	streamUnitLogs(w, r, "lerd-queue-"+parts[0])
-}
-
 // SettingsResponse is the response for GET /api/settings.
 type SettingsResponse struct {
-	AutostartOnLogin          bool   `json:"autostart_on_login"`
-	WorkerExecMode            string `json:"worker_exec_mode"`
-	WorkerModeApplies         bool   `json:"worker_mode_applies"` // true on macOS only
-	IdleSuspendEnabled        bool   `json:"idle_suspend_enabled"`
-	IdleSuspendTimeoutMinutes int    `json:"idle_suspend_timeout_minutes"`
+	AutostartOnLogin          bool     `json:"autostart_on_login"`
+	WorkerExecMode            string   `json:"worker_exec_mode"`
+	WorkerModeApplies         bool     `json:"worker_mode_applies"` // true on macOS only
+	IdleSuspendEnabled        bool     `json:"idle_suspend_enabled"`
+	IdleSuspendTimeoutMinutes int      `json:"idle_suspend_timeout_minutes"`
+	DNSEnabled                bool     `json:"dns_enabled"`
+	DNSUpstream               []string `json:"dns_upstream"`          // pinned upstreams, empty = auto-detect
+	DNSUpstreamDetected       []string `json:"dns_upstream_detected"` // what auto-detection currently sees
 }
 
 func handleSettings(w http.ResponseWriter, _ *http.Request) {
@@ -4441,10 +5028,14 @@ func handleSettings(w http.ResponseWriter, _ *http.Request) {
 	mode := config.WorkerExecModeExec
 	idleEnabled := false
 	idleMinutes := int(config.DefaultIdleSuspendTimeout / time.Minute)
+	dnsEnabled := true
+	var dnsUpstream []string
 	if cfg != nil {
 		mode = cfg.WorkerExecMode()
 		idleEnabled = cfg.IdleSuspend.Enabled
 		idleMinutes = int(cfg.IdleSuspendTimeout() / time.Minute)
+		dnsEnabled = cfg.DNSManaged()
+		dnsUpstream = cfg.DNS.Upstream
 	}
 	writeJSON(w, SettingsResponse{
 		AutostartOnLogin:          lerdSystemd.IsAutostartEnabled(),
@@ -4452,6 +5043,9 @@ func handleSettings(w http.ResponseWriter, _ *http.Request) {
 		WorkerModeApplies:         runtime.GOOS == "darwin",
 		IdleSuspendEnabled:        idleEnabled,
 		IdleSuspendTimeoutMinutes: idleMinutes,
+		DNSEnabled:                dnsEnabled,
+		DNSUpstream:               dnsUpstream,
+		DNSUpstreamDetected:       dns.ReadUpstreamDNS(),
 	})
 }
 
@@ -4486,12 +5080,65 @@ func handleSettingsIdleSuspend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	if !body.Enabled {
-		// Turning the feature off brings every suspended site's workers back
-		// immediately rather than on the next tick.
-		idleEng.ResumeAllSuspended()
+	// Persisted flag is the boot source of truth; this signal makes the running
+	// watcher start the session, or resume all workers and tear it down, now.
+	if body.Enabled {
+		activityping.Enable()
+	} else {
+		activityping.Disable()
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleSettingsDNSUpstream pins (or clears) the upstream DNS servers dnsmasq
+// forwards non-.test queries to. An empty list restores auto-detection. On
+// success it rewrites the dnsmasq config and restarts lerd-dns so the change
+// takes effect without a manual `lerd install`.
+func handleSettingsDNSUpstream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Upstream []string `json:"upstream"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	cleaned := make([]string, 0, len(body.Upstream))
+	for _, entry := range body.Upstream {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+		norm, ok := dns.NormalizeUpstreamEntry(entry)
+		if !ok {
+			writeJSON(w, map[string]any{"ok": false, "error": "invalid upstream: " + entry})
+			return
+		}
+		cleaned = append(cleaned, norm)
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	cfg.DNS.Upstream = cleaned
+	if err := config.SaveGlobal(cfg); err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if cfg.DNSManaged() {
+		if err := dns.WriteDnsmasqConfig(config.DnsmasqDir()); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": "saved, but rewriting dnsmasq config failed: " + err.Error()})
+			return
+		}
+		if err := podman.RestartUnit("lerd-dns"); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": "saved, but restarting lerd-dns failed: " + err.Error()})
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true, "upstream": cleaned})
 }
 
 func handleSettingsWorkerMode(w http.ResponseWriter, r *http.Request) {
@@ -4649,20 +5296,25 @@ func openTerminalCommand(script string) error {
 		args []string
 	}
 	combined := "sh -c " + podman.ShellQuote(script)
-	candidates := []termCmd{
-		{"kitty", []string{"sh", "-c", script}},
-		{"foot", []string{"sh", "-c", script}},
-		{"alacritty", []string{"-e", "sh", "-c", script}},
-		{"wezterm", []string{"start", "--", "sh", "-c", script}},
-		{"ghostty", []string{"-e", combined}},
-		{"ptyxis", []string{"--", "sh", "-c", script}},
-		{"konsole", []string{"--separate", "-e", "sh", "-c", script}},
-		{"gnome-terminal", []string{"--", "sh", "-c", script}},
-		{"xfce4-terminal", []string{"-e", combined}},
-		{"tilix", []string{"-e", combined}},
-		{"terminator", []string{"-e", combined}},
-		{"xterm", []string{"-e", "sh", "-c", script}},
+	candidates := []termCmd{}
+	// $TERMINAL leads, matching openTerminalAt and the error message below.
+	if t := os.Getenv("TERMINAL"); t != "" {
+		candidates = append(candidates, termCmd{t, []string{"-e", "sh", "-c", script}})
 	}
+	candidates = append(candidates,
+		termCmd{"kitty", []string{"sh", "-c", script}},
+		termCmd{"foot", []string{"sh", "-c", script}},
+		termCmd{"alacritty", []string{"-e", "sh", "-c", script}},
+		termCmd{"wezterm", []string{"start", "--", "sh", "-c", script}},
+		termCmd{"ghostty", []string{"-e", combined}},
+		termCmd{"ptyxis", []string{"--", "sh", "-c", script}},
+		termCmd{"konsole", []string{"--separate", "-e", "sh", "-c", script}},
+		termCmd{"gnome-terminal", []string{"--", "sh", "-c", script}},
+		termCmd{"xfce4-terminal", []string{"-e", combined}},
+		termCmd{"tilix", []string{"-e", combined}},
+		termCmd{"terminator", []string{"-e", combined}},
+		termCmd{"xterm", []string{"-e", "sh", "-c", script}},
+	)
 
 	if runtime.GOOS == "darwin" {
 		if _, err := os.Stat("/Applications/iTerm.app"); err == nil {
@@ -4715,14 +5367,21 @@ func handleXdebugAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	applyMode := ""
+	applyStart := "yes"
 	if action == "on" {
 		applyMode = r.URL.Query().Get("mode")
 		if applyMode == "" {
 			applyMode = "debug"
 		}
+		// The dashboard doesn't expose on-demand (start_with_request=trigger), so
+		// preserve whatever the CLI last set instead of silently resetting a user's
+		// on-demand choice back to connect-on-every-request.
+		if cfg, err := config.LoadGlobal(); err == nil {
+			applyStart = cfg.GetXdebugStart(version)
+		}
 	}
 
-	res, err := xdebugops.Apply(version, applyMode)
+	res, err := xdebugops.ApplyWithStart(version, applyMode, applyStart)
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -4730,48 +5389,11 @@ func handleXdebugAction(w http.ResponseWriter, r *http.Request) {
 	if res.RestartErr != nil {
 		fmt.Printf("[WARN] restart %s: %v\n", xdebugops.FPMUnit(version), res.RestartErr)
 	}
+	// Per-site FrankenPHP and custom-FPM containers mount the same per-version
+	// 99-xdebug.ini, so the shared-FPM restart above doesn't reach them; restart
+	// them too or the toggle is a silent no-op on those sites.
+	podman.RestartSiteContainersForVersion(version)
 	writeJSON(w, map[string]any{"ok": true, "xdebug_enabled": res.Enabled, "xdebug_mode": res.Mode})
-}
-
-func handleScheduleLogs(w http.ResponseWriter, r *http.Request) {
-	// path: /api/schedule/<sitename>/logs
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/schedule/"), "/")
-	if len(parts) != 2 || parts[1] != "logs" || !allowedQueueUnit.MatchString(parts[0]) {
-		http.NotFound(w, r)
-		return
-	}
-	streamUnitLogs(w, r, "lerd-schedule-"+parts[0])
-}
-
-func handleReverbLogs(w http.ResponseWriter, r *http.Request) {
-	// path: /api/reverb/<sitename>/logs
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/reverb/"), "/")
-	if len(parts) != 2 || parts[1] != "logs" || !allowedQueueUnit.MatchString(parts[0]) {
-		http.NotFound(w, r)
-		return
-	}
-	streamUnitLogs(w, r, "lerd-reverb-"+parts[0])
-}
-
-func handleWorkerLogs(w http.ResponseWriter, r *http.Request) {
-	// path: /api/worker/<sitename>/<workername>/logs
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/worker/"), "/")
-	if len(parts) != 3 || parts[2] != "logs" || !allowedQueueUnit.MatchString(parts[0]) || !allowedQueueUnit.MatchString(parts[1]) {
-		http.NotFound(w, r)
-		return
-	}
-	// unit: lerd-{workerName}-{siteName}
-	streamUnitLogs(w, r, "lerd-"+parts[1]+"-"+parts[0])
-}
-
-func handleStripeLogs(w http.ResponseWriter, r *http.Request) {
-	// path: /api/stripe/<sitename>/logs
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/stripe/"), "/")
-	if len(parts) != 2 || parts[1] != "logs" || !allowedQueueUnit.MatchString(parts[0]) {
-		http.NotFound(w, r)
-		return
-	}
-	streamUnitLogs(w, r, "lerd-stripe-"+parts[0])
 }
 
 func handleWatcherStart(w http.ResponseWriter, r *http.Request) {
@@ -4786,44 +5408,10 @@ func handleWatcherStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func handleWatcherLogs(w http.ResponseWriter, r *http.Request) {
-	streamUnitLogs(w, r, "lerd-watcher")
-}
-
 // setWorktreeDBIsolated forwards to cli.SetWorktreeDBIsolated; the shared
 // implementation in cli is also used by `lerd db:isolate`.
 func setWorktreeDBIsolated(site *config.Site, branch string, isolated bool, source string) error {
 	return cli.SetWorktreeDBIsolated(site, branch, isolated, source)
-}
-
-// setWorktreePHPVersion writes the override to the worktree's .lerd.yaml and
-// .php-version, then regenerates its nginx vhost so the next request lands on
-// the new PHP-FPM upstream.
-func setWorktreePHPVersion(site *config.Site, branch, version string) error {
-	wtPath := resolveSitePath(site, branch)
-	if wtPath == "" {
-		return fmt.Errorf("unknown worktree branch")
-	}
-	if err := os.WriteFile(filepath.Join(wtPath, ".php-version"), []byte(version+"\n"), 0644); err != nil {
-		return fmt.Errorf("writing .php-version: %w", err)
-	}
-	if err := config.SetWorktreePHPVersion(wtPath, version); err != nil {
-		return fmt.Errorf("updating .lerd.yaml: %w", err)
-	}
-	worktrees, err := gitpkg.DetectWorktrees(site.Path, site.PrimaryDomain())
-	if err != nil {
-		return fmt.Errorf("detecting worktrees: %w", err)
-	}
-	for _, wt := range worktrees {
-		if wt.Branch != branch {
-			continue
-		}
-		if site.Secured {
-			return nginx.GenerateWorktreeSSLVhost(wt.Domain, wt.Path, version, site.PrimaryDomain(), site.Name, wt.Branch)
-		}
-		return nginx.GenerateWorktreeVhost(wt.Domain, wt.Path, version, site.Name, wt.Branch)
-	}
-	return fmt.Errorf("worktree %s not found", branch)
 }
 
 // ensureWorktreeEnvIfBranch materialises the worktree's .env when the request
@@ -4866,15 +5454,45 @@ func projectJSRuntime(sitePath string) string {
 	return ""
 }
 
-func siteHasEnv(sitePath string) bool {
+// frameworkEnvFile resolves the dotenv file a framework actually reads, relative
+// to dir (Laravel ".env", CakePHP "config/.env", Symfony ".env.local"). ok is
+// false for frameworks whose env is PHP source (WordPress wp-config.php, etc.):
+// those are out of scope for the flat key=value editor and get no Env tab. With
+// no known framework it defaults to ".env".
+func frameworkEnvFile(frameworkName, dir string) (file string, ok bool) {
+	// GetFrameworkForDir (not GetFramework) so the tab resolves against the same
+	// version-aware store definition the env wiring and doctor use; GetFramework
+	// returns the Go built-in and ignores the per-version store yaml.
+	fw, found := config.GetFrameworkForDir(frameworkName, dir)
+	if !found {
+		return ".env", true
+	}
+	file, format := fw.Env.Resolve(dir)
+	if format != "dotenv" {
+		return "", false
+	}
+	// The declared path comes from framework yaml and is joined onto dir for
+	// read/write/backup; reject anything that escapes the site (absolute or
+	// ../.. traversal) so a bad declaration can't reach ../../.ssh/config.
+	// Symlinks are deliberately followed: a project sharing one .env through a
+	// symlink is a real layout, and it is the same file the CLI, the doctor and
+	// the service wiring already read.
+	if !filepath.IsLocal(file) {
+		return "", false
+	}
+	return file, true
+}
+
+func siteHasEnv(frameworkName, sitePath string) bool {
 	if sitePath == "" {
 		return false
 	}
-	info, err := os.Stat(filepath.Join(sitePath, ".env"))
-	if err != nil {
+	file, ok := frameworkEnvFile(frameworkName, sitePath)
+	if !ok {
 		return false
 	}
-	return !info.IsDir()
+	info, err := os.Stat(filepath.Join(sitePath, file))
+	return err == nil && !info.IsDir()
 }
 
 // siteHasEnvOverrides reports whether the project declares env_overrides in its

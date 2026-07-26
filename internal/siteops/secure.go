@@ -14,6 +14,7 @@ import (
 var (
 	secureCertFn   = certs.SecureSite
 	unsecureCertFn = certs.UnsecureSite
+	reissueCertFn  = certs.ReissueCertForWorktree
 	nginxReloadFn  = nginx.Reload
 	notifyDaemonFn = defaultNotifyDaemon
 )
@@ -57,26 +58,69 @@ func defaultNotifyDaemon(domain, action string) error {
 //     for these, so even callers running inside the daemon hit the same
 //     HTTP endpoints; a tiny loopback roundtrip is the cost of having one
 //     identical post-toggle path.
+//  7. Cascade to the group secondaries when the site is a secured group main,
+//     and refuse to unsecure a secondary whose main is secured (see #811).
 func SetSecured(site *config.Site, secured bool) error {
+	_, err := SetSecuredCascade(site, secured)
+	return err
+}
+
+// SetSecuredCascade is SetSecured, additionally naming the group secondaries it
+// secured alongside a group main so a caller can report them. Securing a main
+// silently changing other sites is the kind of thing a user should be told.
+func SetSecuredCascade(site *config.Site, secured bool) ([]string, error) {
+	if !secured {
+		if main := securedMainOf(site); main != nil {
+			return nil, fmt.Errorf("site %q is a secondary of the secured group main %q: on plain HTTP its subdomain would be served by the main's *.%s wildcard over https. Unsecure %q first",
+				site.Name, main.Name, main.PrimaryDomain(), main.Name)
+		}
+	}
 	if secured {
+		// Upstream gates HTTPS on lerd-managed DNS here. The Oracle fork does
+		// not: `lerd install` trusts the mkcert CA regardless of the DNS choice
+		// and .localhost resolves to the loopback via RFC 6761, so a DNS-off
+		// install serves HTTPS just as well as a .test one.
 		if err := secureCertFn(*site); err != nil {
-			return fmt.Errorf("issuing certificate: %w", err)
+			return nil, fmt.Errorf("issuing certificate: %w", err)
 		}
 	} else {
 		if err := unsecureCertFn(*site); err != nil {
-			return fmt.Errorf("removing certificate: %w", err)
+			return nil, fmt.Errorf("removing certificate: %w", err)
 		}
 	}
 	site.Secured = secured
 	if err := config.AddSite(*site); err != nil {
-		return fmt.Errorf("updating site registry: %w", err)
+		return nil, fmt.Errorf("updating site registry: %w", err)
 	}
 	_ = SyncSiteEnv(config.Site{Name: site.Name, Path: site.Path, Domains: site.Domains, Secured: secured})
 	_ = config.SetProjectSecured(site.Path, secured)
 	if err := nginxReloadFn(); err != nil {
-		return fmt.Errorf("reloading nginx: %w", err)
+		return nil, fmt.Errorf("reloading nginx: %w", err)
 	}
 	_ = notifyDaemonFn(site.PrimaryDomain(), "stripe:refresh")
 	_ = notifyDaemonFn(site.PrimaryDomain(), "lan:refresh")
+	if secured && site.IsGroupMain() {
+		return cascadeGroupSecondaries(site)
+	}
+	return nil, nil
+}
+
+// RenewCert force-reissues a secured site's TLS certificate on demand, resetting
+// its validity window, and reloads nginx so the fresh cert takes effect. The new
+// cert covers the site's own domains plus every worktree wildcard SAN, matching
+// what securing the site issues. This is the manual counterpart to the automatic
+// self-heal (certs.EnsureCert reissues only an aging cert on start/watcher pass);
+// callers reach for it to reset the clock without toggling HTTPS off and on. It
+// is the single source of truth shared by the CLI and MCP renew paths.
+func RenewCert(site *config.Site) error {
+	if !site.Secured {
+		return fmt.Errorf("site %q is not secured, run 'lerd secure' first", site.Name)
+	}
+	if err := reissueCertFn(*site); err != nil {
+		return fmt.Errorf("reissuing certificate: %w", err)
+	}
+	if err := nginxReloadFn(); err != nil {
+		return fmt.Errorf("reloading nginx: %w", err)
+	}
 	return nil
 }

@@ -6,9 +6,9 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
@@ -40,14 +40,14 @@ func runMachineReset(assumeYes bool) error {
 		}
 	}
 
-	fmt.Printf("  --> Stopping Podman Machine %q ...\n", name)
-	stop := exec.Command(podman.PodmanBin(), "machine", "stop", name)
+	feedback.Line(fmt.Sprintf("Stopping Podman Machine %q…", name))
+	stop := podman.Cmd("machine", "stop", name)
 	stop.Stdout = os.Stdout
 	stop.Stderr = os.Stderr
 	_ = stop.Run() // a stopped machine still removes fine
 
-	fmt.Printf("  --> Removing Podman Machine %q ...\n", name)
-	rm := exec.Command(podman.PodmanBin(), "machine", "rm", "-f", name)
+	feedback.Line(fmt.Sprintf("Removing Podman Machine %q…", name))
+	rm := podman.Cmd("machine", "rm", "-f", name)
 	rm.Stdout = os.Stdout
 	rm.Stderr = os.Stderr
 	if err := rm.Run(); err != nil {
@@ -56,7 +56,7 @@ func runMachineReset(assumeYes bool) error {
 
 	// ensurePodmanMachineRunning re-inits a rootful machine when none exists
 	// and waits for the API socket to be ready.
-	ensurePodmanMachineRunning()
+	_ = ensurePodmanMachineRunning()
 	recordMachineLastUp()
 
 	fmt.Println()

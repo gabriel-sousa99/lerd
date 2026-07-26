@@ -1,4 +1,4 @@
-import { writable, get } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import { wsMessage, type NotificationEvent } from './ws';
 import { apiFetch } from './api';
 import { m } from '../paraglide/messages.js';
@@ -21,6 +21,7 @@ export type NotifyKind =
   | 'op_done'
   | 'update_available'
   | 'nplusone'
+  | 'slow_route'
   | 'dump';
 
 export const ALL_KINDS: NotifyKind[] = [
@@ -29,6 +30,7 @@ export const ALL_KINDS: NotifyKind[] = [
   'op_done',
   'update_available',
   'nplusone',
+  'slow_route',
   'dump'
 ];
 
@@ -48,6 +50,10 @@ const DEFAULTS: NotifyPrefs = {
     // stay low-volume and useful; on by default, matching prior behaviour
     // where the kind had no toggle and always fired.
     nplusone: true,
+    // slow_route is edge-triggered in the watcher (fires once when a route goes
+    // slow, rearms when it recovers), so it stays low-volume; on by default like
+    // the other proactive warnings.
+    slow_route: true,
     // dump is opt-in: many dev sessions emit hundreds of ray() calls and
     // the user almost always wants to silence them by default.
     dump: false
@@ -146,18 +152,152 @@ function localize(
   return fallback ?? '';
 }
 
+// InAppNotification is one entry of the in-page notification stack, the surface
+// that carries notifications the desktop never shows.
+export interface InAppNotification {
+  id: number;
+  kind: string;
+  title: string;
+  body: string;
+  url: string;
+  failed: boolean;
+}
+
+export const inAppNotifications = writable<InAppNotification[]>([]);
+
+// Severity drives how a notification is drawn on the in-page surfaces. The
+// diagnostic kinds report a problem lerd found in the user's app, so they read
+// as warnings rather than as a completed action.
+export type NotifySeverity = 'failure' | 'warning' | 'info';
+
+const WARNING_KINDS = new Set<string>(['nplusone', 'slow_route']);
+
+export function notificationSeverity(kind: string, failed: boolean): NotifySeverity {
+  if (failed) return 'failure';
+  return WARNING_KINDS.has(kind) ? 'warning' : 'info';
+}
+
+// HISTORY_KEY holds the notification centre's list. It is persisted because the
+// point of the centre is catching up on what happened while the user was
+// elsewhere, including before a reload.
+const HISTORY_KEY = 'lerd:notify:history';
+const historyLimit = 50;
+
+export interface NotificationRecord extends InAppNotification {
+  at: number;
+  read: boolean;
+}
+
+// Debug notifications used to open the global bridge view, which says nothing
+// about the event that was clicked. Stored entries outlive the build that wrote
+// them, so an old one is retargeted at the sites list on load.
+function retargetStoredURL(url: string): string {
+  return url === '#system/dump-bridge' ? '#sites' : (url ?? '');
+}
+
+// Stored ids are renumbered on the way in. The list outlives the code that
+// wrote it, so a payload from an older build (or a hand-edited one) can carry
+// repeats, and two entries under one key throw out of the keyed list and take
+// the dashboard down with them.
+function loadHistory(): NotificationRecord[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    const list = raw ? (JSON.parse(raw) as NotificationRecord[]) : [];
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((r) => r && typeof r === 'object' && typeof r.title === 'string')
+      .slice(0, historyLimit)
+      .map((r, i) => ({ ...r, id: i + 1, url: retargetStoredURL(r.url) }));
+  } catch {
+    return [];
+  }
+}
+
+export const notificationHistory = writable<NotificationRecord[]>(loadHistory());
+
+notificationHistory.subscribe((list) => {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, historyLimit)));
+  } catch {
+    /* storage may be unavailable (private mode, quota) */
+  }
+});
+
+export const unreadNotifications = derived(notificationHistory, (list) =>
+  list.reduce((n, r) => n + (r.read ? 0 : 1), 0)
+);
+
+export function markNotificationsRead() {
+  notificationHistory.update((list) => list.map((r) => (r.read ? r : { ...r, read: true })));
+}
+
+export function clearNotificationHistory() {
+  notificationHistory.set([]);
+}
+
+// inAppLimit keeps a burst of events from filling the viewport; the oldest
+// non-failure entries fall off first.
+const inAppLimit = 4;
+
+// Ids are derived from the list they join rather than from a module counter,
+// which restarts at zero on every reload and would hand a fresh notification
+// the id of a stored one. Two entries under one key throw out of the keyed
+// list and take the dashboard down with them.
+function nextId(list: { id: number }[]): number {
+  return list.reduce((max, n) => Math.max(max, n.id), 0) + 1;
+}
+
+function pushInApp(n: Omit<InAppNotification, 'id'>) {
+  inAppNotifications.update((list) => [...list, { ...n, id: nextId(list) }].slice(-inAppLimit));
+}
+
+// record keeps every delivered notification in the centre, whichever surface
+// showed it, so a desktop popup the user missed is still there to be read.
+function record(n: Omit<InAppNotification, 'id'>) {
+  notificationHistory.update((list) =>
+    [{ ...n, id: nextId(list), at: Date.now(), read: false }, ...list].slice(0, historyLimit)
+  );
+}
+
+export function dismissInApp(id: number) {
+  inAppNotifications.update((list) => list.filter((n) => n.id !== id));
+}
+
 // dedupeWindowMs scopes the tag dedupe to a short window so an immediate
 // retry of the same payload collapses but a same-tag send seconds later
 // (Send-test double-click, two identical mail webhooks) still fires.
 const dedupeWindowMs = 2000;
 const recentTags = new Map<string, number>();
 
+// A focused dashboard is already showing whatever the notification announces,
+// so the event is left to the page rather than raised on the desktop.
+function windowFocused(): boolean {
+  if (typeof document === 'undefined') return false;
+  return !document.hidden && document.hasFocus();
+}
+
+// A failed operation is the one thing the user must not miss: it is reported
+// whatever the notification prefs say and it stays on screen until dismissed.
+function isFailure(evt: NotificationEvent): boolean {
+  return evt.kind.endsWith('_failed') || evt.data?.result === 'failed';
+}
+
 async function fireNotification(evt: NotificationEvent) {
-  if (typeof Notification === 'undefined') return;
-  if (Notification.permission !== 'granted') return;
   const prefs = get(notifyPrefs);
-  if (!prefs.enabled) return;
-  if (prefs.kinds[evt.kind as NotifyKind] === false) return;
+  const native = get(notifyDelivery) === 'native';
+  const failed = isFailure(evt);
+  // A failure is always delivered. Otherwise the gate follows the active sink:
+  // under native the daemon's resolved per-kind prefs decide, and the browser
+  // prefs (which have no UI in native mode) must not act as a phantom filter
+  // that keeps the desktop popup but silently empties the bell.
+  if (!failed) {
+    if (native) {
+      if (get(notifyNativeKinds)[evt.kind] === false) return;
+    } else {
+      if (!prefs.enabled) return;
+      if (prefs.kinds[evt.kind as NotifyKind] === false) return;
+    }
+  }
   if (evt.tag) {
     const key = evt.kind + ' ' + evt.tag;
     const now = Date.now();
@@ -173,6 +313,28 @@ async function fireNotification(evt: NotificationEvent) {
 
   const title = localize(evt.title_key, evt.title, evt.params) || '(notification)';
   const body = localize(evt.body_key, evt.body, evt.params) || '';
+
+  // In-app first: it is the only surface while the window has focus, and a
+  // failure is recorded even when the desktop popup also fires, so it is still
+  // waiting on screen when the user comes back to the dashboard.
+  // The test notification exists to prove the desktop path works, so it skips
+  // the in-page surfaces and the focus check that would swallow it.
+  const isTest = evt.kind === 'test';
+  if (!isTest) {
+    const entry = { kind: evt.kind, title, body, url: evt.url ?? '', failed };
+    record(entry);
+    if (failed || windowFocused()) {
+      pushInApp(entry);
+    }
+    if (windowFocused()) return;
+    // Under the native sink the daemon has already posted this to the desktop.
+    // A second popup from the page duplicates it and takes the click away from
+    // the desktop app, which the daemon's copy opens through lerd://.
+    if (get(notifyDelivery) === 'native') return;
+  }
+  if (typeof Notification === 'undefined') return;
+  if (Notification.permission !== 'granted') return;
+
   const opts: NotificationOptions = {
     body,
     tag: evt.tag,
@@ -192,11 +354,73 @@ async function fireNotification(evt: NotificationEvent) {
   new Notification(title, opts);
 }
 
+// notifyDelivery mirrors the server's notification sink (browser | native) so
+// browser-only UI (the enable banner, permission prompts) can hide itself when
+// the daemon is delivering notifications natively.
+export const notifyDelivery = writable<'browser' | 'native'>('browser');
+
+// desktopAppInstalled mirrors whether the daemon sees the Lerd desktop app as
+// the lerd:// handler, so the web UI can offer "Open in app".
+export const desktopAppInstalled = writable<boolean>(false);
+
+// notifyNativeKinds mirrors the daemon's resolved per-kind native prefs. Under
+// the native sink the browser prefs are hidden, so the bell and toasts must
+// follow these instead: a kind the daemon posts to the desktop is one the bell
+// should keep, and one it suppresses is one the bell should drop.
+export const notifyNativeKinds = writable<Record<string, boolean>>({});
+
+export async function loadNotifyDelivery() {
+  try {
+    const r = await apiFetch('/api/notifications/target');
+    if (r.ok) {
+      const d = (await r.json()) as {
+        target?: string;
+        app_installed?: boolean;
+        kinds?: Record<string, boolean>;
+      };
+      notifyDelivery.set(d.target === 'native' ? 'native' : 'browser');
+      desktopAppInstalled.set(!!d.app_installed);
+      notifyNativeKinds.set(d.kinds ?? {});
+    }
+  } catch {
+    /* keep browser default */
+  }
+}
+
+// insideDesktopApp is true when the dashboard is running inside the Lerd desktop
+// app (its preload exposes window.lerd), so "Open in app" hides there.
+export function insideDesktopApp(): boolean {
+  return typeof window !== 'undefined' && typeof (window as { lerd?: unknown }).lerd !== 'undefined';
+}
+
+// openInDesktopApp hands off to the desktop app at the current route via its
+// lerd:// scheme.
+export function openInDesktopApp() {
+  if (typeof location === 'undefined') return;
+  const route = location.hash || '/';
+  location.href = 'lerd://open/' + route;
+}
+
+// handleProtocolLaunch routes a PWA opened via its web+lerd:// protocol handler.
+// The manifest maps the scheme to /?lerd=<full web+lerd:// url>; we extract the
+// route, navigate, and strip the query so a refresh doesn't re-trigger it.
+export function handleProtocolLaunch() {
+  if (typeof location === 'undefined') return;
+  const raw = new URLSearchParams(location.search).get('lerd');
+  if (!raw) return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  const m = /^web\+lerd:\/\/open\/?(.*)$/.exec(raw);
+  const route = m ? m[1] : '';
+  if (route) openOverlayUrl(route.startsWith('#') ? route : '#' + route);
+}
+
 let initialized = false;
 
 export function initNotify() {
   if (initialized) return;
   initialized = true;
+  handleProtocolLaunch();
+  void loadNotifyDelivery();
   wsMessage.subscribe((msg) => {
     if (!msg?.notification) return;
     void fireNotification(msg.notification);

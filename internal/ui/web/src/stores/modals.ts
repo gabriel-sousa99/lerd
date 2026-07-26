@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { Site } from './sites';
+import type { Site, EnvProposeEntry } from './sites';
 import type { Proxy } from './proxies';
 
 export type ModalKind =
@@ -16,6 +16,7 @@ export type ModalKind =
   | 'phpAdd'
   | 'envSave'
   | 'envRestore'
+  | 'envPropose'
   | 'nginxSave'
   | 'nginxRestore'
   | 'nginxReset'
@@ -29,6 +30,10 @@ export type ModalKind =
   | 'tuningSave'
   | 'tuningRestore'
   | 'tuningReset'
+  | 'workspaceDelete'
+  | 'siteUnlink'
+  | 'serviceInstall'
+  | 'error'
   | null;
 
 export type LANAction = 'expose' | 'unexpose';
@@ -54,6 +59,14 @@ export interface EnvRestoreTarget {
   current: string;
   backupName: string;
   backup: string;
+}
+
+export interface EnvProposeTarget {
+  file: string;
+  entries: EnvProposeEntry[];
+  /** Called with the keys the user ticked; the tab stages just those into the
+   *  editor buffer for review before saving. */
+  onAdd: (keys: string[]) => void;
 }
 
 export interface NginxSaveTarget {
@@ -96,6 +109,9 @@ export interface NginxGlobalResetTarget {
 
 export interface PhpIniSaveTarget {
   version: string;
+  // Human-readable scope for the confirm copy, e.g. "PHP 8.4" or "the shared
+  // file (all versions)". The API still keys on `version`.
+  label: string;
   content: string;
   original: string;
   exists: boolean;
@@ -103,6 +119,7 @@ export interface PhpIniSaveTarget {
 
 export interface PhpIniRestoreTarget {
   version: string;
+  label: string;
   current: string;
   backupName: string;
   backup: string;
@@ -110,12 +127,26 @@ export interface PhpIniRestoreTarget {
 
 export interface PhpIniResetTarget {
   version: string;
+  label: string;
   path: string;
 }
 
 export interface PhpRemoveTarget {
   version: string;
   siteCount: number;
+}
+
+export interface WorkspaceDeleteTarget {
+  name: string;
+  siteCount: number;
+}
+
+export interface SiteUnlinkTarget {
+  domain: string;
+}
+
+export interface ServiceInstallTarget {
+  name: string;
 }
 
 export interface TuningSaveTarget {
@@ -140,6 +171,12 @@ export interface TuningResetTarget {
   path: string;
 }
 
+export interface ErrorTarget {
+  message: string;
+  /** Overrides the generic "Something went wrong" heading. */
+  title?: string;
+}
+
 export interface ModalState {
   kind: ModalKind;
   site?: Site;
@@ -150,6 +187,7 @@ export interface ModalState {
   prefill?: ProxyAddPrefill;
   envSave?: EnvSaveTarget;
   envRestore?: EnvRestoreTarget;
+  envPropose?: EnvProposeTarget;
   nginxSave?: NginxSaveTarget;
   nginxRestore?: NginxRestoreTarget;
   nginxReset?: NginxResetTarget;
@@ -163,9 +201,31 @@ export interface ModalState {
   tuningSave?: TuningSaveTarget;
   tuningRestore?: TuningRestoreTarget;
   tuningReset?: TuningResetTarget;
+  workspaceDelete?: WorkspaceDeleteTarget;
+  siteUnlink?: SiteUnlinkTarget;
+  serviceInstall?: ServiceInstallTarget;
+  error?: ErrorTarget;
 }
 
 export const modal = writable<ModalState>({ kind: null });
+
+// The dashboard reports failures in a modal rather than a native alert(), which
+// browsers block, style inconsistently, and freeze the page on.
+export function openErrorModal(message: string, title?: string) {
+  modal.set({ kind: 'error', error: { message, title } });
+}
+
+export function openWorkspaceDeleteModal(target: WorkspaceDeleteTarget) {
+  modal.set({ kind: 'workspaceDelete', workspaceDelete: target });
+}
+
+export function openSiteUnlinkModal(target: SiteUnlinkTarget) {
+  modal.set({ kind: 'siteUnlink', siteUnlink: target });
+}
+
+export function openServiceInstallModal(name: string) {
+  modal.set({ kind: 'serviceInstall', serviceInstall: { name } });
+}
 
 export function openDomainModal(site: Site) {
   modal.set({ kind: 'domain', site });
@@ -217,6 +277,10 @@ export function openEnvSaveModal(target: EnvSaveTarget, onSuccess?: () => void) 
 
 export function openEnvRestoreModal(target: EnvRestoreTarget, onSuccess?: () => void) {
   modal.set({ kind: 'envRestore', envRestore: target, onSuccess });
+}
+
+export function openEnvProposeModal(target: EnvProposeTarget) {
+  modal.set({ kind: 'envPropose', envPropose: target });
 }
 
 export function openNginxSaveModal(target: NginxSaveTarget, onSuccess?: () => void) {

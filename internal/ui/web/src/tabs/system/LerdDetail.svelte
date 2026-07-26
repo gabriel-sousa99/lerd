@@ -15,8 +15,14 @@
   import Toggle from '$components/Toggle.svelte';
   import SettingsCard from '$components/SettingsCard.svelte';
   import LanguageSwitcher from '$components/LanguageSwitcher.svelte';
-  import { apiFetch } from '$lib/api';
+  import { apiFetch, apiBase } from '$lib/api';
+  import { escapeHtml } from '$lib/html';
   import { m } from '../../paraglide/messages.js';
+
+  // The remote dashboard always binds :7073; when LAN-exposed we surface the
+  // address plus a scannable QR so a phone can jump straight in.
+  const dashboardURL = $derived('http://' + $lan.lanIP + ':7073');
+  const dashboardQRSrc = $derived(apiBase + '/api/dashboard-qr?v=' + encodeURIComponent($lan.lanIP));
 
   onMount(() => {
     loadLANStatus();
@@ -123,7 +129,7 @@
           {/if}
         </div>
         <button
-          onclick={loadVersion}
+          onclick={() => loadVersion(true)}
           disabled={$version.checking}
           class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 disabled:opacity-40 text-gray-700 dark:text-gray-300 transition-colors"
         >
@@ -179,13 +185,15 @@
         </div>
       {/if}
 
-      <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mt-3">
-        <svg class="w-3.5 h-3.5 shrink-0 text-yellow-500" fill="currentColor" viewBox="0 0 20 20">
+      <div class="flex items-start gap-2 text-xs text-gray-500 dark:text-gray-400 mt-3">
+        <svg class="w-3.5 h-3.5 shrink-0 mt-0.5 text-yellow-500" fill="currentColor" viewBox="0 0 20 20">
           <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.286 3.957a1 1 0 00.95.69h4.162c.969 0 1.371 1.24.588 1.81l-3.367 2.446a1 1 0 00-.364 1.118l1.287 3.957c.3.922-.755 1.688-1.54 1.118l-3.366-2.446a1 1 0 00-1.176 0l-3.366 2.446c-.784.57-1.838-.196-1.54-1.118l1.287-3.957a1 1 0 00-.364-1.118L2.098 9.384c-.783-.57-.38-1.81.588-1.81h4.162a1 1 0 00.95-.69l1.286-3.957z"/>
         </svg>
-        <span>{m.system_lerd_starBlurb()}</span>
-        <a href="https://github.com/gabriel-sousa99/lerd" target="_blank" rel="noopener" class="font-medium text-lerd-red hover:text-lerd-redhov underline-offset-2 hover:underline">{m.system_lerd_starCta()}</a>
-        <span>{m.system_lerd_starAfter()}</span>
+        <p class="leading-relaxed">
+          {m.system_lerd_starBlurb()}
+          <a href="https://github.com/lerd-env/lerd" target="_blank" rel="noopener" class="font-medium text-lerd-red hover:text-lerd-redhov underline-offset-2 hover:underline">{m.system_lerd_starCta()}</a>
+          {m.system_lerd_starAfter()}
+        </p>
       </div>
     </SettingsCard>
 
@@ -255,7 +263,7 @@
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
         {#if $lan.exposed}
           {@html m.system_lan_exposedDescription({
-            ip: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + $lan.lanIP + '</code>',
+            ip: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + escapeHtml($lan.lanIP) + '</code>',
             pattern: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">*.test</code>',
             loop4: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">127.0.0.1</code>',
             loop6: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">::1</code>'
@@ -297,8 +305,8 @@
       {#if $lan.exposed && $accessMode.loopback}
         <div class="mt-3 space-y-3">
           <div class="text-xs text-gray-600 dark:text-gray-400 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg p-3 space-y-1">
-            <p>{@html m.system_lan_postExpose_resolver({ addr: '<code class="bg-white/60 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + $lan.lanIP + ':5300</code>', unit: '<code class="bg-white/60 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">lerd-dns-forwarder.service</code>' })}</p>
-            <p>{@html m.system_lan_postExpose_dnsmasq({ pattern: '<code class="bg-white/60 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">*.test</code>', ip: $lan.lanIP })}</p>
+            <p>{@html m.system_lan_postExpose_resolver({ addr: '<code class="bg-white/60 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + escapeHtml($lan.lanIP) + ':5300</code>', unit: '<code class="bg-white/60 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">lerd-dns-forwarder.service</code>' })}</p>
+            <p>{@html m.system_lan_postExpose_dnsmasq({ pattern: '<code class="bg-white/60 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">*.test</code>', ip: escapeHtml($lan.lanIP) })}</p>
             <p><strong>{m.system_lan_postExpose_firewall()}</strong></p>
           </div>
 
@@ -325,7 +333,7 @@
             {:else}
               <div class="space-y-2">
                 <div class="flex items-center justify-between gap-3 text-xs text-gray-600 dark:text-gray-400">
-                  <span>{@html m.system_lan_remote_codeLabel({ code: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono text-sm">' + $lan.setupCode + '</code>' })}</span>
+                  <span>{@html m.system_lan_remote_codeLabel({ code: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono text-sm">' + escapeHtml($lan.setupCode) + '</code>' })}</span>
                   {#if $lan.setupExpiresIn}<span>{m.system_lan_remote_expiresIn({ time: $lan.setupExpiresIn })}</span>{/if}
                 </div>
                 <p class="text-xs text-gray-500 dark:text-gray-400">{m.system_lan_remote_runOnMachine()}</p>
@@ -385,7 +393,10 @@
       </div>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
         {#if $status.dns?.enabled === false}
-          DNS is disabled, so the dashboard is the only thing remote devices can use lerd for. Enable to set HTTP Basic credentials and bind the dashboard at <code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">{$lan.lanIP || '<lan-ip>'}:7073</code>. Sites need per-site <code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">lerd lan:share</code> to be reachable.
+          {@html m.system_remote_descriptionNoDns({
+            addr: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + ($lan.lanIP ? escapeHtml($lan.lanIP) : '&lt;lan-ip&gt;') + ':7073</code>',
+            cmd: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">lerd lan:share</code>'
+          })}
         {:else}
           {@html m.system_remote_description({ loop4: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">127.0.0.1</code>', loop6: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">::1</code>' })}
         {/if}
@@ -393,8 +404,17 @@
 
       {#if $remoteControl.enabled}
         <div class="space-y-2">
+          {#if $lan.exposed}
+            <div class="flex items-center justify-between gap-3 p-3 rounded-lg bg-gray-50 dark:bg-white/3 border border-gray-100 dark:border-lerd-border">
+              <div class="min-w-0">
+                <p class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">{m.system_remote_address()}</p>
+                <a href={dashboardURL} target="_blank" rel="noopener" class="text-sm text-teal-600 dark:text-teal-400 font-mono hover:underline break-all">{dashboardURL}</a>
+              </div>
+              <img src={dashboardQRSrc} width="112" height="112" alt={m.lanShare_qrAlt()} class="shrink-0 rounded-sm bg-white p-1" />
+            </div>
+          {/if}
           <p class="text-xs text-gray-600 dark:text-gray-400">
-            {@html m.system_remote_usernameRow({ username: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + $remoteControl.username + '</code>' })}
+            {@html m.system_remote_usernameRow({ username: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + escapeHtml($remoteControl.username) + '</code>' })}
           </p>
           {#if !$lan.exposed && $status.dns?.enabled !== false}
             <p class="text-xs text-amber-600 dark:text-amber-400">

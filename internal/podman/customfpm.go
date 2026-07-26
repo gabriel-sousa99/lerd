@@ -34,6 +34,9 @@ func WriteCustomFPMQuadlet(siteName, version string) error {
 	if err := EnsureUserIni(version); err != nil {
 		return fmt.Errorf("creating user ini: %w", err)
 	}
+	if err := EnsureSharedIni(); err != nil {
+		return fmt.Errorf("creating shared ini: %w", err)
+	}
 	if err := EnsureXdebugIni(version); err != nil {
 		return fmt.Errorf("creating xdebug ini: %w", err)
 	}
@@ -78,4 +81,26 @@ func generateCustomFPMQuadlet(siteName, version string) (string, error) {
 // RemoveCustomFPMQuadlet removes the per-site custom FPM quadlet unit file.
 func RemoveCustomFPMQuadlet(siteName string) error {
 	return RemoveQuadlet(CustomFPMContainerName(siteName))
+}
+
+// CustomFPMBaseVersion returns the dotted PHP version a custom-FPM site's
+// Containerfile builds FROM (e.g. "FROM lerd-php84-fpm:local" -> "8.4"), or "" when
+// the base isn't a lerd FPM image. A custom-FPM site's PHP version is fixed by that
+// FROM line, not project detection, so the caller can report the right version and
+// mount the matching per-version inis instead of a detected one that may differ.
+func CustomFPMBaseVersion(projectPath string, cfg *config.ContainerConfig) string {
+	base := ContainerBaseImage(projectPath, cfg)
+	if i := strings.IndexByte(base, ':'); i >= 0 {
+		base = base[:i]
+	}
+	if !strings.HasPrefix(base, "lerd-php") || !strings.HasSuffix(base, "-fpm") {
+		return ""
+	}
+	short := strings.TrimSuffix(strings.TrimPrefix(base, "lerd-php"), "-fpm")
+	for _, v := range config.SupportedPHPVersions {
+		if strings.ReplaceAll(v, ".", "") == short {
+			return v
+		}
+	}
+	return ""
 }

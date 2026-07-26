@@ -25,9 +25,17 @@ var loopbackOnlyRoutes = []string{
 	"/api/lerd/stop",            // shuts down all lerd containers
 	"/api/lerd/quit",            // exits the dashboard process
 	"/api/lerd/update-terminal", // spawns a terminal emulator on the host
+	"/api/logs/terminal",        // spawns a terminal emulator on the host
 	"/api/sites/link",           // links arbitrary host filesystem paths
 	"/api/browse",               // browses host filesystem
 	"/api/push/test",            // fires notifications onto subscribed devices
+}
+
+// loopbackOnlyRoutePrefixes are endpoint subtrees restricted to loopback in
+// full, so a new subresource cannot escape by failing to be listed. Databases
+// read out, drop and overwrite the data the "/env" gate already protects.
+var loopbackOnlyRoutePrefixes = []string{
+	"/api/databases",
 }
 
 // loopbackOnlySiteSubactions are the per-site actions (under
@@ -93,6 +101,11 @@ func fromHost(r *http.Request) bool {
 func isLoopbackOnlyPath(path string) bool {
 	for _, p := range loopbackOnlyRoutes {
 		if path == p {
+			return true
+		}
+	}
+	for _, p := range loopbackOnlyRoutePrefixes {
+		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
 		}
 	}
@@ -284,7 +297,19 @@ func withRemoteControlGate(next http.Handler) http.Handler {
 			return
 		}
 
-		// 5. Validate HTTP Basic auth.
+		// 5. A valid session cookie authenticates without re-challenging.
+		// It is issued after a Basic-auth success below and HMAC'd with the
+		// password hash, so changing or clearing credentials invalidates it.
+		// This is what stops iOS Safari, which drops cached Basic
+		// credentials between refreshes, from prompting on every load.
+		now := time.Now()
+		if c, err := r.Cookie(remoteSessionCookie); err == nil &&
+			remoteSessionValid(c.Value, cfg.UI.Username, cfg.UI.PasswordHash, now) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// 6. Validate HTTP Basic auth.
 		user, pass, ok := r.BasicAuth()
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Basic realm="lerd dashboard"`)
@@ -305,6 +330,9 @@ func withRemoteControlGate(next http.Handler) http.Handler {
 			return
 		}
 
+		// Basic auth cleared — mint a session cookie so the browser skips
+		// the challenge on subsequent requests.
+		setRemoteSessionCookie(w, cfg.UI.Username, cfg.UI.PasswordHash, now)
 		next.ServeHTTP(w, r)
 	})
 }

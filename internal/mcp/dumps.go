@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/dumpsops"
 )
 
-// execDumpsRecent calls lerd-ui's /api/dumps endpoint over the local Unix
-// socket and returns the JSON response verbatim. We don't reach into the
+// execDumpsRecent calls lerd-ui's /api/dumps endpoint over the local transport
+// (unix socket on Linux, TCP loopback on macOS) and returns the JSON response
+// verbatim. We don't reach into the
 // in-process ring directly because the MCP server may run in a different
 // process from lerd-ui (e.g. an editor-launched MCP subprocess).
 func execDumpsRecent(args map[string]any) (any, *rpcError) {
@@ -61,20 +63,59 @@ func execDumpsRecent(args map[string]any) (any, *rpcError) {
 // reads the same captured-query ring; the analysis itself is server-side so the
 // fingerprinting matches the dashboard and the N+1 notifications.
 func execAnalyzeQueries(args map[string]any) (any, *rpcError) {
-	q := []string{}
-	if s := strArg(args, "site"); s != "" {
-		q = append(q, "site="+s)
-	}
+	params := [][2]string{{"site", strArg(args, "site")}}
 	if v, ok := args["min_repeat"]; ok {
-		q = append(q, fmt.Sprintf("min_repeat=%v", v))
+		params = append(params, [2]string{"min_repeat", fmt.Sprintf("%v", v)})
 	}
 	if v, ok := args["slow_ms"]; ok {
-		q = append(q, fmt.Sprintf("slow_ms=%v", v))
+		params = append(params, [2]string{"slow_ms", fmt.Sprintf("%v", v)})
 	}
-	path := "/api/queries/analyze"
-	if len(q) > 0 {
-		path += "?" + strings.Join(q, "&")
+	path := queryPath("/api/queries/analyze", params)
+	body, status, err := uiGET(path)
+	if err != nil {
+		return toolErr("lerd-ui not reachable: " + err.Error()), nil
 	}
+	if status != http.StatusOK {
+		return toolErr(fmt.Sprintf("lerd-ui returned %d: %s", status, body)), nil
+	}
+	return toolOK(string(body)), nil
+}
+
+// execRouteTiming calls lerd-ui's /api/queries/route-timing endpoint, returning
+// the per-site request-timing snapshot (median response time and the routes
+// whose p95 runs well above it) verbatim. This is the timing table the doctor's
+// slow_routes finding only summarizes in prose.
+func execRouteTiming(args map[string]any) (any, *rpcError) {
+	path := queryPath("/api/queries/route-timing", [][2]string{
+		{"site", strArg(args, "site")},
+		{"branch", strArg(args, "branch")},
+	})
+	body, status, err := uiGET(path)
+	if err != nil {
+		return toolErr("lerd-ui not reachable: " + err.Error()), nil
+	}
+	if status != http.StatusOK {
+		return toolErr(fmt.Sprintf("lerd-ui returned %d: %s", status, body)), nil
+	}
+	return toolOK(string(body)), nil
+}
+
+// execOptimizeRoute calls lerd-ui's /api/queries/optimize endpoint, returning the
+// joined view: each slow route alongside the N+1 and slow-query findings captured
+// against it, so an agent gets the symptom and its cause in one call rather than
+// pivoting between route_timing and analyze_queries by hand.
+func execOptimizeRoute(args map[string]any) (any, *rpcError) {
+	params := [][2]string{
+		{"site", strArg(args, "site")},
+		{"branch", strArg(args, "branch")},
+	}
+	if v, ok := args["min_repeat"]; ok {
+		params = append(params, [2]string{"min_repeat", fmt.Sprintf("%v", v)})
+	}
+	if v, ok := args["slow_ms"]; ok {
+		params = append(params, [2]string{"slow_ms", fmt.Sprintf("%v", v)})
+	}
+	path := queryPath("/api/queries/optimize", params)
 	body, status, err := uiGET(path)
 	if err != nil {
 		return toolErr("lerd-ui not reachable: " + err.Error()), nil
@@ -136,9 +177,26 @@ func execDumpsToggle(args map[string]any) (any, *rpcError) {
 	return toolOK(string(b)), nil
 }
 
-// uiGET / uiPOST: tiny HTTP-over-Unix-socket helpers. Local to mcp so callers
-// don't have to import a heavier client. uiRoundTrip is swappable so tests can
-// assert the path/body an exec builds without a live lerd-ui socket.
+// queryPath joins base with the non-empty params as an escaped, key-sorted query
+// string. Escaping matters because a value like a git branch name can carry &,
+// =, # or +, which raw concatenation would splice into the query.
+func queryPath(base string, params [][2]string) string {
+	q := url.Values{}
+	for _, p := range params {
+		if p[1] != "" {
+			q.Set(p[0], p[1])
+		}
+	}
+	if enc := q.Encode(); enc != "" {
+		return base + "?" + enc
+	}
+	return base
+}
+
+// uiGET / uiPOST: tiny HTTP helpers over the OS-appropriate lerd-ui transport
+// (unix socket on Linux, TCP loopback on macOS). Local to mcp so callers don't
+// have to import a heavier client. uiRoundTrip is swappable so tests can assert
+// the path/body an exec builds without a live lerd-ui daemon.
 var uiRoundTrip = uiDo
 
 func uiGET(path string) ([]byte, int, error) {
@@ -154,13 +212,20 @@ func uiPOST(path string, body []byte) ([]byte, int, error) {
 	return uiRoundTrip(req)
 }
 
+// uiClientDial reports the transport used to reach the lerd-ui daemon: the unix
+// socket on Linux, the TCP loopback on macOS where the socket isn't created. A
+// var so tests can point it at a fake listener regardless of the per-OS default.
+var uiClientDial = func() (network, addr string) {
+	return config.UIClientNetwork(), config.UIClientAddr()
+}
+
 func uiDo(req *http.Request) ([]byte, int, error) {
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				d := net.Dialer{Timeout: 2 * time.Second}
-				return d.DialContext(ctx, "unix", config.UISocketPath())
+				network, addr := uiClientDial()
+				return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, network, addr)
 			},
 		},
 	}

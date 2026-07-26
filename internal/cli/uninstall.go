@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"bufio"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +9,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/spf13/cobra"
@@ -31,12 +30,12 @@ func NewUninstallCmd() *cobra.Command {
 }
 
 func runUninstall(force bool) error {
-	fmt.Println("==> Uninstalling Lerd")
+	feedback.Begin()
+	feedback.Line("uninstalling lerd")
 
 	if !force {
-		fmt.Print("  This will stop all containers and remove Lerd. Continue? [y/N] ")
-		if !readYes() {
-			fmt.Println("  Aborted.")
+		if !feedback.Confirm("This will stop all containers and remove lerd. Continue?", false) {
+			feedback.Line("aborted")
 			return nil
 		}
 	}
@@ -48,8 +47,9 @@ func runUninstall(force bool) error {
 	removeMkcertCA := force || confirmRemoveMkcertCA()
 	purgeImages := force || confirmPurgeLerdImages()
 
-	// DNS teardown runs outside the step runner because it may prompt for sudo.
-	fmt.Println("  --> Removing DNS configuration")
+	// DNS teardown runs outside the step runner because it may prompt for sudo;
+	// the lock glyph warns that the password prompt below is expected.
+	feedback.Sudo("Removing DNS configuration")
 	dns.Teardown()
 
 	step("Stopping containers and services")
@@ -114,12 +114,12 @@ func runUninstall(force bool) error {
 	ok()
 
 	if purgeImages {
-		fmt.Println("  --> Purging lerd-built container images")
+		feedback.Line("purging lerd-built container images")
 		removeLerdImages()
 	}
 
 	if removeMkcertCA {
-		fmt.Println("  --> Uninstalling mkcert CA from system trust stores")
+		feedback.Sudo("Uninstalling mkcert CA from system trust stores")
 		cmd := exec.Command(certs.MkcertPath(), "-uninstall")
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -128,15 +128,15 @@ func runUninstall(force bool) error {
 	}
 
 	if removeMCP {
-		fmt.Println("  --> Removing MCP integration (global)")
+		feedback.Line("removing MCP integration (global)")
 		if home, err := os.UserHomeDir(); err == nil {
 			_ = RemoveGlobalAISkills(home, true)
 		}
-		fmt.Println("  --> Removing MCP integration (registered sites)")
+		feedback.Line("removing MCP integration (registered sites)")
 		if reg, err := config.LoadSites(); err == nil {
 			for _, s := range reg.Sites {
 				if err := RemoveProjectAISkills(s.Path, false); err == nil {
-					fmt.Printf("    cleaned %s\n", s.Path)
+					feedback.Note("cleaned " + s.Path)
 				}
 			}
 		}
@@ -152,43 +152,39 @@ func runUninstall(force bool) error {
 	}
 	ok()
 
-	fmt.Println()
 	if removeData {
-		fmt.Print("  --> Removing config and data directories ... ")
+		step("Removing config and data directories")
 		os.RemoveAll(config.ConfigDir())
 		os.RemoveAll(config.DataDir())
-		fmt.Println("OK")
+		ok()
 	} else {
-		fmt.Printf("  Config kept at %s\n", config.ConfigDir())
-		fmt.Printf("  Data kept at   %s\n", config.DataDir())
+		feedback.Note("config kept at " + config.ConfigDir())
+		feedback.Note("data kept at " + config.DataDir())
 	}
 
-	fmt.Println("\nLerd uninstalled.")
+	feedback.Done("lerd uninstalled")
 	return nil
 }
 
 func confirmRemoveMCPIntegration() bool {
-	fmt.Print("  Remove MCP integration (global skills + per-site .mcp/.claude/.cursor/.junie files)? [y/N] ")
-	return readYes()
+	return feedback.Confirm("Remove MCP integration (global skills + per-site .mcp/.claude/.cursor/.junie files)?", false)
 }
 
 func confirmRemoveMkcertCA() bool {
-	fmt.Print("  Uninstall mkcert CA from system trust stores? [y/N] ")
-	return readYes()
+	return feedback.Confirm("Uninstall mkcert CA from system trust stores?", false)
 }
 
 func confirmPurgeLerdImages() bool {
-	fmt.Print("  Purge lerd-built container images (lerd-php*-fpm, lerd-custom-*, lerd-dnsmasq)? Databases and app files are unaffected. [y/N] ")
-	return readYes()
+	return feedback.Confirm("Purge lerd-built container images (lerd-php*-fpm, lerd-custom-*, lerd-dnsmasq)? Databases and app files are unaffected.", false)
 }
 
 // removeLerdImages removes locally-built lerd images. Upstream pulls
 // (mysql/redis/postgres/etc.) are left alone since they're expensive to
 // re-pull and not lerd-owned.
 func removeLerdImages() {
-	out, err := exec.Command(podman.PodmanBin(), "images", "--format", "{{.Repository}}:{{.Tag}}").Output()
+	out, err := podman.Cmd("images", "--format", "{{.Repository}}:{{.Tag}}").Output()
 	if err != nil {
-		fmt.Printf("    WARN: listing images: %v\n", err)
+		feedback.Warn("listing images: %v", err)
 		return
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -199,11 +195,11 @@ func removeLerdImages() {
 		if !isLerdBuiltImage(line) {
 			continue
 		}
-		if err := exec.Command(podman.PodmanBin(), "image", "rm", "-f", line).Run(); err != nil {
-			fmt.Printf("    WARN: removing %s: %v\n", line, err)
+		if err := podman.Cmd("image", "rm", "-f", line).Run(); err != nil {
+			feedback.Warn("removing %s: %v", line, err)
 			continue
 		}
-		fmt.Printf("    removed %s\n", line)
+		feedback.Note("removed " + line)
 	}
 }
 
@@ -221,15 +217,7 @@ func isLerdBuiltImage(ref string) bool {
 }
 
 func confirmRemoveData() bool {
-	fmt.Print("  Remove all config and data (~/.config/lerd, ~/.local/share/lerd)? [y/N] ")
-	return readYes()
-}
-
-func readYes() bool {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	ans := strings.TrimSpace(scanner.Text())
-	return strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")
+	return feedback.Confirm("Remove all config and data (~/.config/lerd, ~/.local/share/lerd)?", false)
 }
 
 // shellRCMarkers lists every marker comment lerd's install pipelines

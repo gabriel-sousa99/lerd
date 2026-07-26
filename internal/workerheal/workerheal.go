@@ -8,6 +8,7 @@ package workerheal
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,7 +22,7 @@ type UnhealthyWorker struct {
 	Site      string `json:"site"`
 	Worker    string `json:"worker"`
 	Unit      string `json:"unit"`
-	State     string `json:"state"` // "failed" today; reserve for future "start-limit-hit", "expected-but-stopped"
+	State     string `json:"state"` // "failed" | "expected-but-stopped" | "unreachable" (process up, server not accepting)
 	LastError string `json:"last_error,omitempty"`
 }
 
@@ -58,12 +59,84 @@ var nonWorkerPerSitePrefixes = map[string]bool{
 // Swappable for tests so the detector can be exercised without touching the
 // real systemd unit-state cache or starting real units.
 var (
-	unitStatesFn  = siteinfo.AllUnitStates
-	unitEnabledFn = isUnitEnabled
-	healFn        = podman.StartUnit
-	lastErrorFn   = readLastError
-	isStoppedFn   = config.IsStopped
+	unitStatesFn      = siteinfo.AllUnitStates
+	unitMetaFn        = siteinfo.AllUnitMeta
+	unitEnabledFn     = isUnitEnabled
+	healFn            = podman.StartUnit
+	restartFn         = podman.RestartUnit
+	lastErrorFn       = readLastError
+	isStoppedFn       = config.IsStopped
+	workerReachableFn = defaultWorkerReachable
 )
+
+// defaultWorkerReachable probes a running worker that declares a health block.
+// probed is false (keep process-only liveness) when the site has no resolvable
+// framework or the worker has no health block. The framework is resolved once
+// per site by Detect and passed in, so the store is touched at most once per
+// site per tick, never per worker.
+func defaultWorkerReachable(sitePath string, fw *config.Framework, worker string, activeEnter time.Time) (reachable, probed bool) {
+	if fw == nil {
+		return false, false
+	}
+	w, ok := fw.Workers[worker]
+	if !ok || w.Health == nil {
+		return false, false
+	}
+	return siteinfo.WorkerServerReachable(sitePath, w.Health, activeEnter)
+}
+
+// resolveWorkerUnit maps a unit body to site, worker, and probe path (the worktree
+// checkout, else ""). A unit running in a site's own checkout is that site's worker,
+// so only a working directory that is not a site path can be a worktree's — and that
+// has to be settled before the suffix match, which cannot tell a worktree directory
+// named after another registered site from that site's own worker.
+func resolveWorkerUnit(body string, sitePaths map[string]string, workingDir string) (site, worker, probePath string) {
+	// A container worker sets no WorkingDirectory, so systemd reports the inherited
+	// home with a "!" prefix. That is not a checkout.
+	if strings.HasPrefix(workingDir, "!") {
+		workingDir = ""
+	}
+	if workingDir != "" && !isSiteCheckout(sitePaths, workingDir) {
+		if s, w := resolveWorktreeUnit(body, sitePaths, workingDir); s != "" {
+			return s, w, workingDir
+		}
+	}
+	for s := range sitePaths {
+		if strings.HasSuffix(body, "-"+s) && len(s) > len(site) {
+			site, worker = s, strings.TrimSuffix(body, "-"+s)
+		}
+	}
+	return site, worker, ""
+}
+
+func isSiteCheckout(sitePaths map[string]string, dir string) bool {
+	dir = filepath.Clean(dir)
+	for _, p := range sitePaths {
+		if p != "" && filepath.Clean(p) == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveWorktreeUnit resolves a unit against its checkout directory, returning
+// empty when the unit is not a worktree's.
+func resolveWorktreeUnit(body string, sitePaths map[string]string, workingDir string) (site, worker string) {
+	slug := config.WorktreeUnitSlug(filepath.Base(workingDir))
+	if slug == "" || !strings.HasSuffix(body, "-"+slug) {
+		return "", ""
+	}
+	core := strings.TrimSuffix(body, "-"+slug)
+	for s := range sitePaths {
+		if strings.HasSuffix(core, "-"+s) && len(s) > len(site) {
+			site, worker = s, strings.TrimSuffix(core, "-"+s)
+		}
+	}
+	if worker == "" {
+		return "", ""
+	}
+	return site, worker
+}
 
 // HumanState renders an UnhealthyWorker.State for end-user copy. The machine
 // values ("failed", "expected-but-stopped") read awkwardly in a sentence.
@@ -118,6 +191,15 @@ func Enrich(in []UnhealthyWorker) []UnhealthyWorker {
 		if in[i].State == "expected-but-stopped" {
 			continue
 		}
+		// An unreachable worker's process is still active, so its last journal line
+		// is whatever the live server last logged (often a harmless info line) and
+		// would read as a false cause. State the real problem instead of the journal.
+		// Framework-agnostic on purpose: which file/port carries the URL lives in the
+		// store, not here.
+		if in[i].State == "unreachable" {
+			in[i].LastError = "process is up but its server is not accepting connections"
+			continue
+		}
 		if time.Now().After(deadline) {
 			break
 		}
@@ -129,8 +211,10 @@ func Enrich(in []UnhealthyWorker) []UnhealthyWorker {
 // Detect returns every worker unit systemd considers "failed". Cheap by
 // design: it reads only the existing batched unit-state cache (one
 // systemctl call per 3s, shared with the dashboard's enrichment path) plus
-// sites.yaml. No per-site .lerd.yaml or composer.json reads, no extra
-// subprocess calls. Safe to invoke from a hot endpoint.
+// sites.yaml. For a site that has an active health-probed worker it resolves
+// the framework once per site, memoised by composer.json mtime, so a steady
+// tick reparses nothing. No extra subprocess calls; safe to invoke from a
+// hot endpoint.
 //
 // Two health problems are detected. "failed" — units that hit Restart= rate
 // limits or crash repeatedly and stay stuck until reset. "expected-but-stopped"
@@ -153,7 +237,12 @@ func Detect() ([]UnhealthyWorker, error) {
 	if err != nil {
 		return nil, err
 	}
-	siteSet := make(map[string]bool, len(reg.Sites))
+	// Every active site's checkout, so a unit's WorkingDirectory can be told apart
+	// from a worktree's.
+	sitePaths := make(map[string]string, len(reg.Sites))
+	// path + framework per site, for resolving a health-probed worker's block.
+	type siteMeta struct{ path, framework string }
+	meta := make(map[string]siteMeta, len(reg.Sites))
 	// Workers a site has intentionally idle-suspended must never be reported as
 	// failing or drifted — they are asleep on purpose and resume on the next
 	// request, so flagging or healing them would be noise (and a heal would wake
@@ -163,7 +252,8 @@ func Detect() ([]UnhealthyWorker, error) {
 		if s.Paused || s.Ignored {
 			continue
 		}
-		siteSet[s.Name] = true
+		sitePaths[s.Name] = s.Path
+		meta[s.Name] = siteMeta{path: s.Path, framework: s.Framework}
 		if len(s.IdleSuspendedWorkers) > 0 {
 			set := make(map[string]bool, len(s.IdleSuspendedWorkers))
 			for _, w := range s.IdleSuspendedWorkers {
@@ -172,11 +262,20 @@ func Detect() ([]UnhealthyWorker, error) {
 			suspended[s.Name] = set
 		}
 	}
-	if len(siteSet) == 0 {
+	if len(sitePaths) == 0 {
 		return nil, nil
 	}
 
 	states := unitStatesFn()
+	// Per-unit ActiveEnter + WorkingDirectory from the same batched snapshot,
+	// used to resolve worktree units (by WorkingDirectory) and to gate the dial
+	// (by ActiveEnter). Empty on darwin; callers fall back to the prior behaviour.
+	unitMeta := unitMetaFn()
+	// Framework resolved lazily, at most once per site with an active worker.
+	// GetFrameworkForDir is not a plain lookup (it can trigger an unthrottled
+	// store fetch), so it must never run per worker inside the loop.
+	resolvedFw := make(map[string]*config.Framework)
+	resolvedSet := make(map[string]bool)
 	var out []UnhealthyWorker
 	for unit, state := range states {
 		// The unit-state cache aliases each .service unit under both
@@ -186,6 +285,26 @@ func Detect() ([]UnhealthyWorker, error) {
 		// fails, will surface here under its own key.
 		if !strings.HasSuffix(unit, ".service") {
 			continue
+		}
+		// Only these states can be unhealthy; skip the rest before the
+		// site-name resolution below so the hot path stays cheap.
+		if state != "failed" && state != "inactive" && state != "active" {
+			continue
+		}
+		body := strings.TrimPrefix(unit, "lerd-")
+		body = strings.TrimSuffix(body, ".service")
+		// Resolve site + worker (longest site suffix for parents; the unit's
+		// WorkingDirectory disambiguates worktree units). probePath is the
+		// worktree checkout for a worktree unit, else "" (use the site path).
+		site, worker, probePath := resolveWorkerUnit(body, sitePaths, unitMeta[unit].WorkingDir)
+		if site == "" || worker == "" {
+			continue
+		}
+		if nonWorkerPerSitePrefixes[worker] {
+			continue
+		}
+		if suspended[site][worker] {
+			continue // intentionally idle-suspended, not a failure
 		}
 		var detected string
 		switch state {
@@ -202,35 +321,26 @@ func Detect() ([]UnhealthyWorker, error) {
 				continue
 			}
 			detected = "expected-but-stopped"
-		default:
-			continue
-		}
-		body := strings.TrimPrefix(unit, "lerd-")
-		body = strings.TrimSuffix(body, ".service")
-		// Find the longest site-name suffix match so worker names with
-		// embedded hyphens (e.g. emit-events) survive intact.
-		var site, worker string
-		for s := range siteSet {
-			if strings.HasSuffix(body, "-"+s) {
-				if len(s) > len(site) {
-					site = s
-					worker = strings.TrimSuffix(body, "-"+s)
-				}
+		default: // "active": up, but a health-probed server may have died under it.
+			m := meta[site]
+			if !resolvedSet[site] {
+				resolvedFw[site], _ = config.GetFrameworkForDir(m.framework, m.path)
+				resolvedSet[site] = true
 			}
-		}
-		if site == "" || worker == "" {
-			continue
-		}
-		if nonWorkerPerSitePrefixes[worker] {
-			continue
-		}
-		if suspended[site][worker] {
-			continue // intentionally idle-suspended, not a failure
+			path := probePath // worktree checkout, or the site root for a parent
+			if path == "" {
+				path = m.path
+			}
+			reachable, probed := workerReachableFn(path, resolvedFw[site], worker, unitMeta[unit].ActiveEnter)
+			if !probed || reachable {
+				continue // no health probe declared, or the server is serving
+			}
+			detected = "unreachable"
 		}
 		out = append(out, UnhealthyWorker{
 			Site:   site,
 			Worker: worker,
-			Unit:   "lerd-" + worker + "-" + site,
+			Unit:   strings.TrimSuffix(unit, ".service"),
 			State:  detected,
 		})
 	}
@@ -264,7 +374,13 @@ func HealAll(emit func(Event)) (Result, error) {
 	report := Result{}
 	for _, u := range unhealthy {
 		emit(Event{Phase: "starting", Site: u.Site, Unit: u.Unit})
-		if err := HealUnit(u.Unit); err != nil {
+		// An unreachable worker's process is still up, so a plain start is a no-op;
+		// restart to rebind its server. Failed/stopped workers just start.
+		heal := HealUnit
+		if u.State == "unreachable" {
+			heal = restartFn
+		}
+		if err := heal(u.Unit); err != nil {
 			report.Failed = append(report.Failed, Failure{Worker: u, Err: err.Error()})
 			emit(Event{Phase: "failed", Site: u.Site, Unit: u.Unit, Error: err.Error()})
 			continue

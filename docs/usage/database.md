@@ -34,7 +34,29 @@ Database commands work with any project type: Laravel, Symfony, NestJS, Next.js,
 | `--force` | `-f` | Skip the `db:restore` confirmation prompt |
 | `--all` | | List snapshots across every database on the service (`db:snapshots`) |
 
+A named snapshot (`lerd db:snapshot nightly`) gets a UTC timestamp appended to its name, e.g. `nightly-20260719-135558`, so taking the same name twice never collides. Reference the full stamped name shown by `db:snapshots` when restoring or removing it.
+
 ---
+
+## Databases tab (web UI)
+
+Each database engine's detail page in the web UI (Services → pick MySQL, MariaDB, PostgreSQL or MongoDB) opens on a **Databases** tab that shows the databases inside that engine as a grid of cards, each with its on-disk size. It surfaces the same operations as the CLI without leaving the browser:
+
+- **Create** a database inline from the field above the grid. Names accepted here are limited to letters, digits, underscores and dashes, up to 64 characters, which covers every name lerd generates and keeps the value safe to use as both a path segment and a SQL identifier.
+- **Export** a database to a `.sql` dump, or **import** a dump into one, from the card. An import reports itself while it runs: the card shows the dump's name with a progress bar, then a spinner once the last byte is in and the engine is still replaying it, and finally either a confirmation that fades away or the engine's own error, so a dump that fails halfway says why instead of quietly stopping. The daemon pipes the upload straight into the engine instead of reading the whole request into a temp file first, so the bar tracks what the engine has actually swallowed and a multi-gigabyte dump never lands on disk twice. A load that the engine accepted while still complaining ends on an amber warning with the error count and the most frequent complaints, because `psql` exits 0 even when every statement in a dump failed and a silent green tick over a half-empty database is worse than no feedback at all.
+- **Snapshots** are managed on the card of the database they belong to: take a snapshot, restore one (with a confirmation, since a restore overwrites the current data), delete one (also confirmed), or download one as a plain `.sql` dump. Taking, restoring and deleting all report what they are doing in the snapshots modal and leave a confirmation or the engine's error behind, so a slow restore of a large database is visibly working rather than apparently frozen. A snapshot is keyed on the engine and database it was taken from, never on a site, so it lives with the database rather than on the site page. A named snapshot gets a UTC timestamp appended (`nightly-20260719-135558`), so repeated snapshots of one name never collide; the list shows the parsed time and sorts newest first.
+- **Copy connection string** builds a ready-to-paste DSN for that specific database, which works whether or not an admin UI is installed.
+- **Open in the admin UI** appears on the card when an admin tool is installed for the engine, and opens it straight to this database when the tool supports a per-database URL (phpMyAdmin and Adminer for MySQL/MariaDB, Mongo Express for MongoDB). pgAdmin has no such URL, so it opens at its root.
+- **The linked site**, when a site owns the database, is shown as a link on the card that jumps to that site. A `<name>_testing` database links to the same site as `<name>`. A worktree's isolated database is shown under the branch's own domain (`staging.astrolov.test` for the `staging` branch of `astrolov.test`), so it reads as that branch's data rather than as a stray database of the parent site, and the link still opens the parent site's page.
+- **A `<name>_testing` database shares the card of the `<name>` database it tests**, rather than taking a second card of its own for what is usually an empty database. The card header carries an App/Testing segment, and the name, size, linked site and every action below it act on whichever half is selected, so an export, an import, a snapshot or a drop always applies to the database currently shown. Dropping one half leaves the other in place. A `_testing` database whose matching database does not exist keeps an ordinary card of its own.
+
+The same "open in the admin tool" affordance is on the database service card in a site's own overview (a database-icon button), so from a site you can jump straight into that site's database in phpMyAdmin, Adminer or Mongo Express.
+
+Document engines like MongoDB list their databases and expose the connection string and admin link, but the SQL-only operations (create, export, import, snapshots) are hidden for them since those act through SQL clients. A stopped engine shows a prompt to start it rather than an empty grid.
+
+The whole tab is loopback only. Reaching the dashboard over the LAN, even as a remote-control client with valid credentials, the tab is not offered at all and every database endpoint behind it answers 403, because this surface both reads a database out in full and drops or overwrites it, and the raw `.env` view is already held to the same rule for carrying the credentials to it. Drive databases from the machine lerd runs on.
+
+Which databases an engine advertises, and their sizes, comes from an `introspect.list_databases` command declared in the engine's [service preset](service-presets.md), so a newly added engine works here as soon as its preset ships that query, with no lerd release. The size is the data you put there, not the engine's own overhead: every postgres database inherits roughly 7.5 MB of system catalogs from `template1`, so that baseline is netted off and an empty database reads as empty, the same as it does on MySQL.
 
 ## Service and database resolution
 
@@ -119,6 +141,21 @@ An all-databases restore drops and recreates every database contained in the sna
 
 `db:snapshot` rejects names that look like command verbs (`list`, `rm`, `delete`, `restore`, …), so `lerd db snapshot list` errors with a hint instead of silently creating a snapshot literally named "list". Use `lerd db:snapshots` to list.
 
+### Imports that finish with errors
+
+`psql` exits 0 whether a dump loaded cleanly or every statement in it failed, so `lerd db:import`, `lerd db:restore` and a cross-version `service migrate` count what the engine wrote and end on a warning instead of "import complete" when it complained. The warning lists the most frequent complaints with their counts, which is usually enough to name the cause on sight: a flood of `invalid command \N` means a `COPY` block had no table to load into, so the failure is further up in whatever stopped that table from being created.
+
+### Large dumps and `max_allowed_packet`
+
+A big restore that dies partway with "Lost connection to MySQL server during query" is almost always a single SQL statement exceeding `max_allowed_packet`, which is enforced on both the client and the server. `lerd db:import`, `lerd db:restore`, and a cross-version `service migrate` all raise the client ceiling to 1G automatically, so the client is never the bottleneck, and the bundled MySQL config ships a `max_allowed_packet` of 256M on the server. If a dump has an even larger single statement, raise the server ceiling in the service **Config** tab (or the `zz-*.cnf` tuning file) under `[mysqld]` and run `lerd service restart <name>`:
+
+```ini
+[mysqld]
+max_allowed_packet = 1G
+```
+
+When you restore with an external client instead (a GUI, a manual `mysql` call), raise the packet size there too, either with `mysql --max-allowed-packet=1G` or a matching `[client]` entry in the same tuning file.
+
 ---
 
 ## Picking a database for a Laravel project
@@ -190,6 +227,55 @@ lerd db:shell --service postgres --database myapp
 #   database: myapp
 lerd db:shell
 ```
+
+## Client tools for external databases and IDEs
+
+The `db:*` commands work against lerd's own service containers. When you need to dump or query a database that lives **outside** lerd, for example a managed cluster on DigitalOcean, or you want to point an IDE like PhpStorm at a real `mysqldump` executable, lerd exposes the client tools that already ship inside its database images as host shims.
+
+A service declares which tools it exposes in its YAML, so the set grows with the store. Today: mysql and mariadb expose `mysql` and `mysqldump` (mariadb backed by the `mariadb`/`mariadb-dump` binaries); postgres and its pgvector/timescaledb variants expose `psql`, `pg_dump`, `pg_dumpall`, `pg_restore`; redis exposes `redis-cli`; valkey exposes `valkey-cli`; and mongo exposes `mongosh`, `mongodump`, `mongorestore`, `mongoexport`, `mongoimport`. Each becomes a shim on your PATH in `~/.local/share/lerd/bin`.
+
+When you install a service, lerd installs its shims. If you do not already have the tool on your system there is nothing to shadow, so the shim is installed automatically. If you **do** already have the tool installed, lerd asks first (default no) because the shim sits ahead of your own binary on PATH. Removing a service removes its shims. A tool added to a service in the store reaches an already-installed service on the next `lerd update`, without a reinstall.
+
+The shims pass every argument straight through, so targeting an external host is just a matter of supplying your own connection flags:
+
+```bash
+# Dump a managed database to a file in the current directory
+mysqldump -h db.example.com -P 25060 -u doadmin -p yourdb > dump.sql
+
+# Same for postgres
+pg_dump -h db.example.com -p 25060 -U doadmin -d yourdb > dump.sql
+```
+
+Each tool runs in a throwaway container spun from the service's image, so nothing touches your running database container. Your home directory is mounted read-write, so the tool can read a CA cert and write its output anywhere under it, whether you use a shell redirect (`> dump.sql`), the tool's own `--result-file`/`-f` flag, or an IDE that fills one in. Output files are owned by you, not root.
+
+Managed databases usually require TLS. Keep the CA file you pass with a flag like `--ssl-ca` somewhere under your home directory so the tool can read it:
+
+```bash
+mysqldump -h db.example.com -P 25060 -u doadmin -p --ssl-ca=ca.crt yourdb > dump.sql
+```
+
+When you give no host, the tool connects to a local lerd database with its admin credentials, so `pg_dump mydb` or `mysqldump mydb` just works. If you run it from a project directory, it targets that project's own database service, read from the project's `DB_HOST`, so a mariadb-backed project routes to your mariadb container rather than the default mysql one. Outside a project, or when the project's database is a different family than the tool, it falls back to the family's default service. Passing `-h` (an external host) turns all of this off and the shim forwards everything untouched. For scripted local dumps `lerd db:export` is still the tidier option; the raw shim is there for external databases and IDEs.
+
+Run from inside a git worktree, the shim reads that checkout's own env file rather than the parent site's, so a branch with an isolated database dumps from its own schema even when the worktree lives inside the parent's directory. A worktree whose env was never rewritten keeps using the parent site's.
+
+To point an IDE at a tool, use its shim path, for example `~/.local/share/lerd/bin/mysqldump`.
+
+### Managing shims
+
+List the shims your installed services expose and whether each is installed:
+
+```bash
+lerd shims
+```
+
+Add or remove an individual shim, for example if you declined it at install time and later want it, or you would rather keep your own binary on PATH:
+
+```bash
+lerd shims remove mysqldump   # take lerd's shim off your PATH
+lerd shims add mysqldump      # put it back
+```
+
+The same per-tool toggles are on each database service's Tools tab in the web UI. When two services of the same family are installed (say mysql and mariadb, which both provide `mysqldump`), one owns the shim and runs it; the others show that tool disabled on their Tools tab so it is managed in one place.
 
 ## Recovering after a service reinstall
 

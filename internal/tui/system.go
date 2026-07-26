@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	lerdNode "github.com/gabriel-sousa99/lerd/internal/node"
@@ -136,6 +136,13 @@ func (m *Model) systemRows() []systemRow {
 			label += " (" + mode + ")"
 		}
 		add(systemRow{kind: sysXdebug, label: label, on: on, arg: v})
+
+		// What this version's image carries of the custom extension/package
+		// set. Omitted entirely when nothing is declared, so the row only
+		// appears for the users it means something to.
+		if extras := phpExtrasSummary(cfg, v); extras != "" {
+			info("Extras · PHP "+v, extras)
+		}
 	}
 
 	// Node

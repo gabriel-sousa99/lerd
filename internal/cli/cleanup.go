@@ -1,0 +1,156 @@
+package cli
+
+import (
+	"fmt"
+
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/spf13/cobra"
+)
+
+// NewCleanupCmd returns the cleanup command: reclaim podman disk that lerd's
+// own image rebuilds have orphaned, without ever touching a non-lerd resource.
+func NewCleanupCmd() *cobra.Command {
+	var dryRun, yes, safe, deep bool
+	cmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Reclaim podman disk from orphaned lerd images, unused service images, and dangling leftovers",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runCleanup(dryRun, yes, safe)
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be reclaimed without removing anything")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Remove without confirming")
+	cmd.Flags().BoolVar(&safe, "safe", false, "Only reclaim images provably built by lerd, keep unused service and dangling images")
+	// --deep is now the default; kept as a hidden no-op so existing muscle memory
+	// and scripts don't break.
+	cmd.Flags().BoolVar(&deep, "deep", false, "")
+	_ = cmd.Flags().MarkHidden("deep")
+	cmd.AddCommand(newCleanupAutoCmd())
+	return cmd
+}
+
+// newCleanupAutoCmd toggles automatic cleanup (the watcher's daily managed-tier
+// sweep and the post-rebuild / post-service-change reaping), so users don't have
+// to hand-edit config.yaml. Matches the on/off/status shape of lerd idle/notify.
+func newCleanupAutoCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "auto",
+		Short: "Enable, disable, or show automatic cleanup",
+		Long: `Toggle automatic cleanup: the lerd-watcher's daily managed sweep and
+the immediate reaping after a PHP rebuild or a service update/remove. On by
+default. The managed sweep reclaims lerd's own orphaned builds and old service
+versions, always keeps the current image and the one-back rollback target, and
+never touches an image lerd didn't pull. The wider dangling-image reap is
+reserved for the interactive lerd cleanup.`,
+	}
+	cmd.AddCommand(
+		&cobra.Command{Use: "on", Short: "Enable automatic cleanup", Args: cobra.NoArgs,
+			RunE: func(_ *cobra.Command, _ []string) error { return runCleanupAutoToggle(true) }},
+		&cobra.Command{Use: "off", Short: "Disable automatic cleanup", Args: cobra.NoArgs,
+			RunE: func(_ *cobra.Command, _ []string) error { return runCleanupAutoToggle(false) }},
+		&cobra.Command{Use: "status", Short: "Show whether automatic cleanup is on", Args: cobra.NoArgs,
+			RunE: func(_ *cobra.Command, _ []string) error { return runCleanupAutoStatus() }},
+	)
+	return cmd
+}
+
+func runCleanupAutoToggle(enable bool) error {
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	if cfg.AutoCleanupEnabled() == enable {
+		feedback.Line(fmt.Sprintf("Automatic cleanup already %s.", autoStateWord(enable)))
+		return nil
+	}
+	cfg.AutoCleanup = enable
+	if err := config.SaveGlobal(cfg); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+	feedback.Done(fmt.Sprintf("Automatic cleanup %s.", autoStateWord(enable)))
+	return nil
+}
+
+func runCleanupAutoStatus() error {
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	state := feedback.Amber("disabled")
+	if cfg.AutoCleanupEnabled() {
+		state = feedback.Green("enabled")
+	}
+	fmt.Printf("Automatic cleanup: %s\n", state)
+	return nil
+}
+
+func autoStateWord(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+// cleanupScope maps the --safe flag to the scope the reclaim runs at. The doctor
+// sizes its reclaimable-disk finding through the same helper, so the estimate it
+// shows is the one its fix acts on.
+func cleanupScope(safe bool) cleanup.Scope {
+	if safe {
+		return cleanup.ScopeSafe
+	}
+	return cleanup.ScopeDeep
+}
+
+func runCleanup(dryRun, yes, safe bool) error {
+	plan, err := cleanup.Inspect(cleanupScope(safe))
+	if err != nil {
+		return err
+	}
+	if len(plan.Targets) == 0 {
+		feedback.Line("Nothing to reclaim right now.")
+		showHeldHint(plan)
+		return nil
+	}
+
+	// Sizes are per-image reclaimable (unique layers only); shared base layers
+	// stay behind for the live images that still reference them.
+	rows := make([][]string, 0, len(plan.Targets))
+	for _, t := range plan.Targets {
+		rows = append(rows, []string{t.ID, t.Desc, humanSize(t.Bytes)})
+	}
+	feedback.Header("Reclaimable lerd images")
+	feedback.Table([]string{"IMAGE", "KIND", "RECLAIMABLE"}, rows)
+	feedback.Note(fmt.Sprintf("About %s across %d image(s).", humanSize(plan.ReclaimBytes()), len(plan.Targets)))
+
+	if dryRun {
+		showHeldHint(plan)
+		return nil
+	}
+	if !yes && !feedback.Confirm("Remove these images?", false) {
+		return nil
+	}
+
+	_, freed := cleanup.Apply(plan)
+	feedback.Done(fmt.Sprintf("Freed about %s.", humanSize(freed)))
+	showHeldHint(plan)
+	return nil
+}
+
+// showHeldHint tells the user when reclaimable disk is locked behind running
+// containers: those images can't be removed now, but a restart recreates the
+// containers on the current images and releases the old ones. Silent otherwise.
+func showHeldHint(plan cleanup.Plan) {
+	if h := heldHint(plan); h != "" {
+		feedback.Note(h)
+	}
+}
+
+func heldHint(plan cleanup.Plan) string {
+	if plan.Held.Count == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s across %d image(s) is held by running containers. Run `lerd restart` to release it, then cleanup again.",
+		humanSize(plan.Held.Bytes), plan.Held.Count)
+}

@@ -6,9 +6,9 @@
   import KindLens from '$components/KindLens.svelte';
   import DebugDisabled from '$components/DebugDisabled.svelte';
   import { debugLens, type DebugLens } from '$stores/debugLens';
-  import { dumps, refreshStatus } from '$stores/dumps';
+  import { refreshStatus } from '$stores/dumps';
   import { refreshDevtoolsStatus, debugCaptureEnabled } from '$stores/queries';
-  import { countKinds } from '$stores/debugEvents';
+  import { countKinds, debugEvents } from '$stores/debugEvents';
   import { m } from '../../paraglide/messages.js';
 
   onMount(() => {
@@ -19,15 +19,17 @@
   interface Props {
     siteName?: string;
     framework?: string;
+    domain?: string;
+    branch?: string;
   }
-  let { siteName = '', framework = '' }: Props = $props();
+  let { siteName = '', framework = '', domain = '', branch = '' }: Props = $props();
 
   // Cache comes solely from the Laravel adapter, so it only applies to Laravel
   // sites; everything else is framework-agnostic (PDO and the Symfony
   // Mailer/Twig/EventDispatcher/Messenger/HttpClient seams cover every PHP app).
   const isLaravel = $derived(framework.toLowerCase() === 'laravel');
   const laravelOnly: DebugLens[] = ['cache'];
-  const counts = $derived(countKinds($dumps, siteName));
+  const counts = $derived(countKinds($debugEvents, siteName));
 
   type Lens = DebugLens;
   const tabs = $derived<TabItem<Lens>[]>([

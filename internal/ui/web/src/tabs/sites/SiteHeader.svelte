@@ -7,11 +7,11 @@
     resumeSite,
     pinSite,
     unpinSite,
-    unlinkSite,
     restartSite,
     openSiteInBrowser,
     openTerminal,
     openEditor,
+    openFolder,
     loadSites,
     activeWorktreeDomain,
     toggleTLS,
@@ -19,19 +19,23 @@
   } from '$stores/sites';
   import {
     openDomainModal,
+    openErrorModal,
     openGroupModal,
+    openSiteUnlinkModal,
     openWorktreeAddModal,
     openWorktreeRemoveModal
   } from '$stores/modals';
   import Icon from '$components/Icon.svelte';
+  import { tooltip } from '$lib/tooltip';
   import { accessMode } from '$stores/accessMode';
   import { idleEnabled } from '$stores/idle';
   import { status, loadStatus } from '$stores/status';
   import { xdebugOn, xdebugOff, type XdebugMode } from '$stores/xdebug';
   import { apiBase } from '$lib/api';
-  import ServiceBadgeRow from './ServiceBadgeRow.svelte';
+  import { homeShorten } from '$lib/path';
   import DomainMorePill from './DomainMorePill.svelte';
   import LANShareLink from './LANShareLink.svelte';
+  import WorkspacePicker from './WorkspacePicker.svelte';
   import { m } from '../../paraglide/messages.js';
 
   import type { Snippet } from 'svelte';
@@ -52,7 +56,6 @@
   }: Props = $props();
 
   let pauseBusy = $state(false);
-  let unlinkBusy = $state(false);
   let restartBusy = $state(false);
   let tlsBusy = $state(false);
   let lanBusy = $state(false);
@@ -100,6 +103,7 @@
     return (site.worktrees || []).find((w) => w.branch === activeWorktreeBranch);
   });
   const activePath = $derived(activeWorktree?.path || site.path || '');
+  const activePathLabel = $derived(homeShorten(activePath, $status.home));
   const activeFrameworkLabel = $derived(activeWorktree?.framework_label || site.framework_label);
 
   type TabEntry = { branch: string; domain: string; isMain: boolean };
@@ -128,8 +132,27 @@
   const lanDomain = $derived(activeWorktree ? activeWorktree.domain ?? site.domain : site.domain);
   const lanOn = $derived(Boolean(lanPort));
 
+  // A host-proxy site's dev server is its only runtime, and restarting it is the
+  // routine fix when it wedges, so it gets a first-class header button rather
+  // than an overflow entry. Proxy-only sites have no process lerd can bounce.
+  const showDevServerRestart = $derived(
+    Boolean(site.host_has_dev_server) && !site.paused && !activeWorktreeBranch
+  );
+
   const useTLS = $derived(Boolean(site.tls));
   const scheme = $derived(useTLS ? 'https://' : 'http://');
+
+  // On a remote (non-loopback) dashboard the site's .test domain doesn't
+  // resolve, so the open action targets the LAN share URL instead. When the
+  // site isn't shared yet the primary button flips to a share action, since
+  // there is nothing openable off-host until it is. Loopback is unchanged.
+  const remoteView = $derived(!$accessMode.loopback);
+  const primaryShare = $derived(remoteView && !lanOn && !site.paused);
+  const showLanToggle = $derived(!site.paused && ($accessMode.loopback || lanOn));
+
+  function openTarget() {
+    openSiteInBrowser(site, activeWorktreeBranch, remoteView && lanOn && lanURL ? lanURL : undefined);
+  }
 
   async function togglePause() {
     pauseBusy = true;
@@ -141,23 +164,11 @@
     }
   }
 
-  async function unlink() {
-    if (!confirm(m.sites_confirmUnlink({ domain: site.domain }))) return;
-    unlinkBusy = true;
-    try {
-      const res = await unlinkSite(site.domain);
-      if (!res.ok) alert(m.sites_unlinkFailed({ error: res.error || '' }));
-      await loadSites();
-    } finally {
-      unlinkBusy = false;
-    }
-  }
-
   async function restart() {
     restartBusy = true;
     try {
       const res = await restartSite(site.domain);
-      if (!res.ok) alert(m.sites_restartFailed({ error: res.error || '' }));
+      if (!res.ok) openErrorModal(m.sites_restartFailed({ error: res.error || '' }));
     } finally {
       restartBusy = false;
     }
@@ -223,7 +234,7 @@
           <button
             type="button"
             onclick={() => pickWorktree(e)}
-            title={e.domain}
+            use:tooltip={e.domain}
             class="flex items-center gap-1.5 pl-3 pr-3 py-2.5 text-xs min-w-0 {isActive
               ? 'text-gray-800 dark:text-gray-100 font-medium'
               : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'}"
@@ -233,13 +244,13 @@
                 class="w-3.5 h-3.5 shrink-0 {isActive ? 'text-lerd-red' : 'text-gray-400 dark:text-gray-500'}"
                 fill="none"
                 stroke="currentColor"
-                stroke-width="1.8"
+                stroke-width="2"
                 stroke-linecap="round"
                 stroke-linejoin="round"
                 viewBox="0 0 24 24"
                 aria-label={m.sites_ariaMain()}
               >
-                <path d="M3 10.5L12 3l9 7.5V20a1 1 0 01-1 1h-4v-6h-8v6H4a1 1 0 01-1-1v-9.5z" />
+                <path d="M6 3v12M15 6a3 3 0 1 0 6 0a3 3 0 1 0-6 0M3 18a3 3 0 1 0 6 0a3 3 0 1 0-6 0M18 9a9 9 0 0 1-9 9" />
               </svg>
             {:else}
               <svg
@@ -263,7 +274,7 @@
                 ev.stopPropagation();
                 openWorktreeRemoveModal(site, e.branch);
               }}
-              title={m.common_remove() + ' ' + e.branch}
+              use:tooltip={m.common_remove() + ' ' + e.branch}
               aria-label={m.common_remove() + ' ' + e.branch}
               class="shrink-0 mr-1 w-4 h-4 flex items-center justify-center rounded-sm text-gray-400 hover:text-red-500 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors"
             >
@@ -279,7 +290,7 @@
           type="button"
           onclick={() => openWorktreeAddModal(site)}
           class="ml-1 mb-0.5 w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5 transition-colors shrink-0"
-          title={m.worktreeMgr_add()}
+          use:tooltip={m.worktreeMgr_add()}
           aria-label={m.worktreeMgr_add()}
         >
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -288,11 +299,6 @@
         </button>
       {/if}
       </div>
-      {#if activePath}
-        <div class="shrink-0 pl-2 pr-3 pb-2 flex items-center text-[11px] leading-none text-gray-500 dark:text-gray-400 min-w-0">
-          <span class="font-mono leading-none truncate max-w-[22rem]" title={activePath}>{activePath}</span>
-        </div>
-      {/if}
     </div>
   {/if}
 
@@ -307,8 +313,8 @@
           type="button"
           onclick={flipTLS}
           disabled={tlsBusy}
-          title={site.tls ? m.sites_controls_httpsToggle_on() : m.sites_controls_httpsToggle_off()}
           aria-label={site.tls ? m.sites_controls_httpsToggle_on() : m.sites_controls_httpsToggle_off()}
+          use:tooltip={site.tls ? m.sites_controls_httpsToggle_on() : m.sites_controls_httpsToggle_off()}
           class="shrink-0 -ml-1 p-1 rounded-sm transition-colors disabled:opacity-50 {site.tls
             ? 'text-emerald-500 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'
             : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5'}"
@@ -339,7 +345,7 @@
           {/if}
         </button>
       {:else if useTLS}
-        <span class="shrink-0 -ml-1 p-1 inline-flex items-center text-emerald-500" aria-label="TLS">
+        <span class="shrink-0 -ml-1 p-1 inline-flex items-center text-emerald-500" aria-label={m.sites_tls_on()}>
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               stroke-linecap="round"
@@ -349,23 +355,14 @@
             />
           </svg>
         </span>
-      {:else if !dnsEnabled}
-        <span
-          class="shrink-0 -ml-1 p-1 inline-flex items-center text-gray-400 dark:text-gray-500"
-          title={m.sites_controls_httpsUnavailable()}
-          aria-label={m.sites_controls_httpsUnavailable()}
-        >
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
-            />
-          </svg>
-        </span>
+      <!--
+        Upstream has an "HTTPS unavailable" branch here for dns.enabled === false.
+        The fork drops it: the mkcert CA is installed regardless of the DNS choice
+        and .localhost resolves via RFC 6761, so a DNS-off site can be secured and
+        must fall through to the ordinary "TLS off" padlock below.
+      -->
       {:else}
-        <span class="shrink-0 -ml-1 p-1 inline-flex items-center text-gray-400 dark:text-gray-500" aria-label="No TLS">
+        <span class="shrink-0 -ml-1 p-1 inline-flex items-center text-gray-400 dark:text-gray-500" aria-label={m.sites_tls_off()}>
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               stroke-linecap="round"
@@ -404,7 +401,8 @@
         <button
           type="button"
           onclick={() => openDomainModal(site)}
-          title={m.sites_manageDomains()}
+          use:tooltip={m.sites_manageDomains()}
+          aria-label={m.sites_manageDomains()}
           class="flex items-center min-w-0 flex-1 font-mono cursor-text text-left pt-1.5"
         >
           <span class="text-sm text-gray-400 dark:text-gray-500 shrink-0 leading-none">{scheme}</span>
@@ -419,32 +417,13 @@
 
       <DomainMorePill {site} />
 
-      {#if !activeWorktreeBranch && !site.host_proxy}
-        <button
-          type="button"
-          onclick={() => openGroupModal(site)}
-          title={site.group ? 'Manage group' : 'Group with another site'}
-          aria-label={m.group_manage()}
-          class="inline-flex items-center gap-1 shrink-0 text-xs transition-colors {site.group
-            ? 'text-lerd-red'
-            : 'text-gray-400 dark:text-gray-500 hover:text-lerd-red'}"
-        >
-          <Icon name="group" class="w-3.5 h-3.5" />
-          {#if site.group_subdomain}
-            <span class="font-mono">{site.group_subdomain}.</span>
-          {/if}
-        </button>
-      {/if}
-
       <span class="flex items-center gap-1.5 shrink-0">
         {#if activeFrameworkLabel}
-          <Badge tone="framework">{activeFrameworkLabel}</Badge>
+          <span class="hidden @md:inline-flex"><Badge tone="framework">{activeFrameworkLabel}</Badge></span>
         {/if}
         {#if lanOn && lanURL}
           <span class="hidden @md:inline-flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400">
-            <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-              <path d="M5 12.55a11 11 0 0114 0M8.5 16.5a5 5 0 017 0M2 8.82a15 15 0 0120 0M12 20h.01" />
-            </svg>
+            <Icon name="wifi" class="w-3 h-3 shrink-0" />
             <LANShareLink domain={lanDomain} url={lanURL} siteDomain={site.domain} branch={activeWorktreeBranch} />
           </span>
         {/if}
@@ -455,10 +434,6 @@
             </svg>
             {m.sites_paused().toLowerCase()}
           </span>
-        {:else if site.fpm_running}
-          <span class="w-2 h-2 rounded-full bg-emerald-500" title={m.common_running()} aria-label={m.common_running()}></span>
-        {:else}
-          <span class="w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600" title={m.common_stopped()} aria-label={m.common_stopped()}></span>
         {/if}
       </span>
 
@@ -466,8 +441,8 @@
         <button
           type="button"
           onclick={onOpenNginx}
-          title={m.sites_nginx_editTitle()}
           aria-label={m.sites_nginx_editTitle()}
+          use:tooltip={m.sites_nginx_editTitle()}
           class="shrink-0 -mr-1 p-1 rounded-sm text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition-colors"
         >
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
@@ -481,30 +456,83 @@
     </div>
 
     <div class="flex items-center shrink-0">
-      <button
-        type="button"
-        onclick={() => openSiteInBrowser(site, activeWorktreeBranch)}
-        title={m.common_open() + ' — ' + activeDomain}
-        aria-label={m.common_open()}
-        class="w-8 h-8 flex items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5 transition-colors"
-      >
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
-          />
-        </svg>
-      </button>
-
-      {#if !site.paused}
+      {#if primaryShare}
         <button
           type="button"
           onclick={flipLAN}
           disabled={lanBusy}
-          title={lanOn ? m.sites_controls_lanToggle_on() : m.sites_controls_lanToggle_off()}
+          aria-label={m.sites_controls_lanToggle_off()}
+          use:tooltip={m.sites_controls_lanToggle_off()}
+          class="w-8 h-8 flex items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+        >
+          {#if lanBusy}
+            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+            </svg>
+          {:else}
+            <Icon name="wifi" class="w-4 h-4" />
+          {/if}
+        </button>
+      {:else}
+        <button
+          type="button"
+          onclick={openTarget}
+          aria-label={m.common_open()}
+          use:tooltip={m.common_open() + ' — ' + (remoteView && lanOn && lanURL ? lanURL : activeDomain)}
+          class="w-8 h-8 flex items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5 transition-colors"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+            />
+          </svg>
+        </button>
+      {/if}
+
+      {#if showDevServerRestart}
+        <button
+          type="button"
+          onclick={restart}
+          disabled={restartBusy}
+          aria-label={m.sites_restartDevServer()}
+          use:tooltip={m.sites_restartDevServer()}
+          class="w-8 h-8 flex items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+        >
+          <Icon name={restartBusy ? 'spinner' : 'refresh'} class="w-4 h-4 {restartBusy ? 'animate-spin' : ''}" />
+        </button>
+      {/if}
+
+      {#if !activeWorktreeBranch && !site.host_proxy}
+        <button
+          type="button"
+          onclick={() => openGroupModal(site)}
+          aria-label={m.group_manage()}
+          use:tooltip={site.group ? 'Manage group' : 'Group with another site'}
+          class="w-8 h-8 flex items-center justify-center rounded-md transition-colors hover:bg-gray-100 dark:hover:bg-white/5 {site.group
+            ? 'text-lerd-red'
+            : 'text-gray-500 dark:text-gray-400 hover:text-lerd-red'}"
+        >
+          <Icon name="group" class="w-4 h-4" />
+        </button>
+      {/if}
+
+      <!-- A group secondary shows its main's workspace and moves with it, so it
+           has nothing of its own to pick. -->
+      {#if $accessMode.loopback && !activeWorktreeBranch && !site.group_subdomain}
+        <WorkspacePicker {site} />
+      {/if}
+
+      {#if showLanToggle}
+        <button
+          type="button"
+          onclick={flipLAN}
+          disabled={lanBusy}
           aria-label={lanOn ? m.sites_controls_lanToggle_on() : m.sites_controls_lanToggle_off()}
+          use:tooltip={lanOn ? m.sites_controls_lanToggle_on() : m.sites_controls_lanToggle_off()}
           class="hidden @md:flex w-8 h-8 items-center justify-center rounded-md transition-colors disabled:opacity-50 {lanOn
             ? 'text-teal-500 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/20'
             : 'text-gray-500 dark:text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5'}"
@@ -515,9 +543,7 @@
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
             </svg>
           {:else}
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-              <path d="M5 12.55a11 11 0 0114 0M8.5 16.5a5 5 0 017 0M2 8.82a15 15 0 0120 0M12 20h.01" />
-            </svg>
+            <Icon name="wifi" class="w-4 h-4" />
           {/if}
         </button>
       {/if}
@@ -527,9 +553,9 @@
           type="button"
           onclick={toggleXdebug}
           disabled={xdebugBusy}
-          title={(xdebugEnabled ? m.sites_badges_xdebugOn({ mode: xdebugMode }) : m.sites_badges_xdebugDisabled()) + ' · ' + m.system_php_xdebugHint()}
           aria-label={m.sites_badges_xdebug()}
           aria-pressed={xdebugEnabled}
+          use:tooltip={xdebugEnabled ? m.sites_badges_xdebugOn({ mode: xdebugMode }) : m.sites_badges_xdebugDisabled()}
           class="hidden @md:flex w-8 h-8 items-center justify-center rounded-md transition-colors disabled:opacity-50 {xdebugEnabled
             ? 'text-emerald-500 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'
             : 'text-gray-500 dark:text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5'}"
@@ -553,8 +579,8 @@
         <button
           type="button"
           onclick={() => openTerminal(site.domain, activeWorktreeBranch)}
-          title={m.sites_openInTerminal()}
           aria-label={m.common_terminal()}
+          use:tooltip={m.sites_openInTerminal()}
           class="hidden @md:flex w-8 h-8 items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5 transition-colors"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -597,6 +623,7 @@
           aria-label={m.common_moreActions()}
           aria-haspopup="menu"
           aria-expanded={overflowOpen}
+          use:tooltip={m.common_moreActions()}
           class="w-8 h-8 flex items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:text-lerd-red hover:bg-gray-100 dark:hover:bg-white/5 transition-colors"
         >
           <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
@@ -608,7 +635,7 @@
             role="menu"
             class="absolute right-0 top-full mt-1 min-w-[12rem] rounded-md border border-gray-200 dark:border-lerd-border bg-white dark:bg-lerd-bg shadow-lg z-30 py-1"
           >
-            {#if !site.paused && (site.uses_php || site.custom_container)}
+            {#if !site.paused && !site.host_proxy && (site.uses_php || site.custom_container)}
               <button
                 type="button"
                 role="menuitem"
@@ -731,7 +758,7 @@
                 {m.sites_manageDomains()}
               </button>
             {/if}
-            {#if !site.paused}
+            {#if showLanToggle}
               <button
                 type="button"
                 role="menuitem"
@@ -742,10 +769,27 @@
                 disabled={lanBusy}
                 class="@md:hidden w-full px-3 py-1.5 text-xs text-left flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors disabled:opacity-50 {lanOn ? 'text-teal-600 dark:text-teal-400' : 'text-gray-700 dark:text-gray-200'}"
               >
-                <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                  <path d="M5 12.55a11 11 0 0114 0M8.5 16.5a5 5 0 017 0M2 8.82a15 15 0 0120 0M12 20h.01" />
-                </svg>
+                <Icon name="wifi" class="w-3.5 h-3.5 shrink-0" />
                 {lanOn ? m.sites_controls_lanToggle_on() : m.sites_controls_lanToggle_off()}
+              </button>
+            {/if}
+            {#if showXdebug && !site.paused}
+              <button
+                type="button"
+                role="menuitem"
+                onclick={() => {
+                  overflowOpen = false;
+                  toggleXdebug();
+                }}
+                disabled={xdebugBusy}
+                class="@md:hidden w-full px-3 py-1.5 text-xs text-left flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors disabled:opacity-50 {xdebugEnabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-700 dark:text-gray-200'}"
+              >
+                <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                  <path d="m8 2 1.88 1.88M14.12 3.88 16 2M9 7.13v-1a3.003 3.003 0 1 1 6 0v1" />
+                  <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6zM12 20v-9" />
+                  <path d="M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4" />
+                </svg>
+                {xdebugEnabled ? m.sites_badges_xdebugOn({ mode: xdebugMode }) : m.sites_badges_xdebugDisabled()}
               </button>
             {/if}
             {#if !site.paused || !activeWorktreeBranch}
@@ -756,10 +800,9 @@
               role="menuitem"
               onclick={() => {
                 overflowOpen = false;
-                unlink();
+                openSiteUnlinkModal({ domain: site.domain });
               }}
-              disabled={unlinkBusy}
-              class="w-full px-3 py-1.5 text-xs text-left flex items-center gap-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50"
+              class="w-full px-3 py-1.5 text-xs text-left flex items-center gap-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
             >
               <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path
@@ -769,7 +812,7 @@
                   d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
                 />
               </svg>
-              {unlinkBusy ? '...' : m.sites_unlink()}
+              {m.sites_unlink()}
             </button>
           </div>
         {/if}
@@ -777,18 +820,40 @@
     </div>
   </div>
 
-  {#if activePath && !showWorktreeTabs}
-    <div class="px-2 pb-2 flex items-center text-[11px] text-gray-500 dark:text-gray-400 min-w-0">
-      <span class="font-mono truncate" title={activePath}>{activePath}</span>
+  {#if lanOn && lanURL}
+    <div class="@md:hidden px-3 pb-2 flex items-center gap-1.5 text-[11px] text-teal-600 dark:text-teal-400 min-w-0">
+      <Icon name="wifi" class="w-3 h-3 shrink-0" />
+      <LANShareLink domain={lanDomain} url={lanURL} siteDomain={site.domain} branch={activeWorktreeBranch} />
     </div>
   {/if}
 
-  <div class="px-3 flex flex-col @xl:flex-row justify-between gap-2">
-    <div class="pb-3">
-      <ServiceBadgeRow {site} />
-    </div>
-    {#if tabs}
-      <div class="flex items-end gap-4 -mb-px pt-2">{@render tabs()}</div>
+  {#snippet pathLabel()}
+    {#if $accessMode.loopback}
+      <button
+        type="button"
+        onclick={() => openFolder(activePath)}
+        use:tooltip={m.sites_openFolder()}
+        class="font-mono leading-none truncate hover:text-lerd-red transition-colors"
+      >{activePathLabel}</button>
+    {:else}
+      <span class="font-mono leading-none truncate" title={activePath}>{activePathLabel}</span>
     {/if}
-  </div>
+  {/snippet}
+
+  {#if activePath && !tabs}
+    <div class="px-3 pb-2 flex items-center text-[11px] text-gray-500 dark:text-gray-400 min-w-0">
+      {@render pathLabel()}
+    </div>
+  {/if}
+
+  {#if tabs}
+    <div class="px-3 flex items-end justify-between gap-4 -mb-px pt-1">
+      <div class="flex items-end gap-4 min-w-0 overflow-x-auto">{@render tabs()}</div>
+      {#if activePath}
+        <div class="self-center min-w-0 max-w-[50%] flex items-center text-[11px] leading-none text-gray-500 dark:text-gray-400">
+          {@render pathLabel()}
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>

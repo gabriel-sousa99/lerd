@@ -3,11 +3,7 @@
 package cli
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-
-	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 )
 
 // healOverlayCorruptionIfNeeded recovers from the overlay-storage error (see
@@ -25,7 +21,7 @@ func healOverlayCorruptionIfNeeded(err error) bool {
 	}
 	restartPodmanMachineForHeal()
 	forceRemoveLerdContainers(true,
-		"  --> Clearing stale lerd containers so they rebuild on fresh storage ...")
+		"Clearing stale lerd containers so they rebuild on fresh storage…")
 	return true
 }
 
@@ -37,15 +33,12 @@ func restartPodmanMachineForHeal() {
 	if name == "" {
 		return
 	}
-	fmt.Println("  --> Container storage looks stale after an unclean shutdown; restarting the Podman Machine to remount it ...")
-	stop := exec.Command(podman.PodmanBin(), "machine", "stop", name)
-	stop.Stdout = os.Stdout
-	stop.Stderr = os.Stderr
-	if err := stop.Run(); err != nil {
-		fmt.Printf("  WARN: podman machine stop: %v\n", err)
+	feedback.Line("Container storage looks stale after an unclean shutdown; restarting the Podman Machine to remount it…")
+	if err := runMachineStreaming(machineStopTimeout, "machine", "stop", name); err != nil {
+		feedback.Warn("podman machine stop: %v", err)
 	}
 	// ensurePodmanMachineRunning starts the VM and waits for the API socket.
-	ensurePodmanMachineRunning()
+	_ = ensurePodmanMachineRunning()
 	recordMachineLastUp()
 }
 
@@ -57,11 +50,11 @@ func reportOverlayHealOutcome(err error) bool {
 	if !isOverlayStorageError(err) {
 		return false
 	}
-	fmt.Println()
-	fmt.Println("  Podman Machine container storage is still corrupted after a restart.")
-	fmt.Println("  This happens when the host shuts down while the VM is running.")
-	fmt.Println("  Your databases and site data are safe; they live on the host, not in the VM.")
-	fmt.Println("  Recreate the VM to fix it (images are rebuilt automatically on the next start):")
-	fmt.Println("      lerd machine reset")
+	feedback.Begin()
+	feedback.Warn("Podman Machine container storage is still corrupted after a restart.")
+	feedback.Note("This happens when the host shuts down while the VM is running.")
+	feedback.Note("Your databases and site data are safe; they live on the host, not in the VM.")
+	feedback.Note("Recreate the VM to fix it (images are rebuilt automatically on the next start):")
+	feedback.Note("    lerd machine reset")
 	return true
 }

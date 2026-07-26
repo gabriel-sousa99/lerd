@@ -7,12 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -47,8 +48,8 @@ func detectSiteProxy(site config.Site) (path string, port int, ok bool) {
 }
 
 type nginxConfData struct {
-	Resolver     string
-	AccessSocket string
+	Resolver        string
+	AccessLogTarget string
 }
 
 // VhostData is the data passed to vhost templates.
@@ -85,6 +86,143 @@ type VhostData struct {
 	// fastcgi_*_timeout / proxy_*_timeout directives. Resolved per site by
 	// resolveRequestTimeout (project .lerd.yaml, then global config, then 60s).
 	RequestTimeout int
+	// FrameworkNginx is the framework definition's nginx block, already
+	// placeholder-expanded and indented. Rendered ahead of the generic
+	// locations so a framework can claim paths they would otherwise swallow.
+	FrameworkNginx string
+}
+
+// Root is the document root as the templates render it, quoted so a path with a
+// space stays a single nginx token. Every generator that fills a VhostData goes
+// through it, so the site, worktree, and SSL vhosts are all covered.
+func (d VhostData) Root() string {
+	return nginxQuote(d.Path + "/" + d.PublicDir)
+}
+
+// resolveFrameworkNginx returns the site framework's nginx block, expanded and
+// indented for splicing into the server block. Empty when the framework declares
+// none, when the snippet is unbalanced, or when a substituted value carries
+// nginx syntax of its own.
+func resolveFrameworkNginx(site config.Site, publicDir, fpmContainer string) string {
+	fw, ok := config.GetFrameworkForDir(site.Framework, site.Path)
+	if !ok || fw.Nginx == nil {
+		return ""
+	}
+	var warn bytes.Buffer
+	block := frameworkNginxBlock(&warn, site.Framework, site.PrimaryDomain(), fw.Nginx.Snippet, site.Path, publicDir, fpmContainer)
+	emitOnce(os.Stdout, warn.String())
+	return block
+}
+
+var (
+	frameworkNginxWarnMu   sync.Mutex
+	frameworkNginxWarnSeen = map[string]bool{}
+)
+
+// emitOnce writes msg to w only the first time this process sees it. A dropped
+// snippet then surfaces on `lerd link` without the watcher repeating it on every
+// vhost regeneration, and the http/ssl pair for one site collapses to one line.
+func emitOnce(w io.Writer, msg string) {
+	if msg == "" {
+		return
+	}
+	frameworkNginxWarnMu.Lock()
+	defer frameworkNginxWarnMu.Unlock()
+	if frameworkNginxWarnSeen[msg] {
+		return
+	}
+	frameworkNginxWarnSeen[msg] = true
+	fmt.Fprint(w, msg)
+}
+
+// frameworkNginxBlock validates and expands a framework snippet into an indented
+// server-block fragment, "" when it declares none. A drop writes a warning to w
+// rather than vanishing silently (the caller rate-limits it, see emitOnce).
+func frameworkNginxBlock(w io.Writer, framework, domain, snippet, sitePath, publicDir, fpmContainer string) string {
+	if strings.TrimSpace(snippet) == "" {
+		return ""
+	}
+	if err := config.ValidateNginxSnippet(snippet); err != nil {
+		fmt.Fprintf(w, "[WARN] dropping %s nginx config for %s: %v\n", framework, domain, err)
+		return ""
+	}
+	expanded, err := expandNginxSnippet(snippet, sitePath, publicDir, fpmContainer)
+	if err != nil {
+		fmt.Fprintf(w, "[WARN] dropping %s nginx config for %s: %v\n", framework, domain, err)
+		return ""
+	}
+	return indentBlock(strings.TrimRight(expanded, "\n"), "    ")
+}
+
+// nginxValueForbidden are the characters that let a substituted value break out
+// of the directive it lands in: braces open or close blocks, `;` ends a
+// directive, `#` comments out the rest of the line, newlines do both.
+const nginxValueForbidden = "{};#\n\r\x00"
+
+// nginxQuote renders a filesystem path as a quoted nginx token. nginx splits a
+// directive on whitespace, so a project under a path with a space would give
+// root three arguments and nginx rejects the whole config, taking every other
+// site down with it. Backslash-escaping the spaces parses but does not work:
+// nginx keeps the backslash in the value and realpath() then fails on it.
+func nginxQuote(p string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(p) + `"`
+}
+
+// Variables carrying the site paths for framework snippets to interpolate.
+const (
+	nginxRootVar   = "${lerd_root}"
+	nginxPublicVar = "${lerd_public}"
+)
+
+// nginxPathVars declares the variables a framework snippet interpolates. A
+// snippet may use a path mid-token, as Magento's does with {{public}}/static/,
+// and a quoted token cannot be glued to anything, so the path reaches the
+// snippet as a variable: nginx resolves it after tokenizing, spaces and all.
+func nginxPathVars(sitePath, docRoot string) string {
+	return fmt.Sprintf("set $lerd_root %s;\nset $lerd_public %s;\n\n",
+		nginxQuote(sitePath), nginxQuote(docRoot))
+}
+
+// expandNginxSnippet substitutes the placeholders a framework snippet may use.
+// Plain string replacement, not text/template: the snippet is data rendered into
+// a template, so its braces must never be evaluated as template actions. Values
+// are rejected rather than escaped, since nginx has no general escape for them
+// and every legitimate value here is a path or a container name.
+func expandNginxSnippet(snippet, sitePath, publicDir, fpmContainer string) (string, error) {
+	docRoot := sitePath
+	if publicDir != "" && publicDir != "." {
+		docRoot = filepath.Join(sitePath, publicDir)
+	}
+	for _, v := range []string{sitePath, docRoot, fpmContainer} {
+		if i := strings.IndexAny(v, nginxValueForbidden); i >= 0 {
+			return "", fmt.Errorf("nginx value %q contains %q", v, v[i])
+		}
+	}
+	out := strings.NewReplacer(
+		"{{root}}", nginxRootVar,
+		"{{public}}", nginxPublicVar,
+		"{{fpm}}", fpmContainer,
+	).Replace(snippet)
+	// A misspelled placeholder has balanced braces, so it survives validation and
+	// would reach nginx verbatim, breaking the config for every site.
+	if strings.Contains(out, "{{") {
+		return "", fmt.Errorf("nginx snippet has an unknown {{placeholder}}")
+	}
+	if strings.Contains(out, nginxRootVar) || strings.Contains(out, nginxPublicVar) {
+		out = nginxPathVars(sitePath, docRoot) + out
+	}
+	return out, nil
+}
+
+// indentBlock prefixes every non-blank line with indent.
+func indentBlock(s, indent string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			lines[i] = indent + l
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // resolveRequestTimeout returns the effective request timeout in seconds for
@@ -162,13 +300,14 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 	serverNames := serverNamesWithWildcards(site.Domains)
 
 	proxyPath, proxyPort, hasProxy := detectSiteProxy(site)
+	fpmContainer := podman.FPMContainerName(site, phpVersion)
 	data := VhostData{
 		Domain:          site.PrimaryDomain(),
 		ServerNames:     serverNames,
 		Path:            site.Path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
-		FPMContainer:    podman.FPMContainerName(site, phpVersion),
+		FPMContainer:    fpmContainer,
 		PublicDir:       publicDir,
 		Proxy:           hasProxy,
 		ProxyPath:       proxyPath,
@@ -176,6 +315,7 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 		LerdSite:        site.Name,
 		Profiling:       profilerEnabled(),
 		RequestTimeout:  resolveRequestTimeout(site.Path),
+		FrameworkNginx:  resolveFrameworkNginx(site, publicDir, fpmContainer),
 	}
 
 	var buf bytes.Buffer
@@ -187,6 +327,7 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -206,13 +347,14 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 	serverNames := serverNamesWithWildcards(site.Domains)
 
 	proxyPath, proxyPort, hasProxy := detectSiteProxy(site)
+	fpmContainer := podman.FPMContainerName(site, phpVersion)
 	data := VhostData{
 		Domain:          site.PrimaryDomain(),
 		ServerNames:     serverNames,
 		Path:            site.Path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
-		FPMContainer:    podman.FPMContainerName(site, phpVersion),
+		FPMContainer:    fpmContainer,
 		CertDomain:      site.PrimaryDomain(),
 		PublicDir:       publicDir,
 		Proxy:           hasProxy,
@@ -221,6 +363,7 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 		LerdSite:        site.Name,
 		Profiling:       profilerEnabled(),
 		RequestTimeout:  resolveRequestTimeout(site.Path),
+		FrameworkNginx:  resolveFrameworkNginx(site, publicDir, fpmContainer),
 	}
 
 	var buf bytes.Buffer
@@ -232,6 +375,7 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -264,6 +408,7 @@ func GenerateFrankenPHPVhost(site config.Site) error {
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -295,6 +440,7 @@ func GenerateFrankenPHPSSLVhost(site config.Site) error {
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -330,6 +476,7 @@ func GenerateCustomVhost(site config.Site) error {
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -365,6 +512,7 @@ func GenerateCustomSSLVhost(site config.Site) error {
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -425,6 +573,7 @@ func generateHostProxyVhost(site config.Site, tmplName, confName string, ssl boo
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), confName)
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -441,14 +590,28 @@ func GenerateWorktreeVhostFor(domain, path, phpVersion, parentDomain, siteName, 
 	return GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch)
 }
 
-// worktreeFPMContainer resolves the FPM container a worktree vhost points at:
-// the parent site's per-site container for custom-FPM sites, otherwise the
-// shared lerd-php<ver>-fpm.
-func worktreeFPMContainer(siteName, phpVersion string) string {
-	if site, _ := config.FindSite(siteName); site != nil {
-		return podman.FPMContainerName(*site, phpVersion)
+// worktreeSite rebases the parent site onto the worktree checkout: same
+// framework and public_dir, but rooted at the worktree's path and domain, so
+// everything derived from it (document root, framework nginx block) resolves
+// against the branch's own files. An unregistered parent yields a bare site,
+// which falls back to the shared FPM container and a "public" root.
+func worktreeSite(domain, path, siteName string) config.Site {
+	site := config.Site{Name: siteName, Domains: []string{domain}, Path: path}
+	if parent, _ := config.FindSite(siteName); parent != nil {
+		site = *parent
+		site.Path = path
+		site.Domains = []string{domain}
 	}
-	return "lerd-php" + phpShort(phpVersion) + "-fpm"
+	return site
+}
+
+// worktreeVhostConfig resolves the framework-dependent parts of a worktree
+// vhost, the same three the main-site generators resolve for the parent.
+func worktreeVhostConfig(domain, path, phpVersion, siteName string) (publicDir, fpmContainer, frameworkNginx string) {
+	site := worktreeSite(domain, path, siteName)
+	publicDir = resolvePublicDir(site)
+	fpmContainer = podman.FPMContainerName(site, phpVersion)
+	return publicDir, fpmContainer, resolveFrameworkNginx(site, publicDir, fpmContainer)
 }
 
 // GenerateWorktreeVhost renders the HTTP vhost template for a worktree checkout
@@ -464,18 +627,20 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 		return err
 	}
 
+	publicDir, fpmContainer, frameworkNginx := worktreeVhostConfig(domain, path, phpVersion, siteName)
 	data := VhostData{
 		Domain:          domain,
 		ServerNames:     domain + " *." + domain,
 		Path:            path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
-		FPMContainer:    worktreeFPMContainer(siteName, phpVersion),
-		PublicDir:       "public",
+		FPMContainer:    fpmContainer,
+		PublicDir:       publicDir,
 		LerdSite:        siteName,
 		LerdBranch:      branch,
 		Profiling:       profilerEnabled(),
 		RequestTimeout:  resolveRequestTimeout(path),
+		FrameworkNginx:  frameworkNginx,
 	}
 
 	var buf bytes.Buffer
@@ -487,6 +652,7 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), domain+".conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -503,19 +669,21 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 		return err
 	}
 
+	publicDir, fpmContainer, frameworkNginx := worktreeVhostConfig(domain, path, phpVersion, siteName)
 	data := VhostData{
 		Domain:          domain,
 		ServerNames:     domain + " *." + domain,
 		Path:            path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
-		FPMContainer:    worktreeFPMContainer(siteName, phpVersion),
+		FPMContainer:    fpmContainer,
 		CertDomain:      parentDomain,
-		PublicDir:       "public",
+		PublicDir:       publicDir,
 		LerdSite:        siteName,
 		LerdBranch:      branch,
 		Profiling:       profilerEnabled(),
 		RequestTimeout:  resolveRequestTimeout(path),
+		FrameworkNginx:  frameworkNginx,
 	}
 
 	var buf bytes.Buffer
@@ -527,6 +695,7 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), domain+".conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, buf.Bytes(), 0644)
 }
 
@@ -565,23 +734,18 @@ func GenerateWorktreeHostProxyVhostFor(domain, path, parentDomain string, upstre
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
 		return err
 	}
+	config.GuardRealWrite(filepath.Join(config.NginxConfD(), domain+".conf"))
 	return os.WriteFile(filepath.Join(config.NginxConfD(), domain+".conf"), buf.Bytes(), 0644)
 }
 
-// GeneratePausedVhost writes a minimal nginx vhost that serves the static paused
-// landing page for the given site. For secured sites it also adds the HTTPS block
-// so the redirect and TLS still work while the site is paused.
-func GeneratePausedVhost(site config.Site) error {
-	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
-		return err
-	}
-
-	pausedDir := config.PausedDir()
+// landingVhostConf renders a minimal vhost for site that serves htmlFile (read
+// from pausedDir) for every path. Shared by the paused and the idle-waking
+// landing pages. Secured sites get an 80->443 redirect plus a TLS server block;
+// plain sites a single 80 server.
+func landingVhostConf(site config.Site, pausedDir, htmlFile string) string {
 	serverNames := serverNamesWithWildcards(site.Domains)
-
-	var conf string
 	if site.Secured {
-		conf = fmt.Sprintf(`server {
+		return fmt.Sprintf(`server {
     listen 80;
     listen [::]:80;
     server_name %s;
@@ -596,35 +760,57 @@ server {
     ssl_certificate_key /etc/nginx/certs/%s.key;
     root %s;
     location / {
-        try_files /paused.html =503;
+        try_files /%s =503;
         default_type text/html;
     }
 }
-`, serverNames, serverNames, site.PrimaryDomain(), site.PrimaryDomain(), pausedDir)
-	} else {
-		conf = fmt.Sprintf(`server {
+`, serverNames, serverNames, site.PrimaryDomain(), site.PrimaryDomain(), nginxQuote(pausedDir), htmlFile)
+	}
+	return fmt.Sprintf(`server {
     listen 80;
     listen [::]:80;
     server_name %s;
     root %s;
     location / {
-        try_files /paused.html =503;
+        try_files /%s =503;
         default_type text/html;
     }
 }
-`, serverNames, pausedDir)
-	}
+`, serverNames, nginxQuote(pausedDir), htmlFile)
+}
 
+// writeLandingVhost writes site's static-page vhost (serving htmlFile) to
+// conf.d/<domain>.conf and, for secured sites, removes the separate -ssl.conf so
+// nginx stops routing HTTPS to the real backend while the page is up.
+func writeLandingVhost(site config.Site, htmlFile string) error {
+	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
+		return err
+	}
+	conf := landingVhostConf(site, config.PausedDir(), htmlFile)
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
+	config.GuardRealWrite(confPath)
 	if err := os.WriteFile(confPath, []byte(conf), 0644); err != nil {
 		return err
 	}
-	// For secured sites the SSL vhost lives in a separate file; remove it so
-	// nginx doesn't still route HTTPS requests to PHP-FPM while the site is paused.
 	if site.Secured {
 		_ = os.Remove(filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf"))
 	}
 	return nil
+}
+
+// GeneratePausedVhost writes a minimal nginx vhost that serves the static paused
+// landing page for the given site. For secured sites it also adds the HTTPS block
+// so the redirect and TLS still work while the site is paused.
+func GeneratePausedVhost(site config.Site) error {
+	return writeLandingVhost(site, "paused.html")
+}
+
+// GenerateWakingVhost swaps an idle-suspended host-proxy site's vhost to the
+// auto-refreshing "waking up" page. A request to a sleeping site then wakes its
+// dev server (the access hit drives idle-resume) and the page reloads onto the
+// live app, instead of nginx returning 502 from proxying to the stopped server.
+func GenerateWakingVhost(site config.Site) error {
+	return writeLandingVhost(site, "waking.html")
 }
 
 // GeneratePausedWorktreeVhost writes a paused nginx vhost for a worktree domain.
@@ -655,7 +841,7 @@ server {
         default_type text/html;
     }
 }
-`, domain, domain, certDomain, certDomain, pausedDir)
+`, domain, domain, certDomain, certDomain, nginxQuote(pausedDir))
 	} else {
 		conf = fmt.Sprintf(`server {
     listen 80;
@@ -667,10 +853,11 @@ server {
         default_type text/html;
     }
 }
-`, domain, pausedDir)
+`, domain, nginxQuote(pausedDir))
 	}
 
 	confPath := filepath.Join(config.NginxConfD(), domain+".conf")
+	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, []byte(conf), 0644)
 }
 
@@ -728,6 +915,7 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured b
 		return err
 	}
 	confPath := filepath.Join(config.NginxConfD(), confName)
+	config.GuardRealWrite(confPath)
 	if err := os.WriteFile(confPath, buf.Bytes(), 0644); err != nil {
 		return err
 	}
@@ -741,10 +929,60 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured b
 	return nil
 }
 
-// Reload signals nginx to reload its configuration.
+// ErrNotRunning reports that lerd-nginx is down, so there is no process to
+// signal. The on-disk config is still authoritative: whoever starts nginx next
+// reads it. Callers that only need the config correct (the install reconcile,
+// which starts nginx later in the same run) treat this as benign.
+var ErrNotRunning = errors.New("lerd-nginx is not running")
+
+var (
+	containerRunningFn = podman.ContainerRunning
+	reloadExecFn       = func() error {
+		_, err := podman.Run("exec", "lerd-nginx", "nginx", "-s", "reload")
+		return err
+	}
+)
+
+// Reload signals nginx to reload its configuration. A failed signal is
+// classified after the fact rather than pre-checked, so the common path costs
+// no extra inspect and a genuine podman failure is never mistaken for a
+// stopped container.
 func Reload() error {
-	_, err := podman.Run("exec", "lerd-nginx", "nginx", "-s", "reload")
+	err := reloadExecFn()
+	if err == nil {
+		return nil
+	}
+	if running, rerr := containerRunningFn("lerd-nginx"); rerr == nil && !running {
+		return ErrNotRunning
+	}
 	return err
+}
+
+// ReloadWithRetry reloads nginx, retrying on failure for up to timeout. The cert
+// file is now swapped in atomically, but the cert and key are still two separate
+// renames, so a concurrent reissue (the watcher or UI reacting to the same site
+// change) can momentarily pair a new cert with the old key. A reload that lands
+// in that window crashes with "cannot load certificate"; retrying a beat later,
+// once the swap has settled, succeeds. nginx keeps serving its previous config
+// across a rejected reload, so retrying is safe.
+func ReloadWithRetry(timeout time.Duration) error {
+	return reloadWithRetry(Reload, timeout)
+}
+
+func reloadWithRetry(reload func() error, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := reload()
+		// A stopped nginx will not come back within the window; retrying only
+		// stalls the caller for the full timeout before failing anyway.
+		if err == nil || errors.Is(err, ErrNotRunning) {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // Test runs `nginx -t` inside the lerd-nginx container and returns the
@@ -761,7 +999,7 @@ func Reload() error {
 func Test() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, podman.PodmanBin(), "exec", "lerd-nginx", "nginx", "-t")
+	cmd := podman.CmdContext(ctx, "exec", "lerd-nginx", "nginx", "-t")
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -977,6 +1215,7 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 		effective = info.Mode().Perm()
 	}
 	tmp := path + ".tmp"
+	config.GuardRealWrite(tmp)
 	if err := os.WriteFile(tmp, data, effective); err != nil {
 		return err
 	}
@@ -1010,7 +1249,7 @@ server {
     listen [::]:443 default_server ssl;
     ssl_reject_handshake on;
 }
-`, errorDir))
+`, nginxQuote(errorDir)))
 }
 
 // contentHashHex is sha256 → hex, used as the managed-file sentinel value.
@@ -1130,6 +1369,7 @@ func writeErrorPages() error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
+	config.GuardRealWrite(filepath.Join(dir, "404.html"))
 	return os.WriteFile(filepath.Join(dir, "404.html"), []byte(errorPageHTML), 0644)
 }
 
@@ -1272,6 +1512,7 @@ func EnsureLerdVhost() error {
 }
 `, config.UISocketPath())
 	}
+	config.GuardRealWrite(filepath.Join(config.NginxConfD(), "lerd.localhost.conf"))
 	return os.WriteFile(filepath.Join(config.NginxConfD(), "lerd.localhost.conf"), []byte(content), 0644)
 }
 
@@ -1305,12 +1546,14 @@ func EnsureNginxConfig() error {
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, nginxConfData{
-		Resolver:     podman.NetworkGateway("lerd"),
-		AccessSocket: config.AccessSocketPath(),
+		Resolver:        podman.NetworkGateway("lerd"),
+		AccessLogTarget: config.AccessLogTarget(),
 	}); err != nil {
 		return fmt.Errorf("rendering nginx.conf: %w", err)
 	}
-	return os.WriteFile(destPath, buf.Bytes(), 0644)
+	rendered := dropOverriddenDefaults(buf.String(), httpOverrideNames())
+	config.GuardRealWrite(destPath)
+	return os.WriteFile(destPath, []byte(rendered), 0644)
 }
 
 // forwardedConf declares $real_forwarded_host / $real_forwarded_proto /
@@ -1349,6 +1592,7 @@ func EnsureForwardedConf() error {
 		return err
 	}
 	content := forwardedConf + spxKeyMap(key)
+	config.GuardRealWrite(filepath.Join(config.NginxConfD(), "_forwarded.conf"))
 	return os.WriteFile(
 		filepath.Join(config.NginxConfD(), "_forwarded.conf"),
 		[]byte(content),
@@ -1401,6 +1645,7 @@ func EnsureProfilerVhost() error {
     }
 }
 `, phpShort(cfg.PHP.DefaultVersion))
+	config.GuardRealWrite(filepath.Join(config.NginxConfD(), "_profiler.conf"))
 	return os.WriteFile(filepath.Join(config.NginxConfD(), "_profiler.conf"), []byte(content), 0644)
 }
 
@@ -1430,5 +1675,9 @@ func RewriteNginxQuadlet() (changed bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("reading bundled nginx quadlet template: %w", err)
 	}
+	// The template carries only the lerd-owned mounts, so a site or parked
+	// directory outside $HOME must have its Volume= line re-injected here, the
+	// same way RewriteFPMQuadlets does, or nginx restarts without the docroot.
+	content = podman.InjectExtraVolumes(content, podman.ExtraVolumePaths())
 	return podman.WriteQuadletDiff("lerd-nginx", content)
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/dumps"
 	"github.com/gabriel-sousa99/lerd/internal/push"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // nPlusOneThreshold is the number of structurally-identical queries within one
@@ -55,18 +56,15 @@ func newNPlusOneTracker() *nPlusOneTracker {
 }
 
 // routeKeyForQuery collapses a query event to the "route or script" the warning
-// is deduped on: the worker command, or the request method + path with numeric
-// segments and the query string stripped so /users/1 and /users/2 share a key.
+// is deduped on: the worker command, or the site plus the request normalized
+// through the same reqstats route key the timing snapshot uses, so /users/1 and
+// /users/2 share a key and the two detectors bucket identically.
 func routeKeyForQuery(ev dumps.Event) string {
 	if ev.Ctx.Worker != "" {
 		return "worker:" + ev.Ctx.Worker
 	}
-	req := ev.Ctx.Request
-	if i := strings.IndexByte(req, '?'); i >= 0 {
-		req = req[:i]
-	}
-	req = reSQLNum.ReplaceAllString(req, "{n}")
-	return ev.Ctx.Site + " " + req
+	method, path, _ := strings.Cut(ev.Ctx.Request, " ")
+	return ev.Ctx.Site + " " + reqstats.NormalizeRoute(method, path)
 }
 
 // observe records a query event and returns a notification the first time a
@@ -126,16 +124,12 @@ func notificationForNPlusOne(ev dumps.Event, count int) push.Notification {
 	if where != "" {
 		body = fmt.Sprintf("%s ran a similar query %d×", where, count)
 	}
-	url := "#system/dump-bridge"
-	if ev.Ctx.Site != "" {
-		url = "#sites/" + siteDomainForRoute(ev.Ctx.Site) + "/dumps"
-	}
 	return push.Notification{
 		Kind:  "nplusone",
 		Title: "Possible N+1 query on " + site,
 		Body:  body,
 		Tag:   "lerd-nplusone-" + routeKeyForQuery(ev),
-		URL:   url,
+		URL:   debugRouteForContext(ev.Ctx),
 		Data: map[string]string{
 			"site":   ev.Ctx.Site,
 			"worker": ev.Ctx.Worker,

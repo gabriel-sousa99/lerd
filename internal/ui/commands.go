@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/logcolor"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/sitetpl"
 )
 
 // runLocks holds a per-site mutex so two browser tabs (or the palette + the
@@ -37,6 +40,19 @@ func tryAcquireRun(domain, name string) (release func(), busyWith string, ok boo
 		delete(runLocks, domain)
 		runLocksMu.Unlock()
 	}, "", true
+}
+
+// siteRunLockKey derives the per-site run-lock key: prefer the name, fall back to
+// the first domain, then the project path, so every site has a unique key shared
+// by the command runner and the doctor-fix runner (they must exclude each other).
+func siteRunLockKey(site *config.Site) string {
+	if site.Name != "" {
+		return site.Name
+	}
+	if len(site.Domains) > 0 {
+		return site.Domains[0]
+	}
+	return site.Path
 }
 
 // commandRoute dispatches the two commands subroutes:
@@ -76,6 +92,14 @@ func commandRoute(w http.ResponseWriter, r *http.Request, domain string, rest []
 func handleCommandsList(w http.ResponseWriter, r *http.Request, site *config.Site) {
 	branch := r.URL.Query().Get("branch")
 	cmds := resolveSiteCommands(site, branch)
+	// A project-supplied command that hasn't been approved yet runs on the host,
+	// so force the confirm modal (which shows the command) until the user approves
+	// it once. ProjectOrigin itself is not serialized; the UI only sees Confirm.
+	for i := range cmds {
+		if cmds[i].ProjectOrigin && !site.CommandApproved(cmds[i].Command) {
+			cmds[i].Confirm = true
+		}
+	}
 	writeJSON(w, map[string]any{"commands": cmds})
 }
 
@@ -103,7 +127,7 @@ func resolveSiteCommands(site *config.Site, branch string) []config.FrameworkCom
 	}
 	fw, _ := config.GetFrameworkForDir(site.Framework, path)
 	proj, _ := config.LoadProjectConfig(path)
-	merged := config.ResolveCommands(fw, proj, path)
+	merged := sitetpl.ExpandCommands(config.ResolveCommands(fw, proj, path), sitetpl.ForPath(path))
 
 	// Append Laravel-side user-defined artisan commands. Skipped quietly
 	// when the project isn't Laravel.
@@ -167,18 +191,27 @@ func handleCommandRun(w http.ResponseWriter, r *http.Request, site *config.Site,
 		return
 	}
 
+	// A project-supplied command runs on the host. Require the user to have
+	// approved this exact command (the confirm modal posts approve=1) before
+	// running it; trusted framework commands are unaffected.
+	if target.ProjectOrigin {
+		allowed, disabled := config.HostCommandAllowed(site.Name, target.Command)
+		switch {
+		case disabled:
+			writeJSON(w, map[string]any{"error": "project-supplied host commands are disabled (host_commands.disabled)"})
+			return
+		case !allowed && r.URL.Query().Get("approve") != "1":
+			writeJSON(w, map[string]any{"needsConfirm": true, "command": target.Command})
+			return
+		case !allowed:
+			_ = config.ApproveSiteCommand(site.Name, target.Command)
+		}
+	}
+
 	// Per-site mutex: refuse if another command is already running on this
 	// site. Prevents two tabs (or palette + dropdown) from concurrently
-	// hammering migrate:fresh, etc. Prefer site.Name, fall back to the
-	// first domain, then the project path so we always have a unique key.
-	lockKey := site.Name
-	if lockKey == "" && len(site.Domains) > 0 {
-		lockKey = site.Domains[0]
-	}
-	if lockKey == "" {
-		lockKey = site.Path
-	}
-	release, busyWith, ok := tryAcquireRun(lockKey, target.Name)
+	// hammering migrate:fresh, etc.
+	release, busyWith, ok := tryAcquireRun(siteRunLockKey(site), target.Name)
 	if !ok {
 		w.WriteHeader(http.StatusConflict)
 		writeJSON(w, map[string]any{"error": "another command is already running on this site: " + busyWith})
@@ -215,6 +248,14 @@ func handleCommandRun(w http.ResponseWriter, r *http.Request, site *config.Site,
 		return
 	}
 
+	streamShellRun(w, r.Context(), cwd, target.Command, target.Output == config.CommandOutputURL)
+}
+
+// streamShellRun execs shell in cwd and streams stdout/stderr to the client as
+// SSE (event: stdout|stderr), closing with a done frame carrying the exit code,
+// duration, and (when captureURL) a URL parsed from the output. Shared by the
+// command runner and the doctor fix runner so both produce an identical stream.
+func streamShellRun(w http.ResponseWriter, ctx context.Context, cwd, shell string, captureURL bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, map[string]any{"error": "streaming not supported"})
@@ -251,8 +292,7 @@ func handleCommandRun(w http.ResponseWriter, r *http.Request, site *config.Site,
 		flusher.Flush()
 	}
 
-	ctx := r.Context()
-	cmd := exec.CommandContext(ctx, "sh", "-c", target.Command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", shell)
 	cmd.Dir = cwd
 	// Prepend BinDir so php/composer/npm shims resolve under launchd's
 	// restricted PATH on macOS. Skip the trailing separator when PATH is
@@ -261,7 +301,10 @@ func handleCommandRun(w http.ResponseWriter, r *http.Request, site *config.Site,
 	if existing := os.Getenv("PATH"); existing != "" {
 		path += string(os.PathListSeparator) + existing
 	}
-	cmd.Env = append(os.Environ(), "PATH="+path)
+	// Force colour on: the command runs against a pipe, so composer, artisan
+	// and friends would otherwise strip their ANSI escapes and the run modal
+	// would show a wall of grey.
+	cmd.Env = logcolor.Environ(append(os.Environ(), "PATH="+path))
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -323,7 +366,7 @@ func handleCommandRun(w http.ResponseWriter, r *http.Request, site *config.Site,
 		"exit":       exitCode,
 		"durationMs": time.Since(start).Milliseconds(),
 	}
-	if target.Output == config.CommandOutputURL {
+	if captureURL {
 		if u := urlRegex.FindString(captured.String()); u != "" {
 			payload["url"] = u
 		}

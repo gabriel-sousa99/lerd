@@ -5,20 +5,46 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
+	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	"github.com/gabriel-sousa99/lerd/internal/store"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
-// linkSkipSetupPrompt suppresses the "Run lerd setup?" prompt when runLink
-// is called from within lerd setup / lerd init (prevents infinite recursion).
+// linkSkipSetupPrompt suppresses the post-link "Run lerd setup?" suggestion
+// when runLink is called from within lerd setup / lerd init (prevents infinite
+// recursion and a redundant nag while setup is already running).
 var linkSkipSetupPrompt bool
+
+// linkSkipSummary defers runLink's success line and details block to the
+// caller. Set by the init/setup flow so the ".env" step prints before the
+// "linked" summary rather than after it.
+var linkSkipSummary bool
+
+// linkSkipDataImport suppresses the Sail data-import offer. It is kept separate
+// from linkSkipSetupPrompt so routing `lerd link` through the init wizard
+// (which suppresses the setup prompt) still offers to import an existing Sail
+// database. Only the unattended (--all/CI) path sets it.
+var linkSkipDataImport bool
+
+// linkApplied and envApplied track whether the current process has already
+// linked the site and applied its .env. When a link flows straight into setup
+// (the "Run lerd setup?" prompt), this lets the setup pass skip re-printing the
+// same provisioning steps and jump to the step selector.
+var (
+	linkApplied bool
+	envApplied  bool
+)
 
 // linkAssumeYes approves a host-proxy dev command without the interactive
 // confirmation prompt. Set by `lerd link --yes` and by the UI link flow, where
@@ -41,11 +67,56 @@ func NewLinkCmd() *cobra.Command {
 		Long:  "Register the current directory as a lerd site. The optional argument is the domain name without the TLD (e.g. 'myapp' becomes myapp.test). Defaults to the directory name.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLink(args)
+			return runLinkOrInit(args)
 		},
 	}
 	cmd.Flags().BoolVar(&linkAssumeYes, "yes", false, "Approve a host-proxy dev command without the confirmation prompt")
 	return cmd
+}
+
+// runLinkOrInit routes a user-typed `lerd link` into the init wizard when the
+// project has no usable .lerd.yaml and we have an interactive terminal, so a
+// fresh link guides the user through configuration (the wizard then links and
+// offers setup) instead of leaving a bare, unconfigured registration. Every
+// other case — a configured .lerd.yaml, a non-interactive shell (park, CI,
+// scripts), or an explicit domain argument — falls through to a direct link.
+// Internal runLink callers bypass this routing entirely.
+func runLinkOrInit(args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	// IsEmpty (not file existence) so a present-but-empty .lerd.yaml still routes
+	// to the wizard, matching what runLink's old empty-project branch did.
+	proj, _ := config.LoadProjectConfig(cwd)
+	hasConfig := proj != nil && !proj.IsEmpty()
+	_, _, isWorktree := findOwningWorktree(cwd)
+	if linkShouldRunWizard(hasConfig, isInteractive(), len(args) > 0, isWorktree) {
+		// fresh=true: linkShouldRunWizard already gated on !hasConfig (absent or
+		// empty .lerd.yaml), so force the wizard. Without it runInit re-decides on
+		// file existence and a present-but-empty file would skip the wizard into a
+		// bare link, contradicting the IsEmpty routing above.
+		return runInit(true)
+	}
+	return runLink(args)
+}
+
+// linkShouldRunWizard reports whether a user-invoked `lerd link` should run the
+// init wizard rather than a bare link. Only true for a fresh, interactive,
+// argument-free link on a real site directory: a missing .lerd.yaml means
+// nothing is committed yet, the terminal can host the wizard, no explicit
+// domain was requested, and the directory isn't a worktree (which inherits its
+// parent's registration). Any false input keeps the fast, scriptable link.
+func linkShouldRunWizard(hasConfig, interactive, hasDomainArg, isWorktree bool) bool {
+	return !hasConfig && interactive && !hasDomainArg && !isWorktree
+}
+
+// linkShouldImportSail reports whether runLink should offer to import an
+// existing Sail project's data. Gated on a live terminal and a dedicated
+// suppression flag (NOT linkSkipSetupPrompt), so a fresh `lerd link` that
+// routes through the init wizard still offers the import.
+func linkShouldImportSail(interactive, skipImport, hasSail bool) bool {
+	return interactive && !skipImport && hasSail
 }
 
 func runLink(args []string) error {
@@ -61,6 +132,13 @@ func runLink(args []string) error {
 		return nil
 	}
 
+	start := time.Now()
+	// A standalone link opens the feedback block with a blank line for breathing
+	// room; when embedded in init/setup the caller already printed one.
+	if !linkSkipSetupPrompt {
+		feedback.Begin()
+	}
+
 	cfg, err := config.LoadGlobal()
 	if err != nil {
 		return err
@@ -74,19 +152,23 @@ func runLink(args []string) error {
 	// Compare against whichever definition is currently active (user-defined or store-installed).
 	if proj != nil && proj.Framework != "" && proj.FrameworkDef != nil {
 		proj.FrameworkDef.Name = proj.Framework
+		// The embedded def is untrusted; sanitise the copy we'd install so a
+		// .lerd.yaml can't seed host-executing doctor checks, and so the conflict
+		// prompt compares like-for-like with what is (or would be) in the store.
+		safe := config.SanitizeProjectFrameworkDef(proj.FrameworkDef)
 		existing, exists := config.GetFrameworkForDir(proj.Framework, cwd)
 		if !exists {
 			// No definition anywhere — save the embedded one to the store dir.
-			_ = config.SaveStoreFramework(proj.FrameworkDef)
+			_ = config.SaveStoreFramework(safe)
 		} else {
-			action, err := confirmReplace("framework", proj.Framework, existing, proj.FrameworkDef)
+			action, err := confirmReplace("framework", proj.Framework, existing, safe)
 			if err != nil {
 				return err
 			}
 			switch action {
 			case replaceFromProject:
 				// User chose the .lerd.yaml version — save to store dir.
-				_ = config.SaveStoreFramework(proj.FrameworkDef)
+				_ = config.SaveStoreFramework(safe)
 			case replaceFromDisk:
 				// User chose the local/store version — update .lerd.yaml.
 				_ = config.SetProjectFrameworkDef(cwd, existing)
@@ -148,7 +230,7 @@ func runLink(args []string) error {
 	// Custom container path: the project defines its own Containerfile and
 	// nginx reverse-proxies to it. Skip PHP/framework detection entirely.
 	if proj != nil && proj.Container != nil && proj.Container.Port > 0 {
-		secured := siteops.CleanupRelink(cwd, name) || (proj != nil && proj.Secured)
+		secured := siteops.ResolveSecured(siteops.CleanupRelink(cwd, name), proj, cfg)
 		site := config.Site{
 			Name:          name,
 			Domains:       domains,
@@ -160,11 +242,14 @@ func runLink(args []string) error {
 		if err := config.AddSite(site); err != nil {
 			return fmt.Errorf("registering site: %w", err)
 		}
+		// A site that used to be FrankenPHP or custom-FPM and now reverse-proxies a
+		// container leaves its old per-site PHP quadlet auto-starting; clear it.
+		reconcileStaleRuntimeQuadlets(site)
 		_ = config.SyncProjectDomains(cwd, site.Domains, cfg.DNS.TLD)
 		if err := siteops.FinishCustomLink(site, proj.Container); err != nil {
 			return err
 		}
-		fmt.Printf("Linked: %s -> %s (custom container, port %d)\n", name, strings.Join(domains, ", "), proj.Container.Port)
+		printLinkSummary(site, start)
 		return linkApplyServices(cwd, proj)
 	}
 
@@ -181,7 +266,7 @@ func runLink(args []string) error {
 		if err := approveHostProxyCommand(name, proj.Proxy.Command, approved); err != nil {
 			return err
 		}
-		secured := siteops.CleanupRelink(cwd, name) || proj.Secured
+		secured := siteops.ResolveSecured(siteops.CleanupRelink(cwd, name), proj, cfg)
 		site := config.Site{
 			Name:        name,
 			Domains:     domains,
@@ -194,12 +279,15 @@ func runLink(args []string) error {
 		if err := config.AddSite(site); err != nil {
 			return fmt.Errorf("registering site: %w", err)
 		}
+		// A site that used to be FrankenPHP or custom-FPM and now proxies a host
+		// dev server leaves its old per-site PHP quadlet auto-starting; clear it.
+		reconcileStaleRuntimeQuadlets(site)
 		_ = config.SyncProjectDomains(cwd, site.Domains, cfg.DNS.TLD)
 		if err := siteops.FinishHostProxyLink(site); err != nil {
 			return err
 		}
 		startHostProxyWorker(site, proj.Proxy)
-		fmt.Printf("Linked: %s -> %s (host proxy, port %d)\n", name, strings.Join(domains, ", "), proj.Proxy.Port)
+		printLinkSummary(site, start)
 		return linkApplyServices(cwd, proj)
 	}
 
@@ -211,6 +299,17 @@ func runLink(args []string) error {
 		detectedPublicDir = config.DetectPublicDir(cwd)
 	}
 
+	frameworkLabel := framework
+	if frameworkLabel == "" {
+		frameworkLabel = "unknown (public: " + detectedPublicDir + ")"
+	}
+	fwStep := feedback.Start("detecting framework")
+	if framework != "" {
+		fwStep.OK(frameworkLabel)
+	} else {
+		fwStep.Info(frameworkLabel)
+	}
+
 	versions := siteops.DetectSiteVersions(cwd, framework, cfg.PHP.DefaultVersion, cfg.Node.DefaultVersion)
 	phpVersion, nodeVersion := versions.PHP, versions.Node
 	if proj != nil && proj.PHPVersion != "" {
@@ -220,15 +319,14 @@ func runLink(args []string) error {
 		unclamped, _ := phpDet.DetectVersion(cwd)
 		if unclamped != phpVersion {
 			if versions.SuggestedPHP != "" {
-				fmt.Printf("Using PHP %s (best installed in range %s–%s). Install PHP %s? [Y/n] ",
+				q := fmt.Sprintf("Using PHP %s (best installed in range %s–%s). Install PHP %s?",
 					phpVersion, versions.PHPMin, versions.PHPMax, versions.SuggestedPHP)
-				var answer string
-				fmt.Scanln(&answer) //nolint:errcheck
-				if answer == "" || answer[0] == 'Y' || answer[0] == 'y' {
-					fmt.Printf("Installing PHP %s...\n", versions.SuggestedPHP)
+				if feedback.Confirm(q, true) {
+					inst := feedback.Start("installing PHP " + versions.SuggestedPHP)
 					if err := ensureFPMQuadlet(versions.SuggestedPHP); err != nil {
-						fmt.Printf("[WARN] installing PHP %s: %v\n", versions.SuggestedPHP, err)
+						inst.Fail(err)
 					} else {
+						inst.OK("")
 						phpVersion = versions.SuggestedPHP
 					}
 				}
@@ -252,7 +350,7 @@ func runLink(args []string) error {
 		proj = promptLinkDatabaseChoice(cwd, &config.ProjectConfig{})
 	}
 
-	secured := siteops.CleanupRelink(cwd, name) || (proj != nil && proj.Secured)
+	secured := siteops.ResolveSecured(siteops.CleanupRelink(cwd, name), proj, cfg)
 
 	site := config.Site{
 		Name:        name,
@@ -271,100 +369,121 @@ func runLink(args []string) error {
 	if proj != nil && proj.Runtime != "" {
 		site.Runtime = proj.Runtime
 		site.RuntimeWorker = proj.RuntimeWorker
+		// FrankenPHP only publishes images for PHP >= 8.2; without this guard the
+		// build normalizes the version up (e.g. 8.1 -> 8.5) and silently runs a
+		// different PHP than the site reports. Mirror the `lerd runtime` guard and
+		// fall back to FPM rather than upgrading PHP behind the user's back.
+		if site.IsFrankenPHP() && !config.IsFrankenPHPVersion(site.PHPVersion) {
+			fmt.Printf("  FrankenPHP has no PHP %s image; linking as FPM instead\n", site.PHPVersion)
+			site.Runtime = ""
+			site.RuntimeWorker = false
+		}
 	}
 	// A container: config with no port on a PHP project means the site is served
 	// by fastcgi from its own image, built from the project's Containerfile.
 	if proj != nil && proj.Container != nil && proj.Container.Port == 0 {
 		site.Runtime = "fpm-custom"
+		// The PHP version is fixed by the Containerfile's FROM lerd-php<ver>-fpm line,
+		// not project detection; honour it so the reported version and the per-version
+		// ini mounts match the image the container actually runs.
+		if v := podman.CustomFPMBaseVersion(cwd, proj.Container); v != "" {
+			site.PHPVersion = v
+			phpVersion = v
+		}
 	}
 
 	if err := config.AddSite(site); err != nil {
 		return fmt.Errorf("registering site: %w", err)
 	}
 
-	// A re-link of a site that dropped its frankenphp runtime leaves the old
-	// per-site FrankenPHP quadlet behind; reconcile it to the site's real type.
-	reconcileStaleFrankenPHP(site)
+	// Custom-FPM takes its version from the Containerfile and host-proxy sites have
+	// none, so neither has a version the file should pin.
+	if !site.IsCustomContainer() && !site.IsHostProxy() {
+		_ = siteops.PinPHPVersionFile(cwd, site.PHPVersion)
+	}
+
+	// A re-link of a site that dropped its frankenphp or custom-FPM runtime
+	// leaves the old per-site quadlet behind; reconcile it to the site's real type.
+	reconcileStaleRuntimeQuadlets(site)
 
 	_ = config.SyncProjectDomains(cwd, site.Domains, cfg.DNS.TLD)
+	_ = config.SyncProjectFrameworkVersion(framework, cwd)
+
+	// Fold in the framework's required services before any runtime path applies
+	// them, so a custom-FPM or FrankenPHP site gets them too, not only the
+	// standard PHP-FPM path below.
+	if fw, ok := config.GetFrameworkForDir(framework, cwd); ok {
+		proj = ensureRequiredServices(cwd, proj, fw, presetResolvable)
+	}
 
 	if site.IsCustomFPM() {
-		if err := siteops.FinishCustomFPMLink(site, proj.Container); err != nil {
+		result := "php " + feedback.Val(phpVersion) + " · nginx vhost written"
+		if err := provisionAndSecure("building custom FPM image", result, site,
+			func(s config.Site) error { return siteops.FinishCustomFPMLink(s, proj.Container) }); err != nil {
 			return err
 		}
-		fmt.Printf("Linked: %s -> %s (custom FPM image, PHP %s, Framework: %s)\n", name, strings.Join(domains, ", "), phpVersion, framework)
+		printLinkSummary(site, start)
 		return linkApplyServices(cwd, proj)
 	}
 
 	if site.IsFrankenPHP() {
-		if err := siteops.FinishFrankenPHPLink(site); err != nil {
+		result := "php " + feedback.Val(phpVersion) + " · node " + feedback.Val(nodeVersion) + " · nginx vhost written"
+		if err := provisionAndSecure("provisioning FrankenPHP runtime", result, site,
+			func(s config.Site) error { return siteops.FinishFrankenPHPLink(s) }); err != nil {
 			return err
 		}
-		fmt.Printf("Linked: %s -> %s (FrankenPHP, PHP %s, Node %s, Framework: %s)\n", name, strings.Join(domains, ", "), phpVersion, nodeVersion, framework)
+		printLinkSummary(site, start)
 		return linkApplyServices(cwd, proj)
 	}
 
-	if err := siteops.FinishLink(site, phpVersion); err != nil {
+	result := "php " + feedback.Val(phpVersion) + " · node " + feedback.Val(nodeVersion) + " · nginx vhost written"
+	if err := provisionAndSecure("provisioning PHP-FPM runtime", result, site,
+		func(s config.Site) error { return siteops.FinishLink(s, phpVersion) }); err != nil {
 		return err
 	}
+	printLinkSummary(site, start)
 
-	frameworkLabel := framework
-	if frameworkLabel == "" {
-		frameworkLabel = "unknown (public: " + detectedPublicDir + ")"
-	}
-	fmt.Printf("Linked: %s -> %s (PHP %s, Node %s, Framework: %s)\n", name, strings.Join(domains, ", "), phpVersion, nodeVersion, frameworkLabel)
+	// Warn before the setup prompt below: an ext-* requirement the image cannot
+	// satisfy fails composer install, which is the first thing setup runs.
+	warnMissingExtensions(cwd, site.Name, phpVersion, cfg)
 
 	// Sail detection — offer to import data before setup so lerd's DB is
-	// populated from the existing Sail environment.
-	if isInteractive() && !linkSkipSetupPrompt && config.ComposerHasPackage(cwd, "laravel/sail") {
+	// populated from the existing Sail environment. Gate on Sail actually being
+	// initialized (a compose file), not just the laravel/sail dev dependency
+	// that every fresh Laravel app ships, which would prompt on a new project.
+	if linkShouldImportSail(isInteractive(), linkSkipDataImport, sailInitialized(cwd)) {
 		sailDBName := sailLinkDetectDBName(cwd)
-		fmt.Print("\nThis project uses Laravel Sail. Import database (and S3 files) from Sail into lerd? [Y/n] ")
-		var sailAnswer string
-		fmt.Scanln(&sailAnswer) //nolint:errcheck
-		if sailAnswer == "" || sailAnswer[0] == 'Y' || sailAnswer[0] == 'y' {
+		if feedback.Confirm("This project uses Laravel Sail. Import database (and S3 files) from Sail into lerd?", false) {
 			if err := runImportSail(false, false, "sail", "password", sailDBName, sailDBName != "", false, false); err != nil {
-				fmt.Printf("[WARN] sail import: %v\n", err)
+				feedback.Warn("sail import: %v", err)
 			}
 		}
 	}
 
-	if proj.IsEmpty() {
+	if hint, suggest := linkNextStep(linkSkipSetupPrompt); suggest {
 		if isInteractive() {
-			fmt.Print("\nNo .lerd.yaml found. Run lerd init? [Y/n] ")
-			var answer string
-			fmt.Scanln(&answer) //nolint:errcheck
-			if answer == "" || answer[0] == 'Y' || answer[0] == 'y' {
-				if err := runInit(false); err != nil {
-					fmt.Printf("[WARN] init: %v\n", err)
-				}
-			}
-		} else {
-			fmt.Println("\nNo .lerd.yaml found. Run 'lerd init' to configure domains, services, and workers.")
-		}
-	} else if !linkSkipSetupPrompt {
-		if isInteractive() {
-			fmt.Print("\nRun lerd setup? [Y/n] ")
-			var answer string
-			fmt.Scanln(&answer) //nolint:errcheck
-			if answer == "" || answer[0] == 'Y' || answer[0] == 'y' {
+			if feedback.Confirm("Run lerd setup?", true) {
 				if err := runSetup(false, false); err != nil {
-					fmt.Printf("[WARN] setup: %v\n", err)
+					feedback.Warn("setup: %v", err)
 				}
 			}
 		} else {
-			fmt.Println("\nRun 'lerd setup' to install dependencies, run migrations, and start workers.")
+			fmt.Println(hint)
 		}
 	}
 
-	// Apply remaining .lerd.yaml settings: HTTPS and services.
+	// Apply remaining .lerd.yaml settings: HTTPS and services. secured already
+	// folds in the DNS-managed gate, so a secured: true project on a localhost
+	// install lands here with secured=false and is left on http rather than
+	// triggering a runSecure that the cert layer would only reject.
 	if proj != nil {
-		if proj.Secured && !secured {
+		if proj.Secured && !secured && cfg.DNSManaged() {
 			if err := runSecure(nil, []string{}); err != nil {
-				fmt.Printf("[WARN] securing site: %v\n", err)
+				feedback.Warn("securing site: %v", err)
 			}
 		} else if !proj.Secured && secured {
 			if err := runUnsecure(nil, []string{}); err != nil {
-				fmt.Printf("[WARN] disabling HTTPS: %v\n", err)
+				feedback.Warn("disabling HTTPS: %v", err)
 			}
 		}
 
@@ -374,6 +493,158 @@ func runLink(args []string) error {
 	}
 
 	return nil
+}
+
+// provisionAndSecure runs a PHP runtime's link finisher as plain HTTP under a
+// "provisioning" step, then, when the site is secured, issues its certificate
+// under a separate "generating certificate" step. Splitting the secure work out
+// of the finisher keeps mkcert's work on its own clean line instead of buried
+// inside the runtime step.
+func provisionAndSecure(label, result string, site config.Site, finish func(config.Site) error) error {
+	unsecured := site
+	unsecured.Secured = false
+	prov := feedback.Start(label)
+	if err := finish(unsecured); err != nil {
+		prov.Fail(err)
+		return err
+	}
+	prov.OK(result)
+
+	if site.Secured {
+		cert := feedback.Start("generating certificate")
+		if err := certs.SecureSite(site); err != nil {
+			cert.Fail(err)
+			return err
+		}
+		// SecureSite swaps the vhost to HTTPS on disk but doesn't reload nginx;
+		// the finisher above only reloaded it for the plain-HTTP config, so
+		// without this the site keeps serving the now-deleted HTTP vhost from
+		// nginx's memory and HTTPS never comes up until an unrelated reload.
+		// Retry the reload: a concurrent cert reissue (the watcher or UI
+		// reacting to the same new site) can briefly race the cert swap and
+		// make a single reload fail with "cannot load certificate".
+		if err := nginx.ReloadWithRetry(10 * time.Second); err != nil {
+			cert.Fail(err)
+			return err
+		}
+		cert.OK("trusted")
+	}
+	return nil
+}
+
+// printLinkSummary prints the green success line and an aligned details block,
+// deriving every field from the registered site so callers don't repeat them.
+func printLinkSummary(site config.Site, start time.Time) {
+	// Reached on every successful link path, so this is where we record that the
+	// site is linked for this process (even when the summary itself is deferred).
+	linkApplied = true
+	if linkSkipSummary {
+		return
+	}
+	feedback.Success("linked", time.Since(start))
+
+	scheme := "http"
+	if site.Secured {
+		scheme = "https"
+	}
+	sum := feedback.NewSummary().Row("Site", feedback.Val(scheme+"://"+site.PrimaryDomain()))
+	switch {
+	case site.HostPort > 0:
+		sum.Row("Serving", fmt.Sprintf("host proxy · port %d", site.HostPort))
+	case site.ContainerPort > 0:
+		sum.Row("Serving", fmt.Sprintf("custom container · port %d", site.ContainerPort))
+	case site.PHPVersion != "":
+		sum.Row("PHP", feedback.Val(site.PHPVersion)+" · "+linkRuntimeLabel(site))
+	}
+	if site.NodeVersion != "" {
+		sum.Row("Node", feedback.Val(site.NodeVersion))
+	}
+	if site.Framework != "" {
+		sum.Row("Framework", site.Framework)
+	}
+	if env := sailReadRawEnv(site.Path); env["DB_CONNECTION"] != "" {
+		db := env["DB_CONNECTION"]
+		if cache := env["CACHE_STORE"]; cache != "" {
+			db += " · cache " + cache
+		}
+		sum.Row("DB", db)
+	}
+	sum.Print()
+}
+
+// linkRuntimeLabel names the serving runtime for the link summary's PHP row.
+func linkRuntimeLabel(site config.Site) string {
+	switch {
+	case site.IsFrankenPHP():
+		return "FrankenPHP"
+	case site.IsCustomFPM():
+		return "custom FPM"
+	default:
+		return "FPM"
+	}
+}
+
+// ensureRequiredServices folds the framework's required service presets into the
+// project's service list, so linkApplyServices installs and starts them like any
+// other declared service and a teammate cloning the repo gets them too. A name
+// the service store does not know is reported and skipped rather than written
+// into the project's committed config. resolvePreset is a seam for tests; the
+// real one fetches a store-only preset, since a required service is precisely
+// the one that is not installed yet.
+func ensureRequiredServices(cwd string, proj *config.ProjectConfig, fw *config.Framework, resolvePreset func(string) bool) *config.ProjectConfig {
+	if fw == nil || len(fw.Requires) == 0 {
+		return proj
+	}
+	if proj == nil {
+		proj = &config.ProjectConfig{}
+	}
+	have := make(map[string]bool, len(proj.Services))
+	for _, s := range proj.Services {
+		have[s.Name] = true
+	}
+	var added []config.ProjectService
+	for _, name := range fw.Requires {
+		if have[name] {
+			continue
+		}
+		if !resolvePreset(name) {
+			feedback.Warn("%s requires the %q service, which the service store does not have", frameworkLabelOf(fw), name)
+			continue
+		}
+		svc := config.ProjectService{Name: name}
+		if !config.IsDefaultPreset(name) {
+			svc.Preset = name
+		}
+		proj.Services = append(proj.Services, svc)
+		have[name] = true
+		added = append(added, svc)
+	}
+	// Append through a fresh read-modify-write: proj was loaded before this
+	// command wrote the domains and the framework version, so saving it whole
+	// would roll both back.
+	if err := config.AddProjectServices(cwd, added); err != nil {
+		feedback.Warn("could not save .lerd.yaml: %v", err)
+	}
+	return proj
+}
+
+// presetResolvable reports whether a preset name can be served, fetching a
+// store-only preset into the local cache on the way. PresetExists alone would
+// reject any preset not already installed, which is the whole point of requires.
+func presetResolvable(name string) bool {
+	if config.PresetExists(name) {
+		return true
+	}
+	_, err := config.EnsurePreset(name)
+	return err == nil
+}
+
+// frameworkLabelOf prefers the display label, falling back to the slug.
+func frameworkLabelOf(fw *config.Framework) string {
+	if fw.Label != "" {
+		return fw.Label
+	}
+	return fw.Name
 }
 
 // linkApplyServices installs and starts services declared in .lerd.yaml.
@@ -404,11 +675,23 @@ func linkApplyServices(cwd string, proj *config.ProjectConfig) error {
 		return nil
 	}
 	for _, svc := range proj.Services {
+		// SQLite is a per-project file, not a container: env setup writes its vars
+		// and creates the db file. There is nothing to install or start here.
+		if svc.Name == "sqlite" {
+			continue
+		}
+		// A bare entry whose name is a bundled tool preset (e.g. phpmyadmin from a
+		// detected docker-compose, or an older .lerd.yaml written before this was
+		// normalised) has no Preset/Custom set; resolve it to its preset so it
+		// installs instead of failing as a missing custom service.
+		if svc.Preset == "" && svc.Custom == nil && config.PresetExists(svc.Name) && !config.IsDefaultPreset(svc.Name) {
+			svc.Preset = svc.Name
+		}
 		if svc.Preset != "" {
 			if _, err := config.LoadCustomService(svc.Name); err != nil {
 				fmt.Printf("  Installing preset %s%s\n", svc.Preset, presetVersionSuffix(svc.PresetVersion))
 				if _, err := InstallPresetByName(svc.Preset, svc.PresetVersion); err != nil {
-					fmt.Printf("[WARN] installing preset %s: %v\n", svc.Preset, err)
+					feedback.Warn("installing preset %s: %v", svc.Preset, err)
 					continue
 				}
 			}
@@ -451,13 +734,13 @@ func linkApplyServices(cwd string, proj *config.ProjectConfig) error {
 			}
 			if shouldSave {
 				if err := config.SaveCustomService(svc.Custom); err != nil {
-					fmt.Printf("[WARN] registering service %s: %v\n", svc.Name, err)
+					feedback.Warn("registering service %s: %v", svc.Name, err)
 					continue
 				}
 			}
 		}
 		if err := ensureServiceRunning(svc.Name); err != nil {
-			fmt.Printf("[WARN] service %s: %v\n", svc.Name, err)
+			feedback.Warn("service %s: %v", svc.Name, err)
 		}
 	}
 	return nil
@@ -475,6 +758,24 @@ func sailLinkDetectDBName(cwd string) string {
 // Workers with a Check rule that doesn't pass are skipped. Workers that conflict
 // with another requested worker are resolved via ConflictsWith (e.g. horizon replaces queue).
 func startWorkersForSite(site *config.Site, workers []string, phpVersion string) {
+	// Stripe is not a framework worker, so the framework loop below skips it.
+	// Start its listener directly when it was among the workers being restored
+	// (e.g. recreated after a runtime switch), before the no-framework early
+	// return so it survives even on a site lerd has no framework definition for.
+	for _, w := range workers {
+		if w == "stripe" {
+			scheme := "http"
+			if site.Secured {
+				scheme = "https"
+			}
+			baseURL := scheme + "://" + site.PrimaryDomain()
+			if err := StripeStartForSite(site.Name, site.Path, baseURL); err != nil {
+				feedback.Warn("starting stripe listener: %v", err)
+			}
+			break
+		}
+	}
+
 	fw, hasFw := config.GetFrameworkForDir(site.Framework, site.Path)
 	if !hasFw || fw.Workers == nil {
 		return
@@ -494,9 +795,15 @@ func startWorkersForSite(site *config.Site, workers []string, phpVersion string)
 		if !ok {
 			continue
 		}
-		// Skip workers whose check doesn't pass.
+		// Skip workers whose check doesn't pass. A host worker (vite et al) the
+		// user opted into but whose deps aren't installed would otherwise drop
+		// silently, reading as "the worker just isn't running"; surface the
+		// reason and remedy instead.
 		if wDef.Check != nil && !config.MatchesRule(site.Path, *wDef.Check) {
 			delete(requested, w)
+			if msg := hostWorkerNotReadyMsg(w, site.Path, wDef); msg != "" {
+				feedback.Warn("%s", msg)
+			}
 			continue
 		}
 		for _, conflict := range wDef.ConflictsWith {
@@ -521,7 +828,7 @@ func startWorkersForSite(site *config.Site, workers []string, phpVersion string)
 			WorkerStopForSite(site.Name, site.Path, conflict) //nolint:errcheck
 		}
 		if err := WorkerStartForSite(site.Name, site.Path, phpVersion, w, worker, true); err != nil {
-			fmt.Printf("[WARN] starting worker %s: %v\n", w, err)
+			feedback.Warn("starting worker %s: %v", w, err)
 		}
 	}
 }
@@ -534,6 +841,19 @@ func hasRunningWorkers(site *config.Site) bool {
 // isInteractive returns true if stdin is a terminal.
 func isInteractive() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// linkNextStep returns the guidance shown after a standalone lerd link, and
+// whether to show it at all. It always points at lerd setup: setup takes a
+// freshly linked project the rest of the way (deps, migrations, workers, HTTPS)
+// and runs the init wizard itself when there is no .lerd.yaml, so suggesting
+// init separately is redundant friction. Returns suggest=false when link runs
+// inside setup/init (skipPrompt), so the guidance never nags mid-setup.
+func linkNextStep(skipPrompt bool) (hint string, suggest bool) {
+	if skipPrompt {
+		return "", false
+	}
+	return "\nRun 'lerd setup' to install dependencies, run migrations, and start workers.", true
 }
 
 // resolveFramework returns the framework name for the project at dir.
@@ -599,7 +919,7 @@ func promptLinkDatabaseChoice(cwd string, proj *config.ProjectConfig) *config.Pr
 			Description("Qual DB este projeto usa? (lerd env vai escrever DB_CONNECTION + creds no .env)").
 			Options(dbOptions...).
 			Value(&dbChoice),
-	)).WithTheme(huh.ThemeCatppuccin()).Run(); err != nil {
+	)).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin)).Run(); err != nil {
 		// User cancelled (Ctrl-C); leave proj unchanged so link still proceeds.
 		return proj
 	}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/desktopnotify"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 	"github.com/gabriel-sousa99/lerd/internal/version"
@@ -47,6 +48,7 @@ type Snapshot struct {
 	LANExposed           bool   // lerd lan expose state — drives the LAN toggle item
 	DumpsEnabled         bool   // lerd dump on/off state — drives the dump toggle item
 	NotificationsEnabled bool   // lerd notify on/off state — drives the notifications toggle item
+	HighContrastIcon     bool   // lerd tray icon high-contrast state — green running icon on any panel
 	LatestVersion        string // non-empty (e.g. "v0.8.5") when a newer version is available
 }
 
@@ -195,7 +197,7 @@ func onReady(mono bool) {
 	// SetTitle would show text next to the icon in the macOS menu bar — skip it.
 	systray.SetTooltip("Lerd Oracle Edition — local dev environment + Oracle DB support")
 
-	menu := buildMenu()
+	menu := buildMenu(mono)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -212,8 +214,17 @@ func onReady(mono bool) {
 		}()
 	}
 
+	// In color mode the running icon is white, which vanishes on a light
+	// panel. Watch the desktop light/dark preference and swap to a dark icon
+	// when the panel is light, reacting live when the user toggles their theme.
+	var icons *iconState
+	if !mono {
+		icons = newIconState()
+		go watchAppearance(ctx, icons.setLight)
+	}
+
 	go runPoller(ctx, updateCh)
-	go applyLoop(menu, updateCh, mono)
+	go applyLoop(menu, updateCh, mono, icons)
 	go handleDash(menu.mDash)
 	go handleToggle(menu.mToggle, refresh)
 	go handleServices(menu, refresh)
@@ -225,6 +236,9 @@ func onReady(mono bool) {
 	go handleDumps(menu.mDumps, refresh)
 	go handleNotifications(menu.mNotifications, refresh)
 	go handleDebugGuide(menu.mDebugGuide)
+	if menu.mIconStyle != nil {
+		go handleIconStyle(menu.mIconStyle, refresh)
+	}
 	go handleUpdate(menu.mUpdate)
 	go handleQuit(menu.mQuit, cancel)
 }
@@ -317,6 +331,7 @@ func fetchSnapshot() *Snapshot {
 		snap.LANExposed = cfg.LAN.Exposed
 		snap.DumpsEnabled = cfg.IsDumpsEnabled()
 		snap.NotificationsEnabled = cfg.IsNotificationsEnabled()
+		snap.HighContrastIcon = cfg.IsHighContrastTrayIcon()
 	}
 
 	// /api/services — only real services (exclude queue/schedule/stripe per-site workers)
@@ -343,34 +358,112 @@ func fetchSnapshot() *Snapshot {
 	return snap
 }
 
-func applyLoop(menu *menuState, updateCh <-chan *Snapshot, mono bool) {
-	// Track the last icon we set so we don't thrash the systray with
-	// identical SetIcon calls every 5s poll.
-	var lastRunning = -1
+// iconKind identifies which color-mode icon is currently shown so we don't
+// thrash the systray with identical SetIcon calls.
+type iconKind int
+
+const (
+	iconKindStopped      iconKind = iota // red L, any panel
+	iconKindRunningDark                  // white L, dark panel
+	iconKindRunningLight                 // dark L, light panel
+	iconKindRunningHiC                   // green L, any panel (high-contrast opt-in)
+)
+
+// pickColorIcon chooses the color-mode icon from the running state, the desktop
+// panel's light/dark preference, and the high-contrast opt-in. With high
+// contrast on, the running indicator is a single green L that reads on any
+// panel, sidestepping the panel-color guess that goes wrong on mixed themes
+// like KDE Breeze Twilight. Otherwise it is white on a dark panel and dark on a
+// light one; the stopped icon is red and reads on both regardless.
+func pickColorIcon(running, light, highContrast bool) (iconKind, []byte) {
+	switch {
+	case !running:
+		return iconKindStopped, iconPNG
+	case highContrast:
+		return iconKindRunningHiC, iconGreenPNG
+	case light:
+		return iconKindRunningLight, iconDarkPNG
+	default:
+		return iconKindRunningDark, iconWhitePNG
+	}
+}
+
+// iconState owns the color-mode tray icon and recomputes it whenever the lerd
+// running state or the desktop light/dark preference changes. It serializes the
+// two input goroutines (poller and appearance watcher) and skips redundant
+// SetIcon calls.
+type iconState struct {
+	mu           sync.Mutex
+	running      bool
+	light        bool
+	highContrast bool
+	last         iconKind
+	// apply performs the actual icon swap; overridable in tests so the logic
+	// can be exercised without a live systray.
+	apply func([]byte)
+}
+
+func newIconState() *iconState {
+	// last defaults to iconKindStopped, matching the red icon onReady sets.
+	return &iconState{last: iconKindStopped, apply: systray.SetIcon}
+}
+
+func (s *iconState) setRunning(running bool) {
+	s.mu.Lock()
+	s.running = running
+	s.mu.Unlock()
+	s.refresh()
+}
+
+func (s *iconState) setLight(light bool) {
+	s.mu.Lock()
+	s.light = light
+	s.mu.Unlock()
+	s.refresh()
+}
+
+func (s *iconState) setHighContrast(highContrast bool) {
+	s.mu.Lock()
+	s.highContrast = highContrast
+	s.mu.Unlock()
+	s.refresh()
+}
+
+func (s *iconState) refresh() {
+	// Hold the lock across apply so the decision and the swap are atomic:
+	// otherwise two concurrent updates (poller + theme watcher) can run their
+	// SetIcon calls out of order and leave the displayed icon disagreeing with
+	// s.last. SetIcon never re-enters iconState, so there's no deadlock.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kind, icon := pickColorIcon(s.running, s.light, s.highContrast)
+	if kind == s.last {
+		return
+	}
+	s.last = kind
+	s.apply(icon)
+}
+
+func applyLoop(menu *menuState, updateCh <-chan *Snapshot, mono bool, icons *iconState) {
 	for snap := range updateCh {
 		menu.apply(snap)
-		// In color mode the icon doubles as a status indicator: white L
-		// when lerd is running, red L when stopped. In mono mode the OS
-		// recolors the template icon, so we leave it alone.
-		if !mono {
-			running := 0
-			if snap != nil && snap.Running {
-				running = 1
-			}
-			if running != lastRunning {
-				if running == 1 {
-					systray.SetIcon(iconWhitePNG)
-				} else {
-					systray.SetIcon(iconPNG)
-				}
-				lastRunning = running
-			}
+		// In color mode the icon doubles as a status indicator. In mono mode
+		// the OS recolors the template icon, so we leave it alone.
+		if !mono && icons != nil {
+			icons.setHighContrast(snap != nil && snap.HighContrastIcon)
+			icons.setRunning(snap != nil && snap.Running)
 		}
 	}
 }
 
 func handleDash(item *systray.MenuItem) {
 	for range item.ClickedCh {
+		// Prefer the desktop app when it's the registered lerd:// handler.
+		if desktopnotify.AppInstalled() {
+			if err := desktopnotify.OpenApp(""); err == nil {
+				continue
+			}
+		}
 		openURL(dashboardURL)
 	}
 }
@@ -471,6 +564,20 @@ func handleNotifications(item *systray.MenuItem, refresh func()) {
 			enabled = cfg.IsNotificationsEnabled()
 		}
 		runAndRefresh(lerdCmd("notify", offOn(enabled)), refresh)
+	}
+}
+
+func handleIconStyle(item *systray.MenuItem, refresh func()) {
+	for range item.ClickedCh {
+		highContrast := false
+		if cfg, err := config.LoadGlobal(); err == nil && cfg != nil {
+			highContrast = cfg.IsHighContrastTrayIcon()
+		}
+		style := "high-contrast"
+		if highContrast {
+			style = "default"
+		}
+		runAndRefresh(lerdCmd("tray", "icon", style), refresh)
 	}
 }
 

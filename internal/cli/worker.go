@@ -10,6 +10,7 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -161,7 +162,10 @@ func resolveSiteAndFramework(cwd string) (*config.Site, *config.Framework, strin
 		if parent, ok := config.ParentSiteForWorktreeDir(cwd); ok {
 			site = parent
 		} else {
-			return nil, nil, "", fmt.Errorf("not a registered site — run 'lerd link' first")
+			site, err = ensureSiteForCwd()
+			if err != nil {
+				return nil, nil, "", err
+			}
 		}
 	}
 
@@ -235,18 +239,22 @@ func requireFrameworkWorker(cwd, workerName string) error {
 // up front when chokidar is absent (see ApplyHorizonReload), so this fallback
 // only bites if the package is removed after the fact.
 func resolveWorkerCommand(sitePath, workerName string, w config.FrameworkWorker) string {
+	// A worker execs its command straight from its unit, so the framework's
+	// cli_ini has to be folded in here too. Magento cannot even bootstrap at
+	// PHP's 128M default, so a worker without it simply crash-loops.
+	ini := phpIniArgsForDir(sitePath)
 	if w.ReloadCommand == "" || !config.ProjectReloadsWorker(sitePath, workerName) {
-		return w.Command
+		return injectPHPIniIntoCommand(w.Command, ini)
 	}
 	if !projectHasChokidar(sitePath) {
-		fmt.Printf("[WARN] %s auto-reload is on but chokidar is not installed in %s, running the standard command. Install it with: npm install -D chokidar\n", workerName, sitePath)
-		return w.Command
+		feedback.Warn("%s auto-reload is on but chokidar is not installed in %s, running the standard command. Install it with: npm install -D chokidar", workerName, sitePath)
+		return injectPHPIniIntoCommand(w.Command, ini)
 	}
 	command := w.ReloadCommand
 	if watcherNeedsPolling(sitePath) {
 		command += " --poll"
 	}
-	return command
+	return injectPHPIniIntoCommand(command, ini)
 }
 
 // watcherNeedsPolling reports whether the reload watcher has to poll because
@@ -254,6 +262,30 @@ func resolveWorkerCommand(sitePath, workerName string, w config.FrameworkWorker)
 // (the canonical predicate, shared with the Octane reload path).
 func watcherNeedsPolling(sitePath string) bool {
 	return config.WatcherNeedsPolling(sitePath)
+}
+
+// workerExecEnvArgs returns the `--env=` flags a worker's `podman exec` needs.
+// Currently that is the reload watcher's poll interval, which only applies where
+// the watcher has to poll; everywhere else this is empty and the command is
+// unchanged. Setting it unconditionally on the polling hosts is harmless for
+// workers that run no watcher, since nothing else reads the variable.
+func workerExecEnvArgs(sitePath string) []string {
+	env := config.WatcherPollEnv(sitePath)
+	if env == "" {
+		return nil
+	}
+	return []string{"--env=" + env}
+}
+
+// workerExecEnvFlags is workerExecEnvArgs rendered for the unit templates, with
+// a leading space so it can be interpolated straight into the command. Mirrors
+// workerColorArgs, which splices the same way for the colour flags.
+func workerExecEnvFlags(sitePath string) string {
+	args := workerExecEnvArgs(sitePath)
+	if len(args) == 0 {
+		return ""
+	}
+	return " " + strings.Join(args, " ")
 }
 
 // projectHasChokidar reports whether the chokidar package, required by the
@@ -302,8 +334,22 @@ func WorkerStartForSite(siteName, sitePath, phpVersion, workerName string, w con
 	// unit that was never written, surfacing a confusing podman error
 	// behind the original WARN.
 	if ok, reason := workerSupportedOnPlatform(w); !ok {
-		fmt.Printf("[WARN] worker %s skipped: %s\n", workerName, reason)
+		feedback.Warn("worker %s skipped: %s", workerName, reason)
 		return nil
+	}
+
+	command := resolveWorkerCommand(sitePath, workerName, w)
+
+	// A host worker from an untrusted project .lerd.yaml (custom_workers) runs its
+	// command on the host, so require consent before starting it. Consent is keyed
+	// on the resolved command actually executed (the reload variant when the
+	// project opts in), not w.Command, so a reload_command can't run unshown behind
+	// an approved plain command. Trusted workers (store/built-in/overlay) and
+	// in-container workers are unaffected.
+	if w.Host && w.ProjectOrigin {
+		if err := approveHostCommand(siteName, command, fmt.Sprintf("worker %q", workerName)); err != nil {
+			return err
+		}
 	}
 
 	// Stop conflicting workers before starting. Match the new worker's
@@ -312,8 +358,6 @@ func WorkerStartForSite(siteName, sitePath, phpVersion, workerName string, w con
 	for _, conflict := range w.ConflictsWith {
 		WorkerStopForSite(siteName, sitePath, conflict) //nolint:errcheck
 	}
-
-	command := resolveWorkerCommand(sitePath, workerName, w)
 
 	// Handle proxy port assignment and command augmentation.
 	if w.Proxy != nil && w.Proxy.PortEnvKey != "" {
@@ -362,10 +406,10 @@ func WorkerStartForSite(siteName, sitePath, phpVersion, workerName string, w con
 		// different container) only takes effect once systemd re-reads it;
 		// without this, Enable/Start act on the stale cached unit.
 		if err := podman.DaemonReloadFn(); err != nil {
-			fmt.Printf("[WARN] daemon-reload: %v\n", err)
+			feedback.Warn("daemon-reload: %v", err)
 		}
 		if err := services.Mgr.Enable(lifecycleTarget); err != nil {
-			fmt.Printf("[WARN] enable: %v\n", err)
+			feedback.Warn("enable: %v", err)
 		}
 	}
 
@@ -374,12 +418,17 @@ func WorkerStartForSite(siteName, sitePath, phpVersion, workerName string, w con
 	// Linux the systemd DBus subscription catches direct services.Mgr
 	// calls as a fallback; macOS has no equivalent, so a direct call
 	// leaves the UI stale until the next 15s cache poll.
+	startStep := feedback.Start("starting " + label)
 	if err := podman.StartUnit(lifecycleTarget); err != nil {
+		startStep.Fail(err)
 		return fmt.Errorf("starting %s worker: %w", workerName, err)
 	}
+	startStep.OK("")
+	feedback.Note("logs: " + workerLogHint(unitName, w.Host))
 
-	fmt.Printf("%s started for %s\n", label, siteName)
-	fmt.Printf("  Logs: %s\n", workerLogHint(unitName, w.Host))
+	// A running worker can't be idle-suspended: clear any stale entry so the idle
+	// engine doesn't boot believing this site (or worktree) is still asleep.
+	ClearIdleSuspendOnStart(siteName, sitePath, workerName)
 
 	// Regenerate nginx vhost if the worker has proxy config.
 	if w.Proxy != nil {
@@ -422,9 +471,9 @@ func newWorkerAddCmd() *cobra.Command {
 				return err
 			}
 
-			site, err := config.FindSiteByPath(cwd)
+			site, err := ensureSiteForCwd()
 			if err != nil {
-				return fmt.Errorf("not a registered site — run 'lerd link' first")
+				return err
 			}
 
 			w := config.FrameworkWorker{
@@ -510,9 +559,9 @@ func newWorkerRemoveCmd() *cobra.Command {
 				return err
 			}
 
-			site, err := config.FindSiteByPath(cwd)
+			site, err := ensureSiteForCwd()
 			if err != nil {
-				return fmt.Errorf("not a registered site — run 'lerd link' first")
+				return err
 			}
 
 			// Stop the worker if running — on the parent and on every
@@ -526,7 +575,7 @@ func newWorkerRemoveCmd() *cobra.Command {
 				}
 			}
 			for _, p := range paths {
-				unit := workerUnitName(site.Name, p, name)
+				unit := WorkerUnitName(site.Name, p, name)
 				if isServiceActiveOrRestarting(unit) {
 					_ = WorkerStopForSite(site.Name, p, name)
 				}
@@ -596,9 +645,10 @@ func workerNames(siteName, sitePath, workerName string) (unit, display string) {
 	return unit + "-" + config.WorktreeUnitSlug(wtBase), display + "/" + wtBase
 }
 
-// workerUnitName is a thin wrapper around workerNames for callers that only
-// need the unit name (legacy callers, mostly).
-func workerUnitName(siteName, sitePath, workerName string) string {
+// WorkerUnitName is a thin wrapper around workerNames for callers that only
+// need the unit name, including callers outside this package, so the naming
+// rule (and its worktree suffix) is never re-spelled by hand.
+func WorkerUnitName(siteName, sitePath, workerName string) string {
 	unit, _ := workerNames(siteName, sitePath, workerName)
 	return unit
 }
@@ -648,34 +698,40 @@ func WorkerStopForSite(siteName, sitePath, workerName string) error {
 // the call works regardless of whether the worker was scheduled (.timer +
 // oneshot .service) or a long-running daemon (.service alone). Missing
 // units are no-ops at this layer.
-func stopWorkerUnit(unitName, label, displaySite string) error {
+func stopWorkerUnit(unitName, label, _ string) error {
+	if label == "" {
+		label = unitName
+	}
+	step := feedback.Start("stopping " + label)
 	_ = services.Mgr.Disable(unitName + ".timer")
 	podman.StopUnit(unitName + ".timer") //nolint:errcheck
 	_ = services.Mgr.Disable(unitName)
 	podman.StopUnit(unitName) //nolint:errcheck
 
 	if err := services.Mgr.RemoveTimerUnit(unitName); err != nil {
+		step.Fail(err)
 		return fmt.Errorf("removing timer unit file: %w", err)
 	}
 	if err := services.Mgr.RemoveServiceUnit(unitName); err != nil {
+		step.Fail(err)
 		return fmt.Errorf("removing unit file: %w", err)
 	}
 	// Drop the macOS exec-mode guard script + pid file (no-op on Linux).
 	// Without this they linger in ~/.local/share/lerd/run/workers after
 	// a normal stop and confuse later mode-migration discovery.
 	removeWorkerExecArtifacts(unitName)
-	if err := podman.DaemonReloadFn(); err != nil {
-		fmt.Printf("[WARN] daemon-reload: %v\n", err)
-	}
-
-	if label == "" {
-		label = unitName
-	}
-	if displaySite == "" {
-		displaySite = unitName
-	}
-	fmt.Printf("%s stopped for %s\n", label, displaySite)
+	finalizeStopStep(step, podman.DaemonReloadFn())
 	return nil
+}
+
+// finalizeStopStep closes the worker-stop step and only then surfaces a
+// non-fatal daemon-reload error, so the warning lands on its own line instead
+// of being overwritten by the live spinner's in-place redraw.
+func finalizeStopStep(step *feedback.Step, reloadErr error) {
+	step.OK("")
+	if reloadErr != nil {
+		feedback.Warn("daemon-reload: %v", reloadErr)
+	}
 }
 
 // StopAllWorkersForWorktree stops every per-worktree worker unit attached
@@ -792,6 +848,32 @@ func stopAllSiteWorkerUnits(site *config.Site) {
 func isServiceActiveOrRestarting(name string) bool {
 	status, _ := podman.UnitStatus(name)
 	return status == "active" || status == "activating"
+}
+
+// approveHostCommand gates running a project-supplied command on the host for a
+// site: it proceeds when the global switch allows it or the user already approved
+// the exact command, prompts and persists the approval interactively, and refuses
+// non-interactively when unapproved. what labels the thing being run for messages
+// (e.g. `worker "vite"`). Empty command is a no-op.
+func approveHostCommand(siteName, command, what string) error {
+	if command == "" {
+		return nil
+	}
+	allowed, disabled := config.HostCommandAllowed(siteName, command)
+	if disabled {
+		return fmt.Errorf("%s: project-supplied host commands are disabled (set host_commands.disabled: false to allow)", what)
+	}
+	if allowed {
+		return nil
+	}
+	if !isInteractive() {
+		return fmt.Errorf("%s: not approved; run it once interactively to confirm, or set host_commands.skip_confirmation: true", what)
+	}
+	fmt.Printf("\nlerd will run this on your host, outside any container:\n\n  %s\n", command)
+	if !promptConfirm(fmt.Sprintf("Run it for %s?", siteName)) {
+		return fmt.Errorf("%s declined for %s", what, siteName)
+	}
+	return config.ApproveSiteCommand(siteName, command)
 }
 
 // findOrphanedWorkers returns worker names that are running but not in the known set.

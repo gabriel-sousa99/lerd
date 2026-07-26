@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 )
 
 // Bundled admin dashboards (rabbitmq, redisinsight) set session/consent cookies
@@ -83,7 +85,21 @@ func newDashProxy(name string, target *url.URL, bootstrap string) *httputil.Reve
 	proxy.Director = func(req *http.Request) {
 		orig(req)
 		req.Host = target.Host
-		req.Header.Set("X-Forwarded-Proto", "http")
+		// Preserve the scheme the browser actually used (nginx forwards it, and
+		// lerd.localhost is served over https) so an upstream that builds absolute
+		// URLs from X-Forwarded-Proto doesn't downgrade them to http. Default to
+		// http only when nothing upstream told us otherwise.
+		if proto := req.Header.Get("X-Forwarded-Proto"); proto != "http" && proto != "https" {
+			// nginx (lerd.localhost) sets this from $scheme, overwriting any client
+			// value; only an unexpected/injected value or a direct-to-socket client
+			// reaches here, so recompute it from the connection rather than forward
+			// whatever the client supplied.
+			if req.TLS != nil {
+				req.Header.Set("X-Forwarded-Proto", "https")
+			} else {
+				req.Header.Set("X-Forwarded-Proto", "http")
+			}
+		}
 		// We rewrite the HTML to inject the auth bootstrap, so ask the upstream
 		// for an uncompressed body we can edit.
 		if bootstrap != "" {
@@ -113,6 +129,19 @@ func newDashProxy(name string, target *url.URL, bootstrap string) *httputil.Reve
 		http.Error(w, "dashboard upstream unavailable", http.StatusBadGateway)
 	}
 	return proxy
+}
+
+// isLoopbackTarget reports whether host is a loopback destination: the literal
+// "localhost" or a loopback IP (127.0.0.0/8, ::1). A non-literal hostname is
+// rejected rather than resolved, so DNS can't be used to slip past the gate.
+func isLoopbackTarget(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // stripFrameAncestors removes the frame-ancestors directive from a CSP value so
@@ -168,7 +197,11 @@ func rewriteCookiePath(cookie, mountPath string) string {
 func rewriteLocation(loc, targetHost, prefix string) string {
 	if u, err := url.Parse(loc); err == nil && u.Host != "" {
 		if u.Host != targetHost {
-			return loc // points somewhere else entirely, leave it
+			// Off-origin redirect (a foreign absolute URL, or a scheme-relative
+			// //host that the browser would follow away from the iframe). These
+			// local admin dashboards never legitimately redirect off-host, so
+			// neutralize the escape by keeping the browser inside the mount.
+			return prefix + "/"
 		}
 		loc = u.EscapedPath()
 		if loc == "" {
@@ -216,10 +249,32 @@ func injectDashboardBootstrap(resp *http.Response, script string) error {
 	return nil
 }
 
+// resolveDashboardURL returns the dashboard upstream a proxied service should
+// target. The stored dashboard URL keeps the preset's default host port; a user
+// port move is recorded in the service config, not rewritten into svc.Dashboard,
+// so follow the move the same way the dashboard link does, or the proxy keeps
+// dialing the stale port after the container rebinds.
+func resolveDashboardURL(svc *config.CustomService, services map[string]config.ServiceConfig) string {
+	return serviceops.WithDashboardPort(svc.Dashboard, svc.Ports, services[svc.Name])
+}
+
 // handleDashProxy serves a bundled service dashboard same-origin under
 // /_svc/<name>/. Loopback-only, since it forwards into a local admin UI.
 func handleDashProxy(w http.ResponseWriter, r *http.Request) {
 	if !isLoopbackRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// The global CSRF gate trusts the unix socket unconditionally, but every
+	// /_svc/ request arrives over it (the lerd.localhost vhost proxies to the
+	// socket), so that trust alone would forward a cross-origin request straight
+	// into the third-party admin API (RabbitMQ management, RedisInsight) with the
+	// dashboard's first-party cookies attached. Re-apply the cross-origin check
+	// here without the socket bypass: the dashboard is embedded same-origin, so
+	// its own traffic is same-origin/none; reject a cross-site or same-site
+	// initiator. A missing header (host tooling, old clients) keeps loopback trust.
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "cross-site", "same-site":
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -233,9 +288,17 @@ func handleDashProxy(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	target, err := url.Parse(svc.Dashboard)
+	target, err := url.Parse(resolveDashboardURL(svc, loadServicesMap()))
 	if err != nil || target.Host == "" {
 		http.Error(w, fmt.Sprintf("invalid dashboard URL for %s", name), http.StatusBadGateway)
+		return
+	}
+	// The dashboard URL comes from a user-writable service file; every bundled
+	// preset points at a loopback admin UI. Refuse anything else so the proxy
+	// can't be coerced into reaching an arbitrary host (cloud metadata, internal
+	// services) with the dashboard's injected credentials attached.
+	if !isLoopbackTarget(target.Hostname()) {
+		http.Error(w, fmt.Sprintf("dashboard for %s must be loopback", name), http.StatusBadGateway)
 		return
 	}
 	dashProxyFor(name, target, config.PresetDashboardBootstrap(svc)).ServeHTTP(w, r)

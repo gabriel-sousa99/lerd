@@ -17,13 +17,15 @@ func recordToolActivity(args map[string]any) {
 }
 
 // siteForToolArgs resolves the site a tool call targets, from the explicit
-// `site` (by name) or `path` (by directory) argument. Returns "" when the call
-// names no site.
+// `site` (by name) or `path` (by directory) argument, falling back to the
+// injected/cwd default site so a tool call in an mcp:inject context (no explicit
+// site/path) still keeps the site the agent is working on awake under
+// idle-suspend. Returns "" when no site can be resolved.
 func siteForToolArgs(args map[string]any) string {
 	if name := strArg(args, "site"); name != "" {
 		return name
 	}
-	if path := strArg(args, "path"); path != "" {
+	if path := resolvedPath(args); path != "" {
 		if s, err := config.FindSiteByPath(path); err == nil && s != nil {
 			return s.Name
 		}
@@ -57,7 +59,18 @@ func toolList() []mcpTool {
 		diagTool(),
 		logsTool(),
 		worktreeTool(),
+		workspaceTool(),
 	}
+}
+
+// ToolActions maps each tool name to the actions it advertises, so the docs-drift
+// test can assert every action reaches the reference every client reads.
+func ToolActions() map[string][]string {
+	out := make(map[string][]string, len(toolList()))
+	for _, t := range toolList() {
+		out[t.Name] = t.InputSchema.Properties["action"].Enum
+	}
+	return out
 }
 
 // dispatch maps group name → action → handler. Built once at init from the
@@ -77,6 +90,7 @@ var groupDispatch = map[string]map[string]handlerFn{
 		"group_list":     execSiteGroupList,
 		"tls_enable":     execSecure,
 		"tls_disable":    execUnsecure,
+		"tls_renew":      execRenew,
 		"php":            execSitePHP,
 		"node":           execSiteNode,
 		"pause":          execSitePause,
@@ -103,6 +117,7 @@ var groupDispatch = map[string]map[string]handlerFn{
 		"reinstall":           execServiceReinstall,
 		"add":                 execServiceAdd,
 		"expose":              execServiceExpose,
+		"port":                execServicePort,
 		"env":                 execServiceEnv,
 		"config_read":         execServiceConfigRead,
 		"config_write":        execServiceConfigWrite,
@@ -110,10 +125,12 @@ var groupDispatch = map[string]map[string]handlerFn{
 		"config_reset":        execServiceConfigReset,
 		"config_list_backups": execServiceConfigListBackups,
 		"preset_list":         func(a map[string]any) (any, *rpcError) { return execServicePresetList(a) },
+		"preset_search":       execServicePresetSearch,
 		"preset_install":      execServicePresetInstall,
 		"check_updates":       execServiceCheckUpdates,
 	},
 	"db": {
+		"list":            execDBList,
 		"set":             execDbSet,
 		"move":            execDbMove,
 		"create":          execDBCreate,
@@ -137,6 +154,12 @@ var groupDispatch = map[string]map[string]handlerFn{
 		"ext_list":       execPHPExtList,
 		"ext_add":        execPHPExtAdd,
 		"ext_remove":     execPHPExtRemove,
+		"ports_list":     execPHPPortsList,
+		"ports_add":      execPHPPortsAdd,
+		"ports_remove":   execPHPPortsRemove,
+		"ini_read":       execPHPIniRead,
+		"ini_write":      execPHPIniWrite,
+		"ini_reset":      execPHPIniReset,
 	},
 	"worker": {
 		"start":  execWorkerStart,
@@ -178,18 +201,23 @@ var groupDispatch = map[string]map[string]handlerFn{
 		"add":         execFrameworkAdd,
 		"remove":      execFrameworkRemove,
 		"search":      execFrameworkSearch,
-		"install":     execFrameworkInstall,
+		"update":      execFrameworkUpdate,
+		"prune":       func(a map[string]any) (any, *rpcError) { return execFrameworkPrune(a) },
 		"project_new": execProjectNew,
 		"setup":       execSetup,
 	},
 	"diag": {
 		"status":          func(a map[string]any) (any, *rpcError) { return execStatus() },
 		"doctor":          func(a map[string]any) (any, *rpcError) { return execDoctor() },
+		"doctor_fix":      func(a map[string]any) (any, *rpcError) { return execDoctorFix() },
+		"site_doctor":     execSiteDoctor,
 		"which":           execWhich,
 		"check":           execCheck,
 		"dns_diagnose":    execDNSDiagnose,
 		"bug_report":      execBugReport,
 		"analyze_queries": execAnalyzeQueries,
+		"route_timing":    execRouteTiming,
+		"optimize_route":  execOptimizeRoute,
 		"dumps_recent":    execDumpsRecent,
 		"dumps_status":    execDumpsStatus,
 		"dumps_clear":     execDumpsClear,
@@ -197,6 +225,7 @@ var groupDispatch = map[string]map[string]handlerFn{
 		"profiler_toggle": execProfilerToggle,
 		"profiler_status": execProfilerStatus,
 		"profiler_clear":  execProfilerClear,
+		"profiler_report": execProfilerReport,
 		"xdebug_on":       func(a map[string]any) (any, *rpcError) { return execXdebugToggle(a, true) },
 		"xdebug_off":      func(a map[string]any) (any, *rpcError) { return execXdebugToggle(a, false) },
 		"xdebug_status":   func(a map[string]any) (any, *rpcError) { return execXdebugStatus() },
@@ -204,6 +233,14 @@ var groupDispatch = map[string]map[string]handlerFn{
 	"logs": {
 		"sources": execLogsSources,
 		"fetch":   execLogsFetch,
+	},
+	"workspace": {
+		"list":   func(a map[string]any) (any, *rpcError) { return execWorkspaceList(a) },
+		"create": execWorkspaceCreate,
+		"rename": execWorkspaceRename,
+		"delete": execWorkspaceDelete,
+		"assign": execWorkspaceAssign,
+		"move":   execWorkspaceMove,
 	},
 }
 
@@ -219,6 +256,14 @@ func handleToolCall(params json.RawMessage) (any, *rpcError) {
 	}
 	if args == nil {
 		args = map[string]any{}
+	}
+
+	// A `site` argument may be given as a site name or any of the site's domains;
+	// canonicalize it to the site name once here so every action keys on the same
+	// value, including those that build systemd unit names or read paths straight
+	// from it and would otherwise silently miss when handed a domain.
+	if raw := strArg(args, "site"); raw != "" {
+		args["site"] = config.ResolveSiteRef(raw)
 	}
 
 	// Working on a site through MCP counts as activity, so idle-suspend keeps it
@@ -258,11 +303,11 @@ func sortedActions(m map[string]handlerFn) []string {
 func siteTool() mcpTool {
 	return mcpTool{
 		Name:        "site",
-		Description: "Manage sites. action: list (discover sites — CALL FIRST), link, unlink, domain_add, domain_remove, group_assign, group_unassign, group_label, group_db, group_list, tls_enable, tls_disable, php, node, pause, unpause, restart, rebuild, runtime, nginx_read, nginx_write, nginx_reset, park, unpark.",
+		Description: "Manage sites. action: list (discover sites — CALL FIRST), link, unlink, domain_add, domain_remove, group_assign, group_unassign, group_label, group_db, group_list, tls_enable, tls_disable, tls_renew, php, node, pause, unpause, restart, rebuild, runtime, nginx_read, nginx_write, nginx_reset, park, unpark.",
 		InputSchema: mcpSchema{
 			Type: "object",
 			Properties: map[string]mcpProp{
-				"action":   {Type: "string", Enum: []string{"list", "link", "unlink", "domain_add", "domain_remove", "group_assign", "group_unassign", "group_label", "group_db", "group_list", "tls_enable", "tls_disable", "php", "node", "pause", "unpause", "restart", "rebuild", "runtime", "nginx_read", "nginx_write", "nginx_reset", "park", "unpark"}},
+				"action":   {Type: "string", Enum: []string{"list", "link", "unlink", "domain_add", "domain_remove", "group_assign", "group_unassign", "group_label", "group_db", "group_list", "tls_enable", "tls_disable", "tls_renew", "php", "node", "pause", "unpause", "restart", "rebuild", "runtime", "nginx_read", "nginx_write", "nginx_reset", "park", "unpark"}},
 				"path":     {Type: "string", Description: "Targets the site by directory (link, unlink, domain_*, group_* [the secondary], park, unpark). Defaults to cwd."},
 				"site":     {Type: "string", Description: "Targets the site by name from action=list (php, node, tls_*, pause, unpause, restart, rebuild, runtime, nginx_*). group_* use path, not site."},
 				"name":     {Type: "string", Description: "link: site name without .test TLD."},
@@ -285,30 +330,33 @@ func siteTool() mcpTool {
 func serviceTool() mcpTool {
 	return mcpTool{
 		Name:        "service",
-		Description: "Manage services (built-in + custom). action: start, stop, restart, pin, unpin, update, rollback, migrate, remove, reinstall, add, expose, env, config_read, config_write, config_restore, config_reset, config_list_backups, preset_list, preset_install, check_updates. update=pull; migrate=dump+restore; reinstall reset_data wipes data; remove remove_data renames data aside.",
+		Description: "Manage services (built-in + custom). action: start, stop, restart, pin, unpin, update, rollback, migrate, remove, reinstall, add, expose, port, env, config_read, config_write, config_restore, config_reset, config_list_backups, preset_list, preset_search, preset_install, check_updates. preset_search browses the store (name=filter). update=pull; migrate=dump+restore; reinstall reset_data wipes data; remove remove_data renames data aside.",
 		InputSchema: mcpSchema{
 			Type: "object",
 			Properties: map[string]mcpProp{
-				"action":      {Type: "string", Enum: []string{"start", "stop", "restart", "pin", "unpin", "update", "rollback", "migrate", "remove", "reinstall", "add", "expose", "env", "config_read", "config_write", "config_restore", "config_reset", "config_list_backups", "preset_list", "preset_install", "check_updates"}},
-				"name":        {Type: "string", Description: "Service name/slug."},
-				"tag":         {Type: "string", Description: "update/migrate: image tag."},
-				"remove_data": {Type: "boolean", Description: "remove: rename data dir aside."},
-				"reset_data":  {Type: "boolean", Description: "reinstall: wipe data, reprovision."},
-				"image":       {Type: "string", Description: "add: OCI image reference."},
-				"ports":       {Type: "array", Description: `add: host:container mappings, e.g. ["27017:27017"].`},
-				"environment": {Type: "array", Description: `add: container env ["KEY=VALUE", ...].`},
-				"env_vars":    {Type: "array", Description: `add: project .env keys ["KEY=VALUE", ...].`},
-				"data_dir":    {Type: "string", Description: "add: container data path."},
-				"description": {Type: "string", Description: "add: human-readable description."},
-				"dashboard":   {Type: "string", Description: "add: web dashboard URL."},
-				"depends_on":  {Type: "array", Description: `add: services to start first, e.g. ["mysql"].`},
-				"init":        {Type: "boolean", Description: "add: pass --init (mysql, mariadb)."},
-				"port":        {Type: "string", Description: `expose: "host:container".`},
-				"remove":      {Type: "boolean", Description: "expose: remove the mapping."},
-				"version":     {Type: "string", Description: "preset_install: required for multi-version presets."},
-				"content":     {Type: "string", Description: "config_write: new file contents."},
-				"backup":      {Type: "boolean", Description: "config_write: stage a backup first."},
-				"backup_name": {Type: "string", Description: "config_restore: backup to restore (newest if omitted)."},
+				"action":         {Type: "string", Enum: []string{"start", "stop", "restart", "pin", "unpin", "update", "rollback", "migrate", "remove", "reinstall", "add", "expose", "port", "env", "config_read", "config_write", "config_restore", "config_reset", "config_list_backups", "preset_list", "preset_search", "preset_install", "check_updates"}},
+				"name":           {Type: "string", Description: "Service name/slug."},
+				"tag":            {Type: "string", Description: "update/migrate: image tag."},
+				"remove_data":    {Type: "boolean", Description: "remove: rename data dir aside."},
+				"reset_data":     {Type: "boolean", Description: "reinstall: wipe data, reprovision."},
+				"image":          {Type: "string", Description: "add: OCI image reference."},
+				"ports":          {Type: "array", Description: `add: host:container mappings, e.g. ["27017:27017"].`},
+				"environment":    {Type: "array", Description: `add: container env ["KEY=VALUE", ...].`},
+				"env_vars":       {Type: "array", Description: `add: project .env keys ["KEY=VALUE", ...].`},
+				"data_dir":       {Type: "string", Description: "add: container data path."},
+				"description":    {Type: "string", Description: "add: human-readable description."},
+				"dashboard":      {Type: "string", Description: "add: web dashboard URL."},
+				"depends_on":     {Type: "array", Description: `add: services to start first, e.g. ["mysql"].`},
+				"init":           {Type: "boolean", Description: "add: pass --init (mysql, mariadb)."},
+				"port":           {Type: "string", Description: `expose: "host:container".`},
+				"remove":         {Type: "boolean", Description: "expose: remove the mapping."},
+				"published_port": {Type: "integer", Description: "port: new host port (0=default)."},
+				"container_port": {Type: "integer", Description: "port: a mapping's container port."},
+				"reset":          {Type: "boolean", Description: "port: reset to default."},
+				"version":        {Type: "string", Description: "preset_install: required for multi-version presets."},
+				"content":        {Type: "string", Description: "config_write: new file contents."},
+				"backup":         {Type: "boolean", Description: "config_write: stage a backup first."},
+				"backup_name":    {Type: "string", Description: "config_restore: backup to restore (newest if omitted)."},
 			},
 			Required: []string{"action"},
 		},
@@ -318,11 +366,11 @@ func serviceTool() mcpTool {
 func dbTool() mcpTool {
 	return mcpTool{
 		Name:        "db",
-		Description: "Database operations. action: set (pick sqlite/mysql/postgres/family alternate), move (between same-family services), create, export, import, snapshot, snapshots, restore (destructive), snapshot_delete.",
+		Description: "Database operations. action: list (an engine's databases), set (pick sqlite/mysql/postgres/family alternate), move (between same-family services), create, export, import, snapshot, snapshots, restore (destructive), snapshot_delete.",
 		InputSchema: mcpSchema{
 			Type: "object",
 			Properties: map[string]mcpProp{
-				"action":        {Type: "string", Enum: []string{"set", "move", "create", "export", "import", "snapshot", "snapshots", "restore", "snapshot_delete"}},
+				"action":        {Type: "string", Enum: []string{"list", "set", "move", "create", "export", "import", "snapshot", "snapshots", "restore", "snapshot_delete"}},
 				"path":          {Type: "string", Description: "Project root. Defaults to cwd."},
 				"database":      {Type: "string", Description: "set: target db engine. Others: db name (defaults DB_DATABASE)."},
 				"from":          {Type: "string", Description: "move: source service."},
@@ -332,7 +380,7 @@ func dbTool() mcpTool {
 				"file":          {Type: "string", Description: "import: SQL dump path."},
 				"output":        {Type: "string", Description: "export: output file (default <database>.sql)."},
 				"name":          {Type: "string", Description: "snapshot/restore/snapshot_delete: snapshot name. create: db name."},
-				"service":       {Type: "string", Description: "snapshot ops: DB service override."},
+				"service":       {Type: "string", Description: "list/snapshot: DB service override."},
 				"all_databases": {Type: "boolean", Description: "snapshot ops: cover whole service."},
 			},
 			Required: []string{"action"},
@@ -359,14 +407,18 @@ func envTool() mcpTool {
 func runtimeTool() mcpTool {
 	return mcpTool{
 		Name:        "runtime",
-		Description: "PHP/Node runtimes. action: versions (installed PHP+Node), node_install, node_uninstall, php_list, ext_list, ext_add, ext_remove. ext_add/ext_remove rebuild the FPM image (slow).",
+		Description: "PHP/Node runtimes. action: versions, node_install, node_uninstall, php_list, ext_list, ext_add, ext_remove, ports_list, ports_add, ports_remove, ini_read, ini_write, ini_reset. ext_add/ext_remove apply to EVERY PHP version (one declared set, kept across a version change) and rebuild one version's image now (slow); others rebuild on next use. ports_* publish host ports on a version's shell container; a busy port shifts to the next free one. ini_* edit php.ini: a per-version file (version=8.4) or the shared file (shared=true) applied to every version, with a per-version key still winning; prefer shared so a version change never drops a setting.",
 		InputSchema: mcpSchema{
 			Type: "object",
 			Properties: map[string]mcpProp{
-				"action":    {Type: "string", Enum: []string{"versions", "node_install", "node_uninstall", "php_list", "ext_list", "ext_add", "ext_remove"}},
-				"version":   {Type: "string", Description: "node_*: version/alias (20, lts). ext_*: PHP version (defaults project/global)."},
+				"action":    {Type: "string", Enum: []string{"versions", "node_install", "node_uninstall", "php_list", "ext_list", "ext_add", "ext_remove", "ports_list", "ports_add", "ports_remove", "ini_read", "ini_write", "ini_reset"}},
+				"version":   {Type: "string", Description: "node_*: version/alias (20, lts). ports_*: PHP version. ext_*: which version to rebuild/report on now (the set applies to all). ini_*: PHP version (omit or set shared=true for the shared file)."},
 				"extension": {Type: "string", Description: "ext_add/ext_remove: extension name (imagick, redis, swoole)."},
 				"apk_deps":  {Type: "string", Description: "ext_add: extra Alpine build packages, space-separated."},
+				"host":      {Type: "integer", Description: "ports_add/remove: host port."},
+				"container": {Type: "integer", Description: "ports_add: container port."},
+				"shared":    {Type: "boolean", Description: "ini_*: target the shared file (all versions)."},
+				"content":   {Type: "string", Description: "ini_write: full php.ini contents."},
 			},
 			Required: []string{"action"},
 		},
@@ -423,7 +475,7 @@ func execTool() mcpTool {
 				"site":           {Type: "string", Description: "commands_*/command_*: site name."},
 				"name":           {Type: "string", Description: "commands_run/command_*: command name."},
 				"command":        {Type: "string", Description: "command_add: shell command (sh -c)."},
-				"force":          {Type: "boolean", Description: "commands_run: required for confirm-gated commands."},
+				"force":          {Type: "boolean", Description: "commands_run: required for confirm-gated commands and for project-supplied (.lerd.yaml) commands that run on the host; approval is then remembered per site."},
 				"label":          {Type: "string", Description: "command_add: dashboard label."},
 				"description":    {Type: "string", Description: "command_add: tooltip."},
 				"output":         {Type: "string", Enum: []string{"silent", "text", "url", "terminal"}, Description: "command_add: output mode."},
@@ -442,12 +494,13 @@ func execTool() mcpTool {
 func frameworkTool() mcpTool {
 	return mcpTool{
 		Name:        "framework",
-		Description: "Framework definitions and scaffolding. action: list, add (name=laravel merges into built-in), remove, search (community store), install, project_new (scaffold), setup (run post-install steps — MANDATORY after env setup).",
+		Description: "Framework definitions and scaffolding. action: list, add (name=laravel merges into built-in), remove (force=true overrides in-use guard), prune (remove unused defs), search (store), update (fetch a definition from the store), project_new (scaffold), setup (post-install steps, MANDATORY after env setup).",
 		InputSchema: mcpSchema{
 			Type: "object",
 			Properties: map[string]mcpProp{
-				"action":              {Type: "string", Enum: []string{"list", "add", "remove", "search", "install", "project_new", "setup"}},
-				"name":                {Type: "string", Description: "add/remove/install: framework slug."},
+				"action":              {Type: "string", Enum: []string{"list", "add", "remove", "prune", "search", "update", "project_new", "setup"}},
+				"name":                {Type: "string", Description: "add/remove/update: framework slug."},
+				"force":               {Type: "boolean", Description: "remove: delete even if a site uses it."},
 				"label":               {Type: "string", Description: "add: human-readable name."},
 				"public_dir":          {Type: "string", Description: "add: document root."},
 				"detect_files":        {Type: "array", Description: "add: filenames that signal this framework."},
@@ -473,20 +526,21 @@ func frameworkTool() mcpTool {
 func diagTool() mcpTool {
 	return mcpTool{
 		Name:        "diag",
-		Description: "Diagnostics & observability. action: status, doctor, which, check, dns_diagnose, bug_report, analyze_queries (N+1/slow queries), dumps_recent, dumps_status, dumps_clear, dumps_toggle, profiler_toggle, profiler_status, profiler_clear, xdebug_on, xdebug_off, xdebug_status. (Reading logs moved to the `logs` tool.)",
+		Description: "Diagnostics & observability. action: status, doctor (lerd environment), doctor_fix, site_doctor (app-level checks for a site: env, dependencies, security audit, framework specifics), which, check, dns_diagnose, bug_report, analyze_queries (N+1/slow queries), route_timing (response-time table + slow routes), optimize_route (slow routes joined with their N+1/slow queries, plus CPU hotspots when profiling was on), dumps_recent, dumps_status, dumps_clear, dumps_toggle, profiler_toggle, profiler_status, profiler_clear, profiler_report (flat CPU profile of a command), xdebug_on, xdebug_off, xdebug_status. (Reading logs moved to the `logs` tool.)",
 		InputSchema: mcpSchema{
 			Type: "object",
 			Properties: map[string]mcpProp{
-				"action":          {Type: "string", Enum: []string{"status", "doctor", "which", "check", "dns_diagnose", "bug_report", "analyze_queries", "dumps_recent", "dumps_status", "dumps_clear", "dumps_toggle", "profiler_toggle", "profiler_status", "profiler_clear", "xdebug_on", "xdebug_off", "xdebug_status"}},
-				"path":            {Type: "string", Description: "Project root (which/check). Defaults to cwd."},
-				"site":            {Type: "string", Description: "dumps/analyze_queries: site filter."},
-				"branch":          {Type: "string", Description: "dumps_recent: worktree branch filter."},
+				"action":          {Type: "string", Enum: []string{"status", "doctor", "doctor_fix", "site_doctor", "which", "check", "dns_diagnose", "bug_report", "analyze_queries", "route_timing", "optimize_route", "dumps_recent", "dumps_status", "dumps_clear", "dumps_toggle", "profiler_toggle", "profiler_status", "profiler_clear", "profiler_report", "xdebug_on", "xdebug_off", "xdebug_status"}},
+				"path":            {Type: "string", Description: "Project root (which/check/site_doctor/profiler_report). Defaults to cwd."},
+				"site":            {Type: "string", Description: "dumps/analyze_queries/route_timing/optimize_route/site_doctor/profiler_report: site filter (site name or domain)."},
+				"args":            {Type: "array", Description: `profiler_report: argv to run under php and profile, e.g. ["artisan","app:import"].`},
+				"branch":          {Type: "string", Description: "dumps_recent/route_timing/optimize_route: worktree branch filter."},
 				"ctx":             {Type: "string", Enum: []string{"fpm", "cli"}, Description: "dumps_recent: context filter."},
 				"kind":            {Type: "string", Enum: []string{"dump", "query", "job", "view", "mail", "cache", "event", "http"}, Description: "dumps_recent: event kind."},
 				"since":           {Type: "string", Description: "dumps_recent: time filter."},
 				"limit":           {Type: "integer", Description: "dumps_recent: max events."},
-				"min_repeat":      {Type: "integer", Description: "analyze_queries: N+1 repeat threshold."},
-				"slow_ms":         {Type: "number", Description: "analyze_queries: slow-query threshold."},
+				"min_repeat":      {Type: "integer", Description: "analyze_queries/optimize_route: N+1 repeat threshold."},
+				"slow_ms":         {Type: "number", Description: "analyze_queries/optimize_route: slow-query threshold."},
 				"enable":          {Type: "boolean", Description: "dumps_toggle/profiler_toggle: on/off."},
 				"output":          {Type: "string", Description: "bug_report: output file path."},
 				"log_lines":       {Type: "integer", Description: "bug_report: lines per log (default 200)."},

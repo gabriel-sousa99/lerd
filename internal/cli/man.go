@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/gabriel-sousa99/lerd/internal/man"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -35,7 +35,7 @@ func runMan(_ *cobra.Command, args []string) error {
 
 	pages := man.BuildRegistry()
 	m := man.NewModel(pages, args, glamStyle)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	_, err := p.Run()
 	return err
 }
@@ -60,8 +60,7 @@ func runManPlain(args []string) error {
 				return nil
 			}
 		}
-		fmt.Fprintf(os.Stderr, "No documentation page found for %q\n", query)
-		os.Exit(1)
+		return fmt.Errorf("no documentation page found for %q", query)
 	}
 
 	// Print table of contents

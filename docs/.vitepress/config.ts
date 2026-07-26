@@ -1,38 +1,87 @@
-import { defineConfig } from "vitepress";
+import { readdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { defineConfig } from 'vitepress'
 
-const SITE_URL = "https://geodro.github.io/lerd";
-const OG_IMAGE = `${SITE_URL}/assets/social-preview.png`;
+const SITE_URL = 'https://lerd.sh'
+const OG_IMAGE = `${SITE_URL}/assets/social-preview.png`
+const DIGEST_DIR = fileURLToPath(new URL('../public/digest', import.meta.url))
 
 export default defineConfig({
-  title: "Lerd",
-  description:
-    "Open-source Herd-like local PHP development environment for Linux. Automatic .test domains, PHP 8.2–8.5, rootless Podman. Works on Ubuntu, Fedora, Arch, and Debian.",
-  base: "/lerd/",
+  title: 'Lerd',
+  description: 'Open-source, Herd-like local PHP development for Linux and macOS. Automatic .test domains, HTTPS, per-project PHP and Node, rootless Podman, no Docker daemon.',
+  base: '/',
+  lang: 'en-US',
   cleanUrls: true,
 
   sitemap: {
     hostname: SITE_URL,
     transformItems(items) {
-      return items.map((item) => ({ ...item, url: `lerd/${item.url}` }));
+      // Static digest pages live in public/ and aren't page-derived. Read the
+      // directory rather than listing them, so a new release is never missed.
+      for (const file of readdirSync(DIGEST_DIR).filter((f) => f.endsWith('.html')).sort().reverse()) {
+        items.push({ url: `digest/${file}` })
+      }
+      return items
     },
   },
 
   head: [
-    [
-      "link",
-      { rel: "icon", type: "image/svg+xml", href: "/lerd/assets/logo.svg" },
-    ],
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/assets/logo.svg' }],
+
+    // Display fonts for the home page hero (Archivo + JetBrains Mono)
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
+    ['link', { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700;800;900&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap' }],
+
+    ['meta', { name: 'theme-color', content: '#FF2D20' }],
 
     // Open Graph
-    ["meta", { property: "og:type", content: "website" }],
-    ["meta", { property: "og:site_name", content: "Lerd" }],
-    ["meta", { property: "og:image", content: OG_IMAGE }],
-    ["meta", { property: "og:image:width", content: "1200" }],
-    ["meta", { property: "og:image:height", content: "630" }],
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: 'Lerd' }],
+    ['meta', { property: 'og:locale', content: 'en_US' }],
+    ['meta', { property: 'og:image', content: OG_IMAGE }],
+    ['meta', { property: 'og:image:type', content: 'image/png' }],
+    ['meta', { property: 'og:image:width', content: '1499' }],
+    ['meta', { property: 'og:image:height', content: '787' }],
+    ['meta', { property: 'og:image:alt', content: 'Lerd, local PHP development for Linux and macOS' }],
 
     // Twitter / X
-    ["meta", { name: "twitter:card", content: "summary_large_image" }],
-    ["meta", { name: "twitter:image", content: OG_IMAGE }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: OG_IMAGE }],
+    ['meta', { name: 'twitter:image:alt', content: 'Lerd, local PHP development for Linux and macOS' }],
+
+    // Structured data (rich results / knowledge graph)
+    [
+      'script',
+      { type: 'application/ld+json' },
+      JSON.stringify({
+        '@context': 'https://schema.org',
+        '@graph': [
+          {
+            '@type': 'SoftwareApplication',
+            name: 'Lerd',
+            applicationCategory: 'DeveloperApplication',
+            operatingSystem: 'Linux, macOS',
+            description:
+              'Open-source, Herd-like local PHP development environment for Linux and macOS: automatic .test domains and HTTPS, per-project PHP 7.4–8.5 and Node, rootless Podman, a built-in Web UI, and an MCP server for AI agents. No Docker daemon, no sudo.',
+            url: SITE_URL,
+            downloadUrl: `${SITE_URL}/install.sh`,
+            softwareVersion: '1.25.0',
+            license: 'https://opensource.org/licenses/MIT',
+            image: OG_IMAGE,
+            author: { '@type': 'Person', name: 'George Dumitrescu' },
+            offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+          },
+          {
+            '@type': 'WebSite',
+            name: 'Lerd',
+            url: SITE_URL,
+            description:
+              'Documentation and downloads for Lerd, the open-source local PHP development environment for Linux and macOS.',
+          },
+        ],
+      }),
+    ],
   ],
 
   transformPageData(pageData, { siteConfig }) {
@@ -45,12 +94,14 @@ export default defineConfig({
       pageData.frontmatter.title ?? pageData.title ?? siteConfig.site.title;
     pageData.frontmatter.head ??= [];
     pageData.frontmatter.head.push(
-      ["link", { rel: "canonical", href: canonicalUrl }],
-      ["meta", { property: "og:title", content: title }],
-      ["meta", { property: "og:description", content: description }],
-      ["meta", { property: "og:url", content: canonicalUrl }],
-      ["meta", { name: "description", content: description }],
-    );
+      ['link', { rel: 'canonical', href: canonicalUrl }],
+      ['meta', { name: 'description', content: description }],
+      ['meta', { property: 'og:title', content: title }],
+      ['meta', { property: 'og:description', content: description }],
+      ['meta', { property: 'og:url', content: canonicalUrl }],
+      ['meta', { name: 'twitter:title', content: title }],
+      ['meta', { name: 'twitter:description', content: description }],
+    )
   },
 
   themeConfig: {
@@ -72,11 +123,12 @@ export default defineConfig({
         {
           text: "Getting Started",
           items: [
-            { text: "Requirements", link: "/getting-started/requirements" },
-            { text: "Installation", link: "/getting-started/installation" },
-            { text: "Windows (WSL2, beta)", link: "/getting-started/wsl2" },
-            { text: "Quick Start", link: "/getting-started/quick-start" },
-            { text: "Comparison", link: "/getting-started/comparison" },
+            { text: 'Requirements', link: '/getting-started/requirements' },
+            { text: 'Installation', link: '/getting-started/installation' },
+            { text: 'Windows (WSL2, beta)', link: '/getting-started/wsl2' },
+            { text: 'NixOS', link: '/getting-started/nixos' },
+            { text: 'Quick Start', link: '/getting-started/quick-start' },
+            { text: 'Comparison', link: '/getting-started/comparison' },
           ],
         },
         {
@@ -123,11 +175,12 @@ export default defineConfig({
         {
           text: "Services & Data",
           items: [
-            { text: "Services", link: "/usage/services" },
-            { text: "Service updates", link: "/usage/service-updates" },
-            { text: "Service presets", link: "/usage/service-presets" },
-            { text: "Custom services", link: "/usage/custom-services" },
-            { text: "Database", link: "/usage/database" },
+            { text: 'Services', link: '/usage/services' },
+            { text: 'Service updates', link: '/usage/service-updates' },
+            { text: 'Service presets', link: '/usage/service-presets' },
+            { text: 'Custom services', link: '/usage/custom-services' },
+            { text: 'Database', link: '/usage/database' },
+            { text: 'Disk cleanup', link: '/usage/cleanup' },
           ],
         },
         {
@@ -256,7 +309,14 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: "github", link: "https://github.com/gabriel-sousa99/lerd" },
+      { icon: 'github', link: 'https://github.com/gabriel-sousa99/lerd' },
+      { icon: 'discord', link: 'https://discord.gg/5JK54s7xCC' },
+      {
+        icon: {
+          svg: '<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><title>Reddit</title><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.01 4.744c.688 0 1.25.561 1.25 1.249a1.25 1.25 0 0 1-2.498.056l-2.597-.547-.8 3.747c1.824.07 3.48.632 4.674 1.488.308-.309.73-.491 1.207-.491.968 0 1.754.786 1.754 1.754 0 .716-.435 1.333-1.01 1.614a3.111 3.111 0 0 1 .042.52c0 2.694-3.13 4.87-7.004 4.87-3.874 0-7.004-2.176-7.004-4.87 0-.183.015-.366.043-.534A1.748 1.748 0 0 1 4.028 12c0-.968.786-1.754 1.754-1.754.463 0 .898.196 1.207.49 1.207-.883 2.878-1.43 4.744-1.487l.885-4.182a.342.342 0 0 1 .14-.197.35.35 0 0 1 .238-.042l2.906.617a1.214 1.214 0 0 1 1.108-.701zM9.25 12C8.561 12 8 12.562 8 13.25c0 .687.561 1.248 1.25 1.248.687 0 1.248-.561 1.248-1.249 0-.688-.561-1.249-1.249-1.249zm5.5 0c-.687 0-1.248.561-1.248 1.25 0 .687.561 1.248 1.249 1.248.688 0 1.249-.561 1.249-1.249 0-.687-.562-1.249-1.25-1.249zm-5.466 3.99a.327.327 0 0 0-.231.094.33.33 0 0 0 0 .463c.842.842 2.484.913 2.961.913.477 0 2.105-.056 2.961-.913a.361.361 0 0 0 .029-.463.33.33 0 0 0-.464 0c-.547.533-1.684.73-2.512.73-.828 0-1.979-.196-2.512-.73a.326.326 0 0 0-.232-.095z"/></svg>',
+        },
+        link: 'https://reddit.com/r/lerd',
+      },
     ],
 
     footer: {
@@ -269,8 +329,8 @@ export default defineConfig({
     },
 
     editLink: {
-      pattern: "https://github.com/gabriel-sousa99/lerd/edit/main/docs/:path",
-      text: "Edit this page on GitHub",
+      pattern: 'https://github.com/gabriel-sousa99/lerd/edit/main/docs/:path',
+      text: 'Edit this page on GitHub',
     },
   },
 });

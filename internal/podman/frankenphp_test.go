@@ -37,7 +37,10 @@ func TestFrankenPHPImage(t *testing.T) {
 func TestGenerateFrankenPHPQuadlet(t *testing.T) {
 	entry := []string{"php", "artisan", "octane:start", "--server=frankenphp"}
 	env := map[string]string{"FRANKENPHP_CONFIG": "worker ./public/index.php"}
-	content := GenerateFrankenPHPQuadlet("myapp", "/home/user/myapp", "8.4", entry, env)
+	content, err := GenerateFrankenPHPQuadlet("myapp", "/home/user/myapp", "8.4", entry, env)
+	if err != nil {
+		t.Fatalf("GenerateFrankenPHPQuadlet: %v", err)
+	}
 
 	mustContain := []string{
 		"ContainerName=lerd-fp-myapp",
@@ -54,6 +57,7 @@ func TestGenerateFrankenPHPQuadlet(t *testing.T) {
 		"/usr/local/etc/php/conf.d/96-lerd-devtools.ini:ro",
 		"/usr/local/etc/php/conf.d/99-xdebug.ini:ro",
 		"/usr/local/etc/php/conf.d/98-lerd-user.ini:ro",
+		"/usr/local/etc/php/conf.d/95-lerd-shared.ini:ro",
 		":/usr/local/etc/lerd:ro",
 	}
 	for _, s := range mustContain {
@@ -72,5 +76,15 @@ func TestShellJoinQuotesWhitespace(t *testing.T) {
 	want := `frankenphp run "--with spaces" "has\"quote"`
 	if got != want {
 		t.Fatalf("shellJoin:\n  want %s\n  got  %s", want, got)
+	}
+}
+
+func TestShellJoinEscapesBackslash(t *testing.T) {
+	// An arg ending in a backslash must escape it so the closing quote isn't
+	// swallowed by the parser on the other side.
+	got := shellJoin([]string{"cmd", `path\`})
+	want := `cmd "path\\"`
+	if got != want {
+		t.Fatalf("shellJoin backslash:\n  want %s\n  got  %s", want, got)
 	}
 }

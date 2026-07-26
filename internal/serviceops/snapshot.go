@@ -52,6 +52,14 @@ const (
 	mysqldumpFlags   = "--single-transaction --quick --no-tablespaces --routines --triggers --events"
 )
 
+// The mariadb images ship mariadb/mariadb-dump and no mysql-named binaries, so
+// every mysql-family command resolves its tool in the container rather than
+// spelling one of the two names.
+const (
+	mysqlDumpBin   = "$(command -v mysqldump || command -v mariadb-dump)"
+	mysqlClientBin = "$(command -v mysql || command -v mariadb)"
+)
+
 // reservedSnapshotName flags snapshot names that collide with command verbs,
 // catching mistakes like `lerd db snapshot list` (which would otherwise create
 // a snapshot literally named "list" instead of listing).
@@ -135,7 +143,7 @@ func snapshotEnv(family string) []string {
 func snapshotDumpCommand(t SnapshotTarget) (string, error) {
 	switch t.Family {
 	case "mysql", "mariadb":
-		bin := "$(command -v mysqldump || command -v mariadb-dump)"
+		bin := mysqlDumpBin
 		args := "-uroot " + mysqldumpFlags
 		if t.AllDatabases {
 			// --add-drop-database makes the dump self-cleaning so an
@@ -160,7 +168,7 @@ func snapshotDumpCommand(t SnapshotTarget) (string, error) {
 func snapshotRestoreCommand(t SnapshotTarget) (string, error) {
 	switch t.Family {
 	case "mysql", "mariadb":
-		bin := "$(command -v mysql || command -v mariadb)"
+		bin := mysqlClientBin + " --max-allowed-packet=" + config.MySQLImportMaxPacket
 		if t.AllDatabases {
 			return "gunzip -c | " + bin + " -uroot", nil
 		}
@@ -247,6 +255,11 @@ func ListSnapshots(service, database string, includeAll bool) ([]Snapshot, error
 // DeleteSnapshot removes a stored snapshot, erroring when it does not exist so
 // callers can report the miss clearly.
 func DeleteSnapshot(service, database, name string, allDatabases bool) error {
+	if !allDatabases {
+		if err := ValidateDatabaseName(database); err != nil {
+			return err
+		}
+	}
 	clean, err := sanitizeSnapshotName(name)
 	if err != nil {
 		return err
@@ -268,6 +281,11 @@ func CreateSnapshot(t SnapshotTarget, name string, ctx SnapshotMeta, emit func(P
 	if emit == nil {
 		emit = func(PhaseEvent) {}
 	}
+	if !t.AllDatabases {
+		if err := ValidateDatabaseName(t.Database); err != nil {
+			return nil, err
+		}
+	}
 	dumpCmd, err := snapshotDumpCommand(t)
 	if err != nil {
 		return nil, err
@@ -276,6 +294,11 @@ func CreateSnapshot(t SnapshotTarget, name string, ctx SnapshotMeta, emit func(P
 		name = "snapshot-" + timestamped()
 	} else if hint, reserved := reservedSnapshotName(name); reserved {
 		return nil, fmt.Errorf("%q is not a valid snapshot name — %s", strings.TrimSpace(name), hint)
+	} else {
+		// Stamp a user-provided name with the same UTC timestamp an auto-generated
+		// one carries, so repeated snapshots of one name never collide and each
+		// snapshot's time can be read straight off its name.
+		name = strings.TrimSpace(name) + "-" + timestamped()
 	}
 	clean, err := sanitizeSnapshotName(name)
 	if err != nil {
@@ -337,17 +360,22 @@ func CreateSnapshot(t SnapshotTarget, name string, ctx SnapshotMeta, emit func(P
 // RestoreSnapshot loads a stored snapshot back into its database. A per-database
 // restore drops and recreates the target database first so no orphan tables
 // survive; an all-databases restore replays the self-cleaning dump as-is.
-func RestoreSnapshot(t SnapshotTarget, name string, emit func(PhaseEvent)) error {
+func RestoreSnapshot(t SnapshotTarget, name string, emit func(PhaseEvent)) (ImportReport, error) {
 	if emit == nil {
 		emit = func(PhaseEvent) {}
 	}
+	if !t.AllDatabases {
+		if err := ValidateDatabaseName(t.Database); err != nil {
+			return ImportReport{}, err
+		}
+	}
 	restoreCmd, err := snapshotRestoreCommand(t)
 	if err != nil {
-		return err
+		return ImportReport{}, err
 	}
 	clean, err := sanitizeSnapshotName(name)
 	if err != nil {
-		return err
+		return ImportReport{}, err
 	}
 
 	unlock := lockService(t.Service)
@@ -357,26 +385,29 @@ func RestoreSnapshot(t SnapshotTarget, name string, emit func(PhaseEvent)) error
 	snap, err := readSnapshotMeta(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("snapshot %q not found", name)
+			return ImportReport{}, fmt.Errorf("snapshot %q not found", name)
 		}
-		return fmt.Errorf("reading snapshot %q: %w", name, err)
+		return ImportReport{}, fmt.Errorf("reading snapshot %q: %w", name, err)
 	}
 	dumpPath := filepath.Join(dir, snap.DumpFile)
 
 	if !t.AllDatabases {
 		emit(PhaseEvent{Phase: "dropping_database", Message: "recreating " + t.Database})
 		if _, err := DropDatabase(t.Service, t.Database); err != nil {
-			return fmt.Errorf("dropping %s: %w", t.Database, err)
+			return ImportReport{}, fmt.Errorf("dropping %s: %w", t.Database, err)
 		}
 		if _, err := CreateDatabase(t.Service, t.Database); err != nil {
-			return fmt.Errorf("recreating %s: %w", t.Database, err)
+			return ImportReport{}, fmt.Errorf("recreating %s: %w", t.Database, err)
 		}
 	}
 
 	emit(PhaseEvent{Phase: "restoring_data", Message: "restoring " + clean})
-	if err := restoreFromHost("lerd-"+t.Service, restoreCmd, snapshotEnv(t.Family), dumpPath, dumpRestoreTimeout); err != nil {
-		return fmt.Errorf("restoring snapshot %q: %w", name, err)
+	rep, err := restoreFromHost("lerd-"+t.Service, restoreCmd, snapshotEnv(t.Family), dumpPath, dumpRestoreTimeout)
+	if err != nil {
+		return rep, fmt.Errorf("restoring snapshot %q: %w", name, err)
 	}
+	// The complaints ride back on the report rather than the phase stream, since
+	// every caller here has the return value and would print them twice.
 	emit(PhaseEvent{Phase: "done", Message: "snapshot " + clean + " restored"})
-	return nil
+	return rep, nil
 }

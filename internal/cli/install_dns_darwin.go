@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dns"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
 )
@@ -25,7 +27,7 @@ func installDNSService(w io.Writer) error {
 		if _, berr := exec.LookPath("brew"); berr != nil {
 			return fmt.Errorf("dnsmasq not found and Homebrew not available — install dnsmasq manually")
 		}
-		fmt.Fprintln(w, "==> Installing dnsmasq via Homebrew")
+		feedback.LineOn(w, "Installing dnsmasq via Homebrew…")
 		cmd := exec.Command("brew", "install", "dnsmasq")
 		cmd.Stdout = w
 		cmd.Stderr = w
@@ -148,7 +150,7 @@ func writeDNSUnit(_ io.Writer) error {
 // container-based approach, migrating to native dnsmasq automatically.
 func ensureDNSServiceUpdated(w io.Writer) error {
 	if needsDNSServiceInstall() {
-		fmt.Fprintln(w, "  --> Migrating DNS from container to native dnsmasq ...")
+		feedback.LineOn(w, "Migrating DNS from container to native dnsmasq…")
 		return installDNSService(w)
 	}
 	return nil
@@ -175,4 +177,7 @@ func teardownDNS() {
 	_ = services.Mgr.RemoveServiceUnit("lerd-dns")
 	// Defensive: if a legacy container plist is still around, clear that too.
 	_ = services.Mgr.RemoveContainerUnit("lerd-dns")
+	// Remove the /etc/resolver files lerd wrote so a disabled setup doesn't leave
+	// a resolver pointing at the dnsmasq we just tore down.
+	dns.Teardown()
 }

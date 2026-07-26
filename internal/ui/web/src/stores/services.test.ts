@@ -29,6 +29,36 @@ describe('services store', () => {
     expect(groups.find((g) => g.key === 'schedule')).toBeUndefined();
   });
 
+  it('groups core services by category in CATEGORY_ORDER, sorted by name', async () => {
+    const { services, coreServiceGroups } = await import('./services');
+    services.set([
+      { name: 'valkey', status: 'active', site_count: 0, category: 'cache' },
+      { name: 'mariadb', status: 'active', site_count: 0, category: 'databases' },
+      { name: 'memcached', status: 'active', site_count: 0, category: 'cache' },
+      { name: 'mailpit', status: 'active', site_count: 0, category: 'mail' }
+    ]);
+    const groups = get(coreServiceGroups);
+    expect(groups.map((g) => g.key)).toEqual(['databases', 'cache', 'mail']);
+    expect(groups[1].items.map((s) => s.name)).toEqual(['memcached', 'valkey']);
+  });
+
+  it('excludes worker-lens services from the category groups', async () => {
+    const { services, coreServiceGroups } = await import('./services');
+    services.set([
+      { name: 'mariadb', status: 'active', site_count: 0, category: 'databases' },
+      { name: 'queue-blog', status: 'active', site_count: 0, category: 'other', queue_site: 'blog' }
+    ]);
+    const groups = get(coreServiceGroups);
+    expect(groups.map((g) => g.key)).toEqual(['databases']);
+    expect(groups.flatMap((g) => g.items.map((s) => s.name))).toEqual(['mariadb']);
+  });
+
+  it('buckets a service with no category into other', async () => {
+    const { services, coreServiceGroups } = await import('./services');
+    services.set([{ name: 'mystery', status: 'active', site_count: 0 }]);
+    expect(get(coreServiceGroups).map((g) => g.key)).toEqual(['other']);
+  });
+
   it('applies ws service frames', async () => {
     const { wsMessage } = await import('$lib/ws');
     const { services, servicesLoaded } = await import('./services');
@@ -51,6 +81,95 @@ describe('services store', () => {
     expect(calls[0][1]?.method).toBe('POST');
     // Second call should be the reload
     expect(calls.some((c) => c[0] === '/api/services')).toBe(true);
+  });
+
+  it('setServiceShim POSTs the tool decision and reloads', async () => {
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push([String(url), init]);
+      if (String(url).endsWith('/mysql/shims'))
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response('[]', { status: 200 });
+    }) as unknown as typeof fetch;
+    const { setServiceShim } = await import('./services');
+    const res = await setServiceShim('mysql', { tool: 'mysqldump', enabled: true });
+    expect(res.ok).toBe(true);
+    expect(calls[0][0]).toBe('/api/services/mysql/shims');
+    expect(calls[0][1]?.method).toBe('POST');
+    expect(JSON.parse(String(calls[0][1]?.body))).toEqual({ tool: 'mysqldump', enabled: true });
+    expect(calls.some((c) => c[0] === '/api/services')).toBe(true);
+  });
+
+  it('setServiceShim surfaces a server error without reloading', async () => {
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      calls.push(String(url));
+      if (String(url).endsWith('/mysql/shims'))
+        return new Response(JSON.stringify({ ok: false, error: 'boom' }), { status: 200 });
+      return new Response('[]', { status: 200 });
+    }) as unknown as typeof fetch;
+    const { setServiceShim } = await import('./services');
+    const res = await setServiceShim('mysql', { tool: 'mysqldump', enabled: true });
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe('boom');
+    expect(calls.includes('/api/services')).toBe(false);
+  });
+
+  it('setServicePorts POSTs the published port and extra ports as JSON', async () => {
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push([String(url), init]);
+      if (String(url).endsWith('/mysql/ports'))
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response('[]', { status: 200 });
+    }) as unknown as typeof fetch;
+    const { setServicePorts } = await import('./services');
+    const res = await setServicePorts('mysql', { published_port: 3307, extra_ports: ['8080:80'] });
+    expect(res.ok).toBe(true);
+    expect(calls[0][0]).toBe('/api/services/mysql/ports');
+    expect(calls[0][1]?.method).toBe('POST');
+    expect(JSON.parse(String(calls[0][1]?.body))).toEqual({
+      published_port: 3307,
+      extra_ports: ['8080:80']
+    });
+    expect(calls.some((c) => c[0] === '/api/services')).toBe(true);
+  });
+
+  it('setServicePorts POSTs secondary published_ports keyed by container port', async () => {
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push([String(url), init]);
+      if (String(url).endsWith('/mailpit/ports'))
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response('[]', { status: 200 });
+    }) as unknown as typeof fetch;
+    const { setServicePorts } = await import('./services');
+    const res = await setServicePorts('mailpit', {
+      published_port: null,
+      published_ports: { '8025': 8026 },
+      extra_ports: []
+    });
+    expect(res.ok).toBe(true);
+    expect(JSON.parse(String(calls[0][1]?.body))).toEqual({
+      published_port: null,
+      published_ports: { '8025': 8026 },
+      extra_ports: []
+    });
+  });
+
+  it('setServicePorts surfaces a server error without reloading', async () => {
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ ok: false, error: 'port already in use: 3307' }), {
+        status: 200
+      });
+    }) as unknown as typeof fetch;
+    const { setServicePorts } = await import('./services');
+    const res = await setServicePorts('mysql', { published_port: 3307, extra_ports: [] });
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('already in use');
+    expect(calls.some((c) => c === '/api/services')).toBe(false);
   });
 
   it('getServiceConfig GETs the tuning override with exists flag', async () => {

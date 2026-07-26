@@ -3,18 +3,32 @@
 package dns
 
 import (
+	"bytes"
 	"fmt"
+	"github.com/gabriel-sousa99/lerd/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
 
-	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 )
+
+// resolverDir is the macOS per-TLD resolver directory. A var so tests can point
+// the stale-file scan at a fixture.
+var resolverDir = "/etc/resolver"
+
+// resolverContent is what ConfigureResolver writes into /etc/resolver/<tld>: it
+// routes .<tld> queries at the lerd-dns dnsmasq container. Teardown matches on it
+// so it removes exactly the resolver files lerd created.
+var resolverContent = []byte("nameserver 127.0.0.1\nport 5300\n")
 
 // readUpstreamDNS reads upstream DNS servers from /etc/resolv.conf.
 // On macOS the OS keeps /etc/resolv.conf up-to-date with DHCP-assigned DNS servers,
 // so parsing it gives the real upstreams without needing nmcli or resolvectl.
 func readUpstreamDNS() []string {
+	if servers := configuredUpstreamDNS(); len(servers) > 0 {
+		return servers
+	}
 	return parseNameservers("/etc/resolv.conf")
 }
 
@@ -28,42 +42,72 @@ func defaultUpstreamFallback() []string { return nil }
 // the lerd-dns dnsmasq container on port 5300. macOS checks /etc/resolver/<tld>
 // automatically for per-TLD DNS overrides — no daemon restart required.
 func ConfigureResolver() error {
+	// Nothing when the user opted out, mirroring the Linux guard: disable flips the
+	// TLD to localhost and stops lerd-dns, so writing /etc/resolver here would point
+	// *.localhost at a resolver that is deliberately not running. A config that fails
+	// to load is surfaced, not defaulted: silently falling through to the "test"
+	// default would write /etc/resolver/test and report success on a broken config.
 	cfg, err := config.LoadGlobal()
 	if err != nil {
 		return err
 	}
-	tld := cfg.DNS.TLD
-	if tld == "" {
-		tld = "test"
+	if cfg != nil && !cfg.DNS.Enabled {
+		return nil
 	}
 
-	resolverFile := filepath.Join("/etc/resolver", tld)
-	content := []byte("nameserver 127.0.0.1\nport 5300\n")
+	// ConfiguredTLD rejects anything that is not a DNS label. The TLD lands in
+	// /etc/resolver/<tld> and, via the sudoers grant below, in a NOPASSWD tee
+	// target, so a raw value could traverse out of /etc/resolver or inject a
+	// sudoers line: it must be validated before either.
+	tld := ConfiguredTLD()
+
+	resolverFile := filepath.Join(resolverDir, tld)
+	content := resolverContent
 
 	if isFileContent(resolverFile, content) {
 		return nil
 	}
 
-	fmt.Println("  [sudo required] Configuring /etc/resolver for ." + tld + " DNS resolution")
+	feedback.Sudo("Configuring /etc/resolver for ." + tld + " DNS resolution")
 	return sudoWriteFile(resolverFile, content, 0644)
 }
 
-// Teardown removes the /etc/resolver/<tld> file written by ConfigureResolver.
+// Teardown removes every /etc/resolver file lerd wrote (matched by content) so
+// disabling DNS never orphans a resolver pointing at the torn-down dnsmasq.
+// Content-matching beats the config TLD: disable flips cfg.DNS.TLD first, so it
+// no longer names the file to remove, and a custom TLD leaves its own to clean.
 func Teardown() {
-	cfg, _ := config.LoadGlobal()
-	tld := "test"
-	if cfg != nil && cfg.DNS.TLD != "" {
-		tld = cfg.DNS.TLD
+	stale := staleResolverFiles(resolverDir)
+	if len(stale) == 0 {
+		return
 	}
+	rmCmd := exec.Command("sudo", append([]string{"rm", "-f"}, stale...)...)
+	rmCmd.Stdin = os.Stdin
+	rmCmd.Stdout = os.Stdout
+	rmCmd.Stderr = os.Stderr
+	rmCmd.Run() //nolint:errcheck
+}
 
-	resolverFile := filepath.Join("/etc/resolver", tld)
-	if _, err := os.Stat(resolverFile); err == nil {
-		rmCmd := exec.Command("sudo", "rm", "-f", resolverFile)
-		rmCmd.Stdin = os.Stdin
-		rmCmd.Stdout = os.Stdout
-		rmCmd.Stderr = os.Stderr
-		rmCmd.Run() //nolint:errcheck
+// staleResolverFiles returns the resolver files under dir whose content matches
+// what ConfigureResolver writes, so Teardown removes exactly those and leaves a
+// user's or another tool's resolver files untouched.
+func staleResolverFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
 	}
+	want := bytes.TrimSpace(resolverContent)
+	var stale []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		if body, rerr := os.ReadFile(path); rerr == nil && bytes.Equal(bytes.TrimSpace(body), want) {
+			stale = append(stale, path)
+		}
+	}
+	return stale
 }
 
 // InstallSudoers writes a sudoers drop-in granting the current user passwordless
@@ -78,25 +122,31 @@ func InstallSudoers() error {
 		return fmt.Errorf("cannot determine current user")
 	}
 
-	cfg, _ := config.LoadGlobal()
-	tld := "test"
-	if cfg != nil && cfg.DNS.TLD != "" {
-		tld = cfg.DNS.TLD
-	}
-
-	content := renderDarwinSudoers(user, tld)
+	content := renderDarwinSudoers(user, ConfiguredTLD())
 
 	const sudoersPath = "/etc/sudoers.d/lerd"
-	if isFileContent(sudoersPath, []byte(content)) {
+	if sudoersInstalled([]byte(content)) {
 		return nil
 	}
 
-	fmt.Println("  [sudo required] Installing DNS sudoers rule")
+	feedback.Sudo("Installing DNS sudoers rule")
 	if err := sudoWriteFile(sudoersPath, []byte(content), 0440); err != nil {
 		return fmt.Errorf("writing sudoers drop-in: %w", err)
 	}
+	recordSudoersInstalled([]byte(content))
 	return nil
 }
+
+// sudoersProbeCommand / sudoProbeArgs are the passwordless-liveness probe on
+// macOS. It must exercise a command renderDarwinSudoers actually grants, or the
+// probe can never succeed: `mkdir -p /etc/resolver` matches the granted rule
+// verbatim and is idempotent (a no-op once the directory exists). resolvectl,
+// the Linux probe, is never granted here, which forced a sudoers rewrite on
+// every run (issue #1101).
+var (
+	sudoersProbeCommand = "/bin/mkdir"
+	sudoProbeArgs       = []string{"-p", "/etc/resolver"}
+)
 
 // renderDarwinSudoers returns the macOS sudoers content for user + the
 // configured TLD. Every command argument is fully qualified — no

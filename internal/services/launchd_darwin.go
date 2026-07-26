@@ -79,7 +79,7 @@ func plistArgs(path string) ([]string, error) {
 		if open < 0 || close < 0 {
 			break
 		}
-		args = append(args, block[open+len("<string>"):close])
+		args = append(args, xmlUnescStr(block[open+len("<string>"):close]))
 		block = block[close+len("</string>"):]
 	}
 	return args, nil
@@ -92,6 +92,26 @@ type darwinServiceManager struct{}
 func launchAgentsDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents")
+}
+
+// launchAgentsDirFn and containerSnapshotFn are the seams the whole-sweep path
+// uses, so tests can point it at a fixture directory and count how many times
+// container state is queried.
+var (
+	launchAgentsDirFn   = launchAgentsDir
+	containerSnapshotFn = func() map[string]bool { return podman.Cache.Snapshot() }
+)
+
+// containerRunning answers "is this unit's container up?" from a snapshot taken
+// once for a whole sweep, falling back to a per-unit lookup when no snapshot was
+// prefetched. In a process without the container cache running (every CLI
+// invocation, and the MCP server) the per-unit path is a `podman inspect`
+// subprocess, which on macOS is a round trip into the podman VM.
+func containerRunning(name string, snapshot map[string]bool) bool {
+	if snapshot != nil {
+		return snapshot[name]
+	}
+	return podman.Cache.Running(name)
 }
 
 func lerdLogsDir() string {
@@ -130,6 +150,15 @@ func xmlEscStr(s string) string {
 		}
 	}
 	return buf.String()
+}
+
+// xmlUnescStr reverses xmlEscStr, so args read back out of a plist reach podman
+// as they were written. &amp; is decoded last, otherwise an escaped "&amp;lt;"
+// would collapse into a literal "<".
+func xmlUnescStr(s string) string {
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	return strings.ReplaceAll(s, "&amp;", "&")
 }
 
 // keepAlivePolicy mirrors the subset of systemd Restart= values we care
@@ -245,8 +274,8 @@ func splitSystemdExec(s string) []string {
 		c := s[i]
 		switch {
 		case inQuote:
-			if c == '\\' && i+1 < len(s) && s[i+1] == '"' {
-				cur.WriteByte('"')
+			if c == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\') {
+				cur.WriteByte(s[i+1])
 				i++
 			} else if c == '"' {
 				inQuote = false
@@ -279,18 +308,18 @@ func expandSpecifiers(s string) string {
 	return strings.ReplaceAll(s, "%h", home)
 }
 
-// podmanBinPath returns the path to the podman binary.
-func podmanBinPath() string {
-	if p, err := exec.LookPath("podman"); err == nil {
-		return p
-	}
-	// Homebrew default locations
-	for _, candidate := range []string{"/opt/homebrew/bin/podman", "/usr/local/bin/podman"} {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+// precreateBindMountDirs creates the host source directory of each bind-mount
+// volume so podman run doesn't fail with statfs. A named volume (a bare name
+// with no absolute source, e.g. lerd-ssh-agent:/ssh-agent) is skipped: podman
+// manages it, and MkdirAll on the bare name would drop a stray relative
+// directory into the process working directory.
+func precreateBindMountDirs(vols []string) {
+	for _, vol := range vols {
+		parts := strings.SplitN(expandSpecifiers(vol), ":", 3)
+		if len(parts) >= 2 && filepath.IsAbs(parts[0]) {
+			os.MkdirAll(parts[0], 0755) //nolint:errcheck
 		}
 	}
-	return "podman"
 }
 
 // stripSELinuxVolOpts removes SELinux relabelling flags (:z, :Z) from a
@@ -351,18 +380,31 @@ func stripPrivilegedIPBind(port string) string {
 	return port
 }
 
-// stripIPv6PublishPorts removes PublishPort= lines that start with a bracketed
-// IPv6 address (e.g. "[::1]:3306:3306"). gvproxy cannot bind both an IPv4 and
-// an IPv6 loopback address on the same port simultaneously.
+// stripIPv6PublishPorts normalises bracketed IPv6 PublishPort= lines for gvproxy,
+// which cannot bind both an IPv4 and an IPv6 address on the same port at once.
+//
+// Loopback IPv6 lines ("[::1]:3306:3306") are dropped: PairIPv6Binds always pairs
+// them with an IPv4 "127.0.0.1:" line that survives, so the published port lives on.
+//
+// Bind-all IPv6 lines ("[::]:80:80") have no IPv4 partner — PairIPv6Binds collapses a
+// bare/0.0.0.0 bind into the "[::]:" form only — so they are rewritten to "0.0.0.0:"
+// rather than dropped. Dropping them left LAN-exposed containers (lan.exposed: true,
+// where every publish ends up as "[::]:") with no published ports at all.
 func stripIPv6PublishPorts(content string) string {
 	lines := strings.Split(content, "\n")
 	out := lines[:0]
 	for _, l := range lines {
-		val := strings.TrimPrefix(strings.TrimSpace(l), "PublishPort=")
-		if val != strings.TrimSpace(l) && strings.HasPrefix(val, "[") {
+		trimmed := strings.TrimSpace(l)
+		val := strings.TrimPrefix(trimmed, "PublishPort=")
+		if val == trimmed || !strings.HasPrefix(val, "[") {
+			out = append(out, l)
 			continue
 		}
-		out = append(out, l)
+		if rest, ok := strings.CutPrefix(val, "[::]:"); ok {
+			out = append(out, "PublishPort=0.0.0.0:"+rest)
+			continue
+		}
+		// Loopback (or any other bracketed) IPv6 line: drop it; its IPv4 partner stays.
 	}
 	return strings.Join(out, "\n")
 }
@@ -371,7 +413,7 @@ func stripIPv6PublishPorts(content string) string {
 // On macOS we run detached (-d) so that launchctl bootstrap sees an immediate
 // exit 0 (success); podman's own --restart=always policy handles crash recovery.
 func containerToPodmanArgs(c map[string][]string) ([]string, error) {
-	args := []string{podmanBinPath(), "run", "-d", "--restart=always"}
+	args := []string{podman.PodmanBin(), "run", "-d", "--restart=always"}
 
 	if names := c["ContainerName"]; len(names) > 0 {
 		// --replace removes any stale container with this name before starting.
@@ -433,7 +475,7 @@ func parseServiceUnit(name, content string) (args []string, keepAlive keepAliveP
 	if len(execStarts) == 0 {
 		return nil, keepAliveNever, fmt.Errorf("no ExecStart= found in service unit %s", name)
 	}
-	args = strings.Fields(expandSpecifiers(execStarts[0]))
+	args = SplitExecStart(expandSpecifiers(execStarts[0]))
 	if len(args) == 0 {
 		return nil, keepAliveNever, fmt.Errorf("empty ExecStart in service unit %s", name)
 	}
@@ -568,13 +610,7 @@ func (m *darwinServiceManager) WriteContainerUnit(name, content string) error {
 		return fmt.Errorf("container unit %s: %w", name, err)
 	}
 
-	// Pre-create volume source directories so podman doesn't fail with statfs.
-	for _, vol := range c["Volume"] {
-		parts := strings.SplitN(expandSpecifiers(vol), ":", 3)
-		if len(parts) >= 2 {
-			os.MkdirAll(parts[0], 0755) //nolint:errcheck
-		}
-	}
+	precreateBindMountDirs(c["Volume"])
 
 	if err := ensurePlistDirs(name); err != nil {
 		return err
@@ -738,8 +774,8 @@ func (m *darwinServiceManager) Stop(name string) error {
 	// Skipping the podman calls when the container is absent avoids flooding the
 	// Podman Machine SSH socket with N parallel no-op requests during lerd stop.
 	if running, _ := podman.ContainerRunning(name); running {
-		exec.Command(podmanBinPath(), "stop", "-t", "5", name).Run() //nolint:errcheck
-		exec.Command(podmanBinPath(), "rm", "-f", name).Run()        //nolint:errcheck
+		podman.Cmd("stop", "-t", "5", name).Run() //nolint:errcheck
+		podman.Cmd("rm", "-f", name).Run()        //nolint:errcheck
 	}
 
 	domain := uidDomain()
@@ -764,8 +800,8 @@ func (m *darwinServiceManager) Restart(name string) error {
 	// of launchd. Stop it explicitly so the restart is clean even if
 	// --replace is ever removed from the podman run args.
 	if running, _ := podman.ContainerRunning(name); running {
-		exec.Command(podmanBinPath(), "stop", "-t", "5", name).Run() //nolint:errcheck
-		exec.Command(podmanBinPath(), "rm", "-f", name).Run()        //nolint:errcheck
+		podman.Cmd("stop", "-t", "5", name).Run() //nolint:errcheck
+		podman.Cmd("rm", "-f", name).Run()        //nolint:errcheck
 	}
 
 	domain := uidDomain()
@@ -827,12 +863,19 @@ func (m *darwinServiceManager) IsEnabled(name string) bool {
 // container is detached, so we fall back to checking whether the container
 // is actually running rather than trusting launchd's "state = waiting/exited".
 func (m *darwinServiceManager) UnitStatus(name string) (string, error) {
+	return m.unitStatus(name, nil)
+}
+
+// unitStatus is UnitStatus with an optional prefetched container snapshot, so a
+// whole-directory sweep resolves every unit's container state from one query
+// instead of one per unit.
+func (m *darwinServiceManager) unitStatus(name string, snapshot map[string]bool) (string, error) {
 	domain := uidDomain()
 	label := plistLabel(name)
 	out, err := launchctl("print", domain+"/"+label)
 	if err != nil {
 		// Not loaded at all — check container directly before giving up.
-		if podman.Cache.Running(name) {
+		if containerRunning(name, snapshot) {
 			return "active", nil
 		}
 		if _, statErr := os.Stat(plistPath(name)); statErr == nil {
@@ -846,7 +889,7 @@ func (m *darwinServiceManager) UnitStatus(name string) (string, error) {
 	}
 	// For exited-0 or waiting: the job may be a container launcher that
 	// succeeded (-d detach). Check the actual container state.
-	if podman.Cache.Running(name) {
+	if containerRunning(name, snapshot) {
 		return "active", nil
 	}
 	// Universal failure signal: an explicit non-zero last exit code is
@@ -919,10 +962,18 @@ func isContainerPlist(out []byte) bool {
 // This is the launchd analogue of `systemctl --user list-units lerd-*` and
 // is wired onto siteinfo.AllUnitStates from siteinfo/unitcache_darwin.go.
 func (m *darwinServiceManager) AllUnitStates() map[string]string {
-	pattern := filepath.Join(launchAgentsDir(), "lerd-*.plist")
+	pattern := filepath.Join(launchAgentsDirFn(), "lerd-*.plist")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return map[string]string{}
+	}
+	// One container query for the whole sweep. Resolving liveness per unit
+	// instead costs a `podman inspect` each in any process without the cache
+	// running, which is what made a single MCP worker health call take about a
+	// second on a 25 worker install.
+	snapshot := containerSnapshotFn()
+	if snapshot == nil {
+		snapshot = map[string]bool{}
 	}
 	out := make(map[string]string, len(matches)*2)
 	for _, path := range matches {
@@ -930,7 +981,7 @@ func (m *darwinServiceManager) AllUnitStates() map[string]string {
 		if !strings.HasPrefix(name, "lerd-") {
 			continue
 		}
-		state, _ := m.UnitStatus(name)
+		state, _ := m.unitStatus(name, snapshot)
 		if state == "" || state == "unknown" {
 			continue
 		}

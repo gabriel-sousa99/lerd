@@ -9,22 +9,23 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	lerddumps "github.com/gabriel-sousa99/lerd/internal/dumps"
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
+	zone "github.com/lrstanley/bubblezone/v2"
 )
 
 // siteTab identifies which sub-view of Site detail is showing. Tabs let the
-// detail pane mirror the web UI's Overview / Env / Dumps / App logs split
-// without forcing users to scroll past the toggles every time they want to
-// inspect a different facet of the site.
+// detail pane mirror the web UI's Overview / Logs / Env / Dumps split without
+// forcing users to scroll past the toggles every time they want to inspect a
+// different facet of the site.
 type siteTab int
 
 const (
 	tabSiteOverview siteTab = iota
+	tabSiteLogs
 	tabSiteEnv
 	tabSiteDebug
-	tabSiteAppLogs
 	tabSiteDoctor
 )
 
@@ -36,12 +37,12 @@ const envReadLimit = 256 * 1024
 // siteTabLabel returns the title shown in the tab strip header.
 func siteTabLabel(t siteTab) string {
 	switch t {
+	case tabSiteLogs:
+		return "Logs"
 	case tabSiteEnv:
 		return "Env"
 	case tabSiteDebug:
 		return "Debug"
-	case tabSiteAppLogs:
-		return "App logs"
 	case tabSiteDoctor:
 		return "Doctor"
 	default:
@@ -50,19 +51,21 @@ func siteTabLabel(t siteTab) string {
 }
 
 // siteTabsHeader renders the tab strip across the top of the site detail
-// pane, e.g. "[1] Overview · [2] Env · [3] Dumps · [4] App logs". The active
-// tab is highlighted in the accent colour; the others are dimmed. Lives at
-// the head of every site detail variant so the user always sees the
-// shortcuts and which tab is active without scrolling.
+// pane, e.g. "[1] Overview  [2] Logs  [3] Env". The active tab is highlighted
+// in the accent colour; the others are dimmed. Lives at the head of every site
+// detail variant so the user always sees the shortcuts and which tab is active
+// without scrolling.
 func siteTabsHeader(active siteTab, tabs []siteTab) string {
 	parts := make([]string, 0, len(tabs))
 	for i, t := range tabs {
 		label := fmt.Sprintf("[%d] %s", i+1, siteTabLabel(t))
 		if t == active {
-			parts = append(parts, selectedStyle.Render(label))
+			label = selectedStyle.Render(label)
 		} else {
-			parts = append(parts, dimStyle.Render(label))
+			label = dimStyle.Render(label)
 		}
+		// Each tab label is clickable; handleMouse maps the zone to selectSiteTab.
+		parts = append(parts, zone.Mark(fmt.Sprintf("sitetab:%d", i), label))
 	}
 	return "  " + strings.Join(parts, "  ")
 }
@@ -77,22 +80,16 @@ func renderSiteTabHeader(active siteTab, innerW int, tabs []siteTab) []string {
 	}
 }
 
-// availableSiteTabs returns the tabs a site offers, in display order. Doctor is
-// Laravel-only. This is the single source the strip numbering, the number-key
-// shortcuts, and the render dispatch all derive from, so a tab's position,
-// label, and availability can never drift apart.
+// availableSiteTabs returns the tabs a site offers, in display order. The doctor
+// runs framework-agnostic checks, so every site gets the tab. This is the single
+// source the strip numbering, the number-key shortcuts, and the render dispatch
+// all derive from, so a tab's position, label, and availability can never drift.
 func availableSiteTabs(s *siteinfo.EnrichedSite) []siteTab {
-	tabs := []siteTab{tabSiteOverview, tabSiteEnv, tabSiteDebug, tabSiteAppLogs}
-	if siteIsLaravel(s) {
+	tabs := []siteTab{tabSiteOverview, tabSiteLogs, tabSiteEnv, tabSiteDebug}
+	if s != nil {
 		tabs = append(tabs, tabSiteDoctor)
 	}
 	return tabs
-}
-
-// siteIsLaravel reports whether the site can run the Laravel Doctor checks,
-// gating both the tab strip entry and the `5` shortcut.
-func siteIsLaravel(s *siteinfo.EnrichedSite) bool {
-	return s != nil && s.FrameworkName == "laravel"
 }
 
 // siteEnvContentLines reads the site's .env file and renders one line per
@@ -150,7 +147,9 @@ func siteDebugContentLines(m *Model, site *siteinfo.EnrichedSite, innerW int) []
 
 	kind := m.activeLensKind()
 	add(sectionStyle.Render("Debug for "+site.Name) + "  " + dumpsBridgeStateLabel())
+	add("")
 	add("  " + renderDebugTabs(m, site.Name))
+	add("")
 	hint := "  [ ] switch lens · D for the full window"
 	if m.dumpsCtxFilter != "" {
 		hint += " · ctx:" + m.dumpsCtxFilter
@@ -227,50 +226,28 @@ func siteDebugContentLines(m *Model, site *siteinfo.EnrichedSite, innerW int) []
 	return out
 }
 
-// siteAppLogsContentLines lists every tail-able file behind the focused
-// site (framework-declared app logs) with its size and modification time.
-// Informational only; users press `l` to actually tail one — the file
-// targets are wired into logTargetsForSite so `l` / `[` / `]` already do
-// the right thing.
-func siteAppLogsContentLines(m *Model, site *siteinfo.EnrichedSite, innerW int) []string {
-	out := make([]string, 0, 32)
-	out = append(out, renderSiteTabHeader(tabSiteAppLogs, innerW, availableSiteTabs(site))...)
-	add := func(s string) { out = append(out, padToWidth(clipLine(s, innerW), innerW)) }
+// siteLogsActive reports whether the Sites tab is showing the Logs tab for a
+// selected site, in which case the detail column is given over to the streaming
+// tail rather than the usual rows.
+func (m *Model) siteLogsActive() bool {
+	return m.activeTab == tabSites && m.detailMode == detailSite &&
+		m.siteTab == tabSiteLogs && m.currentSite() != nil
+}
 
-	if site == nil {
-		add(dimStyle.Render("  no site selected"))
-		return out
-	}
+// serviceLogsActive reports whether the Services tab should show a logs
+// sub-pane beneath the service detail: any time a service or worker row is
+// selected on that tab. The streaming tail is fed by the same logTail the
+// manual `l` pane uses, retargeted by syncLogs as the selection moves.
+func (m *Model) serviceLogsActive() bool {
+	return m.activeTab == tabServices && m.currentService() != nil
+}
 
-	add(sectionStyle.Render("App logs"))
-	add(dimStyle.Render("  press l to tail · [ / ] to cycle through targets"))
-	add("")
-
-	paths := appLogPathsForSite(site)
-	if len(paths) == 0 {
-		add(dimStyle.Render("  no app log paths declared for this framework"))
-		add("")
-		add("  " + dimStyle.Render("for Laravel: ") + accentStyle.Render("storage/logs/*.log") + dimStyle.Render(" once the app starts writing them"))
-		add("  " + dimStyle.Render("for FPM containers: press ") + accentStyle.Render("l") + dimStyle.Render(" to tail the container log instead"))
-		return out
-	}
-
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			add(failingStyle.Render("  ! ") + p + "  " + dimStyle.Render(err.Error()))
-			continue
-		}
-		size := humanSize(info.Size())
-		mtime := info.ModTime().Local().Format("15:04:05")
-		short := filepath.Base(p)
-		add("  " + accentStyle.Render("·") + " " +
-			padRight(truncatePlain(short, 30), 30) + " " +
-			dimStyle.Render(padRight(size, 9)) + " " +
-			dimStyle.Render(mtime) + "  " +
-			dimStyle.Render(p))
-	}
-	return out
+// logsInDetail reports whether the tail is already showing inside the detail
+// column, on either tab. The full-width `l` pane consults this so the same logs
+// can't be drawn twice, and syncLogs so it keeps retargeting the tail as the
+// selection moves even when that pane is closed.
+func (m *Model) logsInDetail() bool {
+	return m.siteLogsActive() || m.serviceLogsActive()
 }
 
 // readBoundedFile reads up to max bytes of path. Used for the env reader so
@@ -289,44 +266,31 @@ func readBoundedFile(path string, max int64) ([]byte, error) {
 	return buf[:n], nil
 }
 
-// humanSize formats a byte count as the smallest unit ≥1: "512B", "12KB",
-// "3.4MB". Kept terser than stats.FormatBytes so the file-list column stays
-// narrow when several logs share a row.
-func humanSize(n int64) string {
-	switch {
-	case n < 1024:
-		return fmt.Sprintf("%dB", n)
-	case n < 1024*1024:
-		return fmt.Sprintf("%.0fKB", float64(n)/1024)
-	case n < 1024*1024*1024:
-		return fmt.Sprintf("%.1fMB", float64(n)/(1024*1024))
-	default:
-		return fmt.Sprintf("%.1fGB", float64(n)/(1024*1024*1024))
-	}
-}
-
 // openInBrowserCmd opens the focused row in the browser: a service's dashboard
 // URL when the Services pane is focused, otherwise the focused site's primary
 // domain. Falls back to a status-bar message when there's nothing to open or
 // the platform lacks a known opener.
 func (m *Model) openInBrowserCmd() tea.Cmd {
-	if m.focus == paneServices {
+	switch m.activeTab {
+	case tabServices:
 		return m.openServiceDashboardCmd()
+	case tabSites:
+		site := m.currentSite()
+		if site == nil {
+			return nil
+		}
+		domain := site.PrimaryDomain()
+		if domain == "" {
+			m.setStatus("no domain to open for "+site.Name, 3*time.Second)
+			return nil
+		}
+		scheme := "http"
+		if site.Secured {
+			scheme = "https"
+		}
+		return m.openURL(scheme + "://" + domain)
 	}
-	site := m.currentSite()
-	if site == nil {
-		return nil
-	}
-	domain := site.PrimaryDomain()
-	if domain == "" {
-		m.setStatus("no domain to open for "+site.Name, 3*time.Second)
-		return nil
-	}
-	scheme := "http"
-	if site.Secured {
-		scheme = "https"
-	}
-	return m.openURL(scheme + "://" + domain)
+	return nil
 }
 
 // openServiceDashboardCmd opens the focused service's dashboard URL. Worker

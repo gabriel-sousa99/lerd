@@ -97,3 +97,62 @@ func SitesUsingService(name string) []Site {
 func CountSitesUsingService(name string) int {
 	return len(SitesUsingService(name))
 }
+
+// ServicePublishedPort returns the published host port a service was pinned to
+// (0 = preset/version default). It is non-zero when the user ran
+// `lerd service port`, or when the port-ownership guard auto-shifted lerd's DB
+// off the engine default because a host server owns it. Readers that surface a
+// host-facing endpoint (a host-proxy app's .env, a connection URL) use it so the
+// port reflects where lerd's container actually listens, not the default a
+// coexisting host server may be sitting on.
+func ServicePublishedPort(name string) int {
+	cfg, err := LoadGlobal()
+	if err != nil {
+		return 0
+	}
+	if sc, ok := cfg.Services[name]; ok {
+		return sc.PublishedPort
+	}
+	return 0
+}
+
+// ServiceConfigFor returns the global config entry for a service (its ports,
+// image pin and enabled flag), or the zero ServiceConfig when the service isn't
+// configured. Callers that need the effective host ports read HostPorts() off it
+// so the preset default and any override resolve from the one registry.
+func ServiceConfigFor(name string) ServiceConfig {
+	cfg, err := LoadGlobal()
+	if err != nil {
+		return ServiceConfig{}
+	}
+	return cfg.Services[name]
+}
+
+// ServicePublishedPorts returns the per-container-port host overrides for a
+// service's secondary mappings (nil when none). The primary override lives in
+// ServicePublishedPort; these cover the extra ports a multi-port service exposes.
+func ServicePublishedPorts(name string) map[int]int {
+	cfg, err := LoadGlobal()
+	if err != nil {
+		return nil
+	}
+	if sc, ok := cfg.Services[name]; ok {
+		return sc.PublishedPorts
+	}
+	return nil
+}
+
+// ServiceExtraPorts returns the extra published port mappings recorded for a
+// service (set via `lerd service expose` or the Web UI ports modal), or nil when
+// none. Applied at the quadlet choke point so every preset-backed service, not
+// just the default-stack ones, honours the same extra-port overrides.
+func ServiceExtraPorts(name string) []string {
+	cfg, err := LoadGlobal()
+	if err != nil {
+		return nil
+	}
+	if sc, ok := cfg.Services[name]; ok {
+		return sc.ExtraPorts
+	}
+	return nil
+}

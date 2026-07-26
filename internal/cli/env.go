@@ -16,14 +16,16 @@ import (
 
 	neturl "net/url"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
-	"github.com/gabriel-sousa99/lerd/internal/grouping"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/sitetpl"
 	"github.com/spf13/cobra"
 )
 
@@ -111,13 +113,25 @@ func applyHostProxyEnv(updates, containerToHost map[string]string) {
 // non-canonical version reports its real published port; the default preset is
 // the fallback for services not separately registered.
 func servicePortMappings(name string) []string {
+	var ports []string
 	if svc, err := config.LoadCustomService(name); err == nil && len(svc.Ports) > 0 {
-		return svc.Ports
+		ports = svc.Ports
+	} else if svc, err := config.DefaultPresetMeta(name); err == nil && len(svc.Ports) > 0 {
+		ports = svc.Ports
 	}
-	if svc, err := config.DefaultPresetMeta(name); err == nil && len(svc.Ports) > 0 {
-		return svc.Ports
+	if len(ports) == 0 {
+		return nil
 	}
-	return nil
+	// Apply a published-port override so a host-proxy app's loopback target
+	// follows the moved port (e.g. lerd-mysql 3306 → 3307 when a host MySQL owns
+	// 3306, set manually via `lerd service port` or by the port-ownership guard).
+	// The override lives in global config, not the preset/quadlet meta the lookups
+	// above read, so without this the host-proxy .env would keep pointing at the
+	// vacated default — and connect to the host server instead of lerd's container.
+	if pp := config.ServicePublishedPort(name); pp > 0 {
+		ports = podman.SetPrimaryHostPort(ports, pp)
+	}
+	return ports
 }
 
 // splitHostContainerPort parses a podman port mapping ("3411:3306", or
@@ -138,22 +152,204 @@ func splitHostContainerPort(mapping string) (host, container string, ok bool) {
 // projectDBName returns a safe database name for the project at path.
 // It uses the registered site name, falling back to the directory name,
 // converting hyphens to underscores.
-func projectDBName(path string) string {
-	name := filepath.Base(path)
-	if reg, err := config.LoadSites(); err == nil {
-		for _, s := range reg.Sites {
-			if s.Path == path {
-				// A shared-DB group secondary uses the group main's database, so
-				// env setup must not reset it to the secondary's own slug.
-				if shared, ok := grouping.SharedDBNameFor(&s); ok {
-					return shared
-				}
-				name = s.Name
-				break
+func projectDBName(path string) string { return sitetpl.DBName(path) }
+
+// frameworkMapsService reports whether the framework definition declares its own
+// env wiring for the named service, in which case a service preset's generic
+// env_vars must not be written on top of it.
+func frameworkMapsService(fw *config.Framework, name string) bool {
+	if fw == nil {
+		return false
+	}
+	_, ok := fw.Env.Services[name]
+	return ok
+}
+
+// frameworkServiceRole resolves the framework env.services entry svc is served by,
+// most specific first: itself, its preset (opensearch-2-19 -> opensearch), the
+// service it declares itself a drop-in for (mariadb -> mysql), then its family.
+// Empty when the framework wires up nothing this service can fill.
+func frameworkServiceRole(fw *config.Framework, svc *config.CustomService) (string, bool) {
+	if fw == nil || svc == nil {
+		return "", false
+	}
+	family := config.FamilyOf(svc)
+	for _, name := range []string{svc.Name, svc.Preset, config.EnvRoleOf(svc), family, builtinEnvRole(family)} {
+		if name != "" && frameworkMapsService(fw, name) {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// builtinEnvRole is the cross-family drop-in relationship lerd knows without being
+// told, so an install whose service store predates the preset's own env_role still
+// wires an alternate onto the framework's keys rather than writing the wrong ones.
+// A same-family alternate needs no entry here: the family is already tried first.
+func builtinEnvRole(family string) string {
+	switch family {
+	case "mariadb":
+		return "mysql"
+	case "valkey":
+		return "redis"
+	}
+	return ""
+}
+
+// replacedFrameworkRoles is the set of env.services entries a picked drop-in stands
+// in for. The framework loop must skip those: left to itself it would write the
+// replaced service's container into the env file and boot it alongside the one the
+// project actually uses.
+func replacedFrameworkRoles(fw *config.Framework, picked []*config.CustomService) map[string]bool {
+	roles := make(map[string]bool)
+	for _, svc := range picked {
+		if role, ok := frameworkServiceRole(fw, svc); ok && role != svc.Name {
+			roles[role] = true
+		}
+	}
+	return roles
+}
+
+// customServiceDetected reports whether a service's own env_detect rule matches the
+// project's env file or composer.json.
+func customServiceDetected(svc *config.CustomService, cwd string, envMap map[string]string) bool {
+	if svc == nil || svc.EnvDetect == nil {
+		return false
+	}
+	if svc.EnvDetect.Key != "" {
+		if val, exists := envMap[svc.EnvDetect.Key]; exists {
+			if svc.EnvDetect.ValuePrefix == "" || strings.HasPrefix(val, svc.EnvDetect.ValuePrefix) {
+				return true
 			}
 		}
 	}
-	return config.SiteSlug(name)
+	return svc.EnvDetect.Composer != "" && config.ComposerHasPackage(cwd, svc.EnvDetect.Composer)
+}
+
+// frameworkKnownKeys is every env key a framework's definition names, in a service's
+// vars or in a detect rule. The definition is the framework's whole vocabulary, so a
+// key it never names is a key the app never reads.
+func frameworkKnownKeys(fw *config.Framework) map[string]bool {
+	known := make(map[string]bool)
+	if fw == nil {
+		return known
+	}
+	for _, def := range fw.Env.Services {
+		for _, kv := range def.Vars {
+			k, _, _ := strings.Cut(kv, "=")
+			known[k] = true
+		}
+		for _, rule := range def.Detect {
+			if rule.Key != "" {
+				known[rule.Key] = true
+			}
+		}
+	}
+	return known
+}
+
+// presetVarsBeyond returns the preset's vars the framework's mapping leaves unset but
+// its definition still knows about elsewhere, so wiring a drop-in through that mapping
+// cannot drop a key the app reads. Valkey is the case that matters: Laravel's redis
+// block names the host but not the cache, session and queue drivers valkey switches
+// on, and Laravel's detect rules name all three. A key the definition never names is
+// one the framework cannot read, which is what keeps a preset's Laravel-shaped keys
+// out of a Symfony or Drupal env file.
+func presetVarsBeyond(presetVars, frameworkVars []string, known map[string]bool) []string {
+	declared := make(map[string]bool, len(frameworkVars))
+	for _, kv := range frameworkVars {
+		k, _, _ := strings.Cut(kv, "=")
+		declared[k] = true
+	}
+	var out []string
+	for _, kv := range presetVars {
+		if k, _, _ := strings.Cut(kv, "="); !declared[k] && known[k] {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// frameworkVarsForAlternate returns the framework's vars for the mapped service,
+// re-pointed at the alternate actually picked. A drop-in is protocol-compatible with
+// the service it replaces (same port, same credentials, same driver name), so the
+// container it runs in is the only thing that moves: lerd-mysql becomes
+// lerd-mariadb-11-8, and the rest of the framework's wiring stands.
+func frameworkVarsForAlternate(fw *config.Framework, role string, svc *config.CustomService) []string {
+	def := fw.Env.Services[role]
+	from, to := "lerd-"+role, "lerd-"+svc.Name
+	out := make([]string, 0, len(def.Vars))
+	for _, kv := range def.Vars {
+		k, v, _ := strings.Cut(kv, "=")
+		out = append(out, k+"="+strings.ReplaceAll(v, from, to))
+	}
+	return out
+}
+
+// wiredVarsFor returns the env vars to write for a picked service. A drop-in is wired
+// through the framework's own mapping, re-pointed at its container, plus any preset
+// key that mapping leaves unset but the framework still knows. The preset's own keys
+// stand alone only where the framework maps nothing. dottedEnv marks a php-array env
+// file, whose keys are dotted paths a preset's flat env_vars cannot address.
+//
+// An externally managed service is wired through the same mapping. The keys lerd
+// writes are the ones .env.lerd_override overrides, so they have to be the keys the
+// app reads, and a dotted env takes none of them: the override file is dotenv, so it
+// cannot address a dotted path either, and that connection is left to the user.
+func wiredVarsFor(fw *config.Framework, svc *config.CustomService, role string, known map[string]bool, mapped, external, dottedEnv bool) []string {
+	switch {
+	case dottedEnv && external:
+		return nil
+	case mapped:
+		vars := frameworkVarsForAlternate(fw, role, svc)
+		if dottedEnv {
+			return vars
+		}
+		return append(vars, presetVarsBeyond(svc.EnvVars, vars, known)...)
+	case dottedEnv:
+		return nil
+	}
+	return svc.EnvVars
+}
+
+// emptyEnvFile returns the seed contents for a freshly created env file. A PHP
+// format needs a parseable skeleton so the app can require() it before lerd has
+// written any keys into it.
+func emptyEnvFile(envFormat string) []byte {
+	switch envFormat {
+	case "php-array":
+		return []byte("<?php\nreturn [];\n")
+	case "php-const":
+		return []byte("<?php\n")
+	default:
+		return []byte("")
+	}
+}
+
+// frameworkManagesEnv reports whether the project's framework declares an env
+// section. For a framework with no env section (a static or host-proxy app) the
+// unconditional `lerd env` in link and setup is an expected no-op, not a failure.
+func frameworkManagesEnv(cwd string) bool {
+	name, ok := config.DetectFrameworkForDir(cwd)
+	if !ok {
+		return true // unknown framework: let runEnv decide as before
+	}
+	fw, ok := config.GetFrameworkForDir(name, cwd)
+	if !ok {
+		return true
+	}
+	return fw.HasEnvConfig()
+}
+
+// runEnvIfManaged runs fn only when the framework manages an env file, warning
+// on a real failure. Frameworks with no env section are skipped silently.
+func runEnvIfManaged(cwd string, fn func() error) {
+	if !frameworkManagesEnv(cwd) {
+		return
+	}
+	if err := fn(); err != nil {
+		feedback.Warn("lerd env: %v", err)
+	}
 }
 
 // envDomainOnly toggles the reduced "URL/domain only" path of `lerd env`.
@@ -167,6 +363,7 @@ var envDomainOnly bool
 
 // NewEnvCmd returns the env command.
 func NewEnvCmd() *cobra.Command {
+	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "env",
 		Short: "Configure .env for this project with lerd service connection settings",
@@ -182,11 +379,79 @@ SESSION_DOMAIN, SANCTUM_STATEFUL_DOMAINS, VITE_REVERB_*, …) are touched.
 Service settings (DB_*, REDIS_*, MAIL_*, credentials) are preserved exactly
 as the developer wrote them. This is the mode used by the automatic upload
 flows (lerd init, lerd setup --all, dashboard link).`,
-		RunE: runEnv,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// --verbose (and any non-interactive output, e.g. the MCP server or a
+			// pipe) prints the full per-step detail. An interactive terminal gets
+			// the single live "configuring .env" line instead, even under NO_COLOR
+			// where it degrades to a plain condensed line rather than verbose.
+			if verbose || !feedback.Interactive() {
+				return runEnv(cmd, args)
+			}
+			feedback.Begin()
+			return runEnvLive(cmd, args)
+		},
 	}
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "Print detailed per-service output (used by the MCP server)")
 	cmd.Flags().BoolVar(&envDomainOnly, "domain-only", false,
 		"Only update URL/domain-scoped keys (APP_URL, SESSION_DOMAIN, VITE_REVERB_*, …); leave DB/redis/mail/credentials untouched")
 	return cmd
+}
+
+// envLive, when set, redirects runEnv's per-service reporting to a single live
+// progress line instead of the detailed multi-line output.
+var envLive *feedback.Live
+
+// runEnvLive runs runEnv under a live "configuring .env" line that accumulates
+// each service as it is applied. It saves and restores the previous live line
+// so it is reentrant: `lerd env` in an unlinked dir links first, and that link
+// runs its own setup env step (another runEnvLive) — nilling the global here
+// instead of restoring it would crash the outer line's Done/Fail on return.
+func runEnvLive(cmd *cobra.Command, args []string) error {
+	prev := envLive
+	live := feedback.StartLive("configuring .env")
+	envLive = live
+	err := runEnv(cmd, args)
+	if err != nil {
+		live.Fail(err)
+	} else {
+		live.Done()
+	}
+	envLive = prev
+	return err
+}
+
+// envInfo prints a detailed runEnv line, suppressed while the live line is active.
+func envInfo(format string, a ...any) {
+	if envLive == nil {
+		fmt.Printf(format, a...)
+	}
+}
+
+// envInterrupt runs fn, pausing the live line first (when active) so fn's raw
+// stdout — a service-start notice, a child process's output — prints cleanly
+// above the spinner instead of fighting its in-place redraw. With no live line
+// it just runs fn, so callers reached outside runEnvLive are unaffected.
+func envInterrupt(fn func()) {
+	if envLive != nil {
+		envLive.Interrupt(fn)
+		return
+	}
+	fn()
+}
+
+// envApplyLine reports a service as its connection values are applied: it feeds
+// the live line when active, otherwise prints the detailed "applying" line.
+func envApplyLine(svc string, detectedFromEnv bool) {
+	if envLive != nil {
+		envLive.Add(svc)
+		return
+	}
+	if detectedFromEnv {
+		fmt.Printf("  Detected %-12s — applying lerd connection values\n", svc)
+	} else {
+		fmt.Printf("  From .lerd.yaml %-4s — applying lerd connection values\n", svc)
+	}
 }
 
 // runEnvDomainOnly is the reduced path of `lerd env`: it creates .env from
@@ -381,9 +646,9 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	}
 
 	// Determine framework-specific env file path and format
-	site, _ := config.FindSiteByPath(cwd)
-	if site == nil {
-		return fmt.Errorf("no site registered for this directory\nRun 'lerd link' first")
+	site, err := ensureSiteForCwd()
+	if err != nil {
+		return err
 	}
 
 	fwName := site.Framework
@@ -394,7 +659,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("no framework detected for this site\nDefine one with 'lerd framework add' or add a framework YAML to %s", config.FrameworksDir())
 	}
 
-	fw, ok := config.GetFramework(fwName)
+	fw, ok := config.GetFrameworkForDir(fwName, cwd)
 	if !ok {
 		return fmt.Errorf("framework %q is not defined\nDefine it with 'lerd framework add'", fwName)
 	}
@@ -415,25 +680,26 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// 1. Create env file from example if it doesn't exist
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
 		if _, err := os.Stat(examplePath); err == nil {
-			fmt.Printf("Creating %s from %s...\n", envRelPath, exampleRelPath)
+			envInfo("Creating %s from %s...\n", envRelPath, exampleRelPath)
 			if err := copyEnvFile(examplePath, envPath); err != nil {
 				return fmt.Errorf("copying %s: %w", exampleRelPath, err)
 			}
 		} else if len(fw.Env.Services) > 0 {
-			// No env or example file, but framework defines services — create
-			// an empty env file so service detection can populate it.
+			// No env or example file, but framework defines services — create an
+			// empty env file so service detection can populate it. A PHP format
+			// needs a parseable skeleton, not a zero-byte file.
 			if dir := filepath.Dir(envPath); dir != "." {
 				_ = os.MkdirAll(dir, 0755)
 			}
-			fmt.Printf("Creating empty %s (no example file found)...\n", envRelPath)
-			if err := os.WriteFile(envPath, []byte(""), 0644); err != nil {
+			envInfo("Creating empty %s (no example file found)...\n", envRelPath)
+			if err := os.WriteFile(envPath, emptyEnvFile(envFormat), 0644); err != nil {
 				return fmt.Errorf("creating %s: %w", envRelPath, err)
 			}
 		} else {
 			return fmt.Errorf("no %s or %s found in %s", envRelPath, exampleRelPath, cwd)
 		}
 	} else {
-		fmt.Printf("Updating existing %s...\n", envRelPath)
+		envInfo("Updating existing %s...\n", envRelPath)
 		// Back up the original .env the first time lerd modifies it (so the user
 		// can inspect what changed and restore with `lerd env:restore`), but only
 		// if lerd hasn't already written to it — detected by presence of the word
@@ -442,9 +708,9 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		if !envFileHasLerd(envPath) {
 			if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 				if err := copyEnvFile(envPath, backupPath); err != nil {
-					fmt.Printf("  [WARN] could not back up %s: %v\n", envRelPath, err)
+					feedback.Warn("could not back up %s: %v", envRelPath, err)
 				} else {
-					fmt.Printf("  Backed up original %s → .env.before_lerd\n", envRelPath)
+					envInfo("  Backed up original %s → .env.before_lerd\n", envRelPath)
 					addToGitignore(cwd, ".env.before_lerd")
 				}
 			}
@@ -456,6 +722,8 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	switch envFormat {
 	case "php-const":
 		envMap, err = envfile.ReadPhpConst(envPath)
+	case "php-array":
+		envMap, err = envfile.ReadPhpArray(envPath)
 	default:
 		envMap, err = parseEnvMap(envPath)
 	}
@@ -488,7 +756,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		}
 		val := applySiteHandle(v, tplCtx)
 		updates[k] = val
-		fmt.Printf("  Setting %s=%s\n", k, val)
+		envInfo("  Setting %s=%s\n", k, val)
 	}
 
 	// Load .lerd.yaml service hints so we can apply env vars for services
@@ -528,12 +796,14 @@ func runEnv(_ *cobra.Command, _ []string) error {
 					Description(envRelPath + " uses SQLite. Use a lerd-managed database service instead?").
 					Options(options...).
 					Value(&dbChoice),
-			)).WithTheme(huh.ThemeCatppuccin())
-			if err := dbForm.Run(); err != nil {
-				return fmt.Errorf("database prompt: %w", err)
+			)).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin))
+			var formErr error
+			envInterrupt(func() { formErr = dbForm.Run() })
+			if formErr != nil {
+				return fmt.Errorf("database prompt: %w", formErr)
 			}
 		} else {
-			fmt.Println("  Defaulting to SQLite (non-interactive). Run `lerd db set <service>` or call db_set to switch.")
+			envInfo("  Defaulting to SQLite (non-interactive). Run `lerd db set <service>` or call db_set to switch.\n")
 		}
 
 		// Persist the choice to .lerd.yaml so future runs don't re-ask, and
@@ -544,7 +814,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		}
 		proj.Services = append(proj.Services, config.ProjectService{Name: dbChoice})
 		if err := config.SaveProjectConfig(cwd, proj); err != nil {
-			fmt.Printf("  [WARN] could not save .lerd.yaml: %v\n", err)
+			feedback.Warn("could not save .lerd.yaml: %v", err)
 		}
 		lerdYAMLServices[dbChoice] = true
 	}
@@ -552,7 +822,25 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	userPickedDB := userPickedDBFromYAML(lerdYAMLServices) || externalDBPicked(extServices)
 	valkeyPicked := lerdYAMLServices["valkey"]
 
+	knownEnvKeys := frameworkKnownKeys(fw)
+
+	// The custom services in play for this project: listed in .lerd.yaml (or
+	// externally managed), or matched by their own env_detect. Resolved before the
+	// framework loop, which has to know which of its roles a drop-in has taken over.
+	customs, _ := config.ListCustomServices()
+	var pickedCustoms []*config.CustomService
+	customFromYAML := make(map[string]bool, len(customs))
+	for _, svc := range customs {
+		fromYAML := lerdYAMLServices[svc.Name] || extServices[svc.Name]
+		if !fromYAML && !customServiceDetected(svc, cwd, envMap) {
+			continue
+		}
+		customFromYAML[svc.Name] = fromYAML
+		pickedCustoms = append(pickedCustoms, svc)
+	}
+
 	if len(fw.Env.Services) > 0 {
+		replaced := replacedFrameworkRoles(fw, pickedCustoms)
 		// Framework defines its own service detection and vars — use those.
 		// A service applies when its env_detect rule matches the existing env
 		// file OR it is listed in .lerd.yaml. The .lerd.yaml hint is what
@@ -563,15 +851,17 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			detectedFromEnv := frameworkServiceDetected(def, envMap)
 			pickedFromYAML := lerdYAMLServices[svc] || extServices[svc]
 
+			// A drop-in has taken this role over. The custom-service loop below wires
+			// the framework's own keys to the container the project actually uses, so
+			// writing them here first would only boot the service it replaced.
+			if replaced[svc] && !pickedFromYAML {
+				continue
+			}
 			if !shouldApplyService(svc, detectedFromEnv, pickedFromYAML, userPickedDB, valkeyPicked) {
 				continue
 			}
 
-			if detectedFromEnv {
-				fmt.Printf("  Detected %-12s — applying lerd connection values\n", svc)
-			} else {
-				fmt.Printf("  From .lerd.yaml %-4s — applying lerd connection values\n", svc)
-			}
+			envApplyLine(svc, detectedFromEnv)
 			isDB := svc == "mysql" || svc == "postgres"
 			for _, kv := range def.Vars {
 				k, v, _ := strings.Cut(kv, "=")
@@ -582,16 +872,16 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			}
 			if isDB {
 				if err := ensureServiceRunning(svc); err != nil {
-					fmt.Printf("  [WARN] could not start %s: %v\n", svc, err)
+					feedback.Warn("could not start %s: %v", svc, err)
 				} else {
 					for _, name := range []string{dbName, dbName + "_testing"} {
 						created, err := createDatabase(svc, name)
 						if err != nil {
-							fmt.Printf("  [WARN] could not create database %q: %v\n", name, err)
+							feedback.Warn("could not create database %q: %v", name, err)
 						} else if created {
-							fmt.Printf("  Created database %q\n", name)
+							envInfo("  Created database %q\n", name)
 						} else {
-							fmt.Printf("  Database %q already exists\n", name)
+							envInfo("  Database %q already exists\n", name)
 						}
 					}
 				}
@@ -608,20 +898,20 @@ func runEnv(_ *cobra.Command, _ []string) error {
 				updates["AWS_BUCKET"] = bucketName
 				updates["AWS_URL"] = "http://localhost:9000/" + bucketName
 				if err := ensureServiceRunning(svc); err != nil {
-					fmt.Printf("  [WARN] could not start %s: %v\n", svc, err)
+					feedback.Warn("could not start %s: %v", svc, err)
 				}
 				created, err := createS3Bucket(bucketName)
 				if err != nil {
-					fmt.Printf("  [WARN] could not create bucket %q: %v\n", bucketName, err)
+					feedback.Warn("could not create bucket %q: %v", bucketName, err)
 				} else if created {
-					fmt.Printf("  Created bucket %q\n", bucketName)
+					envInfo("  Created bucket %q\n", bucketName)
 				} else {
-					fmt.Printf("  Bucket %q already exists\n", bucketName)
+					envInfo("  Bucket %q already exists\n", bucketName)
 				}
 				continue
 			}
 			if err := ensureServiceRunning(svc); err != nil {
-				fmt.Printf("  [WARN] could not start %s: %v\n", svc, err)
+				feedback.Warn("could not start %s: %v", svc, err)
 			}
 		}
 	} else {
@@ -646,11 +936,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 				continue
 			}
 
-			if detectedFromEnv {
-				fmt.Printf("  Detected %-12s — applying lerd connection values\n", svc)
-			} else {
-				fmt.Printf("  From .lerd.yaml %-4s — applying lerd connection values\n", svc)
-			}
+			envApplyLine(svc, detectedFromEnv)
 			for _, kv := range envs {
 				k, v, _ := strings.Cut(kv, "=")
 				updates[k] = v
@@ -666,16 +952,16 @@ func runEnv(_ *cobra.Command, _ []string) error {
 
 			if isDB {
 				if err := ensureServiceRunning(svc); err != nil {
-					fmt.Printf("  [WARN] could not start %s: %v\n", svc, err)
+					feedback.Warn("could not start %s: %v", svc, err)
 				} else {
 					for _, name := range []string{dbName, dbName + "_testing"} {
 						created, err := createDatabase(svc, name)
 						if err != nil {
-							fmt.Printf("  [WARN] could not create database %q: %v\n", name, err)
+							feedback.Warn("could not create database %q: %v", name, err)
 						} else if created {
-							fmt.Printf("  Created database %q\n", name)
+							envInfo("  Created database %q\n", name)
 						} else {
-							fmt.Printf("  Database %q already exists\n", name)
+							envInfo("  Database %q already exists\n", name)
 						}
 					}
 				}
@@ -693,24 +979,24 @@ func runEnv(_ *cobra.Command, _ []string) error {
 				updates["AWS_BUCKET"] = bucketName
 				updates["AWS_URL"] = "http://localhost:9000/" + bucketName
 				if err := ensureServiceRunning(svc); err != nil {
-					fmt.Printf("  [WARN] could not start %s: %v\n", svc, err)
+					feedback.Warn("could not start %s: %v", svc, err)
 				}
 				// Always attempt bucket creation — ensureServiceRunning may have
 				// timed out on the host probe while the container network is already
 				// up, or rustfs was already running before lerd env ran.
 				created, err := createS3Bucket(bucketName)
 				if err != nil {
-					fmt.Printf("  [WARN] could not create bucket %q: %v\n", bucketName, err)
+					feedback.Warn("could not create bucket %q: %v", bucketName, err)
 				} else if created {
-					fmt.Printf("  Created bucket %q\n", bucketName)
+					envInfo("  Created bucket %q\n", bucketName)
 				} else {
-					fmt.Printf("  Bucket %q already exists\n", bucketName)
+					envInfo("  Bucket %q already exists\n", bucketName)
 				}
 				continue
 			}
 
 			if err := ensureServiceRunning(svc); err != nil {
-				fmt.Printf("  [WARN] could not start %s: %v\n", svc, err)
+				feedback.Warn("could not start %s: %v", svc, err)
 			}
 		}
 	}
@@ -759,7 +1045,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// standard Laravel sqlite env vars and ensure the database file exists so
 	// migrations can run immediately. No service to start, no SQL DB to create.
 	if lerdYAMLServices["sqlite"] {
-		fmt.Printf("  From .lerd.yaml %-4s — applying lerd connection values\n", "sqlite")
+		envApplyLine("sqlite", false)
 		for _, kv := range serviceEnvVars("sqlite") {
 			k, v, _ := strings.Cut(kv, "=")
 			updates[k] = v
@@ -769,7 +1055,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			if err := os.MkdirAll(filepath.Dir(sqlitePath), 0o755); err == nil {
 				if f, err := os.Create(sqlitePath); err == nil {
 					_ = f.Close()
-					fmt.Printf("  Created %s\n", filepath.Join("database", "database.sqlite"))
+					envInfo("  Created %s\n", filepath.Join("database", "database.sqlite"))
 				}
 			}
 		}
@@ -782,70 +1068,86 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// DB family alternates (mysql-5-6, mariadb-11, postgres-14) need
 	// DB_DATABASE rewritten to the project name and the database created
 	// inside the container, mirroring what built-in mysql/postgres do above.
-	customs, _ := config.ListCustomServices()
-	for _, svc := range customs {
-		pickedFromYAML := lerdYAMLServices[svc.Name] || extServices[svc.Name]
-		detectedFromEnv := false
-		if svc.EnvDetect != nil {
-			if svc.EnvDetect.Key != "" {
-				if val, exists := envMap[svc.EnvDetect.Key]; exists {
-					if svc.EnvDetect.ValuePrefix == "" || strings.HasPrefix(val, svc.EnvDetect.ValuePrefix) {
-						detectedFromEnv = true
-					}
-				}
-			}
-			if svc.EnvDetect.Composer != "" && config.ComposerHasPackage(cwd, svc.EnvDetect.Composer) {
-				detectedFromEnv = true
-			}
-		}
-		if !pickedFromYAML && !detectedFromEnv {
-			continue
-		}
-		if len(svc.EnvVars) == 0 {
-			// Nothing to write — still ensure the container is up so the
-			// project can reach it once running, unless it's externally managed.
+	for _, svc := range pickedCustoms {
+		pickedFromYAML := customFromYAML[svc.Name]
+		// The framework's own mapping for this service wins: the framework loop
+		// above already wrote its keys, so the preset's must not land beside them.
+		role, mapped := frameworkServiceRole(fw, svc)
+		if mapped && role == svc.Name {
 			if !extServices[svc.Name] {
 				if err := ensureServiceRunning(svc.Name); err != nil {
-					fmt.Printf("  [WARN] could not start %s: %v\n", svc.Name, err)
+					feedback.Warn("could not start %s: %v", svc.Name, err)
 				}
 			}
 			continue
 		}
-		if pickedFromYAML {
-			fmt.Printf("  From .lerd.yaml %-4s — applying lerd connection values\n", svc.Name)
-		} else {
-			fmt.Printf("  Detected %-12s — applying lerd connection values\n", svc.Name)
-		}
-		for _, kv := range svc.EnvVars {
-			k, v, _ := strings.Cut(kv, "=")
-			updates[k] = applySiteHandle(v, tplCtx)
-		}
+
 		family := config.FamilyOf(svc)
 		isDB := family == "mysql" || family == "mariadb" || family == "postgres"
-		if isDB {
-			updates["DB_DATABASE"] = dbName
+		// Only php-array addresses its keys by dotted path, so it alone cannot take a
+		// preset's env_vars. A php-const file's keys are flat and dotenv-shaped, so
+		// they land there as they always have.
+		dottedEnv := envFormat == "php-array"
+
+		// A service with nothing to wire (an admin dashboard) is only ever started.
+		if len(svc.EnvVars) == 0 {
+			if !extServices[svc.Name] {
+				if err := ensureServiceRunning(svc.Name); err != nil {
+					feedback.Warn("could not start %s: %v", svc.Name, err)
+				}
+			}
+			continue
+		}
+
+		// A preset publishes its connection under Laravel's key names, which is only
+		// what the app reads on a Laravel-shaped framework. Everywhere else the keys
+		// the app reads are the ones the framework declares, so a drop-in is wired up
+		// through that mapping, re-pointed at its own container.
+		external := extServices[svc.Name]
+		vars := wiredVarsFor(fw, svc, role, knownEnvKeys, mapped, external, dottedEnv)
+		switch {
+		case dottedEnv && external:
+			envInfo("  %s is externally managed — set its connection in %s yourself\n",
+				svc.Name, envRelPath)
+		case dottedEnv && !mapped:
+			envInfo("  %s has no %s wiring — set it in %s yourself\n",
+				frameworkLabelOf(fw), svc.Name, envRelPath)
+		}
+
+		if len(vars) > 0 {
+			envApplyLine(svc.Name, !pickedFromYAML)
+			for _, kv := range vars {
+				k, v, _ := strings.Cut(kv, "=")
+				updates[k] = applySiteHandle(v, tplCtx)
+			}
+			// DB_DATABASE is one of the preset's own Laravel-shaped keys. A framework's
+			// mapping names the database itself, via {{site}}, so it only needs pinning
+			// where the preset's keys are what got written.
+			if isDB && !dottedEnv && !mapped {
+				updates["DB_DATABASE"] = dbName
+			}
 		}
 		if externalManaged(svc.Name, extServices) {
 			continue
 		}
 		if err := ensureServiceRunning(svc.Name); err != nil {
-			fmt.Printf("  [WARN] could not start %s: %v\n", svc.Name, err)
+			feedback.Warn("could not start %s: %v", svc.Name, err)
 			continue
 		}
 		if isDB {
 			for _, name := range []string{dbName, dbName + "_testing"} {
 				created, err := createDatabase(svc.Name, name)
 				if err != nil {
-					fmt.Printf("  [WARN] could not create database %q: %v\n", name, err)
+					feedback.Warn("could not create database %q: %v", name, err)
 				} else if created {
-					fmt.Printf("  Created database %q\n", name)
+					envInfo("  Created database %q\n", name)
 				} else {
-					fmt.Printf("  Database %q already exists\n", name)
+					envInfo("  Database %q already exists\n", name)
 				}
 			}
 		}
 		if svc.SiteInit != nil && svc.SiteInit.Exec != "" {
-			runSiteInit(svc, tplCtx)
+			envInterrupt(func() { runSiteInit(svc, tplCtx) })
 		}
 	}
 
@@ -859,8 +1161,8 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// the plugin is present but chromium isn't baked into the FPM image yet.
 	if config.ComposerHasPackage(cwd, "pestphp/pest-plugin-browser") {
 		if v, derr := phpDet.DetectVersion(cwd); derr == nil && pestBrowserSupportedVersion(v) == nil {
-			if gcfg, cerr := config.LoadGlobal(); cerr == nil && !slices.Contains(gcfg.GetPackages(v), pestBrowserPkg) {
-				fmt.Println("  Detected pest-plugin-browser — run `lerd pest:browser install` to enable in-container browser testing")
+			if gcfg, cerr := config.LoadGlobal(); cerr == nil && !slices.Contains(gcfg.GetPackages(), pestBrowserPkg) {
+				envInfo("  Detected pest-plugin-browser — run `lerd pest:browser install` to enable in-container browser testing\n")
 			}
 		}
 	}
@@ -869,7 +1171,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// BROADCAST_CONNECTION=reverb is set.
 	if fw.HasWorker("reverb", cwd) &&
 		strings.ToLower(strings.Trim(overrideOr(envOverrides, envMap, "BROADCAST_CONNECTION"), `"'`)) == "reverb" {
-		fmt.Println("  Detected reverb     — configuring REVERB_ connection values")
+		envApplyLine("reverb", true)
 		for k, v := range reverbEnvUpdates(envMap, site.PrimaryDomain(), site.Secured, cwd) {
 			updates[k] = v
 		}
@@ -879,13 +1181,15 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	//    1. .lerd.yaml `app_url` — committed, shared across machines
 	//    2. sites.yaml `app_url` — per-machine override
 	//    3. <scheme>://<primary-domain> default generator
+	// `url_key: none` opts out: Magento keeps its base URL in the database, not
+	// in env.php, so writing an APP_URL there would just be litter.
 	urlKey := fw.Env.URLKey
 	if urlKey == "" {
 		urlKey = "APP_URL"
 	}
-	if url := resolveAppURL(cwd, site); url != "" {
+	if url := resolveAppURL(cwd, site); url != "" && !strings.EqualFold(urlKey, "none") {
 		updates[urlKey] = url
-		fmt.Printf("  Setting %s=%s\n", urlKey, url)
+		envInfo("  Setting %s=%s\n", urlKey, url)
 	}
 
 	// 4d. Host-proxy apps run on the host, so point service connections at
@@ -901,7 +1205,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// 4e. Apply personal .env.lerd_override values last so they win over lerd's
 	// defaults and every computed value (DB_DATABASE, APP_URL, reverb, …).
 	if len(envOverrides) > 0 {
-		fmt.Printf("  Applying %d override(s) from %s\n", len(envOverrides), envOverrideFile)
+		envInfo("  Applying %d override(s) from %s\n", len(envOverrides), envOverrideFile)
 		for k, v := range envOverrides {
 			updates[k] = v
 		}
@@ -913,6 +1217,8 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		switch envFormat {
 		case "php-const":
 			writeErr = envfile.ApplyPhpConstUpdates(envPath, updates)
+		case "php-array":
+			writeErr = envfile.ApplyPhpArrayUpdates(envPath, updates)
 		default:
 			writeErr = envfile.ApplyUpdates(envPath, updates)
 		}
@@ -925,31 +1231,102 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	if kg := fw.Env.KeyGeneration; kg != nil && strings.TrimSpace(overrideOr(envOverrides, envMap, kg.EnvKey)) == "" {
 		if kg.Command != "" {
 			if _, statErr := os.Stat(filepath.Join(cwd, "vendor")); statErr == nil {
-				fmt.Printf("  Generating %s...\n", kg.EnvKey)
+				envInfo("  Generating %s...\n", kg.EnvKey)
 				// Use the framework's console binary (e.g. "spark" for
 				// CodeIgniter), not a hardcoded "artisan", so key generation
 				// works for non-Laravel frameworks.
-				if err := consoleIn(cwd, fw.Console, kg.Command); err != nil {
-					fmt.Printf("  [WARN] %s failed: %v\n", kg.Command, err)
+				var keyErr error
+				envInterrupt(func() { keyErr = consoleIn(cwd, fw.Console, kg.Command) })
+				if keyErr != nil {
+					feedback.Warn("%s failed: %v", kg.Command, keyErr)
 				}
 			} else if kg.FallbackPrefix != "" {
-				fmt.Printf("  Generating %s (vendor not installed yet)...\n", kg.EnvKey)
+				envInfo("  Generating %s (vendor not installed yet)...\n", kg.EnvKey)
 				key := generateRandomKey(kg.FallbackPrefix)
 				if err := envfile.ApplyUpdates(envPath, map[string]string{kg.EnvKey: key}); err != nil {
-					fmt.Printf("  [WARN] writing %s: %v\n", kg.EnvKey, err)
+					feedback.Warn("writing %s: %v", kg.EnvKey, err)
 				}
 			}
 		} else if kg.FallbackPrefix != "" {
-			fmt.Printf("  Generating %s...\n", kg.EnvKey)
+			envInfo("  Generating %s...\n", kg.EnvKey)
 			key := generateRandomKey(kg.FallbackPrefix)
 			if err := envfile.ApplyUpdates(envPath, map[string]string{kg.EnvKey: key}); err != nil {
-				fmt.Printf("  [WARN] writing %s: %v\n", kg.EnvKey, err)
+				feedback.Warn("writing %s: %v", kg.EnvKey, err)
 			}
 		}
 	}
 
-	fmt.Println("Done.")
+	// 7. Worktrees share the parent site's database SERVER (only DB_DATABASE
+	// differs, and only when isolated). Their .env was copied once at creation,
+	// so after this run realigned the parent to the selected services, mirror
+	// the connection coordinates into each worktree .env too — otherwise a
+	// worktree captured before a service switch (e.g. postgres -> postgres-18)
+	// keeps pointing at a host that no longer resolves.
+	alignWorktreeEnvDBConnection(site, envPath, envRelPath, envFormat)
+
+	envInfo("Done.\n")
 	return nil
+}
+
+// worktreeDBConnectionKeys are the shared database SERVER coordinates a worktree
+// inherits from its parent. DB_DATABASE is deliberately excluded: it is owned by
+// the isolated-DB logic (or the parent value for a non-isolated worktree).
+var worktreeDBConnectionKeys = []string{"DB_CONNECTION", "DB_HOST", "DB_PORT", "DB_USERNAME", "DB_PASSWORD"}
+
+// alignWorktreeEnvDBConnection mirrors the parent's (just-aligned) DB connection
+// coordinates into each existing worktree env file. It is the worktree arm of
+// `lerd env`'s "make the env match the selected services" guarantee. Best
+// effort: a worktree without an env file yet is skipped (it'll be seeded on its
+// next sync), and ApplyUpdates no-ops when nothing changed.
+//
+// Scoped to the dotenv format: the connection keys are Laravel-style, and the
+// php-const / php-array formats use a different writer and key set, so they are
+// left to their own env detection. envRelPath is the framework-resolved env file
+// path so a worktree of a framework whose env file isn't ".env" is still targeted.
+func alignWorktreeEnvDBConnection(site *config.Site, mainEnvPath, envRelPath, envFormat string) {
+	// Empty means the caller never resolved a format, which is dotenv.
+	if site == nil || (envFormat != "" && envFormat != "dotenv") {
+		return
+	}
+	worktrees, err := gitpkg.DetectWorktrees(site.Path, site.PrimaryDomain())
+	if err != nil || len(worktrees) == 0 {
+		return
+	}
+	mainVals := envfile.ReadValues(mainEnvPath)
+	coords := map[string]string{}
+	for _, k := range worktreeDBConnectionKeys {
+		if v := mainVals[k]; v != "" {
+			coords[k] = v
+		}
+	}
+	if len(coords) == 0 {
+		return
+	}
+	for _, wt := range worktrees {
+		wtEnv := filepath.Join(wt.Path, envRelPath)
+		if _, statErr := os.Stat(wtEnv); statErr != nil {
+			continue
+		}
+		// Only touch worktrees whose coordinates actually drifted, so a steady
+		// state stays silent and the file's mtime is left alone. One read of the
+		// worktree env covers every key compared.
+		wtVals := envfile.ReadValues(wtEnv)
+		drifted := false
+		for k, v := range coords {
+			if wtVals[k] != v {
+				drifted = true
+				break
+			}
+		}
+		if !drifted {
+			continue
+		}
+		if err := envfile.ApplyUpdates(wtEnv, coords); err != nil {
+			feedback.Warn("aligning worktree %s .env: %v", wt.Branch, err)
+			continue
+		}
+		envInfo("  Aligned worktree %s DB connection\n", wt.Branch)
+	}
 }
 
 // frameworkServiceDetected returns true if any detect rule in def matches the env map.
@@ -1052,13 +1429,16 @@ func ensureServiceRunning(name string) error {
 		return nil
 	}
 	if isKnownService(name) {
-		fmt.Printf("  Starting %s...\n", name)
+		envInterrupt(func() { fmt.Printf("  Starting %s...\n", name) })
 		if err := ensureServiceQuadlet(name); err != nil {
 			return err
 		}
 	} else {
 		svc, err := config.LoadCustomService(name)
 		if err != nil {
+			if config.PresetExists(name) {
+				return fmt.Errorf("service %q is not installed; install it with 'lerd service preset %s'", name, name)
+			}
 			return fmt.Errorf("custom service %q not found: %w", name, err)
 		}
 		for _, dep := range svc.DependsOn {
@@ -1066,7 +1446,7 @@ func ensureServiceRunning(name string) error {
 				return fmt.Errorf("starting dependency %q for %q: %w", dep, name, err)
 			}
 		}
-		fmt.Printf("  Starting %s...\n", name)
+		envInterrupt(func() { fmt.Printf("  Starting %s...\n", name) })
 		if err := ensureCustomServiceQuadlet(svc); err != nil {
 			return err
 		}
@@ -1234,25 +1614,12 @@ type siteTemplateCtx struct {
 // applySiteHandle replaces {{site}}, {{site_testing}}, {{bucket}}, {{domain}},
 // {{scheme}}, and service version placeholders (e.g. {{mysql_version}}) in s.
 func applySiteHandle(s string, ctx siteTemplateCtx) string {
-	s = strings.ReplaceAll(s, "{{site}}", ctx.site)
-	s = strings.ReplaceAll(s, "{{site_testing}}", ctx.site+"_testing")
-	if ctx.bucket != "" {
-		s = strings.ReplaceAll(s, "{{bucket}}", ctx.bucket)
-	}
-	if ctx.domain != "" {
-		s = strings.ReplaceAll(s, "{{domain}}", ctx.domain)
-	}
-	if ctx.scheme != "" {
-		s = strings.ReplaceAll(s, "{{scheme}}", ctx.scheme)
-	}
-	// Lazy-resolve service version placeholders only when present.
-	for _, svc := range []string{"mysql", "postgres", "redis", "meilisearch"} {
-		placeholder := "{{" + svc + "_version}}"
-		if strings.Contains(s, placeholder) {
-			s = strings.ReplaceAll(s, placeholder, podman.ServiceVersion("lerd-"+svc))
-		}
-	}
-	return s
+	return sitetpl.Apply(s, sitetpl.Ctx{
+		Site:   ctx.site,
+		Bucket: ctx.bucket,
+		Domain: ctx.domain,
+		Scheme: ctx.scheme,
+	})
 }
 
 // runSiteInit executes the site_init.exec command inside the service container.
@@ -1266,7 +1633,7 @@ func runSiteInit(svc *config.CustomService, ctx siteTemplateCtx) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("  [WARN] site_init for %s failed: %v\n", svc.Name, err)
+		feedback.Warn("site_init for %s failed: %v", svc.Name, err)
 	}
 }
 
@@ -1489,7 +1856,7 @@ func patchDuskTestCase(dir string) {
 
 	if changed {
 		if err := os.WriteFile(path, []byte(src), 0644); err != nil {
-			fmt.Printf("  [WARN] could not patch DuskTestCase.php: %v\n", err)
+			feedback.Warn("could not patch DuskTestCase.php: %v", err)
 			return
 		}
 		fmt.Println("  Patched tests/DuskTestCase.php for lerd Selenium")

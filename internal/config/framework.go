@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,14 @@ type Framework struct {
 	Label string `yaml:"label"`
 	// Version is the framework major version this definition targets (e.g. "11", "7").
 	Version string `yaml:"version,omitempty"`
+	// DetectedVersion is the project's real major version when it differs from
+	// Version because no exact definition existed and we clamped to the nearest
+	// available one. Runtime only, never serialized.
+	DetectedVersion string `yaml:"-"`
+	// VersionGuessed is true when Version was clamped to a borrowed definition
+	// because the detected version had none of its own (Laravel 6 served by the
+	// Laravel 10 definition); callers must not clamp PHP to its range.
+	VersionGuessed bool `yaml:"-"`
 	// PHP defines the supported PHP version range for this framework version.
 	PHP       FrameworkPHP    `yaml:"php,omitempty"`
 	Detect    []FrameworkRule `yaml:"detect,omitempty"`
@@ -48,6 +57,8 @@ type Framework struct {
 	NPM        string                     `yaml:"npm,omitempty"`      // auto | true | false
 	Workers    map[string]FrameworkWorker `yaml:"workers,omitempty"`
 	Setup      []FrameworkSetupCmd        `yaml:"setup,omitempty"`
+	// Worktree declares what a worktree needs beyond the seeded env file.
+	Worktree *FrameworkWorktree `yaml:"worktree,omitempty"`
 	// Commands are on-demand actions surfaced in the dashboard "Run command"
 	// dropdown. See FrameworkCommand for the schema. Projects extend or
 	// override this list in .lerd.yaml; use ResolveCommands to merge.
@@ -72,6 +83,58 @@ type Framework struct {
 	// for this framework. When absent, lerd falls back to the generic
 	// `frankenphp php-server -r <public>/` entrypoint.
 	FrankenPHP *FrameworkFrankenPHP `yaml:"frankenphp,omitempty"`
+	// Doctor, when set, declares framework-specific health checks the site
+	// doctor runs in addition to the universal defaults (env, dependency, and
+	// audit checks every framework gets). See FrameworkDoctor.
+	Doctor *FrameworkDoctor `yaml:"doctor,omitempty"`
+	// Nginx, when set, declares extra server-block config the framework needs
+	// (Magento's /setup, /static, and /media handling). See FrameworkNginx.
+	Nginx *FrameworkNginx `yaml:"nginx,omitempty"`
+	// Requires names the service presets the framework cannot run without
+	// (Magento 2.4 has no MySQL catalog search engine, so it needs opensearch).
+	// Link installs and starts them; the doctor reports one that goes missing.
+	Requires []string `yaml:"requires,omitempty"`
+}
+
+// FrameworkNginx carries a raw nginx block spliced into the site's server block
+// ahead of lerd's generic `location /` and `location ~ \.php$`, so a framework
+// can claim paths those would otherwise swallow.
+type FrameworkNginx struct {
+	// Snippet is nginx config with three placeholders expanded before render:
+	// {{root}} (project root), {{public}} (document root), {{fpm}} (FPM container).
+	Snippet string `yaml:"snippet"`
+}
+
+// ValidateNginxSnippet returns nil when s is balanced enough to splice into a
+// server block: an unbalanced snippet would close the enclosing `server {` and
+// declare servers of its own. Balance alone cannot contain an interpolated value
+// (a `}` plus a `server {` still balances), so callers must also reject values
+// that carry nginx syntax before substituting them.
+func ValidateNginxSnippet(s string) error {
+	if strings.ContainsRune(s, 0) {
+		return fmt.Errorf("nginx snippet contains a NUL byte")
+	}
+	depth := 0
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		for _, r := range line {
+			switch r {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth < 0 {
+					return fmt.Errorf("nginx snippet closes a block it did not open")
+				}
+			}
+		}
+	}
+	if depth != 0 {
+		return fmt.Errorf("nginx snippet has %d unclosed block(s)", depth)
+	}
+	return nil
 }
 
 // FrameworkFrankenPHP describes how to serve the framework via FrankenPHP.
@@ -121,14 +184,22 @@ type FrameworkWorker struct {
 	// flag (see resolveWorkerCommand). Keeping the literal command text in the
 	// framework definition rather than rewriting Command in Go means the store
 	// stays the single source of truth for what actually runs.
-	ReloadCommand string         `yaml:"reload_command,omitempty"`
-	Restart       string         `yaml:"restart,omitempty"`        // always | on-failure (default: always)
-	Schedule      string         `yaml:"schedule,omitempty"`       // systemd OnCalendar expression (e.g. "minutely"); when set, the worker is run as a Type=oneshot service triggered by a .timer rather than a long-running daemon. Use this for Laravel <=10 schedule:run, cron-style cleanup tasks, etc.
-	Check         *FrameworkRule `yaml:"check,omitempty"`          // only show when check passes (file exists or composer package installed)
-	ExcludeCheck  *FrameworkRule `yaml:"exclude_check,omitempty"`  // only show when check FAILS (e.g. queue is hidden when laravel/horizon is installed because horizon supersedes it)
-	ConflictsWith []string       `yaml:"conflicts_with,omitempty"` // workers to stop before starting this one (e.g. horizon conflicts_with queue)
-	Proxy         *WorkerProxy   `yaml:"proxy,omitempty"`          // WebSocket/HTTP proxy config for nginx
-	Host          bool           `yaml:"host,omitempty"`           // run on the host via fnm instead of inside the PHP-FPM container
+	ReloadCommand string `yaml:"reload_command,omitempty"`
+	// TuneCommand is the parameterized variant of Command for `lerd queue:start`,
+	// a template with {queue}/{tries}/{timeout} placeholders so each framework
+	// declares its own flag syntax. Empty falls back to Command verbatim.
+	TuneCommand string `yaml:"tune_command,omitempty"`
+	// RestartCommand gracefully restarts the queue worker in-container (e.g.
+	// Laravel's "php artisan queue:restart"). Empty means no graceful restart.
+	RestartCommand string         `yaml:"restart_command,omitempty"`
+	Restart        string         `yaml:"restart,omitempty"`        // always | on-failure (default: always)
+	Schedule       string         `yaml:"schedule,omitempty"`       // systemd OnCalendar expression (e.g. "minutely"); when set, the worker is run as a Type=oneshot service triggered by a .timer rather than a long-running daemon. Use this for Laravel <=10 schedule:run, cron-style cleanup tasks, etc.
+	Check          *FrameworkRule `yaml:"check,omitempty"`          // only show when check passes (file exists or composer package installed)
+	ExcludeCheck   *FrameworkRule `yaml:"exclude_check,omitempty"`  // only show when check FAILS (e.g. queue is hidden when laravel/horizon is installed because horizon supersedes it)
+	ConflictsWith  []string       `yaml:"conflicts_with,omitempty"` // workers to stop before starting this one (e.g. horizon conflicts_with queue)
+	Proxy          *WorkerProxy   `yaml:"proxy,omitempty"`          // WebSocket/HTTP proxy config for nginx
+	Health         *WorkerHealth  `yaml:"health,omitempty"`         // reachability probe: process alive but server not accepting = unhealthy
+	Host           bool           `yaml:"host,omitempty"`           // run on the host via fnm instead of inside the PHP-FPM container
 	// PerWorktree opts the worker into running independently per git worktree
 	// (lerd-<wname>-<site>-<wt>). Defaults to false; set true on workers that
 	// need a separate process per checkout (e.g. dev servers like vite).
@@ -138,6 +209,10 @@ type FrameworkWorker struct {
 	// and lerd setup to skip the npm run build step when the user opted into
 	// such a worker (vite is the canonical case).
 	ReplacesBuild bool `yaml:"replaces_build,omitempty"`
+	// ProjectOrigin marks a worker that came from the untrusted project .lerd.yaml
+	// (custom_workers), so the host-execution gate can require consent for it.
+	// Never persisted; set only at the merge point.
+	ProjectOrigin bool `yaml:"-" json:"-"`
 }
 
 // IsPerWorktree reports whether this worker can run independently per git
@@ -155,6 +230,17 @@ type WorkerProxy struct {
 	DefaultPort int    `yaml:"default_port,omitempty"` // fallback port if env key is missing (default: 8080)
 }
 
+// WorkerHealth declares how to tell whether a worker's server is actually
+// reachable, not merely that its process is alive. A dev server (vite under
+// fnm/npm) can keep its process up after its HTTP server has died, so systemd
+// still reports the unit active while nothing is listening. Where the port lives
+// is declared here, never in Go: URLFile names a file the server writes on boot
+// (vite's public/hot) whose contents carry the URL to probe. A worker with no
+// Health block keeps the process-only liveness check unchanged.
+type WorkerHealth struct {
+	URLFile string `yaml:"url_file,omitempty"` // file (relative to site root) holding the server URL, e.g. "public/hot"
+}
+
 // FrameworkLogSource describes where application log files live for a framework.
 type FrameworkLogSource struct {
 	Path   string `yaml:"path"`             // glob relative to project root, e.g. "storage/logs/*.log"
@@ -162,6 +248,21 @@ type FrameworkLogSource struct {
 }
 
 // FrameworkSetupCmd describes a one-off bootstrap command run during project setup.
+// FrameworkWorktree declares what a new worktree needs once its env file is
+// seeded. An app that keeps deployment state in the database (Magento hashes its
+// config there and refuses to serve when the file no longer matches) cannot come
+// up on a copy of the parent's env alone.
+type FrameworkWorktree struct {
+	// DBIsolation "required" forces an isolated database instead of prompting:
+	// the worktree's own config cannot be applied to a database it shares.
+	DBIsolation string `yaml:"db_isolation,omitempty"`
+	// DBSource is what an isolated database starts from, "empty" or "main".
+	DBSource string `yaml:"db_source,omitempty"`
+	// Commands are console commands run in the worktree once its env file and
+	// database are in place, e.g. Magento's app:config:import.
+	Commands []string `yaml:"commands,omitempty"`
+}
+
 type FrameworkSetupCmd struct {
 	Label   string         `yaml:"label"`
 	Command string         `yaml:"command"`
@@ -179,7 +280,7 @@ type FrameworkCommand struct {
 	Label       string         `yaml:"label" json:"label"`                                 // human label shown in the UI
 	Command     string         `yaml:"command" json:"command"`                             // shell command, passed to `sh -c`
 	Description string         `yaml:"description,omitempty" json:"description,omitempty"` // one-line description for tooltips
-	Output      string         `yaml:"output,omitempty" json:"output,omitempty"`           // silent | text | url | terminal (default: silent)
+	Output      string         `yaml:"output,omitempty" json:"output,omitempty"`           // silent | text | url | terminal (default: text)
 	Confirm     bool           `yaml:"confirm,omitempty" json:"confirm,omitempty"`         // gate behind a confirm modal before running
 	Icon        string         `yaml:"icon,omitempty" json:"icon,omitempty"`               // icon name from the known set
 	Check       *FrameworkRule `yaml:"check,omitempty" json:"check,omitempty"`             // hide the command when this rule fails
@@ -187,6 +288,10 @@ type FrameworkCommand struct {
 	// Disabled, in a project .lerd.yaml entry, suppresses the framework default
 	// of the same Name without replacing it. Ignored when read from a framework yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	// ProjectOrigin marks a command that came from the untrusted project .lerd.yaml
+	// (top-level commands or framework_def), so the host-execution gate can require
+	// consent before running it. Never persisted; set only at the merge point.
+	ProjectOrigin bool `yaml:"-" json:"-"`
 }
 
 // Valid Output values for FrameworkCommand.
@@ -229,6 +334,9 @@ func ResolveCommands(fw *Framework, proj *ProjectConfig, projectDir string) []Fr
 	}
 	if proj != nil {
 		for _, c := range proj.Commands {
+			// Tag project commands as project-origin so the host-execution gate can
+			// require consent; framework-defined commands stay untagged.
+			c.ProjectOrigin = true
 			if frameworkNames[c.Name] {
 				overrides[c.Name] = c
 			} else if !c.Disabled {
@@ -261,17 +369,45 @@ func ResolveCommands(fw *Framework, proj *ProjectConfig, projectDir string) []Fr
 type FrameworkPHP struct {
 	Min string `yaml:"min,omitempty"` // minimum PHP version (e.g. "8.2")
 	Max string `yaml:"max,omitempty"` // maximum PHP version (e.g. "8.4")
+	// CLIIni are php.ini directives every PHP process lerd runs for this
+	// framework needs. The CLI SAPI never reads a project's .user.ini, so a
+	// framework whose commands exhaust PHP's 128M default declares it here
+	// instead of prefixing every command with `php -d`.
+	CLIIni map[string]string `yaml:"cli_ini,omitempty"`
+}
+
+// phpIniDirective matches a php.ini directive name: letters, digits, underscore,
+// and the dot that namespaces an extension's settings (opcache.enable).
+var phpIniDirective = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
+
+// phpIniForbidden are the characters a value may not contain. Each directive
+// becomes one `-d name=value` argv entry, so an `=`, whitespace, or a NUL would
+// split it into something PHP reads differently than the definition wrote.
+const phpIniForbidden = "= \t\n\r\x00"
+
+// ValidatePHPIni returns nil when every directive and value is safe to pass as
+// a `-d name=value` argument.
+func ValidatePHPIni(ini map[string]string) error {
+	for k, v := range ini {
+		if !phpIniDirective.MatchString(k) {
+			return fmt.Errorf("invalid php.ini directive %q", k)
+		}
+		if i := strings.IndexAny(v, phpIniForbidden); i >= 0 {
+			return fmt.Errorf("php.ini value for %q contains %q", k, v[i])
+		}
+	}
+	return nil
 }
 
 // FrameworkRule is a single detection rule for a framework.
 // Any matching rule is sufficient to identify the framework.
 type FrameworkRule struct {
-	File             string   `yaml:"file,omitempty"`              // file must exist in project root
-	Composer         string   `yaml:"composer,omitempty"`          // package must be in composer.json require/require-dev
-	ComposerSections []string `yaml:"composer_sections,omitempty"` // extra composer.json keys to search (e.g. flex-require)
-	VersionKey       string   `yaml:"version_key,omitempty"`       // dot-path to version in composer.json (e.g. extra.symfony.require)
-	VersionFile      string   `yaml:"version_file,omitempty"`      // file to read version from (relative to project root)
-	VersionPattern   string   `yaml:"version_pattern,omitempty"`   // regex with capture group for version (e.g. "\\$wp_version = '([^']+)'")
+	File             string   `yaml:"file,omitempty" json:"file,omitempty"`                           // file must exist in project root
+	Composer         string   `yaml:"composer,omitempty" json:"composer,omitempty"`                   // package must be in composer.json require/require-dev
+	ComposerSections []string `yaml:"composer_sections,omitempty" json:"composer_sections,omitempty"` // extra composer.json keys to search (e.g. flex-require)
+	VersionKey       string   `yaml:"version_key,omitempty" json:"version_key,omitempty"`             // dot-path to version in composer.json (e.g. extra.symfony.require)
+	VersionFile      string   `yaml:"version_file,omitempty" json:"version_file,omitempty"`           // file to read version from (relative to project root)
+	VersionPattern   string   `yaml:"version_pattern,omitempty" json:"version_pattern,omitempty"`     // regex with capture group for version (e.g. "\\$wp_version = '([^']+)'")
 }
 
 // FrameworkEnvConf describes how the framework manages its env file.
@@ -284,6 +420,14 @@ type FrameworkEnvConf struct {
 
 	// URLKey is the env key that holds the application URL (default: APP_URL).
 	URLKey string `yaml:"url_key,omitempty"`
+
+	// WorktreeURLKeys are env keys set to the worktree's own base URL
+	// ("<scheme>://<domain>/") on every worktree. They exist for frameworks
+	// whose canonical base URL lives outside the env file — Magento keeps its in
+	// the database, so url_key is "none", but env.php's web.*.base_url overrides
+	// the database and is what lets a worktree serve on its own domain instead of
+	// redirecting to the parent. Written verbatim through the env format's writer.
+	WorktreeURLKeys []string `yaml:"worktree_url_keys,omitempty"`
 
 	// Vars are unconditional KEY=VALUE env defaults the framework always wants
 	// applied during `lerd env`, regardless of which services are detected
@@ -301,11 +445,63 @@ type FrameworkEnvConf struct {
 	KeyGeneration *EnvKeyGeneration `yaml:"key_generation,omitempty"`
 }
 
+// HasEnvConfig reports whether the framework manages an env file at all. A
+// framework with no env section (a static or host-proxy app) is skipped by
+// `lerd env` and the doctor's env checks, not flagged for a file it never had.
+func (f *Framework) HasEnvConfig() bool {
+	if f == nil {
+		return false
+	}
+	e := f.Env
+	return e.File != "" || e.FallbackFile != "" || e.ExampleFile != "" || e.KeyGeneration != nil || len(e.Services) > 0
+}
+
 // EnvKeyGeneration describes how to generate an application encryption key.
 type EnvKeyGeneration struct {
 	EnvKey         string `yaml:"env_key"`                   // env var to check/set (e.g. "APP_KEY")
 	Command        string `yaml:"command,omitempty"`         // console command to run if vendor/ exists, via the framework's console binary (e.g. "key:generate")
 	FallbackPrefix string `yaml:"fallback_prefix,omitempty"` // prefix for random key fallback (e.g. "base64:")
+}
+
+// FrameworkDoctor declares a framework's site-doctor checks, run after the
+// universal baseline (env, dependency install/lock, audit, PHP range) that every
+// framework gets. Keeping it declarative means new frameworks need no Go change.
+type FrameworkDoctor struct {
+	Checks []DoctorCheck `yaml:"checks,omitempty"`
+}
+
+// DoctorCheck is one declarative health check; Type selects the evaluator
+// (env_key_set, env_combo, symlink, command) and which other fields apply.
+type DoctorCheck struct {
+	Name  string `yaml:"name"`
+	Type  string `yaml:"type"`
+	Label string `yaml:"label,omitempty"`
+	// Fix names a command from the framework's command set a UI can run to
+	// resolve the finding, so the doctor never grows its own mutation endpoints.
+	Fix string `yaml:"fix,omitempty"`
+	// Detail overrides the generated finding message when set.
+	Detail string `yaml:"detail,omitempty"`
+	// Severity overrides the triggered status ("warn" or "fail"); each type has
+	// a sensible default (command→fail, the rest→warn).
+	Severity string `yaml:"severity,omitempty"`
+
+	// env_key_set
+	EnvKey string `yaml:"env_key,omitempty"`
+
+	// env_combo
+	When   map[string]string `yaml:"when,omitempty"`
+	WarnIf map[string]string `yaml:"warn_if,omitempty"`
+
+	// symlink
+	Link        string `yaml:"link,omitempty"`
+	Target      string `yaml:"target,omitempty"`
+	RequiresDir string `yaml:"requires_dir,omitempty"`
+
+	// command
+	Command              string `yaml:"command,omitempty"`
+	FailIfOutputContains string `yaml:"fail_if_output_contains,omitempty"`
+	UnknownOnError       bool   `yaml:"unknown_on_error,omitempty"`
+	TimeoutSeconds       int    `yaml:"timeout,omitempty"`
 }
 
 // FrameworkServiceDef describes how a service is detected and configured for a framework.
@@ -359,7 +555,7 @@ func (e FrameworkEnvConf) Resolve(projectDir string) (file, format string) {
 	return primary, primaryFmt
 }
 
-// laravelFramework is the only built-in framework definition.
+// laravelFramework is the built-in Laravel adapter, the default shipped stack.
 var laravelFramework = &Framework{
 	Name:      "laravel",
 	Label:     "Laravel",
@@ -468,10 +664,12 @@ var laravelFramework = &Framework{
 	},
 	Workers: map[string]FrameworkWorker{
 		"queue": {
-			Label:        "Queue Worker",
-			Command:      "php artisan queue:work --queue=default --tries=3 --timeout=60",
-			Restart:      "always",
-			ExcludeCheck: &FrameworkRule{Composer: "laravel/horizon"}, // horizon supersedes queue
+			Label:          "Queue Worker",
+			Command:        "php artisan queue:work --queue=default --tries=3 --timeout=60",
+			TuneCommand:    "php artisan queue:work --queue={queue} --tries={tries} --timeout={timeout}",
+			RestartCommand: "php artisan queue:restart",
+			Restart:        "always",
+			ExcludeCheck:   &FrameworkRule{Composer: "laravel/horizon"}, // horizon supersedes queue
 		},
 		"schedule": {
 			Label:   "Task Scheduler",
@@ -535,6 +733,30 @@ var laravelFramework = &Framework{
 		{Name: "optimize:clear", Label: "Clear all caches", Command: "php artisan optimize:clear", Description: "Clear config, route, view, event, and compiled caches", Output: "silent", Icon: "broom"},
 		{Name: "migrate", Label: "Run migrations", Command: "php artisan migrate --force", Description: "Apply pending database migrations", Output: "silent", Icon: "database"},
 	},
+	Doctor: &FrameworkDoctor{
+		Checks: []DoctorCheck{
+			{
+				Name: "app_debug", Type: "env_combo",
+				When:   map[string]string{"APP_ENV": "production"},
+				WarnIf: map[string]string{"APP_DEBUG": "true"},
+				Detail: "APP_DEBUG is on while APP_ENV=production, so stack traces and config will leak. Turn debug off.",
+			},
+			{
+				Name: "storage_link", Type: "symlink",
+				Link: "public/storage", Target: "storage/app/public", RequiresDir: "public",
+				Fix:    "storage:link",
+				Detail: "public/storage symlink is missing, so files on the public disk won't be web-accessible.",
+			},
+			{
+				Name: "migrations", Type: "command",
+				Command:              "php artisan migrate:status",
+				FailIfOutputContains: "Pending",
+				UnknownOnError:       true,
+				Fix:                  "migrate",
+				Detail:               "There are pending migrations, run migrate to apply them.",
+			},
+		},
+	},
 }
 
 // symfonyFramework is a built-in Symfony adapter. It detects Symfony via
@@ -553,9 +775,13 @@ var symfonyFramework = &Framework{
 		{Composer: "symfony/framework-bundle"},
 	},
 	Env: FrameworkEnvConf{
-		File:        ".env",
-		ExampleFile: ".env.example",
+		// Symfony commits .env and gitignores .env.local as the local override,
+		// so lerd writes its connection values into .env.local, seeded from .env.
+		// Symfony's base URL lives under DEFAULT_URI, not APP_URL.
+		File:        ".env.local",
+		ExampleFile: ".env",
 		Format:      "dotenv",
+		URLKey:      "DEFAULT_URI",
 		Services: map[string]FrameworkServiceDef{
 			"mysql": {
 				Detect: []FrameworkServiceDetect{{Key: "DATABASE_URL", ValuePrefix: "mysql"}},
@@ -716,6 +942,23 @@ func mergeBuiltinTinker(fw *Framework) *Framework {
 	return fw
 }
 
+// mergeBuiltinDoctor backfills the framework's site-doctor checks from a built-in
+// when a store yaml predates the doctor block (or its on-disk cache does), so a
+// Laravel/Symfony site never silently loses its prod-debug, storage-symlink, and
+// pending-migration checks. Same shape as mergeBuiltinFrankenPHP.
+func mergeBuiltinDoctor(fw *Framework) *Framework {
+	if fw == nil || fw.Doctor != nil {
+		return fw
+	}
+	src := builtinFramework(fw.Name)
+	if src == nil || src.Doctor == nil {
+		return fw
+	}
+	cp := *src.Doctor
+	fw.Doctor = &cp
+	return fw
+}
+
 // mergeUserOverlay checks for a user-defined overlay file in FrameworksDir()
 // and merges its workers and setup commands on top of base.
 // User additions/overrides win. If no overlay exists, base is returned as-is.
@@ -756,6 +999,10 @@ func mergeUserOverlay(base *Framework) *Framework {
 // it is preferred over an unversioned one. User overlay workers are always merged.
 // When a version is detected but no local definition exists, it attempts to fetch
 // the definition from the store automatically.
+//
+// It is a read-only resolver. Rendering a vhost, drawing a TUI row, or serving a
+// dashboard poll all land here, so it must never write to the project: use
+// SyncProjectFrameworkVersion from the commands that own .lerd.yaml.
 func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 	if name == "" {
 		return nil, false
@@ -763,11 +1010,9 @@ func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 
 	// 1. Resolve version from composer.lock (source of truth) or .lerd.yaml (fallback).
 	version := DetectMajorVersion(projectDir, name)
-	if proj, err := LoadProjectConfig(projectDir); err == nil {
-		if version == "" && proj.FrameworkVersion != "" {
+	if version == "" {
+		if proj, err := LoadProjectConfig(projectDir); err == nil {
 			version = proj.FrameworkVersion
-		} else if version != "" && proj.FrameworkVersion != "" && version != proj.FrameworkVersion {
-			_ = SetProjectFrameworkVersion(projectDir, version)
 		}
 	}
 
@@ -795,6 +1040,27 @@ func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 		}
 	}
 
+	// 3b. Legacy project below every available definition: serve it with the
+	//     lowest one (not the latest) and mark it guessed, so callers relax PHP
+	//     clamping (a Laravel 6 project must still allow PHP 7.4).
+	guessed := false
+	guessedVersion := ""
+	if base == nil && version != "" {
+		if clamped := clampFrameworkVersion(name, version); clamped != "" {
+			clampedPath := filepath.Join(StoreFrameworksDir(), name+"@"+clamped+".yaml")
+			base = loadFrameworkYAML(clampedPath)
+			if base == nil && frameworkFetchHook != nil {
+				if fetched, err := frameworkFetchHook(name, clamped); err == nil && fetched != nil {
+					base = fetched
+				}
+			}
+			if base != nil {
+				guessed = true
+				guessedVersion = version
+			}
+		}
+	}
+
 	// 4. Fall back to any available local definition.
 	if base == nil {
 		base = loadFrameworkYAML(filepath.Join(StoreFrameworksDir(), name+".yaml"))
@@ -804,9 +1070,14 @@ func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 	}
 
 	if base != nil {
+		if guessed {
+			base.VersionGuessed = true
+			base.DetectedVersion = guessedVersion
+		}
 		base = mergeUserOverlay(base)
 		base = mergeBuiltinFrankenPHP(base)
 		base = mergeBuiltinTinker(base)
+		base = mergeBuiltinDoctor(base)
 		return mergeProjectWorkers(base, projectDir), true
 	}
 
@@ -840,6 +1111,9 @@ func mergeProjectWorkers(fw *Framework, projectDir string) *Framework {
 		fw.Workers = make(map[string]FrameworkWorker)
 	}
 	for k, v := range proj.CustomWorkers {
+		// Tag custom workers as project-origin so the host-execution gate can
+		// require consent; trusted store/built-in/overlay workers stay untagged.
+		v.ProjectOrigin = true
 		fw.Workers[k] = v
 	}
 	return fw
@@ -955,6 +1229,43 @@ func cloneFrameworkMutable(in *Framework) *Framework {
 	return &out
 }
 
+// availableFrameworkVersions returns the major versions for which a versioned
+// store definition (<name>@<version>.yaml) exists locally, sorted ascending.
+// Only numeric versions are considered, since clamping compares them as ints.
+func availableFrameworkVersions(name string) []int {
+	pattern := filepath.Join(StoreFrameworksDir(), name+"@*.yaml")
+	matches, _ := filepath.Glob(pattern)
+	prefix := name + "@"
+	var vers []int
+	for _, p := range matches {
+		base := strings.TrimSuffix(filepath.Base(p), ".yaml")
+		v := strings.TrimPrefix(base, prefix)
+		if n, err := strconv.Atoi(v); err == nil {
+			vers = append(vers, n)
+		}
+	}
+	sort.Ints(vers)
+	return vers
+}
+
+// clampFrameworkVersion returns the lowest available definition version for a
+// legacy project whose detected version predates them all (so Laravel 6 uses the
+// Laravel 10 definition), or "" when no such clamping applies.
+func clampFrameworkVersion(name, detected string) string {
+	d, err := strconv.Atoi(detected)
+	if err != nil {
+		return ""
+	}
+	vers := availableFrameworkVersions(name)
+	if len(vers) == 0 {
+		return ""
+	}
+	if lo := vers[0]; d < lo {
+		return strconv.Itoa(lo)
+	}
+	return ""
+}
+
 // loadBestVersionedFramework scans StoreFrameworksDir for <name>@<version>.yaml files.
 // If preferVersion is set, it tries that first. Otherwise picks the first match
 // alphabetically (which for numeric versions gives the latest).
@@ -1023,6 +1334,68 @@ func DetectPublicDir(dir string) string {
 	return "."
 }
 
+// stripUntrustedDoctorChecks drops command-type doctor checks from a framework
+// definition. A project's .lerd.yaml is untrusted input and command checks run
+// via `sh -c` on the host when the site doctor runs, so they must not survive
+// import into the store; env, symlink, and combo checks are inert and stay.
+func stripUntrustedDoctorChecks(fw *Framework) {
+	if fw == nil || fw.Doctor == nil {
+		return
+	}
+	kept := fw.Doctor.Checks[:0]
+	for _, c := range fw.Doctor.Checks {
+		if c.Type != "command" {
+			kept = append(kept, c)
+		}
+	}
+	fw.Doctor.Checks = kept
+	if len(fw.Doctor.Checks) == 0 {
+		fw.Doctor = nil
+	}
+}
+
+// SanitizeProjectFrameworkDef returns a copy of an embedded framework_def that is
+// safe to install into the store. A .lerd.yaml is untrusted, so command-type
+// doctor checks (which the site doctor would run on the host) are stripped. The
+// original is left untouched so config diffs and round-trips see the real file.
+func SanitizeProjectFrameworkDef(def *Framework) *Framework {
+	safe := cloneFrameworkMutable(def)
+	if safe == nil {
+		return nil
+	}
+	// cloneFrameworkMutable shares the Doctor pointer, so copy it before stripping
+	// or we'd mutate the caller's (and the cached project config's) checks.
+	if safe.Doctor != nil {
+		d := *safe.Doctor
+		d.Checks = append([]DoctorCheck(nil), safe.Doctor.Checks...)
+		safe.Doctor = &d
+	}
+	stripUntrustedDoctorChecks(safe)
+	// Drop host-execution surfaces: a host worker runs its command on the host,
+	// and every command runs via `sh -c` on the host, so an untrusted framework_def
+	// must contribute neither. In-container workers (host:false) stay; a project's
+	// own commands live in top-level proj.Commands, which never passes through here.
+	for k, w := range safe.Workers {
+		if w.Host {
+			delete(safe.Workers, k)
+		}
+	}
+	if len(safe.Workers) == 0 {
+		safe.Workers = nil
+	}
+	safe.Commands = nil
+	// An nginx snippet is spliced into the site's server block, so it is a
+	// config-injection surface: only the trusted store may declare one.
+	safe.Nginx = nil
+	// A required service pulls an image and starts a container, so an untrusted
+	// definition must not be able to drive that either.
+	safe.Requires = nil
+	// auto_prepend_file would make every PHP process lerd runs execute a file from
+	// the repo, so php.ini directives come only from the trusted store.
+	safe.PHP.CLIIni = nil
+	return safe
+}
+
 // DetectFrameworkForDir is the primary entry point for framework detection.
 // It checks .lerd.yaml first (committed source of truth), restoring embedded
 // definitions if needed, then falls back to file/composer-based detection.
@@ -1036,10 +1409,13 @@ func DetectFrameworkForDir(dir string) (string, bool) {
 		if LoadUserFramework(name) != nil {
 			return name, true
 		}
-		// Restore embedded definition from .lerd.yaml to the store dir.
+		// Restore the embedded definition from .lerd.yaml (the committed source of
+		// truth, so inert edits propagate), sanitised so an untrusted .lerd.yaml
+		// can't seed host-executing doctor checks into the store.
 		if proj.FrameworkDef != nil {
-			proj.FrameworkDef.Name = name
-			_ = SaveStoreFramework(proj.FrameworkDef)
+			safe := SanitizeProjectFrameworkDef(proj.FrameworkDef)
+			safe.Name = name
+			_ = SaveStoreFramework(safe)
 		}
 		// Check store-installed (may have just been restored above).
 		if _, ok := GetFrameworkForDir(name, dir); ok {
@@ -1074,6 +1450,18 @@ func DetectFramework(dir string) (string, bool) {
 			if matchesFramework(dir, fw) {
 				matches = append(matches, fw.Name)
 			}
+		}
+	}
+
+	// Cached store catalogue: lets any store framework be detected offline, not
+	// just the ones already fetched to disk or built into the binary.
+	for _, e := range loadCachedStoreEntries() {
+		if seen[e.Name] {
+			continue
+		}
+		seen[e.Name] = true
+		if matchesFramework(dir, &Framework{Name: e.Name, Detect: e.Detect}) {
+			matches = append(matches, e.Name)
 		}
 	}
 
@@ -1157,7 +1545,7 @@ type FrameworkInfo struct {
 func ListFrameworksDetailed() []FrameworkInfo {
 	var result []FrameworkInfo
 	seenNameVersion := map[string]bool{}
-	hasStoreLaravel := false
+	storeNames := map[string]bool{}
 
 	key := func(name, version string) string { return name + "@" + version }
 
@@ -1176,20 +1564,15 @@ func ListFrameworksDetailed() []FrameworkInfo {
 		seenNameVersion[k] = true
 		merged := mergeUserOverlay(fw)
 		result = append(result, FrameworkInfo{Framework: merged, Source: SourceStore})
-		if fw.Name == "laravel" {
-			hasStoreLaravel = true
-		}
+		storeNames[fw.Name] = true
 	}
 
-	// Built-in Laravel (only if no store-installed version exists).
-	if !hasStoreLaravel {
-		if fw, ok := GetFramework("laravel"); ok {
-			result = append(result, FrameworkInfo{Framework: fw, Source: SourceBuiltIn})
+	// Built-in adapters, only when no store-installed version supersedes them.
+	for _, b := range builtinFrameworks() {
+		if storeNames[b.Name] {
+			continue
 		}
-	}
-	// Built-in Symfony.
-	if !seenNameVersion[key("symfony", "")] {
-		if fw, ok := GetFramework("symfony"); ok {
+		if fw, ok := GetFramework(b.Name); ok {
 			result = append(result, FrameworkInfo{Framework: fw, Source: SourceBuiltIn})
 		}
 	}
@@ -1308,14 +1691,24 @@ func GetTinkerForDir(projectDir string) *FrameworkTinker {
 // the framework detected in projectDir. It checks the site registry first, then
 // falls back to auto-detection. For Laravel the default is "artisan".
 func GetConsoleCommand(projectDir string) (string, error) {
-	site, err := FindSiteByPath(projectDir)
-	if err != nil || site.Framework == "" {
+	frameworkName := ""
+	if site, err := FindSiteByPath(projectDir); err == nil {
+		frameworkName = site.Framework
+	}
+	if frameworkName == "" {
+		// Worktree checkouts aren't registered as their own site; inherit the
+		// parent site's framework so console commands run inside them too.
+		if parent, ok := ParentSiteForWorktreeDir(projectDir); ok {
+			frameworkName = parent.Framework
+		}
+	}
+	if frameworkName == "" {
 		return "", fmt.Errorf("no framework assigned — run 'lerd link' first")
 	}
 
-	fw, ok := GetFrameworkForDir(site.Framework, projectDir)
+	fw, ok := GetFrameworkForDir(frameworkName, projectDir)
 	if !ok {
-		return "", fmt.Errorf("framework %q not found", site.Framework)
+		return "", fmt.Errorf("framework %q not found", frameworkName)
 	}
 
 	if fw.Console == "" {
@@ -1422,7 +1815,12 @@ func ListFrameworkFiles(name string) []FrameworkFile {
 		files = append(files, FrameworkFile{Path: path, Version: version, Source: source})
 	}
 
-	add(filepath.Join(FrameworksDir(), name+".yaml"), SourceUser)
+	userDir := FrameworksDir()
+	add(filepath.Join(userDir, name+".yaml"), SourceUser)
+	userMatches, _ := filepath.Glob(filepath.Join(userDir, name+"@*.yaml"))
+	for _, m := range userMatches {
+		add(m, SourceUser)
+	}
 
 	storeDir := StoreFrameworksDir()
 	add(filepath.Join(storeDir, name+".yaml"), SourceStore)
@@ -1432,6 +1830,106 @@ func ListFrameworkFiles(name string) []FrameworkFile {
 	}
 
 	return files
+}
+
+// IsBuiltinFramework reports whether name is one of lerd's built-in frameworks
+// (laravel, symfony). Their definitions ship in the binary, so their store or
+// user files are overlays that prune and the unlink offer leave alone.
+func IsBuiltinFramework(name string) bool {
+	return builtinFramework(name) != nil
+}
+
+// SitesUsingFramework returns the names of active sites whose framework field
+// matches name. Ignored entries (parked directories that were unlinked) are not
+// served, so they do not count as usage. It is the basis for the remove
+// confirmation and prune.
+func SitesUsingFramework(name string) []string {
+	reg, err := LoadSites()
+	if err != nil || reg == nil {
+		return nil
+	}
+	var out []string
+	for _, s := range reg.Sites {
+		if s.Ignored {
+			continue
+		}
+		if s.Framework == name {
+			out = append(out, s.Name)
+		}
+	}
+	return out
+}
+
+// activeFrameworkSet returns the set of framework names referenced by at least
+// one active (non-ignored) site, loading the registry once.
+func activeFrameworkSet() map[string]bool {
+	set := make(map[string]bool)
+	reg, err := LoadSites()
+	if err != nil || reg == nil {
+		return set
+	}
+	for _, s := range reg.Sites {
+		if s.Ignored || s.Framework == "" {
+			continue
+		}
+		set[s.Framework] = true
+	}
+	return set
+}
+
+// UnusedInstalledFrameworks returns installed framework names that no active
+// site references, sorted. Built-in frameworks are never included.
+func UnusedInstalledFrameworks() []string {
+	inUse := activeFrameworkSet()
+	var out []string
+	for _, name := range InstalledFrameworkNames() {
+		if !inUse[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// RemoveFrameworks removes each named framework definition, returning the names
+// that were removed and the names that failed so callers can report accurately.
+func RemoveFrameworks(names []string) (removed, failed []string) {
+	for _, name := range names {
+		if err := RemoveFramework(name); err != nil {
+			failed = append(failed, name)
+			continue
+		}
+		removed = append(removed, name)
+	}
+	return removed, failed
+}
+
+// InstalledFrameworkNames returns the unique names of frameworks that have a
+// removable definition file on disk (user-defined or store-installed). Built-in
+// frameworks are excluded: their definitions live in the binary, so what is on
+// disk is only an overlay we never prune away.
+func InstalledFrameworkNames() []string {
+	seen := make(map[string]bool)
+	var names []string
+
+	collect := func(dir string) {
+		matches, _ := filepath.Glob(filepath.Join(dir, "*.yaml"))
+		for _, m := range matches {
+			base := strings.TrimSuffix(filepath.Base(m), ".yaml")
+			if i := strings.IndexByte(base, '@'); i != -1 {
+				base = base[:i]
+			}
+			if base == "" || seen[base] || IsBuiltinFramework(base) {
+				continue
+			}
+			seen[base] = true
+			names = append(names, base)
+		}
+	}
+
+	collect(FrameworksDir())
+	collect(StoreFrameworksDir())
+	sort.Strings(names)
+	return names
 }
 
 // RemoveFrameworkFile removes a single framework definition file.
@@ -1547,26 +2045,33 @@ func matchesFramework(dir string, fw *Framework) bool {
 
 // DetectMajorVersion detects the major version of a framework from the project directory.
 // It tries composer.json constraints first, then falls back to version_file regex matching.
+// frameworkDetectRules resolves the detect rules for a framework offline,
+// preferring an installed store definition, then the cached store index (which
+// covers every framework in the catalogue, not just the built-ins), then the
+// built-in adapter as the no-network fallback.
+func frameworkDetectRules(frameworkName string) []FrameworkRule {
+	matches, _ := filepath.Glob(filepath.Join(StoreFrameworksDir(), frameworkName+"@*.yaml"))
+	matches = append(matches, filepath.Join(StoreFrameworksDir(), frameworkName+".yaml"))
+	for _, path := range matches {
+		if fw := loadFrameworkYAML(path); fw != nil && len(fw.Detect) > 0 {
+			return fw.Detect
+		}
+	}
+	if e := cachedStoreEntryByName(frameworkName); e != nil && len(e.Detect) > 0 {
+		return e.Detect
+	}
+	if b := builtinFramework(frameworkName); b != nil {
+		return b.Detect
+	}
+	return nil
+}
+
 func DetectMajorVersion(projectDir, frameworkName string) string {
 	if projectDir == "" {
 		return ""
 	}
 
-	var rules []FrameworkRule
-	if frameworkName == "laravel" {
-		rules = []FrameworkRule{{Composer: "laravel/framework"}}
-	} else {
-		pattern := filepath.Join(StoreFrameworksDir(), frameworkName+"@*.yaml")
-		matches, _ := filepath.Glob(pattern)
-		matches = append(matches, filepath.Join(StoreFrameworksDir(), frameworkName+".yaml"))
-		for _, path := range matches {
-			if fw := loadFrameworkYAML(path); fw != nil {
-				rules = fw.Detect
-				break
-			}
-		}
-	}
-
+	rules := frameworkDetectRules(frameworkName)
 	if len(rules) == 0 {
 		return ""
 	}
@@ -1588,14 +2093,54 @@ func DetectMajorVersion(projectDir, frameworkName string) string {
 	return ""
 }
 
-func detectVersionFromComposer(projectDir string, rules []FrameworkRule) string {
-	data, err := os.ReadFile(filepath.Join(projectDir, "composer.json"))
-	if err != nil {
-		return ""
+// composerParseCache memoises the parsed top-level sections of a project's
+// composer.json, keyed by path and invalidated by mtime+size. DetectMajorVersion
+// runs on the daemon's hot snapshot path (once per site per tick, and now once
+// per site inside workerheal.Detect), where re-reading and re-unmarshalling
+// composer.json every call showed up as avoidable work. The cached map is only
+// read by callers, so sharing it is safe.
+type composerParseEntry struct {
+	raw   map[string]json.RawMessage
+	mtime time.Time
+	size  int64
+}
+
+var (
+	composerParseCacheMu sync.Mutex
+	composerParseCache   = map[string]composerParseEntry{}
+)
+
+// parseComposerJSON returns the top-level sections of a project's composer.json,
+// mtime-cached. ok is false when the file is missing or unparseable.
+func parseComposerJSON(projectDir string) (raw map[string]json.RawMessage, ok bool) {
+	path := filepath.Join(projectDir, "composer.json")
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		return nil, false
 	}
 
-	var raw map[string]json.RawMessage
-	if json.Unmarshal(data, &raw) != nil {
+	composerParseCacheMu.Lock()
+	if e, hit := composerParseCache[path]; hit && e.mtime.Equal(info.ModTime()) && e.size == info.Size() {
+		composerParseCacheMu.Unlock()
+		return e.raw, e.raw != nil
+	}
+	composerParseCacheMu.Unlock()
+
+	var parsed map[string]json.RawMessage
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &parsed) // nil on failure -> cached as a miss
+	}
+
+	composerParseCacheMu.Lock()
+	composerParseCache[path] = composerParseEntry{raw: parsed, mtime: info.ModTime(), size: info.Size()}
+	composerParseCacheMu.Unlock()
+
+	return parsed, parsed != nil
+}
+
+func detectVersionFromComposer(projectDir string, rules []FrameworkRule) string {
+	raw, ok := parseComposerJSON(projectDir)
+	if !ok {
 		return ""
 	}
 

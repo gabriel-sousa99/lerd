@@ -7,6 +7,30 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
+func TestWorktreeWorkerIdleSuspended(t *testing.T) {
+	site := &config.Site{
+		Name: "shop",
+		WorktreeIdleSuspended: map[string][]string{
+			"feature-x": {"vite", "queue"},
+		},
+	}
+	cases := []struct {
+		name   string
+		wtPath string
+		worker string
+		want   bool
+	}{
+		{"suspended worker in worktree", "/home/u/shop-worktrees/feature-x", "vite", true},
+		{"other worker in same worktree", "/home/u/shop-worktrees/feature-x", "reverb", false},
+		{"worker in a worktree with no suspensions", "/home/u/shop-worktrees/main", "vite", false},
+	}
+	for _, c := range cases {
+		if got := worktreeWorkerIdleSuspended(site, c.wtPath, c.worker); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestIdleTimingStatus(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	timeout := time.Hour
@@ -25,6 +49,21 @@ func TestIdleTimingStatus(t *testing.T) {
 		if got := idleTimingStatus(c.lastUnix, c.suspended, timeout, now); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// A proxy-only site is exempt from suspension, so its status reads that rather
+// than an "idle" it can never act on.
+func TestIdleSiteStatus_proxyOnly(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	last := map[string]int64{"nestapp": now.Add(-2 * time.Hour).Unix()}
+	proxyOnly := config.Site{Name: "nestapp", HostPort: 3000}
+	if got := idleSiteStatus(proxyOnly, last, nil, time.Hour, now); got != "proxy only" {
+		t.Errorf("proxy-only site = %q, want proxy only", got)
+	}
+	supervised := config.Site{Name: "nestapp", HostPort: 3000, HostCommand: "npm run dev"}
+	if got := idleSiteStatus(supervised, last, nil, time.Hour, now); got != "idle 2h" {
+		t.Errorf("supervised host-proxy site = %q, want idle 2h", got)
 	}
 }
 
@@ -83,6 +122,22 @@ func TestEnsureViteSleepable_buildsAtMostOnce(t *testing.T) {
 	ensureViteSleepableAt(site, dir) // second tick must not rebuild
 	if builds != 1 {
 		t.Errorf("build ran %d times, want 1 (memoized after first attempt)", builds)
+	}
+}
+
+// TestWorktreeIdleSuspendStateIsStale covers the conservative guards: an empty
+// persisted set is never stale, and an unknown framework (workers can't be
+// enumerated) keeps the worktree suspended rather than wrongly clearing it.
+func TestWorktreeIdleSuspendStateIsStale(t *testing.T) {
+	site := &config.Site{Name: "myapp", Path: "/srv/myapp", Framework: "laravel"}
+
+	if WorktreeIdleSuspendStateIsStale(site, "feature-x", nil) {
+		t.Errorf("empty suspended set reported stale")
+	}
+
+	noFW := &config.Site{Name: "myapp", Path: "/srv/myapp", Framework: "__nope__"}
+	if WorktreeIdleSuspendStateIsStale(noFW, "feature-x", []string{"vite"}) {
+		t.Errorf("unknown framework reported stale; should stay suspended")
 	}
 }
 

@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -56,6 +58,8 @@ type ProxyConfig struct {
 	Port       int    `yaml:"port"`                   // host port the app binds (required)
 	SSL        bool   `yaml:"ssl,omitempty"`          // app serves TLS on its port; proxy via https
 	PortEnvKey string `yaml:"port_env_key,omitempty"` // env var the port is injected as (default "PORT")
+	HostEnvKey string `yaml:"host_env_key,omitempty"` // env var the bind address is injected as (default "HOST")
+	InjectHost *bool  `yaml:"inject_host,omitempty"`  // inject the bind-address env (HOST) so the server listens where the proxy container reaches it; nil/unset = true, set false to opt out
 }
 
 // ProjectConfig holds per-project configuration stored in .lerd.yaml.
@@ -132,6 +136,18 @@ type ProjectConfig struct {
 	// route events forward to and which .env key holds the secret. Absent for
 	// projects on the Laravel defaults, which are auto-detected.
 	Stripe *StripeConfig `yaml:"stripe,omitempty"`
+	// MCPInject opts the project out of automatic AI/MCP config refresh. When set
+	// to false, `lerd update`/`install` leaves the project's committed MCP config
+	// and skill files untouched so they change only when the user asks. Nil/unset
+	// keeps the default (refresh in place). An explicit `lerd mcp:inject` still
+	// writes, since that is the user asking.
+	MCPInject *bool `yaml:"mcp_inject,omitempty"`
+}
+
+// MCPInjectDisabled reports whether the project opted out of automatic MCP
+// config injection via `mcp_inject: false` in .lerd.yaml.
+func (c *ProjectConfig) MCPInjectDisabled() bool {
+	return c.MCPInject != nil && !*c.MCPInject
 }
 
 // IsEmpty returns true when the config has no meaningful content, which
@@ -139,12 +155,14 @@ type ProjectConfig struct {
 func (c *ProjectConfig) IsEmpty() bool {
 	return len(c.Domains) == 0 && c.PHPVersion == "" && c.NodeVersion == "" &&
 		c.JSRuntime == "" &&
-		c.Framework == "" && c.PublicDir == "" && len(c.Services) == 0 &&
-		len(c.Workers) == 0 && len(c.CustomWorkers) == 0 && len(c.ReloadWorkers) == 0 && !c.Secured &&
+		c.Framework == "" && c.FrameworkVersion == "" && c.FrameworkDef == nil &&
+		c.PublicDir == "" && len(c.Services) == 0 &&
+		len(c.Workers) == 0 && len(c.CustomWorkers) == 0 && len(c.ReloadWorkers) == 0 && len(c.Commands) == 0 && !c.Secured &&
 		c.AppURL == "" && c.DB.Service == "" && c.DB.Database == "" &&
 		c.Oracle == nil &&
 		c.Container == nil && c.Proxy == nil && c.Runtime == "" && !c.RuntimeWorker &&
-		!c.DBIsolated && len(c.EnvOverrides) == 0 && c.RequestTimeout == 0 && c.Stripe == nil
+		!c.DBIsolated && len(c.EnvOverrides) == 0 && c.RequestTimeout == 0 && c.Stripe == nil &&
+		c.MCPInject == nil
 }
 
 // Validate reports configuration that can't be honoured. A site is either a
@@ -448,21 +466,47 @@ func cloneProjectConfig(in *ProjectConfig) *ProjectConfig {
 		cp := *in.Stripe
 		out.Stripe = &cp
 	}
+	if in.MCPInject != nil {
+		cp := *in.MCPInject
+		out.MCPInject = &cp
+	}
 	if in.FrameworkDef != nil {
 		out.FrameworkDef = cloneFrameworkMutable(in.FrameworkDef)
 	}
 	return &out
 }
 
-// SaveProjectConfig writes cfg to .lerd.yaml in dir.
+// SaveProjectConfig writes cfg to .lerd.yaml in dir. The write goes through a
+// temp file and a rename so a crash, a restart mid-write, or a second concurrent
+// writer can never leave the file half-written; the output is two-space indented
+// to match the store YAML and its lists are sorted for stable git diffs.
 func SaveProjectConfig(dir string, cfg *ProjectConfig) error {
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
+	normalizeProjectConfig(cfg)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(cfg); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".lerd.yaml"), data, 0644); err != nil {
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(dir, ".lerd.yaml"), buf.Bytes(), 0644); err != nil {
 		return err
 	}
 	invalidateProjectConfigCache(dir)
 	return nil
+}
+
+// normalizeProjectConfig sorts the churn-prone lists into a canonical order so a
+// worker waking or sleeping rewrites .lerd.yaml with a minimal diff instead of a
+// reshuffled block. Order is behaviourally irrelevant here: workers are
+// independent units and each service preset owns a distinct env namespace.
+func normalizeProjectConfig(cfg *ProjectConfig) {
+	if cfg == nil {
+		return
+	}
+	sort.Slice(cfg.Services, func(i, j int) bool { return cfg.Services[i].Name < cfg.Services[j].Name })
+	sort.Strings(cfg.Workers)
+	sort.Strings(cfg.ReloadWorkers)
 }

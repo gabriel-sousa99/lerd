@@ -130,6 +130,28 @@ func TestGetFrameworkCustom_WithLogs(t *testing.T) {
 	}
 }
 
+// The built-in Symfony def must follow Symfony's env convention: lerd writes its
+// connection values into .env.local (the gitignored local override), seeded from
+// the committed .env. Keeping the built-in aligned with the store def stops the
+// two from contradicting each other on the offline fallback path.
+func TestGetFrameworkSymfony_BuiltinEnvTargetsEnvLocal(t *testing.T) {
+	setConfigDir(t)
+
+	fw, ok := GetFramework("symfony")
+	if !ok {
+		t.Fatal("GetFramework(symfony): not found")
+	}
+	if fw.Env.File != ".env.local" {
+		t.Errorf("Env.File = %q, want .env.local", fw.Env.File)
+	}
+	if fw.Env.ExampleFile != ".env" {
+		t.Errorf("Env.ExampleFile = %q, want .env", fw.Env.ExampleFile)
+	}
+	if fw.Env.URLKey != "DEFAULT_URI" {
+		t.Errorf("Env.URLKey = %q, want DEFAULT_URI", fw.Env.URLKey)
+	}
+}
+
 func TestGetFrameworkCustom_WithoutLogs(t *testing.T) {
 	setConfigDir(t)
 
@@ -335,5 +357,115 @@ func TestValidatePublicDir(t *testing.T) {
 		if err := ValidatePublicDir(s); err == nil {
 			t.Errorf("ValidatePublicDir(%q) = nil, want error", s)
 		}
+	}
+}
+
+// ── SitesUsingFramework / InstalledFrameworkNames ────────────────────────────
+
+func TestSitesUsingFramework(t *testing.T) {
+	setConfigDir(t)
+
+	reg := &SiteRegistry{Sites: []Site{
+		{Name: "shop", Framework: "laravel"},
+		{Name: "blog", Framework: "wordpress"},
+		{Name: "api", Framework: "laravel"},
+		{Name: "static", Framework: ""},
+	}}
+	if err := SaveSites(reg); err != nil {
+		t.Fatalf("SaveSites: %v", err)
+	}
+
+	got := SitesUsingFramework("laravel")
+	if len(got) != 2 || got[0] != "shop" || got[1] != "api" {
+		t.Errorf("SitesUsingFramework(laravel) = %v, want [shop api]", got)
+	}
+	if got := SitesUsingFramework("symfony"); len(got) != 0 {
+		t.Errorf("SitesUsingFramework(symfony) = %v, want empty", got)
+	}
+}
+
+func TestSitesUsingFramework_IgnoresUnlinkedParkedEntries(t *testing.T) {
+	setConfigDir(t)
+
+	reg := &SiteRegistry{Sites: []Site{
+		{Name: "served", Framework: "wordpress"},
+		{Name: "parked", Framework: "wordpress", Ignored: true},
+	}}
+	if err := SaveSites(reg); err != nil {
+		t.Fatalf("SaveSites: %v", err)
+	}
+
+	got := SitesUsingFramework("wordpress")
+	if len(got) != 1 || got[0] != "served" {
+		t.Errorf("SitesUsingFramework(wordpress) = %v, want [served]", got)
+	}
+}
+
+func TestInstalledFrameworkNames_ExcludesBuiltins(t *testing.T) {
+	setConfigDir(t)
+
+	user := FrameworksDir()
+	os.MkdirAll(user, 0755)
+	os.WriteFile(filepath.Join(user, "custom.yaml"), []byte("name: custom\n"), 0644)
+	os.WriteFile(filepath.Join(user, "laravel.yaml"), []byte("name: laravel\n"), 0644)
+
+	store := StoreFrameworksDir()
+	os.MkdirAll(store, 0755)
+	os.WriteFile(filepath.Join(store, "symfony.yaml"), []byte("name: symfony\n"), 0644)
+	os.WriteFile(filepath.Join(store, "symfony@7.yaml"), []byte("name: symfony\nversion: \"7\"\n"), 0644)
+	os.WriteFile(filepath.Join(store, "wordpress@6.yaml"), []byte("name: wordpress\n"), 0644)
+
+	got := InstalledFrameworkNames()
+	want := []string{"custom", "wordpress"}
+	if len(got) != len(want) {
+		t.Fatalf("InstalledFrameworkNames() = %v, want %v (built-ins laravel/symfony must be excluded)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("InstalledFrameworkNames()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestUnusedInstalledFrameworks(t *testing.T) {
+	setConfigDir(t)
+
+	store := StoreFrameworksDir()
+	os.MkdirAll(store, 0755)
+	os.WriteFile(filepath.Join(store, "wordpress.yaml"), []byte("name: wordpress\n"), 0644)
+	os.WriteFile(filepath.Join(store, "drupal.yaml"), []byte("name: drupal\n"), 0644)
+
+	reg := &SiteRegistry{Sites: []Site{
+		{Name: "blog", Framework: "wordpress"},
+		{Name: "old", Framework: "drupal", Ignored: true},
+	}}
+	if err := SaveSites(reg); err != nil {
+		t.Fatalf("SaveSites: %v", err)
+	}
+
+	got := UnusedInstalledFrameworks()
+	if len(got) != 1 || got[0] != "drupal" {
+		t.Errorf("UnusedInstalledFrameworks() = %v, want [drupal]", got)
+	}
+}
+
+func TestListFrameworkFiles_IncludesUserVersioned(t *testing.T) {
+	setConfigDir(t)
+
+	user := FrameworksDir()
+	os.MkdirAll(user, 0755)
+	versioned := filepath.Join(user, "drupal@10.yaml")
+	os.WriteFile(versioned, []byte("name: drupal\nversion: \"10\"\n"), 0644)
+
+	files := ListFrameworkFiles("drupal")
+	if len(files) != 1 || files[0].Path != versioned || files[0].Version != "10" {
+		t.Fatalf("ListFrameworkFiles(drupal) = %+v, want the user-dir drupal@10 file", files)
+	}
+
+	if err := RemoveFramework("drupal"); err != nil {
+		t.Fatalf("RemoveFramework: %v", err)
+	}
+	if _, err := os.Stat(versioned); !os.IsNotExist(err) {
+		t.Error("expected user-dir versioned file to be removed")
 	}
 }

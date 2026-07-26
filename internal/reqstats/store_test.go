@@ -1,0 +1,318 @@
+package reqstats
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func tempStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := OpenStore(filepath.Join(t.TempDir(), "reqstats.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// base is a fixed clock so tests never touch the wall clock.
+var base = time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+
+func seed(t *testing.T, s *Store, recs []Record) {
+	t.Helper()
+	if err := s.Insert(recs); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+}
+
+func mk(n int, offset time.Duration, site, method, route, uri string, status int, ms float64) []Record {
+	out := make([]Record, n)
+	for i := 0; i < n; i++ {
+		out[i] = Record{
+			At:   base.Add(offset + time.Duration(i)*time.Second),
+			Site: site, Method: method, Route: route, URI: uri, Status: status, Millis: ms,
+		}
+	}
+	return out
+}
+
+func TestStoreAnalyticsAggregates(t *testing.T) {
+	s := tempStore(t)
+	var recs []Record
+	recs = append(recs, mk(10, 0, "app", "GET", "GET /fast", "/fast", 200, 20)...)
+	recs = append(recs, mk(10, time.Minute, "app", "GET", "GET /slow", "/slow", 200, 200)...)
+	recs = append(recs, mk(2, 2*time.Minute, "app", "GET", "GET /boom", "/boom", 500, 30)...)
+	seed(t, s, recs)
+
+	a, err := s.SiteAnalytics("app", base.Add(-time.Hour), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SiteAnalytics: %v", err)
+	}
+	if a.Samples != 22 {
+		t.Errorf("samples = %d, want 22", a.Samples)
+	}
+	if a.Status.C2xx != 20 || a.Status.C5xx != 2 {
+		t.Errorf("status = %+v, want 20x2xx 2x5xx", a.Status)
+	}
+	if len(a.Routes) != 3 {
+		t.Fatalf("routes = %d, want 3", len(a.Routes))
+	}
+	byRoute := map[string]RouteStat{}
+	for _, r := range a.Routes {
+		byRoute[r.Route] = r
+	}
+	if r := byRoute["GET /slow"]; r.P50Millis < 180 || r.Samples != 10 {
+		t.Errorf("/slow = %+v, want p50 ~200 samples 10", r)
+	}
+	total := 0
+	for _, b := range a.Distribution {
+		total += b.Count
+	}
+	if total != 22 {
+		t.Errorf("distribution total = %d, want 22", total)
+	}
+	// 20ms and 30ms land in <50 bins, 200ms lands in 100–250.
+	if a.Distribution[len(a.Distribution)-1].UpperMillis != 0 {
+		t.Errorf("top bucket should be open-ended (UpperMillis 0)")
+	}
+}
+
+func TestStoreAnalyticsExcludesColdFromTiming(t *testing.T) {
+	s := tempStore(t)
+	recs := mk(10, 0, "app", "GET", "GET /x", "/x", 200, 20)
+	cold := mk(1, time.Minute, "app", "GET", "GET /x", "/x", 200, 3000)[0]
+	cold.Cold = true
+	recs = append(recs, cold)
+	seed(t, s, recs)
+
+	a, err := s.SiteAnalytics("app", base.Add(-time.Hour), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SiteAnalytics: %v", err)
+	}
+	if a.Samples != 11 {
+		t.Errorf("samples = %d, want 11 (cold counted)", a.Samples)
+	}
+	if a.ColdStarts != 1 {
+		t.Errorf("cold starts = %d, want 1", a.ColdStarts)
+	}
+	if a.P95Millis > 100 {
+		t.Errorf("p95 = %v, the 3000ms cold start must be excluded from timing", a.P95Millis)
+	}
+	if len(a.Routes) != 1 {
+		t.Fatalf("routes = %d, want 1", len(a.Routes))
+	}
+	r := a.Routes[0]
+	if r.P95Millis > 100 {
+		t.Errorf("route p95 = %v, cold start must be excluded", r.P95Millis)
+	}
+	if r.Samples != 11 {
+		t.Errorf("route samples = %d, want 11 (cold counted)", r.Samples)
+	}
+	total := 0
+	for _, b := range a.Distribution {
+		total += b.Count
+	}
+	if total != 10 {
+		t.Errorf("distribution total = %d, want 10 (warm only)", total)
+	}
+}
+
+func TestStoreAnalyticsRecentP95TracksImprovement(t *testing.T) {
+	s := tempStore(t)
+	// A route slow early, then a run of fast requests: its window p95 stays high
+	// (the old slow samples are still in the window) but its recent p95 recovers,
+	// so the slowest list can demote it once it's been fixed.
+	recs := mk(5, 0, "app", "GET", "GET /x", "/x", 200, 2000)
+	recs = append(recs, mk(25, time.Minute, "app", "GET", "GET /x", "/x", 200, 20)...)
+	seed(t, s, recs)
+
+	a, err := s.SiteAnalytics("app", base.Add(-time.Hour), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SiteAnalytics: %v", err)
+	}
+	r := a.Routes[0]
+	if r.P95Millis < 1000 {
+		t.Errorf("window p95 = %v, want high (old slow samples still in window)", r.P95Millis)
+	}
+	if r.RecentP95Millis > 100 {
+		t.Errorf("recent p95 = %v, want low (route has been fixed)", r.RecentP95Millis)
+	}
+}
+
+func TestStoreAnalyticsRespectsRange(t *testing.T) {
+	s := tempStore(t)
+	seed(t, s, mk(5, -2*time.Hour, "app", "GET", "GET /old", "/old", 200, 20))
+	seed(t, s, mk(5, 0, "app", "GET", "GET /new", "/new", 200, 20))
+
+	a, err := s.SiteAnalytics("app", base.Add(-time.Hour), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SiteAnalytics: %v", err)
+	}
+	if a.Samples != 5 {
+		t.Errorf("samples = %d, want 5 (old rows excluded by range)", a.Samples)
+	}
+}
+
+func TestStoreRecentOrdersNewestFirst(t *testing.T) {
+	s := tempStore(t)
+	seed(t, s, mk(3, 0, "app", "GET", "GET /a", "/a", 200, 20))
+	seed(t, s, mk(1, time.Hour, "app", "POST", "POST /b", "/b/9", 201, 42))
+
+	recent, err := s.Recent("app", 2)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(recent) != 2 {
+		t.Fatalf("recent = %d, want 2 (limited)", len(recent))
+	}
+	if recent[0].URI != "/b/9" {
+		t.Errorf("newest = %q, want /b/9", recent[0].URI)
+	}
+}
+
+// Rows written before the ingest filter existed are still in the store, so both
+// read paths must drop WebSocket upgrades rather than report an hour-long socket
+// as the site's slowest route.
+func TestStoreExcludesWebSocketUpgrade(t *testing.T) {
+	s := tempStore(t)
+	seed(t, s, mk(4, 0, "app", "GET", "GET /home", "/home", 200, 40))
+	seed(t, s, mk(1, time.Hour, "app", "GET", "GET /app/key", "/app/key", 101, 3623181))
+
+	a, err := s.SiteAnalytics("app", base.Add(-time.Hour), base.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("SiteAnalytics: %v", err)
+	}
+	if a.Samples != 4 {
+		t.Errorf("samples = %d, want 4 (the upgrade excluded)", a.Samples)
+	}
+	if len(a.Routes) != 1 {
+		t.Errorf("routes = %d, want 1: the upgrade must not become a route", len(a.Routes))
+	}
+	if a.P95Millis != 40 {
+		t.Errorf("p95 = %v, want 40 (undragged by the upgrade)", a.P95Millis)
+	}
+
+	recent, err := s.Recent("app", 10)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(recent) != 4 {
+		t.Fatalf("recent = %d, want 4 (the upgrade excluded)", len(recent))
+	}
+	for _, r := range recent {
+		if r.Status == 101 {
+			t.Errorf("Recent returned a websocket upgrade: %+v", r)
+		}
+	}
+}
+
+func TestRecordFromNormalizes(t *testing.T) {
+	rec := RecordFrom(AccessRecord{
+		Host: "app.test", Status: 200, RequestTime: 0.15, Method: "get", URI: "/products/42?ref=x",
+	}, "app", base)
+	if rec.Route != "GET /products/:id" {
+		t.Errorf("route = %q, want GET /products/:id", rec.Route)
+	}
+	if rec.Method != "GET" {
+		t.Errorf("method = %q, want GET (upper, trimmed)", rec.Method)
+	}
+	if rec.URI != "/products/42" {
+		t.Errorf("uri = %q, want /products/42 (query stripped)", rec.URI)
+	}
+	if rec.Millis != 150 {
+		t.Errorf("ms = %v, want 150", rec.Millis)
+	}
+}
+
+func TestIsColdStart(t *testing.T) {
+	gap := 30 * time.Minute
+	if IsColdStart(time.Time{}, false, base, gap) {
+		t.Error("first request ever seen must not be a cold start")
+	}
+	if IsColdStart(base.Add(-time.Minute), true, base, gap) {
+		t.Error("a request one minute after the last must not be cold")
+	}
+	if !IsColdStart(base.Add(-time.Hour), true, base, gap) {
+		t.Error("a request an hour after the last must be cold")
+	}
+	if IsColdStart(base.Add(-time.Hour), true, base, 0) {
+		t.Error("a zero gap disables cold detection")
+	}
+}
+
+func TestLastSeenBySite(t *testing.T) {
+	s := tempStore(t)
+	seed(t, s, mk(3, 0, "app", "GET", "GET /", "/", 200, 20))
+	seed(t, s, mk(2, 5*time.Minute, "app", "GET", "GET /x", "/x", 200, 20))
+	seed(t, s, mk(1, time.Minute, "blog", "GET", "GET /", "/", 200, 20))
+
+	got, err := s.LastSeenBySite()
+	if err != nil {
+		t.Fatalf("LastSeenBySite: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("sites = %d, want 2", len(got))
+	}
+	// app's newest sample is the last record of the +5m batch (offset +5m+1s).
+	if want := base.Add(5*time.Minute + time.Second); !got["app"].Equal(want) {
+		t.Errorf("app last seen = %v, want %v", got["app"], want)
+	}
+	if want := base.Add(time.Minute); !got["blog"].Equal(want) {
+		t.Errorf("blog last seen = %v, want %v", got["blog"], want)
+	}
+}
+
+func TestUsageBySite(t *testing.T) {
+	s := tempStore(t)
+	seed(t, s, mk(3, 0, "app", "GET", "GET /", "/", 200, 20))
+	seed(t, s, mk(2, 5*time.Minute, "app", "GET", "GET /x", "/x", 200, 20))
+	seed(t, s, mk(1, time.Minute, "blog", "GET", "GET /", "/", 200, 20))
+	// Traffic the app-request predicate drops: an asset burst, a WebSocket that
+	// logged once on close, and a request nginx timed at zero.
+	seed(t, s, mk(50, 10*time.Minute, "blog", "GET", "GET /app.js", "/app.js", 200, 5))
+	seed(t, s, mk(1, 11*time.Minute, "blog", "GET", "GET /ws", "/ws", 101, 900000))
+	seed(t, s, mk(1, 12*time.Minute, "blog", "GET", "GET /health", "/health", 200, 0))
+	seed(t, s, mk(4, -2*time.Hour, "archived", "GET", "GET /", "/", 200, 20))
+
+	got, err := s.UsageBySite(base.Add(-time.Hour), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("UsageBySite: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("sites = %v, want app and blog only", got)
+	}
+	if got["app"].Count != 5 {
+		t.Errorf("app count = %d, want 5", got["app"].Count)
+	}
+	// app's newest sample is the last record of the +5m batch (offset +5m+1s).
+	if want := base.Add(5*time.Minute + time.Second); !got["app"].LastAt.Equal(want) {
+		t.Errorf("app last request = %v, want %v", got["app"].LastAt, want)
+	}
+	if got["blog"].Count != 1 {
+		t.Errorf("blog count = %d, want 1 (assets, upgrade and zero-time excluded)", got["blog"].Count)
+	}
+	// The asset burst is blog's newest row but not its newest app request, so the
+	// last-request time must stay at the real one.
+	if want := base.Add(time.Minute); !got["blog"].LastAt.Equal(want) {
+		t.Errorf("blog last request = %v, want %v", got["blog"].LastAt, want)
+	}
+}
+
+func TestStorePruneDropsOldRows(t *testing.T) {
+	s := tempStore(t)
+	seed(t, s, mk(4, -48*time.Hour, "app", "GET", "GET /old", "/old", 200, 20))
+	seed(t, s, mk(4, 0, "app", "GET", "GET /new", "/new", 200, 20))
+
+	n, err := s.Prune(base.Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("pruned = %d, want 4", n)
+	}
+	a, _ := s.SiteAnalytics("app", base.Add(-72*time.Hour), base.Add(time.Hour))
+	if a.Samples != 4 {
+		t.Errorf("remaining samples = %d, want 4", a.Samples)
+	}
+}

@@ -3,6 +3,7 @@ package siteops
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -16,10 +17,14 @@ import (
 type VersionResult struct {
 	PHP            string // best installed PHP version (clamped to framework range)
 	Node           string // detected Node version
-	PHPMin         string // framework minimum PHP version (empty if no framework)
-	PHPMax         string // framework maximum PHP version (empty if no framework)
+	PHPMin         string // framework minimum PHP version (empty if no framework or guessed)
+	PHPMax         string // framework maximum PHP version (empty if no framework or guessed)
 	SuggestedPHP   string // better PHP version to install (empty if current is optimal)
 	FrameworkLabel string // human-readable framework name for messages
+	// FrameworkGuessed is true when the framework version was clamped to a
+	// borrowed definition; its PHP range is not enforced (PHPMin/PHPMax stay
+	// empty) since it describes a different version than the project.
+	FrameworkGuessed bool
 }
 
 // DetectSiteVersions resolves the framework, PHP version (clamped to framework
@@ -30,9 +35,15 @@ func DetectSiteVersions(dir, framework, defaultPHP, defaultNode string) VersionR
 
 	if framework != "" {
 		if fw, ok := config.GetFrameworkForDir(framework, dir); ok {
-			result.PHPMin = fw.PHP.Min
-			result.PHPMax = fw.PHP.Max
 			result.FrameworkLabel = fw.Label
+			result.FrameworkGuessed = fw.VersionGuessed
+			// A guessed definition's PHP range must not constrain the project (a
+			// Laravel 6 served by the Laravel 10 def must still allow 7.4), so
+			// leave Min/Max empty when guessed and no clamping happens.
+			if !fw.VersionGuessed {
+				result.PHPMin = fw.PHP.Min
+				result.PHPMax = fw.PHP.Max
+			}
 		}
 	}
 
@@ -115,6 +126,18 @@ func CleanupRelink(path, newName string) bool {
 	return secured
 }
 
+// ResolveSecured decides whether a freshly linked site is secured: the re-link
+// path (relinkSecured, from CleanupRelink) or .lerd.yaml's secured flag.
+//
+// Upstream additionally degrades to http whenever lerd does not manage DNS,
+// because its cert layer refuses with ErrDNSDisabled. The Oracle fork keeps the
+// requested state: the mkcert CA is trusted regardless of the DNS choice and
+// .localhost resolves to the loopback via RFC 6761, so a secured site on a
+// DNS-off install is a working HTTPS site, not a broken registration.
+func ResolveSecured(relinkSecured bool, proj *config.ProjectConfig, cfg *config.GlobalConfig) bool {
+	return relinkSecured || (proj != nil && proj.Secured)
+}
+
 // FinishLink performs the post-registration steps shared by link, park, and MCP:
 // vhost generation, FPM quadlet setup, container hosts update, and nginx reload.
 func FinishLink(site config.Site, phpVersion string) error {
@@ -138,7 +161,7 @@ func FinishLink(site config.Site, phpVersion string) error {
 	}
 	_ = podman.WriteContainerHosts()
 
-	if err := nginx.Reload(); err != nil {
+	if err := nginx.ReloadWithRetry(10 * time.Second); err != nil {
 		return fmt.Errorf("nginx reload: %w", err)
 	}
 
@@ -204,7 +227,7 @@ func FinishFrankenPHPLink(site config.Site) error {
 
 	_ = podman.WriteContainerHosts()
 
-	if err := nginx.Reload(); err != nil {
+	if err := nginx.ReloadWithRetry(10 * time.Second); err != nil {
 		return fmt.Errorf("nginx reload: %w", err)
 	}
 
@@ -212,6 +235,58 @@ func FinishFrankenPHPLink(site config.Site) error {
 		podman.AfterUnitChange("site:" + site.Name)
 	}
 
+	return nil
+}
+
+// StopRuntimeWorkers and RecreateFPMWorkers let the cli package (which owns
+// worker lifecycle) tear down a FrankenPHP site's workers before its per-site
+// container is removed and rebuild them against the shared FPM container once
+// the registry has been flipped to FPM. They mirror switchToFPM, wired at init
+// the same way as StopSiteWorkers. Without them a demote leaves the workers'
+// units still pointed at (and BindsTo) the removed FrankenPHP container, where
+// heal can't recover them. StopRuntimeWorkers returns the names it stopped.
+var (
+	StopRuntimeWorkers func(site *config.Site) []string
+	RecreateFPMWorkers func(site *config.Site, workers []string)
+)
+
+// DemoteFrankenPHPToFPM drops a FrankenPHP site back to the FPM runtime: it
+// stops and tears down the per-site FrankenPHP container, clears the runtime in
+// the registry and the project's .lerd.yaml, regenerates the normal fastcgi
+// vhost, and recreates any running workers against the shared FPM container. It
+// is the fallback the CLI takes (via runLink) when a site's PHP version is
+// changed below the FrankenPHP minimum, mirrored here so the UI and MCP never
+// silently upgrade PHP behind the user's back. The passed site is mutated to FPM.
+func DemoteFrankenPHPToFPM(site *config.Site) error {
+	var workers []string
+	if StopRuntimeWorkers != nil {
+		workers = StopRuntimeWorkers(site)
+	}
+
+	podman.RemoveFrankenPHPContainer(site.Name)
+
+	site.Runtime = ""
+	site.RuntimeWorker = false
+	if err := config.AddSite(*site); err != nil {
+		return fmt.Errorf("updating site registry: %w", err)
+	}
+	_ = config.SetProjectRuntime(site.Path, "", false)
+
+	if site.Secured {
+		if err := certs.SecureSite(*site); err != nil {
+			return fmt.Errorf("regenerating SSL vhost: %w", err)
+		}
+	} else if err := nginx.GenerateVhost(*site, site.PHPVersion); err != nil {
+		return fmt.Errorf("regenerating vhost: %w", err)
+	}
+
+	if err := nginx.ReloadWithRetry(10 * time.Second); err != nil {
+		return fmt.Errorf("nginx reload: %w", err)
+	}
+
+	if RecreateFPMWorkers != nil {
+		RecreateFPMWorkers(site, workers)
+	}
 	return nil
 }
 
@@ -252,7 +327,7 @@ func FinishCustomFPMLink(site config.Site, containerCfg *config.ContainerConfig)
 	}
 
 	_ = podman.WriteContainerHosts()
-	if err := nginx.Reload(); err != nil {
+	if err := nginx.ReloadWithRetry(10 * time.Second); err != nil {
 		return fmt.Errorf("nginx reload: %w", err)
 	}
 	if podman.AfterUnitChange != nil {
@@ -279,7 +354,7 @@ func FinishHostProxyLink(site config.Site) error {
 		}
 	}
 
-	if err := nginx.Reload(); err != nil {
+	if err := nginx.ReloadWithRetry(10 * time.Second); err != nil {
 		return fmt.Errorf("nginx reload: %w", err)
 	}
 
@@ -331,7 +406,7 @@ func FinishCustomLink(site config.Site, containerCfg *config.ContainerConfig) er
 
 	_ = podman.WriteContainerHosts()
 
-	if err := nginx.Reload(); err != nil {
+	if err := nginx.ReloadWithRetry(10 * time.Second); err != nil {
 		return fmt.Errorf("nginx reload: %w", err)
 	}
 

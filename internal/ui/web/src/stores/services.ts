@@ -1,3 +1,4 @@
+import { m } from '../paraglide/messages.js';
 import { writable, derived, get } from 'svelte/store';
 import { apiJson, apiFetch } from '$lib/api';
 
@@ -34,6 +35,15 @@ export async function saveServiceEnv(
 }
 import { wsMessage } from '$lib/ws';
 import { sites } from './sites';
+import { groupByCategory, type CategoryGroup } from '$lib/presetCategories';
+
+// One published port of a service: its container-internal port, its preset
+// default host port, and the current host override (0/undefined = on default).
+export interface ServicePortMapping {
+  container: number;
+  default: number;
+  published?: number;
+}
 
 export interface Service {
   name: string;
@@ -43,14 +53,38 @@ export interface Service {
   dashboard?: string;
   dashboard_external?: boolean;
   connection_url?: string;
+  // Host (published) port the service is exposed on; reflects a moved port.
+  port?: number;
+  // Published-port override (0/undefined = default), the preset default host
+  // port, and the extra published mappings — read by the ports modal.
+  published_port?: number;
+  default_port?: number;
+  extra_ports?: string[];
+  // Published mappings past the primary (a multi-port service like mailpit or
+  // rustfs): container-internal port, preset-default host port, current override.
+  secondary_ports?: ServicePortMapping[];
   custom?: boolean;
   is_default?: boolean;
+  // True when lerd ships this service as a bundled preset (default-stack or
+  // optional). Drives the ports modal's extra-ports affordance.
+  preset_owned?: boolean;
   tunable?: boolean;
+  // True for a database engine (mysql/mariadb/postgres/mongo), so the detail
+  // view shows its Databases tab.
+  is_database?: boolean;
   site_count: number;
   site_domains?: string[];
   pinned?: boolean;
   paused?: boolean;
   depends_on?: string[];
+  // Resolved from the service's preset YAML, so a service predating these
+  // fields still renders with the right category and icon.
+  category?: string;
+  icon?: string;
+  admin_for?: string[];
+  // The preset this service came from ("mariadb" for "mariadb-11-8"), matched
+  // against another preset's admin_for to find the UI that administers it.
+  preset?: string;
   queue_site?: string;
   stripe_listener_site?: string;
   schedule_worker_site?: string;
@@ -69,11 +103,24 @@ export interface Service {
   migration_supported?: boolean;
   can_rollback?: boolean;
   port_conflicts?: PortConflict[];
+  // Client tools this service exposes as host shims (mysqldump, pg_dump…), each
+  // with whether the host already has the tool and the user's current decision.
+  client_shims?: ClientShimInfo[];
 }
 
 export interface PortConflict {
   port: string;
   label?: string;
+}
+
+export interface ClientShimInfo {
+  tool: string;
+  // The service that actually backs the shim. When it differs from the service
+  // being viewed, this row is a same-family duplicate managed elsewhere.
+  owner?: string;
+  host_has: boolean;
+  enabled: boolean;
+  decided: boolean;
 }
 
 export interface PhaseEvent {
@@ -129,6 +176,14 @@ function isWorker(s: Service): boolean {
 }
 
 export const coreServices = derived(services, ($s) => $s.filter((x) => !isWorker(x)));
+
+// The core services list bucketed by the service's category (databases, cache,
+// messaging…) so the middle panel shows one labelled section per type instead
+// of a flat list. Reuses the same taxonomy the discovery grid groups by.
+export const coreServiceGroups = derived(
+  coreServices,
+  ($core): CategoryGroup<Service>[] => groupByCategory($core)
+);
 
 export interface WorkerGroup {
   key: string;
@@ -188,6 +243,57 @@ export async function serviceAction(
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+// setServicePorts sends the primary published-port override (null = reset to
+// default), any secondary-port overrides keyed by container port, and the full
+// extra-ports set in one request, routed through the shared serviceops layer
+// server-side. Returns {ok, error} so the modal can surface a validation failure
+// (e.g. a port already in use).
+export async function setServicePorts(
+  name: string,
+  body: {
+    published_port: number | null;
+    published_ports?: Record<string, number>;
+    extra_ports: string[];
+  }
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch('/api/services/' + encodeURIComponent(name) + '/ports', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    if (res.ok && data.ok) {
+      await loadServices();
+      return { ok: true };
+    }
+    return { ok: false, error: data.error || m.common_failed() };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function setServiceShim(
+  name: string,
+  body: { tool: string; enabled: boolean }
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch('/api/services/' + encodeURIComponent(name) + '/shims', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    if (res.ok && data.ok) {
+      await loadServices();
+      return { ok: true };
+    }
+    return { ok: false, error: data.error || m.common_failed() };
+  } catch (e) {
+    return { ok: false, error: String(e) };
   }
 }
 
@@ -265,6 +371,8 @@ function phaseLabel(phase: string): string {
       return 'Dumping data…';
     case 'restoring_data':
       return 'Restoring data…';
+    case 'restore_warnings':
+      return 'Restored with errors';
     case 'swapping_data_dir':
       return 'Swapping data dir…';
     case 'starting_deps':
@@ -322,6 +430,9 @@ export async function streamServiceAction(
     const decoder = new TextDecoder();
     let buf = '';
     let finalError: string | undefined;
+    // A restore the engine complained about is the last thing worth reading, so
+    // it outlives the phase that follows it instead of being wiped on success.
+    let finalWarning: string | undefined;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -338,11 +449,12 @@ export async function streamServiceAction(
           continue;
         }
         if (evt.phase === 'error') {
-          finalError = evt.error || 'failed';
+          finalError = evt.error || m.common_failed();
           setProgress(name, { phase: 'error', message: finalError, error: true });
           continue;
         }
         if (evt.phase === 'done') continue;
+        if (evt.phase === 'restore_warnings') finalWarning = evt.message || phaseLabel(evt.phase);
         const message =
           evt.phase === 'pulling_image' && evt.image
             ? 'Pulling ' + evt.image
@@ -352,6 +464,9 @@ export async function streamServiceAction(
     }
     if (finalError) {
       setTimeout(() => setProgress(name, null), 5000);
+    } else if (finalWarning) {
+      setProgress(name, { phase: 'restore_warnings', message: finalWarning, error: true });
+      setTimeout(() => setProgress(name, null), 15000);
     } else {
       setProgress(name, null);
     }
@@ -510,7 +625,7 @@ export async function saveServiceConfig(
       rolledBack: data.rolled_back
     };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
   // No finally { loadServices() } — the publishAfter middleware on
   // the services route already broadcasts a sites/services WS frame
@@ -523,18 +638,18 @@ export async function loadServiceTuningBackups(name: string): Promise<LoadTuning
   try {
     const res = await apiFetch(tuningURL(name) + '/backups');
     if (!res.ok) {
-      return { ok: false, list: [], error: `Failed to load backups (${res.status})` };
+      return { ok: false, list: [], error: m.common_backupsLoadFailed({ status: res.status }) };
     }
     const list = (await res.json()) as ServiceTuningBackup[];
     return { ok: true, list: Array.isArray(list) ? list : [] };
   } catch (e) {
-    return { ok: false, list: [], error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, list: [], error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 
 export async function loadServiceTuningBackupContent(name: string, backupName: string): Promise<string> {
   const res = await apiFetch(tuningURL(name) + '/backups/' + encodeURIComponent(backupName));
-  if (!res.ok) throw new Error(`Failed to load backup (${res.status})`);
+  if (!res.ok) throw new Error(m.common_backupLoadFailed({ status: res.status }));
   return await res.text();
 }
 
@@ -566,7 +681,7 @@ export async function restoreServiceTuning(
       rolledBack: data.rolled_back
     };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
   // No finally { loadServices() } — the publishAfter(KindServices)
   // middleware on /api/services/ already triggers a WS broadcast that
@@ -598,7 +713,7 @@ export async function resetServiceTuning(name: string): Promise<ResetTuningResul
       exists: data.exists
     };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : 'Request failed' };
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 

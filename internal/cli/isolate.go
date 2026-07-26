@@ -3,11 +3,11 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
-	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	"github.com/spf13/cobra"
 )
 
@@ -23,62 +23,77 @@ func NewIsolateCmd() *cobra.Command {
 
 func runIsolate(_ *cobra.Command, args []string) error {
 	version := args[0]
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 
-	if err := os.WriteFile(filepath.Join(cwd, ".php-version"), []byte(version+"\n"), 0644); err != nil {
-		return fmt.Errorf("writing .php-version: %w", err)
-	}
-
-	// Worktree path: persist to its .lerd.yaml (creating the file if missing
-	// so the override travels with the branch) and regenerate just the
-	// worktree's nginx vhost so the new FPM upstream takes effect.
+	// Worktree path: the override travels with the branch, so the parent site's
+	// own version is left alone.
 	if site, branch, ok := FindParentSiteForWorktree(cwd); ok {
-		if err := config.SetWorktreePHPVersion(cwd, version); err != nil {
-			return fmt.Errorf("updating .lerd.yaml: %w", err)
+		res, err := siteops.SetSitePHPVersion(site, version, siteops.PHPVersionOpts{Branch: branch})
+		if err != nil {
+			return err
 		}
-		if err := regenerateWorktreeVhost(site, branch, version); err != nil {
-			fmt.Printf("[WARN] regenerating worktree vhost: %v\n", err)
-		} else {
-			nginx.ReloadOrWarn("")
+		feedback.Begin()
+		feedback.Done("PHP pinned to " + feedback.Val(res.Version) + " · worktree " + branch + " of " + site.Name)
+		if res.Clamped {
+			feedback.Note(res.Requested + " isn't usable here; clamped to " + res.Version)
 		}
-		fmt.Printf("PHP version pinned to %s for worktree %s of %s\n", version, branch, site.Name)
+		reportImageGap(res)
 		return nil
 	}
 
-	// Parent-site path: keep the legacy behaviour — write .lerd.yaml when it
-	// exists, then re-link so the registry and nginx pick up the change.
-	_ = config.SetProjectPHPVersion(cwd, version)
-	fmt.Printf("PHP version pinned to %s\n", version)
-
-	if _, err := config.FindSiteByPath(cwd); err == nil {
-		if err := runLink([]string{}); err != nil {
-			fmt.Printf("[WARN] re-linking site: %v\n", err)
+	// An unlinked directory has no site to switch, so the pin is all there is
+	// to write. link picks it up when the directory is eventually linked.
+	site, err := config.FindSiteByPath(cwd)
+	if err != nil {
+		if !config.IsSupportedPHPVersion(version) {
+			return fmt.Errorf("unsupported PHP version %q (supported: %s)", version, strings.Join(config.SupportedPHPVersions, ", "))
 		}
+		if err := siteops.PinPHPVersionFile(cwd, version); err != nil {
+			return fmt.Errorf("writing .php-version: %w", err)
+		}
+		_ = config.SetProjectPHPVersion(cwd, version)
+		feedback.Begin()
+		feedback.Done("PHP pinned to " + feedback.Val(version))
+		return nil
 	}
 
-	return nil
-}
-
-// regenerateWorktreeVhost rewrites a single worktree's nginx vhost using the
-// supplied PHP version, picking the secured/unsecured template based on the
-// parent site's TLS state.
-func regenerateWorktreeVhost(site *config.Site, branch, phpVersion string) error {
-	worktrees, err := gitpkg.DetectWorktrees(site.Path, site.PrimaryDomain())
+	res, err := siteops.SetSitePHPVersion(site, version, siteops.PHPVersionOpts{})
 	if err != nil {
 		return err
 	}
-	for _, wt := range worktrees {
-		if wt.Branch != branch {
-			continue
-		}
-		if site.Secured {
-			return nginx.GenerateWorktreeSSLVhost(wt.Domain, wt.Path, phpVersion, site.PrimaryDomain(), site.Name, wt.Branch)
-		}
-		return nginx.GenerateWorktreeVhost(wt.Domain, wt.Path, phpVersion, site.Name, wt.Branch)
+	feedback.Begin()
+	feedback.Done("PHP pinned to " + feedback.Val(res.Version))
+	if res.Clamped {
+		feedback.Note(res.Requested + " isn't usable here; clamped to " + res.Version + " and updated .lerd.yaml / .php-version")
 	}
-	return fmt.Errorf("worktree %q not found", branch)
+	if res.Demoted {
+		feedback.Note("FrankenPHP has no image for PHP " + res.Version + "; the site now runs on FPM")
+	}
+	reportImageGap(res)
+	// The version the site runs on decides which composer ext-* requirements
+	// its image can satisfy, so re-check them here. isolate used to get this
+	// from the full re-link it no longer performs.
+	if cfg, err := config.LoadGlobal(); err == nil {
+		warnMissingExtensions(cwd, site.Name, res.Version, cfg)
+	}
+	return nil
+}
+
+// reportImageGap surfaces what the new version's image is missing. Changing
+// version is exactly when a site loses a custom extension, and lerd knows what
+// the target image holds, so staying quiet is the bug.
+func reportImageGap(res siteops.PHPVersionResult) {
+	switch {
+	case res.NotInstalled:
+		feedback.Note("PHP " + res.Version + " has no image yet; run 'lerd php:rebuild " + res.Version + "' to build it")
+	case res.Stale:
+		feedback.Warn("PHP %s's image predates your custom extensions and packages", res.Version)
+		fmt.Printf("       run 'lerd php:rebuild %s' to bring it up to date\n", res.Version)
+	case len(res.Missing) > 0:
+		feedback.Warn("PHP %s cannot load: %s", res.Version, strings.Join(res.Missing, ", "))
+		fmt.Printf("       they did not build on this version; a rebuild will not change that\n")
+	}
 }

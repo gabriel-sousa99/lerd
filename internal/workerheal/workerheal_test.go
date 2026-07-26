@@ -6,6 +6,10 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 // stubEnv stages a sites.yaml with the given names in a temp XDG_DATA_HOME
@@ -413,11 +417,166 @@ func TestEnrich_KeepsPreSetErrorAndSkipsCall(t *testing.T) {
 	}
 }
 
+func TestEnrich_UnreachableGetsDedicatedLineNotJournal(t *testing.T) {
+	prev := lastErrorFn
+	t.Cleanup(func() { lastErrorFn = prev })
+	// The journal line for an active server would read as a false cause; Enrich
+	// must not call it for an unreachable worker.
+	lastErrorFn = func(string) string {
+		t.Fatal("readLastError must not be called for an unreachable worker")
+		return ""
+	}
+
+	out := Enrich([]UnhealthyWorker{{Unit: "lerd-vite-foo", Site: "foo", Worker: "vite", State: "unreachable"}})
+	if out[0].LastError == "" || out[0].LastError == "boom" {
+		t.Errorf("unreachable last_error = %q, want the dedicated not-accepting line", out[0].LastError)
+	}
+}
+
 func TestEnrich_NilAndEmpty(t *testing.T) {
 	if got := Enrich(nil); got != nil {
 		t.Errorf("Enrich(nil) = %v, want nil", got)
 	}
 	if got := Enrich([]UnhealthyWorker{}); len(got) != 0 {
 		t.Errorf("Enrich(empty) = %v, want empty", got)
+	}
+}
+
+// An active worker whose declared server has died (process up, port refused) is
+// flagged "unreachable"; a plain active worker with no health probe is not.
+func TestDetect_UnreachableActiveWorkerFlagged(t *testing.T) {
+	stubEnv(t,
+		[]string{"myapp"}, nil,
+		map[string]string{
+			"lerd-vite-myapp.service":  "active",
+			"lerd-queue-myapp.service": "active",
+		},
+		nil,
+	)
+	prev := workerReachableFn
+	workerReachableFn = func(_ string, _ *config.Framework, worker string, _ time.Time) (reachable, probed bool) {
+		if worker == "vite" {
+			return false, true // process up, server not accepting
+		}
+		return false, false // no health probe for other workers
+	}
+	t.Cleanup(func() { workerReachableFn = prev })
+
+	got, err := Detect()
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(got) != 1 || got[0].Unit != "lerd-vite-myapp" {
+		t.Fatalf("got %v, want [lerd-vite-myapp]", unitNames(got))
+	}
+	if got[0].State != "unreachable" {
+		t.Errorf("state = %q, want unreachable", got[0].State)
+	}
+}
+
+func TestResolveWorkerUnit(t *testing.T) {
+	sites := map[string]string{"ws": "/home/u/ws", "feat": "/home/u/feat", "app": "/home/u/app"}
+
+	if s, w, p := resolveWorkerUnit("vite-app", sites, ""); s != "app" || w != "vite" || p != "" {
+		t.Errorf("parent: got %q/%q/%q, want app/vite/empty", s, w, p)
+	}
+	if s, w, p := resolveWorkerUnit("vite-ws-feat-x", sites, "/home/u/wt/feat-x"); s != "ws" || w != "vite" || p != "/home/u/wt/feat-x" {
+		t.Errorf("worktree: got %q/%q/%q, want ws/vite//home/u/wt/feat-x", s, w, p)
+	}
+	// Without a WorkingDirectory a worktree unit is unresolvable, so it is skipped
+	// rather than mis-parsed.
+	if s, _, _ := resolveWorkerUnit("vite-ws-feat-x", sites, ""); s != "" {
+		t.Errorf("no workingdir: got site %q, want empty", s)
+	}
+	// A worktree of "app" checked out into a directory named after the registered
+	// site "feat": the unit ends with "-feat", so a suffix match would hand it to
+	// feat as a worker named "vite-app". WorkingDirectory settles it.
+	if s, w, p := resolveWorkerUnit("vite-app-feat", sites, "/home/u/wt/feat"); s != "app" || w != "vite" || p != "/home/u/wt/feat" {
+		t.Errorf("colliding worktree dir: got %q/%q/%q, want app/vite//home/u/wt/feat", s, w, p)
+	}
+	// A parent host worker's WorkingDirectory is its own checkout, which must not be
+	// read as a worktree slug: here the worker name itself ends with another site's
+	// name, so treating the checkout as a worktree would resolve site "feat".
+	if s, w, p := resolveWorkerUnit("queue-feat-app", sites, "/home/u/app"); s != "app" || w != "queue-feat" || p != "" {
+		t.Errorf("parent whose worker name ends in a site name: got %q/%q/%q, want app/queue-feat/empty", s, w, p)
+	}
+	if s, w, p := resolveWorkerUnit("vite-app", sites, "/home/u/app"); s != "app" || w != "vite" || p != "" {
+		t.Errorf("parent with workingdir: got %q/%q/%q, want app/vite/empty", s, w, p)
+	}
+	// A container worker sets no WorkingDirectory, so systemd reports the inherited
+	// home with a "!" marker. It is not a checkout and must not resolve as one.
+	if s, w, p := resolveWorkerUnit("cron-app", sites, "!/home/app"); s != "app" || w != "cron" || p != "" {
+		t.Errorf("inherited workingdir: got %q/%q/%q, want app/cron/empty", s, w, p)
+	}
+}
+
+func TestDetect_UnreachableWorktreeWorkerFlagged(t *testing.T) {
+	stubEnv(t,
+		[]string{"myapp"}, nil,
+		map[string]string{"lerd-vite-myapp-featx.service": "active"},
+		nil,
+	)
+	prevReach, prevMeta := workerReachableFn, unitMetaFn
+	workerReachableFn = func(_ string, _ *config.Framework, worker string, _ time.Time) (bool, bool) {
+		return false, worker == "vite" // vite: process up, not accepting
+	}
+	unitMetaFn = func() map[string]siteinfo.UnitMeta {
+		return map[string]siteinfo.UnitMeta{
+			"lerd-vite-myapp-featx.service": {WorkingDir: "/home/u/wt/featx"},
+		}
+	}
+	t.Cleanup(func() { workerReachableFn = prevReach; unitMetaFn = prevMeta })
+
+	got, err := Detect()
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(got) != 1 || got[0].Unit != "lerd-vite-myapp-featx" || got[0].State != "unreachable" {
+		t.Fatalf("got %v, want [lerd-vite-myapp-featx unreachable]", unitNames(got))
+	}
+}
+
+func TestDetect_ReachableActiveWorkerNotFlagged(t *testing.T) {
+	stubEnv(t,
+		[]string{"myapp"}, nil,
+		map[string]string{"lerd-vite-myapp.service": "active"},
+		nil,
+	)
+	prev := workerReachableFn
+	workerReachableFn = func(_ string, _ *config.Framework, _ string, _ time.Time) (bool, bool) { return true, true } // serving
+	t.Cleanup(func() { workerReachableFn = prev })
+
+	got, err := Detect()
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("a reachable server must not be flagged, got %v", unitNames(got))
+	}
+}
+
+// An unreachable worker's process is still up, so heal must restart it (a start
+// is a no-op on an active unit), while failed/stopped workers still start.
+func TestHealAll_RestartsUnreachableWorker(t *testing.T) {
+	stubEnv(t,
+		[]string{"myapp"}, nil,
+		map[string]string{"lerd-vite-myapp.service": "active"},
+		func(string) error { t.Fatal("unreachable worker must be restarted, not started"); return nil },
+	)
+	prevReach, prevRestart := workerReachableFn, restartFn
+	workerReachableFn = func(_ string, _ *config.Framework, _ string, _ time.Time) (bool, bool) { return false, true }
+	var restarted string
+	restartFn = func(unit string) error { restarted = unit; return nil }
+	t.Cleanup(func() { workerReachableFn = prevReach; restartFn = prevRestart })
+
+	res, err := HealAll(nil)
+	if err != nil {
+		t.Fatalf("HealAll: %v", err)
+	}
+	if restarted != "lerd-vite-myapp" {
+		t.Errorf("restarted %q, want lerd-vite-myapp", restarted)
+	}
+	if len(res.Healed) != 1 {
+		t.Errorf("healed %d, want 1", len(res.Healed))
 	}
 }

@@ -2,24 +2,35 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/origin"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	defaultBaseURL = "https://raw.githubusercontent.com/gabriel-sousa99/lerd-frameworks/main/frameworks"
-	httpTimeout    = 10 * time.Second
+	httpTimeout       = 10 * time.Second
+	maxFetchAttempts  = 3
+	fetchRetryBackoff = 400 * time.Millisecond
 )
 
-// Client fetches framework definitions from the remote store.
+// sleepFn is the backoff sleep, a seam so tests don't wait in real time.
+var sleepFn = time.Sleep
+
+// Client fetches framework definitions from the remote store. BaseURL is tried
+// first; Fallbacks are tried in order if it fails, so a binary can reach the new
+// store location after an org move and fall back to the old one before it.
 type Client struct {
-	BaseURL string
+	BaseURL   string
+	Fallbacks []string
 }
 
 // Index is the top-level store index listing all available frameworks.
@@ -57,24 +68,87 @@ func autoFetchFramework(name, version string) (*config.Framework, error) {
 
 // NewClient returns a store client with default settings.
 func NewClient() *Client {
+	urls := origin.StoreBaseURLs()
 	return &Client{
-		BaseURL: defaultBaseURL,
+		BaseURL:   urls[0],
+		Fallbacks: urls[1:],
 	}
 }
 
 // FetchIndex downloads the store index.
 func (c *Client) FetchIndex() (*Index, error) {
+	idx, _, err := c.fetchIndex()
+	return idx, err
+}
+
+// fetchIndex downloads and parses the store index, returning the raw bytes too so
+// callers can persist them to the on-disk cache verbatim.
+func (c *Client) fetchIndex() (*Index, []byte, error) {
 	data, err := c.fetch("index.json")
 	if err != nil {
-		return nil, fmt.Errorf("fetching store index: %w", err)
+		return nil, nil, fmt.Errorf("fetching store index: %w", err)
 	}
 
 	var idx Index
 	if err := json.Unmarshal(data, &idx); err != nil {
-		return nil, fmt.Errorf("parsing store index: %w", err)
+		return nil, nil, fmt.Errorf("parsing store index: %w", err)
 	}
 
+	return &idx, data, nil
+}
+
+// RefreshIndex downloads the store index, updates the local cache, and returns
+// it, so offline detection and listing can read the full catalogue without a
+// network round trip.
+func (c *Client) RefreshIndex() (*Index, error) {
+	idx, data, err := c.fetchIndex()
+	if err != nil {
+		return nil, err
+	}
+	writeCachedIndex(data)
+	return idx, nil
+}
+
+// WatchIndex refreshes the cached store index once at startup and then on every
+// interval tick. Meant to run as a goroutine from the long-running watcher.
+func WatchIndex(interval time.Duration) {
+	_, _ = NewClient().RefreshIndex()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for range t.C {
+		_, _ = NewClient().RefreshIndex()
+	}
+}
+
+// loadCachedIndex reads and parses the locally cached store index.
+func loadCachedIndex() (*Index, error) {
+	data, err := os.ReadFile(config.StoreIndexFile())
+	if err != nil {
+		return nil, err
+	}
+	var idx Index
+	if err := json.Unmarshal(data, &idx); err != nil {
+		return nil, err
+	}
 	return &idx, nil
+}
+
+// writeCachedIndex persists the raw index bytes to the local cache atomically
+// (temp then rename) so an offline reader in another process, or a crash
+// mid-write, never sees a truncated file. Best effort: a cache we cannot write
+// just means the next read falls back to the network.
+func writeCachedIndex(data []byte) {
+	path := config.StoreIndexFile()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // FetchFramework downloads a framework definition from the store.
@@ -197,8 +271,60 @@ func (c *Client) findEntry(idx *Index, name string) (*IndexEntry, bool) {
 }
 
 func (c *Client) fetch(path string) ([]byte, error) {
-	url := c.BaseURL + "/" + path
 	client := &http.Client{Timeout: httpTimeout}
+	var errs []string
+	for _, base := range append([]string{c.BaseURL}, c.Fallbacks...) {
+		body, err := fetchWithRetry(client, base+"/"+path)
+		if err == nil {
+			return body, nil
+		}
+		errs = append(errs, err.Error())
+	}
+	return nil, fmt.Errorf("fetching %s: %s", path, strings.Join(errs, "; "))
+}
+
+// fetchWithRetry retries a transient fetch failure, a request timeout, a dropped
+// connection, or a 5xx, with a short linear backoff before giving up. A slow
+// raw.githubusercontent.com response is common when refreshing many definitions at
+// once, and would otherwise fail a store entry on the first stall; a definitive 4xx
+// (e.g. a removed definition) is not retried.
+func fetchWithRetry(client *http.Client, url string) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxFetchAttempts; attempt++ {
+		body, err := fetchOne(client, url)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if !retryableFetchErr(err) || attempt == maxFetchAttempts {
+			break
+		}
+		sleepFn(fetchRetryBackoff * time.Duration(attempt))
+	}
+	return nil, lastErr
+}
+
+// httpStatusError carries a non-200 response code so retry classification can tell
+// a retryable 5xx from a definitive 4xx.
+type httpStatusError struct {
+	code int
+	url  string
+}
+
+func (e *httpStatusError) Error() string { return fmt.Sprintf("HTTP %d from %s", e.code, e.url) }
+
+// retryableFetchErr reports whether an error is worth retrying: any network or
+// timeout error (client.Do failing) is transient, an HTTP 5xx is transient, and a
+// 4xx is not.
+func retryableFetchErr(err error) bool {
+	var se *httpStatusError
+	if errors.As(err, &se) {
+		return se.code >= 500
+	}
+	return true
+}
+
+func fetchOne(client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
 	if err != nil {
 		return nil, err
@@ -212,7 +338,7 @@ func (c *Client) fetch(path string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
+		return nil, &httpStatusError{code: resp.StatusCode, url: url}
 	}
 
 	return io.ReadAll(resp.Body)

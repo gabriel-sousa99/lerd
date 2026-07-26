@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Lerd Oracle Edition installer — https://github.com/gabriel-sousa99/lerd
 #
-# Fork of gabriel-sousa99/lerd with:
+# Fork of lerd-env/lerd (upstream: https://lerd.sh) with:
 #   • Oracle Instant Client 21.18 (LTS) em /opt/oracle/instantclient
-#   • Extensão oci8 pré-compilada em toda imagem PHP (PHP 7.4 → 8.4)
+#   • Extensão oci8 pré-compilada em toda imagem PHP (PHP 5.6 → 8.5)
 #   • Extensões memcached + amqp pré-instaladas (ecossistema Laravel)
 #   • Presets de serviço extras: oracle-xe (Oracle XE 21c) + typesense + typesense-dashboard
 #   • Oracle como opção de DB no `lerd init/link` (DB_CONNECTION=oracle)
 #   • Dashboard com Debug Area, editor de .env, gerenciamento de extensões PHP customizadas
+#   • HTTPS sem DNS gerenciado: CA do mkcert instalada em qualquer modo, *.localhost por RFC 6761
 #   • Auto-update apontado para gabriel-sousa99/lerd
 #
-# Releases seguem o esquema v1.21.2-oracle.N (rebase periódico sobre upstream).
+# Releases seguem o esquema vX.Y.Z-oracle.N (rebase periódico sobre upstream).
 #
 # Uso:
 #   Install:   curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
@@ -21,8 +22,15 @@
 set -euo pipefail
 
 # ── Constants ────────────────────────────────────────────────────────────────
-REPO="gabriel-sousa99/lerd"
+# REPO is the GitHub owner/name release assets are fetched from; override with
+# LERD_REPO so a future org move needs no installer change. Defaults to the fork,
+# which publishes the Oracle-enabled binaries and images.
+REPO="${LERD_REPO:-gabriel-sousa99/lerd}"
 BINARY="lerd"
+# Command shown to install the optional Lerd desktop app (a dedicated window
+# with native desktop notifications), distributed as a Flatpak. Overridable so
+# the ref URL can move.
+DESKTOP_INSTALL_CMD="${LERD_DESKTOP_INSTALL_CMD:-flatpak install --user https://lerd.sh/lerd.flatpakref}"
 INSTALL_DIR="${LERD_INSTALL_DIR:-$HOME/.local/bin}"
 LERD_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lerd"
 LERD_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/lerd"
@@ -50,10 +58,19 @@ star_note() {
 }
 
 # ── Platform detection ───────────────────────────────────────────────────────
+detect_os() {
+  case "$(uname -s)" in
+    Linux)  echo "linux" ;;
+    Darwin) echo "darwin" ;;
+    *) die "Unsupported OS: $(uname -s). Lerd supports Linux and macOS." ;;
+  esac
+}
+
 detect_arch() {
+  # macOS reports arm64; Linux reports aarch64: both map to the arm64 release.
   case "$(uname -m)" in
-    x86_64)  echo "amd64" ;;
-    aarch64) echo "arm64" ;;
+    x86_64)        echo "amd64" ;;
+    aarch64|arm64) echo "arm64" ;;
     *) die "Unsupported architecture: $(uname -m)" ;;
   esac
 }
@@ -68,15 +85,41 @@ detect_distro() {
   fi
 }
 
+# detect_distro_like returns the ID_LIKE field from /etc/os-release, the space
+# separated list of parent distros a derivative declares (e.g. bazzite -> fedora).
+detect_distro_like() {
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    echo "${ID_LIKE:-}"
+  fi
+}
+
+# is_atomic reports whether this host booted from an ostree image (Fedora
+# Silverblue, Bazzite, Kinoite, CoreOS). On these, packages are layered with
+# rpm-ostree and a reboot, not installed into the running system.
+is_atomic() {
+  [ -f /run/ostree-booted ]
+}
+
 distro_family() {
   local distro; distro="$(detect_distro)"
   case "$distro" in
-    arch|manjaro|endeavouros|garuda) echo "arch" ;;
-    debian|ubuntu|pop|linuxmint|elementary|zorin) echo "debian" ;;
-    fedora|rhel|centos|rocky|alma) echo "fedora" ;;
-    opensuse*|sles) echo "suse" ;;
-    *) echo "unknown" ;;
+    arch|manjaro|endeavouros|garuda) echo "arch"; return ;;
+    debian|ubuntu|pop|linuxmint|elementary|zorin) echo "debian"; return ;;
+    fedora|rhel|centos|rocky|alma) echo "fedora"; return ;;
+    opensuse*|sles) echo "suse"; return ;;
   esac
+  # A derivative not listed above (bazzite, nobara, cachyos, ...) still declares
+  # its parents in ID_LIKE, so fall back to that before giving up as unknown.
+  local like; like=" $(detect_distro_like) "
+  case "$like" in
+    *" arch "*)                           echo "arch"; return ;;
+    *" debian "*|*" ubuntu "*)            echo "debian"; return ;;
+    *" fedora "*|*" rhel "*|*" centos "*) echo "fedora"; return ;;
+    *" suse "*|*" opensuse "*)            echo "suse"; return ;;
+  esac
+  echo "unknown"
 }
 
 # ── Prerequisite checks ──────────────────────────────────────────────────────
@@ -102,7 +145,7 @@ ask_dns_mode() {
   read -r _ans </dev/tty 2>/dev/null || true
   if [[ "$_ans" =~ ^[Nn]$ ]]; then
     DNS_MODE="localhost"
-    info "Using *.localhost over HTTP, mkcert and nss-tools are not required"
+    info "Using *.localhost over HTTP, no certificates or extra packages required"
   else
     DNS_MODE="managed"
   fi
@@ -154,6 +197,15 @@ check_certutil() {
     suse)   pkg="mozilla-nss-tools" ;;
     *)      pkg="nss-tools" ;;
   esac
+  if is_atomic; then
+    # nss-tools can't be layered inline (rpm-ostree needs a reboot), so don't
+    # queue it for the package installer, which would die or fail on ostree.
+    # Guide instead, and leave localhost as the no-package alternative.
+    warn "certutil not found — mkcert can't trust HTTPS certs in Chrome/Firefox on this atomic image"
+    info "For browser trust: rpm-ostree install $pkg, reboot, then run 'lerd dns:repair'"
+    info "Or re-run and choose localhost DNS to serve plain http with no certificates"
+    return
+  fi
   warn "certutil not found — mkcert won't be able to trust HTTPS certs in Chrome/Firefox"
   MISSING_PKGS+=("$pkg")
 }
@@ -170,6 +222,34 @@ check_podman_rootless() {
 }
 
 check_prerequisites() {
+  if [ "$(detect_os)" = "darwin" ]; then
+    check_prerequisites_macos
+  else
+    check_prerequisites_linux
+  fi
+}
+
+# macOS needs only the podman CLI on PATH; `lerd install` brings the Podman
+# machine up itself, and mkcert/DNS/launchd are all handled inside the binary.
+# Missing packages are installed via Homebrew (no sudo, unlike the Linux path).
+check_prerequisites_macos() {
+  header "Checking prerequisites"
+
+  check_cmd podman podman "container runtime"
+
+  if [ ${#MISSING_PKGS[@]} -eq 0 ]; then
+    success "All prerequisites met"
+    return
+  fi
+
+  echo ""
+  warn "Missing: ${MISSING_PKGS[*]}"
+  if ask "Install missing packages now (via Homebrew)?"; then
+    install_packages "${MISSING_PKGS[@]}"
+  fi
+}
+
+check_prerequisites_linux() {
   header "Checking prerequisites"
 
   check_cmd podman podman "container runtime"
@@ -213,9 +293,25 @@ check_prerequisites() {
 
 install_packages() {
   local pkgs=("$@")
-  local family; family="$(distro_family)"
 
   header "Installing: ${pkgs[*]}"
+
+  if [ "$(detect_os)" = "darwin" ]; then
+    if ! command -v brew &>/dev/null; then
+      die "Homebrew not found. Install it from https://brew.sh then re-run, or install manually: ${pkgs[*]}"
+    fi
+    brew install "${pkgs[@]}"
+    success "Packages installed"
+    return
+  fi
+
+  local family; family="$(distro_family)"
+
+  if is_atomic; then
+    warn "atomic image detected — packages are layered with rpm-ostree, not installed into the running system"
+    info "Run:  rpm-ostree install ${pkgs[*]}  then reboot and re-run the installer"
+    return
+  fi
 
   case "$family" in
     arch)
@@ -300,7 +396,8 @@ latest_version() {
 # All output goes to stderr — nothing is printed to stdout.
 download_binary() {
   local version="$1" arch="$2" destdir="$3"
-  local filename="lerd_${version}_linux_${arch}.tar.gz"
+  local os; os="$(detect_os)"
+  local filename="lerd_${version}_${os}_${arch}.tar.gz"
   local url="https://github.com/${REPO}/releases/download/v${version}/${filename}"
 
   info "Downloading lerd v${version} (${arch}) via $(_download_tool) ..."
@@ -328,6 +425,38 @@ installed_version() {
   fi
 }
 
+# Full version token including any git-describe suffix (e.g.
+# 1.25.0-6-g7d030096-dirty). installed_version() collapses that to the bare
+# 1.25.0, which is what version_is_dev needs the suffix from.
+installed_version_raw() {
+  if command -v lerd &>/dev/null; then
+    lerd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*' | head -1 || echo ""
+  else
+    echo ""
+  fi
+}
+
+# True when the version token carries a git-describe suffix. Release binaries
+# report a clean X.Y.Z, so a suffix means an ahead-of-release local build that
+# the installer must not silently overwrite with the matching base release.
+version_is_dev() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]
+}
+
+# Guards an overwrite of a local development build. Prints a warning and asks
+# before replacing it; keeps the build and exits 0 when declined or when no tty
+# is available to confirm. $1 is the release version about to be installed.
+guard_dev_build() {
+  local target="$1" current_raw; current_raw="$(installed_version_raw)"
+  version_is_dev "$current_raw" || return 0
+  warn "A local development build (v${current_raw}) is installed."
+  if [ -r /dev/tty ] && ask "Replace it with release v${target}?"; then
+    return 0
+  fi
+  info "Keeping your local build. Reinstall a dev build with: install.sh --local <path>"
+  exit 0
+}
+
 # ── Shell integration ────────────────────────────────────────────────────────
 SHELL_MARKER="# Added by Lerd installer"
 
@@ -336,7 +465,15 @@ detect_shell_rc() {
   case "$shell" in
     fish) echo "$HOME/.config/fish/conf.d/lerd.fish" ;;
     zsh)  echo "$HOME/.zshrc" ;;
-    *)    echo "$HOME/.bashrc" ;;
+    *)
+      # macOS Terminal launches bash as a login shell, which reads
+      # .bash_profile, not .bashrc; Linux interactive bash reads .bashrc.
+      if [ "$(detect_os)" = "darwin" ]; then
+        echo "$HOME/.bash_profile"
+      else
+        echo "$HOME/.bashrc"
+      fi
+      ;;
   esac
 }
 
@@ -373,11 +510,10 @@ remove_from_path() {
   local rc; rc="$(detect_shell_rc)"
   if [ ! -f "$rc" ]; then return; fi
 
-  # Remove the block: marker line + the next line
+  # Remove the block: marker line + the next line. {N;d;} is POSIX and works on
+  # both GNU and BSD/macOS sed, unlike the GNU-only `,+1` relative address.
   if grep -q "$SHELL_MARKER" "$rc" 2>/dev/null; then
-    # portable: works on both GNU and BSD sed
-    sed -i.bak "/^${SHELL_MARKER}/,+1d" "$rc" && rm -f "${rc}.bak"
-    # also remove blank line before marker if present
+    sed -i.bak -e "/^${SHELL_MARKER}/{N;d;}" "$rc" && rm -f "${rc}.bak"
     info "Removed PATH entry from $rc"
   fi
 }
@@ -386,6 +522,10 @@ remove_from_path() {
 cmd_install() {
   local local_binary="${1:-}"
   header "Installing Lerd"
+
+  # Sampled before anything installs: empty means a genuinely fresh install,
+  # the only time we offer the desktop app.
+  local was_installed; was_installed="$(installed_version)"
 
   # Validate local binary path before running any checks so the error is clear.
   if [ -n "$local_binary" ]; then
@@ -423,6 +563,7 @@ cmd_install() {
       success "Lerd v${version} is already installed and up to date"
       exit 0
     fi
+    guard_dev_build "$version"
 
     local tmpdir; tmpdir="$(mktemp -d)"
     download_binary "$version" "$arch" "$tmpdir"
@@ -445,7 +586,34 @@ cmd_install() {
   else
     "${INSTALL_DIR}/${BINARY}" install --dns "$DNS_MODE"
   fi
+
+  # Offer the desktop app on a fresh Linux install. Its own installer does the
+  # download; here we only record the notification sink the user prefers.
+  if [ -z "$was_installed" ] && [ "$(uname -s)" = "Linux" ] && [ -r /dev/tty ]; then
+    offer_desktop_app
+  fi
+
   star_note
+}
+
+# offer_desktop_app asks whether to use the Lerd desktop app (which delivers
+# native desktop notifications) or stay on the browser, records the choice via
+# `lerd notify target`, and always prints the command to install the app.
+offer_desktop_app() {
+  header "Desktop app"
+  info "Lerd has a desktop app: a dedicated window with native desktop notifications,"
+  info "no browser tab needed. The app installs separately with one command."
+  echo ""
+  if ask "Use the Lerd desktop app? (choose native notifications)"; then
+    "${INSTALL_DIR}/${BINARY}" notify target native >/dev/null 2>&1 || true
+    success "Native desktop notifications enabled"
+    info "Install the desktop app with:"
+  else
+    "${INSTALL_DIR}/${BINARY}" notify target browser >/dev/null 2>&1 || true
+    success "Using browser notifications"
+    info "Prefer a dedicated app later? Install it anytime with:"
+  fi
+  echo -e "     ${CYAN}${DESKTOP_INSTALL_CMD}${RESET}"
 }
 
 # ── Update ───────────────────────────────────────────────────────────────────
@@ -462,6 +630,7 @@ cmd_update() {
     success "Already on latest: v${latest}"
     exit 0
   fi
+  guard_dev_build "$latest"
 
   info "Updating v${current:-unknown} → v${latest}"
   local tmpdir; tmpdir="$(mktemp -d)"
@@ -475,7 +644,148 @@ cmd_update() {
 
 # ── Uninstall ────────────────────────────────────────────────────────────────
 cmd_uninstall() {
+  if [ "$(detect_os)" = "darwin" ]; then
+    cmd_uninstall_macos
+  else
+    cmd_uninstall_linux
+  fi
+}
+
+# macOS teardown: boot out and remove the user LaunchAgents, stop any detached
+# lerd-* podman containers, then drop the binary. The DNS resolver file in
+# /etc/resolver and the Podman machine are left to `lerd uninstall` (run before
+# the binary is removed) since removing the resolver needs sudo.
+cmd_uninstall_macos() {
   header "Uninstalling Lerd"
+
+  # Only `lerd uninstall` drops the DNS resolver (/etc/resolver/test, sudo) and
+  # the Podman machine, and it's gone once we delete the binary below. Surface
+  # the two-step order while the binary is here so the resolver isn't orphaned.
+  if command -v lerd &>/dev/null; then
+    warn "This script does not remove the DNS resolver (/etc/resolver/test) or the Podman machine."
+    info "Those are torn down by 'lerd uninstall' (needs sudo), which is unavailable once the binary is gone."
+    if [ -r /dev/tty ] && ! ask "Continue and remove the lerd binary now?"; then
+      info "Aborted. Run 'lerd uninstall' first, then re-run this uninstaller."
+      exit 0
+    fi
+  fi
+
+  local domain="gui/$(id -u)"
+  local agents_dir="$HOME/Library/LaunchAgents"
+
+  # lerd's launch agents are named lerd-*.plist on disk and their launchctl
+  # label is com.lerd.<filename-without-.plist> (see plistLabel in
+  # launchd_darwin.go), so derive it from the name rather than `defaults read`,
+  # which mis-resolves a .plist-suffixed path and would skip the bootout.
+  if [ -d "$agents_dir" ]; then
+    for f in "$agents_dir"/lerd-*.plist; do
+      [ -f "$f" ] || continue
+      local label; label="com.lerd.$(basename "$f" .plist)"
+      launchctl bootout "$domain/$label" 2>/dev/null || true
+      rm -f "$f"
+    done
+    info "Removed launchd agents from $agents_dir"
+  fi
+
+  # Detached `podman run -d` containers outlive their plists, so remove them
+  # too. Capture with `|| true` first: under `set -o pipefail` a no-match grep
+  # would otherwise abort the whole uninstall before the binary is removed.
+  if command -v podman &>/dev/null; then
+    local containers
+    containers="$(podman ps -a --format '{{.Names}}' 2>/dev/null | grep '^lerd-' || true)"
+    for c in $containers; do
+      podman rm -f "$c" 2>/dev/null || true
+    done
+  fi
+
+  rm -rf "$HOME/Library/Logs/lerd"
+
+  # Remove binaries
+  for b in "$BINARY" lerd-tray; do
+    if [ -f "${INSTALL_DIR}/${b}" ]; then
+      rm -f "${INSTALL_DIR}/${b}"
+      success "Removed ${INSTALL_DIR}/${b}"
+    fi
+  done
+
+  remove_from_path
+
+  if ask "Remove all Lerd data and config? (~/.config/lerd, ~/.local/share/lerd)"; then
+    rm -rf "$LERD_CONFIG_DIR"
+    rm -rf "$LERD_DATA_DIR"
+    success "Removed config and data directories"
+  else
+    info "Config kept at $LERD_CONFIG_DIR"
+    info "Data kept at $LERD_DATA_DIR"
+  fi
+
+  if [ -f /etc/resolver/test ]; then
+    warn "DNS resolver /etc/resolver/test is still present (not removed here)."
+    info "Remove it with: sudo rm -f /etc/resolver/test"
+    info "Remove the Podman machine with: podman machine rm <name>  (see 'podman machine ls')"
+  fi
+
+  success "Lerd uninstalled"
+}
+
+# The root-owned files lerd's managed DNS writes. None of them live under $HOME
+# and only the binary can take them back out, so the uninstaller uses this list
+# both to detect the setup and to tell the user how to clear it by hand.
+LERD_DNS_FILES=(
+  /etc/sudoers.d/lerd
+  /etc/systemd/system/lerd-dns-link.service
+  /etc/systemd/resolved.conf.d/lerd-fallback.conf
+  /etc/systemd/resolved.conf.d/lerd.conf
+  /etc/NetworkManager/conf.d/lerd-dns-link.conf
+  /etc/NetworkManager/conf.d/lerd.conf
+  /etc/NetworkManager/dnsmasq.d/lerd.conf
+  /etc/NetworkManager/dispatcher.d/99-lerd-dns
+)
+
+lerd_dns_config_present() {
+  local f
+  for f in "${LERD_DNS_FILES[@]}"; do
+    [ -e "$f" ] && return 0
+  done
+  return 1
+}
+
+lerd_dns_cleanup_hint() {
+  warn "Lerd's DNS configuration is still on this system and only root can remove it:"
+  info "sudo systemctl disable --now lerd-dns-link.service"
+  info "sudo rm -f ${LERD_DNS_FILES[*]}"
+  info "sudo systemctl daemon-reload && sudo systemctl restart systemd-resolved"
+  info "If the interface is still up: sudo ip link del lerd0"
+}
+
+# Left in place, the link unit recreates lerd0 at every boot pointing .test at a
+# dnsmasq that no longer exists, and the fallback drop-in keeps systemd-resolved's
+# fallback servers switched off for good. The binary is removed further down and
+# it is the only thing that can undo any of it, so offer the teardown here.
+uninstall_linux_dns() {
+  lerd_dns_config_present || return 0
+
+  if ! command -v lerd &>/dev/null; then
+    lerd_dns_cleanup_hint
+    return 0
+  fi
+
+  warn "The system DNS setup (the lerd0 link, its root unit, the NetworkManager rules and systemd-resolved's fallback servers) is removed only by lerd itself."
+  info "Nothing on this machine can undo it once the binary is gone."
+  if ask "Remove the DNS setup now? (runs 'lerd dns:disable', needs sudo)"; then
+    if lerd dns:disable; then
+      success "Removed lerd DNS configuration"
+      return 0
+    fi
+    warn "'lerd dns:disable' did not complete."
+  fi
+  lerd_dns_cleanup_hint
+}
+
+cmd_uninstall_linux() {
+  header "Uninstalling Lerd"
+
+  uninstall_linux_dns
 
   # Stop and remove systemd units — discover from quadlet files on disk
   local quadlet_dir="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
@@ -538,9 +848,9 @@ main() {
   echo "  ███████╗███████╗██║  ██║██████╔╝"
   echo "  ╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝   ${CYAN}Oracle Edition${RESET}${BOLD}"
   echo -e "${RESET}"
-  echo "  Lerd — Podman-powered local PHP dev environment for Linux"
-  echo "  Fork:     https://github.com/${REPO}  (release scheme: v1.21.2-oracle.N)"
-  echo "  Upstream: https://github.com/gabriel-sousa99/lerd"
+  echo "  Lerd — Podman-powered local PHP dev environment for Linux and macOS"
+  echo "  Fork:     https://github.com/${REPO}  (release scheme: vX.Y.Z-oracle.N)"
+  echo "  Upstream: https://lerd.sh"
   echo ""
   echo "  Bundled in every PHP-FPM image: Oracle Instant Client 21.18 + oci8,"
   echo "  memcached, amqp.  Extra service presets: oracle-xe, typesense,"

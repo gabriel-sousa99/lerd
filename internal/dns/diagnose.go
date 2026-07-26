@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // StepStatus is the outcome of a single rung in the layered DNS check.
@@ -55,8 +57,55 @@ type probeFns struct {
 	dnsmasqAnswer    func(tld string) (answer string, err error)
 	resolverHookup   func() (kind string, exists bool, path string)
 	interfaceRouting func(tld string) (interfaceName string, has5300 bool, hasTLD bool, err error)
+	dummyLinkRouting func(tld string) (present bool, routed bool)
 	systemLookup     func(tld string) (addrs []string, err error)
 	vpnActive        func() bool
+	// lanExposedIP is the LAN IP dnsmasq hands out under lan:expose, or "" when
+	// off, so the answer checks accept it as legitimate (see probe.go Check).
+	lanExposedIP func() string
+}
+
+// exposedIP is the LAN IP dnsmasq publishes under lan:expose, or "" when the
+// probe left the hook unset (older callers and tests predating the field).
+func (p probeFns) exposedIP() string {
+	if p.lanExposedIP == nil {
+		return ""
+	}
+	return p.lanExposedIP()
+}
+
+// answerAccepted reports whether a DNS answer is one lerd would legitimately
+// return: loopback always, plus the host LAN IP when lan:expose is on.
+func answerAccepted(answer, lanIP string) bool {
+	return answer == "127.0.0.1" || (lanIP != "" && answer == lanIP)
+}
+
+// acceptedAnswer returns the first address in addrs that lerd would legitimately
+// hand out, or "" if none qualifies.
+func acceptedAnswer(addrs []string, lanIP string) string {
+	for _, a := range addrs {
+		if answerAccepted(a, lanIP) {
+			return a
+		}
+	}
+	return ""
+}
+
+// resolverHookup kinds. Both systemd-resolved paths rely on the lerd0 link;
+// NetworkManager's own dnsmasq resolves .test without resolved and needs no link,
+// and macOS routes .test through /etc/resolver.
+const (
+	nmDispatcherKind   = "NetworkManager dispatcher"
+	resolvedLinkKind   = "systemd-resolved link"
+	resolvedDropinKind = "systemd-resolved drop-in"
+	nmDnsmasqKind      = "NetworkManager dnsmasq"
+	macOSKind          = "macOS native dnsmasq"
+)
+
+// usesDummyLink reports whether a resolver hookup relies on lerd0 for offline
+// .test resolution.
+func usesDummyLink(kind string) bool {
+	return kind == nmDispatcherKind || kind == resolvedLinkKind || kind == resolvedDropinKind
 }
 
 // Diagnose walks the DNS chain top to bottom and returns a structured
@@ -150,23 +199,30 @@ func diagnose(tld string, p probeFns) Diagnostic {
 		return finalize(d)
 	}
 
-	// Rung 4 — direct DNS query at port 5300.
+	// Rung 4 — direct DNS query at port 5300. Under lan:expose dnsmasq answers
+	// the host LAN IP, not loopback, so accept that too rather than red-flag a
+	// healthy exposed setup.
 	answer, err := p.dnsmasqAnswer(tld)
+	lanIP := p.exposedIP()
+	want := "127.0.0.1"
+	if lanIP != "" {
+		want += " or " + lanIP
+	}
 	switch {
 	case err != nil:
 		d.Steps = append(d.Steps, Step{
 			Name:   "dig @127.0.0.1 -p 5300",
 			Status: StepFail,
 			Detail: err.Error(),
-			Hint:   "lerd-dns config probably stale, restart with: systemctl --user restart lerd-dns",
+			Hint:   "lerd-dns config probably stale, repair with: lerd dns:repair",
 		})
 		return finalize(d)
-	case answer != "127.0.0.1":
+	case !answerAccepted(answer, lanIP):
 		d.Steps = append(d.Steps, Step{
 			Name:   "dig @127.0.0.1 -p 5300",
 			Status: StepFail,
-			Detail: fmt.Sprintf("got %q, want 127.0.0.1", answer),
-			Hint:   "lerd-dns address rule missing, restart with: systemctl --user restart lerd-dns",
+			Detail: fmt.Sprintf("got %q, want %s", answer, want),
+			Hint:   "lerd-dns address rule missing, repair with: lerd dns:repair",
 		})
 		return finalize(d)
 	default:
@@ -181,7 +237,7 @@ func diagnose(tld string, p probeFns) Diagnostic {
 		d.Steps = append(d.Steps, Step{
 			Name:   "resolver hookup",
 			Status: StepFail,
-			Detail: "no NetworkManager dispatcher or systemd-resolved drop-in installed",
+			Detail: "no NetworkManager dispatcher, NetworkManager dnsmasq config, or lerd .test link installed",
 			Hint:   "rerun: lerd install",
 		})
 		return finalize(d)
@@ -219,17 +275,49 @@ func diagnose(tld string, p probeFns) Diagnostic {
 		}
 	}
 
+	// Rung 6b — the offline .test route. Both systemd-resolved paths rely on lerd0;
+	// NetworkManager's own dnsmasq and macOS resolve .test with no network already.
+	// These are warnings, not failures: with a link up .test resolves fine either
+	// way, and the damage only shows once the user goes offline, which is exactly
+	// why it's worth saying out loud here rather than leaving them to find it on a
+	// train.
+	if runtime.GOOS == "linux" && usesDummyLink(kind) && p.dummyLinkRouting != nil {
+		switch present, routed := p.dummyLinkRouting(tld); {
+		case !present:
+			d.Steps = append(d.Steps, Step{
+				Name:   "offline ." + tld + " route",
+				Status: StepWarn,
+				Detail: lerdDummyIface + " is missing; ." + tld + " resolves now but will stop once every network link is down",
+				Hint:   "lerd start  (or: sudo systemctl restart " + lerdLinkUnitName + ")",
+			})
+		case !routed:
+			d.Steps = append(d.Steps, Step{
+				Name:   "offline ." + tld + " route",
+				Status: StepWarn,
+				Detail: lerdDummyIface + " is up but carries no ~" + tld + " route to 127.0.0.1:5300",
+				Hint:   "sudo systemctl restart " + lerdLinkUnitName,
+			})
+		default:
+			d.Steps = append(d.Steps, Step{
+				Name:   "offline ." + tld + " route",
+				Status: StepOK,
+				Detail: lerdDummyIface,
+			})
+		}
+	}
+
 	// Rung 7 — end to end resolution at port 53.
 	addrs, err := p.systemLookup(tld)
 	vpn := p.vpnActive != nil && p.vpnActive()
+	accepted := acceptedAnswer(addrs, lanIP)
 	switch {
 	case err != nil:
 		d.Steps = append(d.Steps, systemLookupFailStep(err.Error(), vpn))
-	case !contains(addrs, "127.0.0.1"):
+	case accepted == "":
 		d.Steps = append(d.Steps, systemLookupFailStep(
-			fmt.Sprintf("got %v, want one entry to be 127.0.0.1", addrs), vpn))
+			fmt.Sprintf("got %v, want one entry to be %s", addrs, want), vpn))
 	default:
-		d.Steps = append(d.Steps, Step{Name: "system DNS lookup", Status: StepOK, Detail: "127.0.0.1"})
+		d.Steps = append(d.Steps, Step{Name: "system DNS lookup", Status: StepOK, Detail: accepted})
 	}
 
 	return finalize(d)
@@ -270,15 +358,6 @@ func finalize(d Diagnostic) Diagnostic {
 	return d
 }
 
-func contains(haystack []string, needle string) bool {
-	for _, h := range haystack {
-		if h == needle {
-			return true
-		}
-	}
-	return false
-}
-
 // findListenerCmd returns the shell command the user can run to identify
 // the process bound to a TCP port. macOS lacks ss(8), so we point users at
 // lsof which ships with the OS; everywhere else we assume iproute2 ss.
@@ -298,18 +377,70 @@ func defaultProbes() probeFns {
 		dnsmasqAnswer:    defaultDnsmasqAnswer,
 		resolverHookup:   defaultResolverHookup,
 		interfaceRouting: defaultInterfaceRouting,
+		dummyLinkRouting: defaultDummyLinkRouting,
 		systemLookup:     defaultSystemLookup,
 		vpnActive:        VPNActive,
+		lanExposedIP:     defaultLanExposedIP,
 	}
 }
 
+// defaultLanExposedIP returns the host's primary LAN IP when lan:expose is on,
+// or "" otherwise. Mirrors probe.go's Check so the doctor accepts the same
+// answers the resolver legitimately hands out.
+func defaultLanExposedIP() string {
+	cfg, _ := config.LoadGlobal()
+	if cfg != nil && cfg.LAN.Exposed {
+		return primaryLANIP()
+	}
+	return ""
+}
+
+// defaultDummyLinkRouting reports whether lerd0 exists and still carries the
+// .test route to lerd-dns.
+func defaultDummyLinkRouting(tld string) (bool, bool) {
+	out, err := exec.Command("resolvectl", "status", lerdDummyIface).Output()
+	if err != nil {
+		return false, false
+	}
+	return parseDummyLinkRouting(string(out), tld)
+}
+
+// parseDummyLinkRouting reads `resolvectl status lerd0` output. Presence comes
+// off stdout rather than the exit code: resolvectl still exits 0 for a link it
+// doesn't know, printing "No such device" to stderr, so an exit-code check would
+// report a deleted link as present-but-unrouted and send the user chasing a
+// routing problem on an interface that isn't there. A known link always prints a
+// "Link N (lerd0)" header; a missing one prints nothing at all.
+func parseDummyLinkRouting(output, tld string) (present bool, routed bool) {
+	if !strings.Contains(output, "("+lerdDummyIface+")") {
+		return false, false
+	}
+	// Match ~tld as a whole routing domain, not a substring: an unanchored
+	// contains would treat "~testbed" as carrying the "test" route.
+	hasDomain := false
+	for _, f := range strings.Fields(output) {
+		if f == "~"+tld {
+			hasDomain = true
+			break
+		}
+	}
+	return true, strings.Contains(output, "127.0.0.1:5300") && hasDomain
+}
+
+// serviceActive reports whether the lerd-dns service unit is active. It is a
+// var so tests can stub it; production resolves to the platform service
+// manager, which uses launchd on macOS and systemd on linux.
+var serviceActive = func(name string) bool { return services.Mgr.IsActive(name) }
+
 func defaultContainerRunning() bool {
-	out, err := exec.Command("systemctl", "--user", "is-active", "lerd-dns").Output()
-	if err == nil && strings.TrimSpace(string(out)) == "active" {
+	// Consult the service manager first so a launchd-managed host dnsmasq on
+	// macOS (no container, no systemctl) isn't misreported as a foreign
+	// resolver. Falls back to a direct container probe for the podman case.
+	if serviceActive("lerd-dns") {
 		return true
 	}
-	cmd := exec.Command("podman", "ps", "--filter", "name=^lerd-dns$", "--format", "{{.Names}}")
-	out, err = cmd.Output()
+	cmd := podman.Cmd("ps", "--filter", "name=^lerd-dns$", "--format", "{{.Names}}")
+	out, err := cmd.Output()
 	return err == nil && strings.TrimSpace(string(out)) == "lerd-dns"
 }
 
@@ -372,17 +503,26 @@ func defaultDnsmasqAnswer(tld string) (string, error) {
 	return ips[0].String(), nil
 }
 
+// defaultResolverHookup reports how .test is wired into the system resolver.
+//
+// Ordered, not a map: the NetworkManager path installs both the dispatcher and
+// the lerd0 link unit, so a map's random iteration would report either one at
+// random from run to run. First match wins, most specific first.
 func defaultResolverHookup() (string, bool, string) {
 	if runtime.GOOS != "linux" {
-		return "macOS native dnsmasq", true, "/usr/local/etc/dnsmasq.d/lerd.conf"
+		return macOSKind, true, "/usr/local/etc/dnsmasq.d/lerd.conf"
 	}
-	for kind, path := range map[string]string{
-		"NetworkManager dispatcher": "/etc/NetworkManager/dispatcher.d/99-lerd-dns",
-		"systemd-resolved drop-in":  "/etc/systemd/resolved.conf.d/lerd.conf",
-		"NetworkManager dnsmasq":    "/etc/NetworkManager/dnsmasq.d/lerd.conf",
+	for _, h := range []struct{ kind, path string }{
+		{nmDispatcherKind, "/etc/NetworkManager/dispatcher.d/99-lerd-dns"},
+		{nmDnsmasqKind, "/etc/NetworkManager/dnsmasq.d/lerd.conf"},
+		// No NetworkManager: lerd0 alone carries .tld, so its unit is the hookup.
+		{resolvedLinkKind, lerdLinkUnit},
+		// Last: a host that has not re-run setup since the link landed still
+		// resolves through this, and reporting "no hookup" at it would be a lie.
+		{resolvedDropinKind, "/etc/systemd/resolved.conf.d/lerd.conf"},
 	} {
-		if _, err := os.Stat(path); err == nil {
-			return kind, true, path
+		if _, err := os.Stat(h.path); err == nil {
+			return h.kind, true, h.path
 		}
 	}
 	return "", false, ""

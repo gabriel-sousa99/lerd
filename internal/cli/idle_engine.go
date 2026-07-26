@@ -2,24 +2,42 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
+	"github.com/gabriel-sousa99/lerd/internal/siteops"
 )
 
+// unitStatesOKFn snapshots every lerd-* unit's state plus a trust flag; a var so
+// tests can pin which units exist. A worker absent from the map has had its unit
+// removed entirely, which is idle-suspend's signature (it removes units, not just
+// stops them) — but only when the snapshot is trustworthy. The flag is false when
+// the systemctl enumeration failed, in which case every unit looks absent.
+var unitStatesOKFn = siteinfo.AllUnitStatesOK
+
 // SuspendWorkersForIdle stops ALL of the site's running workers (queue, Horizon,
-// scheduler, Stripe, vite, ...) and returns the names it stopped, for the caller
-// to persist as Site.IdleSuspendedWorkers. An idle site does no background work.
+// scheduler, Stripe, vite, ...) and returns the names to persist as
+// Site.IdleSuspendedWorkers. An idle site does no background work.
 //
 // Vite is the one special case: stopping it makes Laravel's @vite directive fall
 // back to the built asset manifest, so a site with no build would serve a broken
 // page. So before sleeping we ensure a usable build exists (running `npm run
 // build` if missing) and clear public/hot; if no build can be produced, vite is
 // left running for that site. Idempotent.
+//
+// The returned set also includes declared workers whose unit was removed entirely
+// (see appendLostSuspended), so an idle site whose persisted suspended list was
+// wiped while its units stayed gone (e.g. a reinstall) is re-marked as sleepy
+// rather than left showing as "off" with no way for the engine to recover it.
 func SuspendWorkersForIdle(site *config.Site) []string {
 	running := collectRunningWorkers(site)
 
@@ -43,6 +61,44 @@ func SuspendWorkersForIdle(site *config.Site) []string {
 		}
 		stopWorkerByName(site, w)
 		suspended = append(suspended, w)
+	}
+	final := appendLostSuspended(site, suspended)
+	// A host-proxy site's dev server is its only request-serving process, so once
+	// idle-suspend stops it the proxy vhost 502s. Swap to the waking page instead.
+	swapHostProxyVhostToWaking(site, final)
+	return final
+}
+
+// appendLostSuspended adds any of the site's declared workers (.lerd.yaml) whose
+// systemd unit is gone entirely and that are resumable. A removed unit is
+// idle-suspend's own signature, so such a worker is one whose persisted
+// "suspended" marking was lost (e.g. a reinstall cleared the list) while its unit
+// stayed gone; re-listing it restores the sleeping state instead of leaving it
+// showing as "off". A worker that merely crashed or stopped still has its unit
+// (active/failed/inactive), so it is left to worker-healing; one the user stopped
+// or removed is dropped from .lerd.yaml entirely, so neither is ever re-marked.
+func appendLostSuspended(site *config.Site, suspended []string) []string {
+	proj, err := config.LoadProjectConfig(site.Path)
+	if err != nil || proj == nil {
+		return suspended
+	}
+	states, ok := unitStatesOKFn()
+	if !ok {
+		// The systemctl enumeration failed, so absence proves nothing — every unit
+		// looks gone. Infer no lost-suspended workers rather than re-mark every
+		// declared worker and resume ones the user never had running.
+		return suspended
+	}
+	for _, w := range proj.Workers {
+		if containsString(suspended, w) {
+			continue
+		}
+		if _, unitExists := states["lerd-"+w+"-"+site.Name]; unitExists {
+			continue // unit still present -> not idle-suspend's doing, leave it alone
+		}
+		if idleWorkerResumable(site, w) {
+			suspended = append(suspended, w)
+		}
 	}
 	return suspended
 }
@@ -80,6 +136,90 @@ func ResumeWorkersForIdle(site *config.Site, workers []string) {
 	}
 	for _, w := range workers {
 		resumeWorkerByName(site, w, phpVersion)
+	}
+	// Restore the host-proxy proxy vhost the suspend swapped to the waking page,
+	// once the dev server is listening again.
+	restoreHostProxyVhostAfterIdle(site, workers)
+}
+
+// hostProxyVhostSwapApplies reports whether idle suspend/resume should swap a
+// site's vhost: only for a host-proxy site whose suspended (or resumed) worker
+// set includes the app dev server. Every other site or worker set leaves the
+// vhost untouched.
+func hostProxyVhostSwapApplies(isHostProxy bool, workers []string) bool {
+	return isHostProxy && containsString(workers, hostProxyWorkerName)
+}
+
+// swapHostProxyVhostToWaking swaps a host-proxy site's proxy vhost to the
+// auto-refreshing waking page when idle-suspend stops its dev server, so a
+// request to the sleeping site serves a "starting back up" page (the access hit
+// drives the resume) instead of a 502 from nginx proxying to the dead port.
+// No-op unless the site is host-proxy and its app worker is among the suspended
+// set.
+func swapHostProxyVhostToWaking(site *config.Site, suspended []string) {
+	if !hostProxyVhostSwapApplies(site.IsHostProxy(), suspended) {
+		return
+	}
+	if err := writeWakingHTML(site); err != nil {
+		fmt.Printf("[WARN] idle-suspend waking page %s: %v\n", site.Name, err)
+		return
+	}
+	if err := nginx.GenerateWakingVhost(*site); err != nil {
+		fmt.Printf("[WARN] idle-suspend waking vhost %s: %v\n", site.Name, err)
+		return
+	}
+	nginx.ReloadOrWarn("")
+}
+
+// restoreHostProxyVhostAfterIdle restores a host-proxy site's proxy vhost after
+// idle-resume restarts its dev server. It waits for the dev server to be
+// listening again first so the waking page's auto-refresh keeps serving until the
+// app can answer, rather than flashing nginx's own 502 (which carries no refresh
+// and would break the reload loop) during the dev server's warmup.
+func restoreHostProxyVhostAfterIdle(site *config.Site, workers []string) {
+	if !hostProxyVhostSwapApplies(site.IsHostProxy(), workers) {
+		return
+	}
+	// Poll the dev-server port, bounded to 60s. Vite/Nuxt can take many seconds to
+	// bind after launch. Wait on the site's registered proxied port — always set
+	// for a host-proxy site — rather than only the committed proxy block's port,
+	// which is unset for an auto-allocated dev server and used to skip the wait and
+	// flash a bare 502 on warmup.
+	if port := hostProxyResumeWaitPort(site); port > 0 {
+		waitForHostPort(port, 60*time.Second)
+	}
+	if err := siteops.RegenerateSiteVhost(site, site.PrimaryDomain()); err != nil {
+		fmt.Printf("[WARN] idle-resume host-proxy vhost %s: %v\n", site.Name, err)
+		return
+	}
+	nginx.ReloadOrWarn("")
+}
+
+// hostProxyResumeWaitPort returns the host port idle-resume waits on before
+// restoring a host-proxy site's proxy vhost: the committed proxy block's port when
+// it carries one, else the site's registered proxied port (HostPort, always >0 for
+// a host-proxy site). The fallback is what stops an auto-allocated dev server —
+// whose committed proxy block has no fixed port — from skipping the wait and
+// flashing a bare 502 during warmup.
+func hostProxyResumeWaitPort(site *config.Site) int {
+	if proxy := parentProxyConfig(*site); proxy != nil && proxy.Port > 0 {
+		return proxy.Port
+	}
+	return site.HostPort
+}
+
+// waitForHostPort blocks until a TCP connection to the host port succeeds or the
+// timeout elapses, polling cheaply. Gates the host-proxy proxy-vhost restore on
+// the dev server actually accepting connections again.
+func waitForHostPort(port int, timeout time.Duration) {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
@@ -126,6 +266,45 @@ func ResumeWorktreeWorkersForIdle(site *config.Site, wtPath string, workers []st
 		}
 		WorkerStartForSite(site.Name, wtPath, phpVersion, w, worker, true) //nolint:errcheck
 	}
+}
+
+// IdleSuspendStateIsStale reports whether a site's persisted idle-suspended set
+// has drifted from reality: a worker it claims to have suspended is actually
+// running. That happens when the workers were (re)started outside the idle engine
+// by an install or relink with an older lerd that didn't reconcile the list. Left
+// uncorrected it wedges the engine into believing the site is asleep forever, so
+// its idle workers never get re-suspended. The engine calls this at startup to
+// discard a stale list rather than seed itself from it.
+func IdleSuspendStateIsStale(site *config.Site) bool {
+	if len(site.IdleSuspendedWorkers) == 0 {
+		return false
+	}
+	running := collectRunningWorkers(site)
+	for _, w := range site.IdleSuspendedWorkers {
+		if containsString(running, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// WorktreeIdleSuspendStateIsStale is IdleSuspendStateIsStale for a single git
+// worktree: it reports whether the worktree's persisted idle-suspended set has
+// drifted from reality (a worker it claims suspended is actually running, e.g.
+// an install/relink restarted it without clearing the slot). The engine calls it
+// at startup so a stale worktree list is discarded rather than seeded from, which
+// would wedge the worktree as suspended forever and never re-suspend it.
+func WorktreeIdleSuspendStateIsStale(site *config.Site, wtBase string, suspended []string) bool {
+	if len(suspended) == 0 {
+		return false
+	}
+	running := collectRunningWorktreeWorkersByBase(site, wtBase)
+	for _, w := range suspended {
+		if containsString(running, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureViteSleepable makes a site safe to stop vite on. Vite needs a built
@@ -181,6 +360,7 @@ var runViteBuildAt = func(site *config.Site, dir string) {
 	fnm := filepath.Join(config.BinDir(), "fnm")
 	cmd := exec.Command(fnm, "exec", "--using="+nodeVersion, "--", "npm", "run", "build")
 	cmd.Dir = dir
+	cmd.Env = shimLeadingEnv(os.Environ()) // wayfinder needs lerd's php shim to lead PATH — issue #381
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Printf("[idle] %s: `npm run build` failed, keeping vite running: %v\n%s\n",
 			site.Name, err, lastBytes(out, 600))
@@ -216,6 +396,42 @@ func containsString(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// removeWorker returns ss without the first occurrence of w plus whether it was
+// present, preserving the order of the rest. The full-slice expression forces a
+// fresh backing array so the caller's slice isn't mutated underneath it.
+func removeWorker(ss []string, w string) ([]string, bool) {
+	for i, s := range ss {
+		if s == w {
+			return append(ss[:i:i], ss[i+1:]...), true
+		}
+	}
+	return ss, false
+}
+
+// ClearIdleSuspendOnStart drops workerName from the site's (or, for a worktree
+// checkout, that worktree's) persisted idle-suspended set whenever the worker is
+// (re)started outside the idle engine: an install, a relink, or `lerd worker
+// start`. A running worker can't be idle-suspended, so a stale entry would make
+// the engine boot believing the site is asleep and never re-suspend it. Cheap
+// no-op (one read, no write) when the worker isn't in the set, which is the
+// common case for the vast majority of starts.
+func ClearIdleSuspendOnStart(siteName, sitePath, workerName string) {
+	site, err := config.FindSite(siteName)
+	if err != nil {
+		return
+	}
+	if sitePath != "" && sitePath != site.Path {
+		wtBase := config.WorktreeUnitSlug(filepath.Base(sitePath))
+		if next, changed := removeWorker(site.WorktreeIdleSuspended[wtBase], workerName); changed {
+			_ = config.SetWorktreeIdleSuspendedWorkers(siteName, wtBase, next)
+		}
+		return
+	}
+	if next, changed := removeWorker(site.IdleSuspendedWorkers, workerName); changed {
+		_ = config.SetSiteIdleSuspendedWorkers(siteName, next)
+	}
 }
 
 func lastBytes(b []byte, n int) []byte {

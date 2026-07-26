@@ -9,6 +9,7 @@
 | `lerd service restart <name>` | Restart a service container; refreshes the quadlet first so config edits land |
 | `lerd service status <name>` | Show systemd unit status |
 | `lerd service list` | All services with status, version, and an Update column |
+| `lerd service search [query]` | Browse the external service-preset store; install a hit with `lerd service preset <name>` |
 | `lerd service update <name> [tag]` | Pull a newer image and restart; tag selects an explicit upgrade target |
 | `lerd service migrate <name> <version>` | SQL dump + restore for cross-version moves (mysql, mariadb, postgres); `<version>` is a preset version label such as `18` |
 | `lerd service rollback <name>` | Swap back to the previously-running image (toggles) |
@@ -16,6 +17,9 @@
 | `lerd service unpin <name>` | Unpin a service so it can be auto-stopped when unused |
 | `lerd service expose <name> <host:container>` | Publish an extra port on a built-in service |
 | `lerd service expose <name> <host:container> --remove` | Remove a previously exposed port |
+| `lerd service port <name> <port>` | Move a service's primary published host port (e.g. free 3306 for a host server) |
+| `lerd service port <name> <port> --container <cport>` | Move a specific mapping of a multi-port service (e.g. Mailpit's 8025 UI) |
+| `lerd service port <name> --reset` | Reset a service to its preset default published port |
 
 Available services: `mysql` (8.4 LTS canonical, 9.7 LTS / 5.7 alternates), `redis` (7-alpine), `postgres` (16 canonical with PostGIS, 17 / 18 alternates), `meilisearch` (v1.42), `rustfs` (S3-compatible), `mailpit` (SMTP catcher).
 
@@ -24,21 +28,23 @@ Default services are defined as YAML presets with `default: true` in the lerd bi
 `lerd service list` shows the version (derived from the image tag) and an Update column with green / amber / violet badges:
 
 ```
-Service              Version    Status     Update
-────────────────────────────────────────────────────────────
-mailpit              latest     active
-meilisearch          v1.42.1    active
-mysql                v8.4.9     active
-postgres             v16        active
-redis                v7.4.8     active
-rustfs               latest     active
+╭─────────────┬─────────┬────────┬────────╮
+│ Service     │ Version │ Status │ Update │
+├─────────────┼─────────┼────────┼────────┤
+│ mailpit     │ latest  │ active │        │
+│ meilisearch │ v1.42.1 │ active │        │
+│ mysql       │ v8.4.9  │ active │        │
+│ postgres    │ v16     │ active │        │
+│ redis       │ v7.4.8  │ active │        │
+│ rustfs      │ latest  │ active │        │
+╰─────────────┴─────────┴────────┴────────╯
 ```
 
 The Web UI, the TUI, and `lerd status` display the same labels. Services pinned to rolling tags (`latest`, `main`) show the tag verbatim. Services where an update is available show `→ <new-tag>`; cross-strategy upgrades show `⇧ <new-tag>` in amber.
 
-### Exposing extra ports on built-in services
+### Exposing extra ports on bundled services
 
-Built-in services publish a fixed set of ports by default. Use `lerd service expose` to bind additional host ports without recompiling or replacing the service:
+Bundled services publish a fixed set of ports by default. Use `lerd service expose` to bind additional host ports without recompiling or replacing the service. This works for any service lerd ships as a preset, both the default-stack ones (MySQL, PostgreSQL, Redis) and the optional ones you install on demand (Gotenberg, MongoDB, Elasticsearch, and so on). Only genuinely custom services you define yourself are excluded, since those declare their ports in their own YAML.
 
 ```bash
 # Expose MySQL on an extra port (e.g. for a second GUI client using a different port)
@@ -60,6 +66,44 @@ services:
 ```
 
 Then apply with `lerd service restart mysql`.
+
+You can also manage extra ports from the dashboard: open a service and switch to the **Ports** tab, then add or remove mappings alongside the published port. The CLI, dashboard, MCP and TUI all route through the same logic, so a change made on one surface shows up on the others.
+
+### Moving a service's published host port
+
+Each service publishes on a default host port (MySQL `3306`, PostgreSQL `5432`, Redis `6379`, and so on). Every member of a service family shares that one canonical port rather than pre-spacing itself, so a single database of any family lands on the familiar port. When lerd writes a service's quadlet and the port can't be bound, or another installed same-family service already holds it, it shifts the service to the next free port and records it, so the container comes up cleanly instead of failing to bind. The decision is made purely from port availability and what other lerd services already claim: lerd never inspects host files, sockets, or installed packages. It applies to every service, not just databases.
+
+Move a port yourself, or undo an automatic shift, with `lerd service port`:
+
+```bash
+# Publish lerd-mysql on 3307 so a host-installed MySQL can keep 3306
+lerd service port mysql 3307
+
+# Go back to the preset default
+lerd service port mysql --reset   # or: lerd service port mysql 0
+```
+
+The container-internal port never changes, so containerized apps (which reach the service by name over the `lerd` network) are unaffected. Only host clients pointed at the old published port need to follow. [Host-proxy sites](host-proxy.md) that connect over the published loopback port have their `.env` regenerated automatically when the port moves. A host-proxy site that is paused when the port moves is skipped at that moment and picks up the new port when it is next unpaused.
+
+Some services publish more than one host port: Mailpit exposes SMTP on `1025` and its web UI on `8025`, RustFS the S3 API on `9000` and the console on `9001`, Selenium the WebDriver on `4444` and the noVNC view on `7900`. `lerd service port <name> <port>` moves the primary (first) mapping. To move any other published port, name the mapping by its container-internal port with `--container`:
+
+```bash
+# Move Mailpit's web UI off 8025 to 8026 (SMTP on 1025 is untouched)
+lerd service port mailpit 8026 --container 8025
+
+# Put it back
+lerd service port mailpit --reset --container 8025
+```
+
+The dashboard link for a service always follows the port its dashboard is served on, so moving Mailpit's UI port re-points the dashboard and the "open dashboard" iframe automatically.
+
+The chosen ports are persisted in `~/.config/lerd/config.yaml` and reapplied on every start: the primary under `services.<name>.published_port`, any other mapping under `services.<name>.published_ports` keyed by container port. Once a port is set, automatically or with `lerd service port`, it sticks: lerd never moves it again on its own, not even back to the default when that frees up later. Change it only with `lerd service port`.
+
+Every published port can also be moved from the dashboard: a service's **Ports** tab lists one editable host-port field per published port (primary and secondary alike), each with a reset-to-default. The TUI shows the current published and extra ports read-only; editing stays in the CLI, dashboard and MCP.
+
+::: warning Known limitation
+The shift is decided at quadlet-write time, from whether the port can be bound right then. A host server that is installed but stopped at that moment leaves its port looking free, so lerd may take it and clash when that server next starts (for example at boot). This is the deliberate trade for not inspecting the host: a host database is usually running, and the failure is loud. Recover by moving lerd onto a free port with `lerd service port <name> <port>`.
+:::
 
 ---
 

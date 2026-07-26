@@ -1,14 +1,14 @@
 package cli
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/sitetpl"
 	"github.com/spf13/cobra"
 )
 
@@ -89,13 +89,14 @@ func resolveCommandsForCwd(cwd string) []config.FrameworkCommand {
 			fw, _ = config.GetFrameworkForDir(name, root)
 		}
 	}
-	return config.ResolveCommands(fw, proj, root)
+	return sitetpl.ExpandCommands(config.ResolveCommands(fw, proj, root), sitetpl.ForPath(root))
 }
 
 func listCommands(cmds []config.FrameworkCommand) error {
 	if len(cmds) == 0 {
-		fmt.Println("No commands available for this project.")
-		fmt.Println("Add a commands: block to .lerd.yaml or install the framework store.")
+		feedback.Begin()
+		feedback.Line("no commands available for this project")
+		feedback.Note("add a commands: block to .lerd.yaml or install the framework store")
 		return nil
 	}
 	maxName := 0
@@ -135,13 +136,21 @@ func runNamedCommand(cwd string, cmds []config.FrameworkCommand, name string, as
 		return fmt.Errorf("command %q has no shell invocation", name)
 	}
 
+	// A command from the project's untrusted .lerd.yaml (top-level commands or an
+	// embedded framework_def) runs on the host, so require consent the first time;
+	// trusted framework commands are unaffected. --yes bypasses the gate.
+	if target.ProjectOrigin && !assumeYes {
+		siteName := ""
+		if site, _ := config.FindSiteByPath(projectRootFromCwd(cwd)); site != nil {
+			siteName = site.Name
+		}
+		if err := approveHostCommand(siteName, target.Command, fmt.Sprintf("command %q", name)); err != nil {
+			return err
+		}
+	}
+
 	if target.Confirm && !assumeYes {
-		fmt.Printf("This will run: %s\n", target.Command)
-		fmt.Printf("Continue? [y/N] ")
-		reader := bufio.NewReader(os.Stdin)
-		line, _ := reader.ReadString('\n')
-		ans := strings.ToLower(strings.TrimSpace(line))
-		if ans != "y" && ans != "yes" {
+		if !feedback.Confirm("This will run: "+target.Command+"\nContinue?", false) {
 			return fmt.Errorf("aborted")
 		}
 	}

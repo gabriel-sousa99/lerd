@@ -2,30 +2,30 @@
 
 Lerd uses **framework definitions** to describe how a PHP project type behaves: where the document root is, how to detect it automatically, which env file to use, and which background workers it supports.
 
-Laravel has a built-in definition. Other frameworks (Symfony, WordPress, Drupal, CakePHP, Statamic, etc.) can be installed from the [community store](https://github.com/gabriel-sousa99/lerd-frameworks) or defined manually.
+Laravel has a built-in definition. Other frameworks (Symfony, WordPress, Drupal, CakePHP, Statamic, Magento, etc.) can be installed from the [community store](https://github.com/lerd-env/frameworks) or defined manually.
 
 ---
 
 ## Commands
 
-| Command                                   | Description                                                   |
-| ----------------------------------------- | ------------------------------------------------------------- |
-| `lerd new <name-or-path>`                 | Scaffold a new PHP project using a framework's create command |
-| `lerd framework list`                     | List all framework definitions with source and workers        |
-| `lerd framework list --check`             | Compare local definitions against the store                   |
-| `lerd framework search [query]`           | Search the community store for available definitions          |
-| `lerd framework install <name>[@version]` | Install a framework definition from the store                 |
-| `lerd framework update [name[@version]]`  | Update installed definitions from the store                   |
-| `lerd framework update --diff`            | Preview changes before applying updates                       |
-| `lerd framework add <name>`               | Add or update a user-defined framework definition             |
-| `lerd framework remove <name>[@version]`  | Remove a framework definition (prompts if multiple versions)  |
-| `lerd framework remove <name> --all`      | Remove all versions of a framework definition                 |
+| Command | Description |
+|---|---|
+| `lerd new <name-or-path>` | Scaffold a new PHP project using a framework's create command |
+| `lerd framework list` | List all framework definitions with source and workers |
+| `lerd framework list --check` | Compare local definitions against the store |
+| `lerd framework search [query]` | Search the community store for available definitions |
+| `lerd framework update [name[@version]]` | Refresh definitions from the store (definitions otherwise auto-fetch on link) |
+| `lerd framework update --diff` | Preview changes before applying updates |
+| `lerd framework add <name>` | Add or update a user-defined framework definition |
+| `lerd framework remove <name>[@version]` | Remove a framework definition (prompts if multiple versions) |
+| `lerd framework remove <name> --all` | Remove all versions of a framework definition |
+| `lerd framework prune` | Remove installed definitions no site uses |
 
 ---
 
 ## Framework store
 
-Lerd has a community-driven framework store backed by [gabriel-sousa99/lerd-frameworks](https://github.com/gabriel-sousa99/lerd-frameworks). The store hosts definitions for popular PHP frameworks, versioned by major release.
+Lerd has a community-driven framework store backed by [lerd-env/frameworks](https://github.com/lerd-env/frameworks). The store hosts definitions for popular PHP frameworks, versioned by major release.
 
 ### Available frameworks
 
@@ -34,27 +34,36 @@ lerd framework search
 ```
 
 ```
-Name            Label           Latest       Versions
-───────────────────────────────────────────────────────
-laravel         Laravel         13           13, 12, 11, 10
-symfony         Symfony         8            8, 7
-wordpress       WordPress       6            6, 5
-drupal          Drupal          11           11, 10
-cakephp         CakePHP         5            5, 4
-statamic        Statamic        6            6, 5
+╭───────────┬───────────┬────────┬────────────────╮
+│ Name      │ Label     │ Latest │ Versions       │
+├───────────┼───────────┼────────┼────────────────┤
+│ laravel   │ Laravel   │ 13     │ 13, 12, 11, 10 │
+│ symfony   │ Symfony   │ 8      │ 8, 7           │
+│ wordpress │ WordPress │ 6      │ 6, 5           │
+│ drupal    │ Drupal    │ 11     │ 11, 10         │
+│ cakephp   │ CakePHP   │ 5      │ 5, 4           │
+│ statamic  │ Statamic  │ 6      │ 6, 5           │
+╰───────────┴───────────┴────────┴────────────────╯
 ```
 
-### Installing from the store
+### Getting definitions from the store
+
+Definitions arrive automatically. Linking a project detects its framework and version and fetches the matching definition from the store, and the cached catalogue refreshes on its own in the background, so there is no install step to run. Because the catalogue is cached locally, detection resolves the right framework and version even offline and for frameworks you have not linked before.
+
+To refresh manually, `lerd framework update`. With no arguments it refreshes the cached catalogue and re-fetches every installed definition; with a name it fetches that one, installing it if it isn't cached yet:
 
 ```bash
-lerd framework install symfony          # auto-detects version from composer.lock
-lerd framework install laravel@12       # explicit version
-lerd framework install wordpress        # latest version
+lerd framework update                   # refresh catalogue + all installed definitions
+lerd framework update symfony           # fetch/update symfony (auto-detects version from composer.lock)
+lerd framework update laravel@12        # explicit version
+lerd framework update --diff            # preview changes before applying
 ```
 
 When no version is specified, lerd reads `composer.lock` to detect the installed major version. If the version can't be determined, it falls back to the latest available.
 
-Store-installed definitions are saved to `~/.local/share/lerd/frameworks/<name>@<version>.yaml`, separate from user-defined frameworks.
+Store definitions are saved to `~/.local/share/lerd/frameworks/<name>@<version>.yaml`, separate from user-defined frameworks.
+
+Point `LERD_STORE_BASE_URL` at an alternate base (comma-separated for several) to fetch framework definitions from a private or local mirror instead of `lerd-env/frameworks`, mirroring `LERD_SERVICES_BASE_URL` for the [service store](service-presets.md).
 
 ### Checking for updates
 
@@ -95,7 +104,7 @@ During `lerd link`, `lerd init`, or `lerd setup`, if no framework is detected at
 
 ### Contributing to the store
 
-Submit a pull request to [gabriel-sousa99/lerd-frameworks](https://github.com/gabriel-sousa99/lerd-frameworks) with a YAML file under `frameworks/<name>/<version>.yaml` and update `frameworks/index.json`.
+Submit a pull request to [lerd-env/frameworks](https://github.com/lerd-env/frameworks) with a YAML file under `frameworks/<name>/<version>.yaml` and update `frameworks/index.json`.
 
 ---
 
@@ -124,6 +133,13 @@ lerd new myapp --framework=symfony      # create using Symfony's create command
 lerd new /path/to/myapp                 # create at an absolute path
 lerd new myapp -- --no-interaction      # pass extra flags to the scaffold command
 ```
+
+`--framework` works before or after the name. Flags belong to lerd wherever they
+appear on the line, so anything meant for the scaffold command itself goes after
+`--`. An absolute target outside your home directory is fine: lerd creates the
+parent directory and mounts it into the PHP container before scaffolding.
+Temporary system directories (`/tmp`, `/var/tmp`, `/run`) are never mounted, so
+scaffolding into one is refused unless you [park](/usage/sites) its parent first.
 
 After creation:
 
@@ -181,6 +197,21 @@ lerd framework remove symfony --all    # remove all versions
 ```
 
 When multiple versions of a framework are installed, `lerd framework remove` prompts you to choose which version to remove.
+
+If a linked site still uses the framework, `lerd framework remove` lists those sites and asks you to confirm before deleting it. Pass `--force` to skip that confirmation.
+
+### Pruning unused definitions
+
+Installed definitions accumulate over time as you try different frameworks. To clear out the ones no site references:
+
+```bash
+lerd framework prune          # lists unused definitions, then asks to confirm
+lerd framework prune --force  # removes them without confirming
+```
+
+Pruning only touches store-installed and user-defined definitions, never the built-in ones. It is safe to run: lerd re-fetches a definition from the store automatically the moment a site needs one that is no longer present locally, so a pruned framework comes back on its own if you need it again.
+
+When you `lerd unlink` the last site using a framework, lerd offers to remove that framework's definition right then, so you do not have to remember to prune it later. The offer only appears for removable definitions, never the built-in ones.
 
 ---
 

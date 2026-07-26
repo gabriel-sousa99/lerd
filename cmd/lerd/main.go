@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"bytes"
@@ -14,16 +15,19 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/activityping"
 	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/cleanup"
 	"github.com/gabriel-sousa99/lerd/internal/cli"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/store"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/gabriel-sousa99/lerd/internal/ui"
 	"github.com/gabriel-sousa99/lerd/internal/version"
@@ -57,10 +61,37 @@ func main() {
 	// publish; in the CLI/MCP processes we HTTP-POST to the dashboard.
 	podman.AfterUnitChange = notifyLerdUI
 
+	// A PHP image (re)build orphans the previous image. Flag it here and reclaim
+	// once when the command finishes, so a multi-version install/update coalesces
+	// into a single safe-tier sweep instead of one per built version.
+	var imageRebuilt atomic.Bool
+	podman.OnImageRebuilt = func() { imageRebuilt.Store(true) }
+
 	root := &cobra.Command{
 		Use:     "lerd",
 		Short:   "Lerd — Podman-powered local PHP dev environment for Linux and macOS",
 		Version: version.String(),
+		// Errors are printed once below: a command that already surfaced its
+		// failure through the feedback UI (a red ✗ line) is suppressed here so
+		// cobra doesn't reprint the same message as a second "Error: …" line.
+		SilenceErrors: true,
+		// Cobra validates flags and args before PersistentPreRunE runs, so by the
+		// time we get here the invocation is well-formed and any failure is a
+		// runtime error, not misuse. Silencing usage now keeps the clean ✗ line
+		// for runtime errors while still printing the usage block for a wrong
+		// flag or arg count. No subcommand defines its own persistent hook, so
+		// this runs for every command.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			return nil
+		},
+		// After any command that rebuilt a PHP image, reclaim the now-orphaned
+		// image (safe tier, gated by auto_cleanup). Runs once per command.
+		PersistentPostRun: func(_ *cobra.Command, _ []string) {
+			if imageRebuilt.Load() {
+				cleanup.SweepSafe()
+			}
+		},
 	}
 
 	// Register all subcommands
@@ -70,6 +101,7 @@ func main() {
 	root.AddCommand(cli.NewQuitCmd())
 	root.AddCommand(cli.NewUpdateCmd(version.Version))
 	root.AddCommand(cli.NewUninstallCmd())
+	root.AddCommand(cli.NewCleanupCmd())
 	root.AddCommand(cli.NewParkCmd())
 	root.AddCommand(cli.NewInitCmd())
 	root.AddCommand(cli.NewLinkCmd())
@@ -111,6 +143,7 @@ func main() {
 	root.AddCommand(cli.NewNpmCmd())
 	root.AddCommand(cli.NewNpxCmd())
 	root.AddCommand(cli.NewComposerCmd())
+	root.AddCommand(cli.NewAuthCmd())
 	root.AddCommand(cli.NewServiceCmd())
 	root.AddCommand(cli.NewStatusCmd())
 	root.AddCommand(cli.NewTuiCmd())
@@ -121,6 +154,7 @@ func main() {
 	root.AddCommand(cli.NewWhatsnewCmd())
 	root.AddCommand(cli.NewManCmd())
 	root.AddCommand(cli.NewDoctorCmd())
+	root.AddCommand(cli.NewSiteDoctorCmd())
 	root.AddCommand(cli.NewMachineCmd())
 	root.AddCommand(cli.NewBugReportCmd())
 	root.AddCommand(cli.NewLogsCmd())
@@ -144,7 +178,9 @@ func main() {
 	root.AddCommand(cli.NewAutostartCmd())
 	root.AddCommand(cli.NewMCPCmd())
 	root.AddCommand(cli.NewMCPInjectCmd())
+	root.AddCommand(cli.NewMCPEjectCmd())
 	root.AddCommand(cli.NewMCPEnableGlobalCmd())
+	root.AddCommand(cli.NewMCPDisableGlobalCmd())
 	root.AddCommand(cli.NewFetchCmd())
 	root.AddCommand(cli.NewDbCmd())
 	root.AddCommand(cli.NewDbImportCmd())
@@ -156,6 +192,8 @@ func main() {
 	root.AddCommand(cli.NewDbRestoreCmd())
 	root.AddCommand(cli.NewDbSnapshotRmCmd())
 	root.AddCommand(cli.NewDbMoveCmd())
+	root.AddCommand(cli.NewClientExecCmd())
+	root.AddCommand(cli.NewShimsCmd())
 	root.AddCommand(cli.NewXdebugCmd())
 	root.AddCommand(cli.NewDumpCmd())
 	root.AddCommand(cli.NewIdleCmd())
@@ -165,6 +203,7 @@ func main() {
 	root.AddCommand(cli.NewPhpExtCmd())
 	root.AddCommand(cli.NewPhpBunCmd())
 	root.AddCommand(cli.NewPhpPkgCmd())
+	root.AddCommand(cli.NewPhpPortsCmd())
 	root.AddCommand(cli.NewPestBrowserCmd())
 	root.AddCommand(cli.NewPhpIniCmd())
 	for _, cmd := range cli.NewStripeCmds() {
@@ -173,6 +212,7 @@ func main() {
 	root.AddCommand(cli.NewShareCmd())
 	root.AddCommand(cli.NewDomainCmd())
 	root.AddCommand(cli.NewGroupCmd())
+	root.AddCommand(cli.NewWorkspaceCmd())
 	root.AddCommand(cli.NewFrameworkCmd())
 	root.AddCommand(cli.NewWorkerCmd())
 	root.AddCommand(cli.NewWorkersCmd())
@@ -185,6 +225,9 @@ func main() {
 	root.AddCommand(cli.NewUnpauseCmd())
 	root.AddCommand(cli.NewTrayCmd())
 	root.AddCommand(newDNSCheckCmd())
+	root.AddCommand(cli.NewDNSEnableCmd())
+	root.AddCommand(cli.NewDNSDisableCmd())
+	root.AddCommand(cli.NewDNSRepairCmd())
 	root.AddCommand(cli.NewDNSForwarderCmd())
 	root.AddCommand(cli.NewLANCmd())
 	root.AddCommand(cli.NewLANExposeCmd())
@@ -203,6 +246,11 @@ func main() {
 	maybeDispatchVendorBin(root)
 
 	if err := root.Execute(); err != nil {
+		// Only print errors the command didn't already show the user via a
+		// feedback Fail line, so the same failure never appears twice.
+		if !feedback.AlreadyShown(err) {
+			feedback.Fail(err)
+		}
 		os.Exit(1)
 	}
 }
@@ -416,6 +464,9 @@ func newWatchCmd() *cobra.Command {
 								fmt.Printf("[WARN] nginx reload: %v\n", err)
 							}
 						}
+						// Teach the access feed the new domain now, so the worktree's
+						// first request lands in its request timing rather than nowhere.
+						watcher.RefreshWorktreeIndex()
 					},
 					func(sitePath, worktreeName string) {
 						if syncWorktree(sitePath, worktreeName, "changed", true) {
@@ -424,8 +475,10 @@ func newWatchCmd() *cobra.Command {
 							}
 							eventbus.Default.Publish(eventbus.KindSites)
 						}
+						watcher.RefreshWorktreeIndex()
 					},
 					func(sitePath, worktreeName string) {
+						defer watcher.RefreshWorktreeIndex()
 						site, err := config.FindSiteByPath(sitePath)
 						if err != nil {
 							return
@@ -469,13 +522,67 @@ func newWatchCmd() *cobra.Command {
 			// (which bake the gateway IP into proxy_pass on Linux) are
 			// regenerated so they don't point at the old, now-dead address.
 			watcher.OnGatewayIPChange = cli.RegenerateHostProxyVhostsOnGatewayChange
-			go watcher.WatchHostGateway(30 * time.Second)
+			go watcher.WatchHostGateway(30*time.Second, nil)
 
 			// Self-heal exec-mode framework workers on macOS. Container mode
 			// uses podman --restart=always; exec mode runs guard scripts
 			// under launchd that can be left orphaned by an interrupted
 			// migration or sleep/wake bridge churn. No-op on Linux.
 			go watcher.WatchExecWorkers(60 * time.Second)
+
+			// Re-apply the reload watcher's poll cadence when the machine is
+			// plugged in or unplugged. The interval is baked into a worker's
+			// unit and read once at watcher startup, so an unplugged laptop
+			// would otherwise keep polling at the mains rate. No-op where the
+			// reload watcher doesn't have to poll.
+			go watcher.WatchPower(30 * time.Second)
+
+			// Reclaim orphaned lerd images (safe tier) on a slow daily cadence,
+			// so rebuild leftovers and stale base images don't pile up. Gated by
+			// the auto_cleanup config; never touches service images (--deep).
+			go watcher.WatchCleanup(time.Hour)
+
+			// Keep the cached framework store index fresh so offline detection and
+			// listing resolve the full catalogue without a network round trip.
+			go store.WatchIndex(6 * time.Hour)
+
+			// Idle-suspend: suspends/resumes workers by activity. The whole session,
+			// including the source-file watcher passed here, only runs while the
+			// feature is enabled; off, the watcher only binds the control socket.
+			watcher.StartIdle(
+				func() { notifyLerdUI("idle") },
+				func(stop <-chan struct{}) error {
+					return watcher.WatchSourceFiles(
+						func() []watcher.SourceTarget {
+							reg, err := config.LoadSites()
+							if err != nil {
+								return nil
+							}
+							var targets []watcher.SourceTarget
+							for _, s := range reg.Sites {
+								if s.Ignored || s.Paused {
+									continue
+								}
+								fw, _ := config.GetFrameworkForDir(s.Framework, s.Path)
+								if dirs := config.SourceWatchRoots(fw, s.Path); len(dirs) > 0 {
+									targets = append(targets, watcher.SourceTarget{Key: s.Name, Dirs: dirs})
+								}
+								wts, _ := gitpkg.DetectWorktrees(s.Path, s.PrimaryDomain())
+								for _, wt := range wts {
+									key := s.Name + "/" + config.WorktreeUnitSlug(filepath.Base(wt.Path))
+									if dirs := config.SourceWatchRoots(fw, wt.Path); len(dirs) > 0 {
+										targets = append(targets, watcher.SourceTarget{Key: key, Dirs: dirs})
+									}
+								}
+							}
+							return targets
+						},
+						5*time.Second,
+						activityping.Site,
+						stop,
+					)
+				},
+			)
 
 			// Watch key site config files and signal queue:restart on change.
 			go func() {
@@ -550,45 +657,6 @@ func newWatchCmd() *cobra.Command {
 				)
 				if err != nil {
 					fmt.Printf("[WARN] site file watcher: %v\n", err)
-				}
-			}()
-
-			// Watch each site's (and worktree's) source tree and report a save as
-			// activity, so editing keeps a site awake under idle-suspend even when
-			// no HTTP request hits nginx (e.g. a Vite HMR session, where the browser
-			// talks to the dev server directly). This is the primary idle signal on
-			// macOS, where the nginx access feed isn't reachable from the host.
-			go func() {
-				err := watcher.WatchSourceFiles(
-					func() []watcher.SourceTarget {
-						reg, err := config.LoadSites()
-						if err != nil {
-							return nil
-						}
-						var targets []watcher.SourceTarget
-						for _, s := range reg.Sites {
-							if s.Ignored || s.Paused {
-								continue
-							}
-							fw, _ := config.GetFrameworkForDir(s.Framework, s.Path)
-							if dirs := config.SourceWatchRoots(fw, s.Path); len(dirs) > 0 {
-								targets = append(targets, watcher.SourceTarget{Key: s.Name, Dirs: dirs})
-							}
-							wts, _ := gitpkg.DetectWorktrees(s.Path, s.PrimaryDomain())
-							for _, wt := range wts {
-								key := s.Name + "/" + config.WorktreeUnitSlug(filepath.Base(wt.Path))
-								if dirs := config.SourceWatchRoots(fw, wt.Path); len(dirs) > 0 {
-									targets = append(targets, watcher.SourceTarget{Key: key, Dirs: dirs})
-								}
-							}
-						}
-						return targets
-					},
-					5*time.Second,
-					activityping.Site,
-				)
-				if err != nil {
-					fmt.Printf("[WARN] source file watcher: %v\n", err)
 				}
 			}()
 
@@ -684,6 +752,14 @@ func scanWorktrees() bool {
 			generated = true
 		}
 		if len(worktrees) == 0 {
+			// A plain secured site never hits the worktree reissue below, so
+			// self-heal its leaf cert here: EnsureCert reuses a still-valid one
+			// and only reissues when it's aging, missing, or unparseable.
+			if s.Secured {
+				if err := certs.EnsureCert(s); err != nil {
+					fmt.Printf("[WARN] ensure cert for %s: %v\n", s.PrimaryDomain(), err)
+				}
+			}
 			continue
 		}
 		// Reissue once per site so the cert covers the wildcard SAN for every
@@ -701,6 +777,14 @@ func scanWorktrees() bool {
 			if release, ok, _ := gitpkg.TryLockInstall(wt.Path); ok {
 				gitpkg.EnsureWorktreeDeps(s.Path, wt.Path, wt.Domain, s.Secured, nil)
 				release()
+			}
+			// Provision the isolated DB for a worktree that committed
+			// db_isolated: true but was never run through `lerd worktree add`
+			// (e.g. linked with the worktree already present). No-op otherwise.
+			if created, err := cli.EnsureWorktreeIsolatedDB(&site, wt.Branch, wt.Path); err != nil {
+				fmt.Printf("[WARN] isolated DB for worktree %s: %v\n", wt.Branch, err)
+			} else if created {
+				fmt.Printf("Worktree DB: created isolated database for %s\n", wt.Branch)
 			}
 			// Host-proxy sites mirror the parent dev command on a per-worktree
 			// port behind the worktree domain; no PHP vhost or framework workers.
@@ -794,6 +878,19 @@ func syncWorktree(sitePath, worktreeName, action string, pruneStale bool) bool {
 			gitpkg.EnsureWorktreeDeps(sitePath, wt.Path, wt.Domain, site.Secured, nil)
 			release()
 		}
+		// Provision the isolated DB for a worktree that committed
+		// db_isolated: true but was never run through `lerd worktree add`.
+		// Gated to genuine creation like the worker/nginx seeding below: on
+		// "changed" (a commit/checkout) an already-provisioned worktree would
+		// no-op anyway, and a misconfigured one would re-warn on every HEAD
+		// write. The boot rescan catches worktrees that opt in while offline.
+		if shouldProvisionWorktreeDBOnSync(action) {
+			if created, err := cli.EnsureWorktreeIsolatedDB(site, wt.Branch, wt.Path); err != nil {
+				fmt.Printf("[WARN] isolated DB for worktree %s: %v\n", wt.Branch, err)
+			} else if created {
+				fmt.Printf("Worktree DB: created isolated database for %s\n", wt.Branch)
+			}
+		}
 		// Host-proxy worktrees run their own dev server behind the worktree
 		// domain; wire that instead of a PHP vhost + framework workers.
 		if site.IsHostProxy() {
@@ -841,6 +938,15 @@ func syncWorktree(sitePath, worktreeName, action string, pruneStale bool) bool {
 // worktree path is stable so existing units need no kick. Resurrecting
 // them clobbered user stops — issue #375.
 func shouldAutoStartWorkersOnSync(action string) bool {
+	return action == "added"
+}
+
+// shouldProvisionWorktreeDBOnSync gates isolated-DB creation to genuine
+// worktree creation. On "changed" an already-isolated worktree is a registry
+// no-op, and a worktree that can't isolate (no lerd-managed parent DB) would
+// otherwise log a warning on every commit/checkout. The boot rescan still
+// picks up worktrees that opted in while the watcher was offline.
+func shouldProvisionWorktreeDBOnSync(action string) bool {
 	return action == "added"
 }
 
@@ -995,6 +1101,7 @@ func removeStale(_ *config.GlobalConfig) bool {
 			}
 			_ = nginx.RemoveVhost(s.PrimaryDomain())
 			_ = config.RemoveSite(s.Name)
+			_ = config.RemoveSiteFromWorkspaces(s.Name)
 			removed = true
 		}
 	}

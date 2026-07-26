@@ -2,7 +2,6 @@ package podman
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,13 +20,19 @@ func parsePodmanVersion(out string) (int, int, error) {
 	return 0, 0, fmt.Errorf("podman version: no version token in %q", out)
 }
 
-func splitMajorMinor(v string) (int, int, error) {
-	// Strip distro/build suffixes like "+ds1" or "-rc1".
+// cleanVersionToken strips distro/build suffixes like "+ds1", "-rc1", or "~"
+// from a bare version string, leaving "major.minor.patch".
+func cleanVersionToken(v string) string {
 	for _, sep := range []string{"+", "-", "~"} {
 		if idx := strings.Index(v, sep); idx > 0 {
 			v = v[:idx]
 		}
 	}
+	return v
+}
+
+func splitMajorMinor(v string) (int, int, error) {
+	v = cleanVersionToken(v)
 	parts := strings.Split(v, ".")
 	if len(parts) < 2 {
 		return 0, 0, fmt.Errorf("podman version %q: not enough components", v)
@@ -43,12 +48,34 @@ func splitMajorMinor(v string) (int, int, error) {
 	return major, minor, nil
 }
 
+// versionAtLeast reports whether major.minor >= wantMajor.wantMinor.
+func versionAtLeast(major, minor, wantMajor, wantMinor int) bool {
+	if major != wantMajor {
+		return major > wantMajor
+	}
+	return minor >= wantMinor
+}
+
 // podmanVersionSupportsStopTimeout reports whether the StopTimeout= key in
 // quadlet [Container] sections is recognised. Added in Podman 5.0; Ubuntu
 // 24.04 ships 4.9.3 which rejects the unit and emits no service files.
 func podmanVersionSupportsStopTimeout(major, minor int) bool {
-	_ = minor
-	return major >= 5
+	return versionAtLeast(major, minor, 5, 0)
+}
+
+// VersionAtLeast probes the local podman and reports whether its version meets
+// the given minimum. It returns the parsed "major.minor" for messaging. An
+// error means the binary could not be run or its version could not be parsed.
+func VersionAtLeast(wantMajor, wantMinor int) (ok bool, version string, err error) {
+	out, err := execCommand(PodmanBin(), "--version").Output()
+	if err != nil {
+		return false, "", err
+	}
+	major, minor, err := parsePodmanVersion(string(out))
+	if err != nil {
+		return false, "", err
+	}
+	return versionAtLeast(major, minor, wantMajor, wantMinor), fmt.Sprintf("%d.%d", major, minor), nil
 }
 
 // supportsContainerStopTimeoutKey is the runtime test seam used by the
@@ -65,7 +92,7 @@ func defaultSupportsContainerStopTimeoutKey() bool {
 	stopTimeoutOnce.Do(func() {
 		// Use PodmanBin() so the probe still resolves under launchd's
 		// restricted PATH on macOS, where "podman" alone misses Homebrew.
-		out, err := exec.Command(PodmanBin(), "--version").Output()
+		out, err := execCommand(PodmanBin(), "--version").Output()
 		if err != nil {
 			// Conservative fallback: PodmanArgs= works on every quadlet
 			// version, while StopTimeout= breaks <5.0. Better to use the

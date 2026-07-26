@@ -6,8 +6,12 @@
   import ServiceSiteBadges from './ServiceSiteBadges.svelte';
   import ServiceEnvTab from './ServiceEnvTab.svelte';
   import ServiceTuningTab from './ServiceTuningTab.svelte';
+  import ServiceToolsTab from './ServiceToolsTab.svelte';
+  import ServicePortsTab from './ServicePortsTab.svelte';
+  import ServiceDatabasesTab from './ServiceDatabasesTab.svelte';
   import PresetSuggestionBanner from './PresetSuggestionBanner.svelte';
-  import type { Service } from '$stores/services';
+  import { isServiceWorker, type Service } from '$stores/services';
+  import { accessMode } from '$stores/accessMode';
   import { m } from '../../paraglide/messages.js';
 
   interface Props {
@@ -15,21 +19,45 @@
   }
   let { svc }: Props = $props();
 
-  type TabId = 'logs' | 'env' | 'config';
+  type TabId = 'databases' | 'logs' | 'env' | 'config' | 'tools' | 'ports';
+  // A database engine opens on its Databases tab, since the databases it holds
+  // are the primary thing to look at; every other service opens on logs. The
+  // default is applied by the effect below on first run (shownService starts
+  // empty), so switching services always lands on the right tab.
   let active = $state<TabId>('logs');
+  let shownService = $state('');
 
   const hasEnv = $derived(Boolean(svc.env_vars && Object.keys(svc.env_vars).length > 0));
+  const hasTools = $derived(Boolean(svc.client_shims && svc.client_shims.length > 0));
+  // Workers publish nothing, so the ports tab tracks the header gear's old guard.
+  const hasPorts = $derived(!isServiceWorker(svc));
+  // The whole databases surface (the /api/databases subtree) is loopback-only,
+  // so on a LAN-exposed dashboard the tab would report a running engine as
+  // stopped and silently 403 every action. Hide it off the lerd host entirely.
+  const hasDatabases = $derived(svc.is_database && $accessMode.loopback);
   const tabs = $derived<TabItem<TabId>[]>([
+    { id: 'databases', label: m.databases_title(), hidden: !hasDatabases },
     { id: 'logs', label: m.services_tabs_logs() },
     { id: 'env', label: m.services_env_title(), hidden: !hasEnv },
-    { id: 'config', label: m.services_tabs_tuning(), hidden: !svc.tunable }
+    { id: 'config', label: m.services_tabs_tuning(), hidden: !svc.tunable },
+    { id: 'tools', label: m.services_tabs_tools(), hidden: !hasTools },
+    { id: 'ports', label: m.services_tabs_ports(), hidden: !hasPorts }
   ]);
 
-  // Fall back to logs when the active tab is hidden for the selected service
-  // (e.g. switching from a tunable service to one without a Tuning tab).
+  // Selecting a different service resets to its default tab; within one service
+  // the user's tab choice sticks, falling back off any tab hidden for it.
   $effect(() => {
-    if (active === 'env' && !hasEnv) active = 'logs';
-    if (active === 'config' && !svc.tunable) active = 'logs';
+    const fallback: TabId = hasDatabases ? 'databases' : 'logs';
+    if (svc.name !== shownService) {
+      shownService = svc.name;
+      active = fallback;
+      return;
+    }
+    if (active === 'databases' && !hasDatabases) active = fallback;
+    if (active === 'env' && !hasEnv) active = fallback;
+    if (active === 'config' && !svc.tunable) active = fallback;
+    if (active === 'tools' && !hasTools) active = fallback;
+    if (active === 'ports' && !hasPorts) active = fallback;
   });
 
   const logPath = $derived.by(() => {
@@ -59,7 +87,9 @@
   {/key}
   <PresetSuggestionBanner {svc} />
   <DetailTabs {tabs} {active} onchange={(id) => (active = id)} />
-  {#if active === 'logs'}
+  {#if active === 'databases'}
+    <ServiceDatabasesTab {svc} />
+  {:else if active === 'logs'}
     {#key svc.name + ':' + logPath}
       <LogViewer path={logPath} {highlight} />
     {/key}
@@ -67,5 +97,9 @@
     <ServiceEnvTab {svc} />
   {:else if active === 'config'}
     <ServiceTuningTab {svc} />
+  {:else if active === 'tools'}
+    <ServiceToolsTab {svc} />
+  {:else if active === 'ports'}
+    <ServicePortsTab {svc} />
   {/if}
 </DetailPanel>

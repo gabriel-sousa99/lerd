@@ -37,7 +37,14 @@ const FrankenPHPPort = 8000
 // FrankenPHP container. The container mounts the project at its host path,
 // joins the lerd network, and runs the framework's declared entrypoint. Any
 // env map entries are written as Environment= lines.
-func GenerateFrankenPHPQuadlet(siteName, projectPath, phpVersion string, entrypoint []string, env map[string]string) string {
+//
+// A project path that cannot be bind-mounted is refused rather than rendered
+// without its Volume= line, which would leave the container serving nothing
+// (#884).
+func GenerateFrankenPHPQuadlet(siteName, projectPath, phpVersion string, entrypoint []string, env map[string]string) (string, error) {
+	if !bindMountable(projectPath) {
+		return "", fmt.Errorf("invalid project path %q for site %s: cannot be bind-mounted into a container", projectPath, siteName)
+	}
 	containerName := FrankenPHPContainerName(siteName)
 	image := FrankenPHPImage(phpVersion)
 
@@ -67,6 +74,10 @@ func GenerateFrankenPHPQuadlet(siteName, projectPath, phpVersion string, entrypo
 	// to this site (not the shared per-version file), since a FrankenPHP site runs
 	// its own container.
 	fmt.Fprintf(&b, "Volume=%s:/usr/local/etc/php/conf.d/98-lerd-user.ini:ro\n", config.SitePHPUserIniFile(siteName))
+	// Version-agnostic shared php.ini, below the per-site file so a per-site key
+	// still wins. Mounted here too so a site switched FPM->FrankenPHP keeps the
+	// shared baseline instead of silently losing it.
+	fmt.Fprintf(&b, "Volume=%s:/usr/local/etc/php/conf.d/95-lerd-shared.ini:ro\n", config.SharedIniFile())
 	fmt.Fprintf(&b, "Volume=%s:%s:rw\n", config.RunDir(), config.RunDir())
 	fmt.Fprintf(&b, "PodmanArgs=--security-opt=label=disable --workdir=%s\n", projectPath)
 	for _, k := range sortedKeys(env) {
@@ -85,7 +96,7 @@ func GenerateFrankenPHPQuadlet(siteName, projectPath, phpVersion string, entrypo
 	b.WriteString("\n[Install]\n")
 	b.WriteString("WantedBy=default.target\n")
 
-	return b.String()
+	return b.String(), nil
 }
 
 // RestartSiteContainersForVersion restarts every per-site PHP container on the
@@ -103,9 +114,13 @@ func RestartSiteContainersForVersion(version string) {
 		}
 		switch {
 		case s.IsCustomFPM():
-			_ = RestartUnit(CustomFPMContainerName(s.Name))
+			if err := RestartUnit(CustomFPMContainerName(s.Name)); err != nil {
+				fmt.Printf("[WARN] restarting %s for xdebug: %v\n", CustomFPMContainerName(s.Name), err)
+			}
 		case s.IsFrankenPHP():
-			_ = RestartUnit(FrankenPHPContainerName(s.Name))
+			if err := RestartUnit(FrankenPHPContainerName(s.Name)); err != nil {
+				fmt.Printf("[WARN] restarting %s for xdebug: %v\n", FrankenPHPContainerName(s.Name), err)
+			}
 		}
 	}
 }
@@ -125,10 +140,14 @@ func WriteFrankenPHPQuadlet(siteName, projectPath, phpVersion string, entrypoint
 // break the container's PHP startup.
 func WriteFrankenPHPQuadletDiff(siteName, projectPath, phpVersion string, entrypoint []string, env map[string]string) (bool, error) {
 	_ = EnsureSitePHPUserIni(siteName)
+	_ = EnsureSharedIni()
 	_ = EnsureXdebugIni(phpVersion)
 	_ = EnsureDumpAssets()
 	_ = EnsureDevtoolsAssets()
-	content := GenerateFrankenPHPQuadlet(siteName, projectPath, phpVersion, entrypoint, env)
+	content, err := GenerateFrankenPHPQuadlet(siteName, projectPath, phpVersion, entrypoint, env)
+	if err != nil {
+		return false, err
+	}
 	return WriteQuadletDiff(FrankenPHPContainerName(siteName), content)
 }
 
@@ -147,6 +166,17 @@ func RemoveFrankenPHPQuadlet(siteName string) error {
 	return RemoveQuadlet(FrankenPHPContainerName(siteName))
 }
 
+// RemoveFrankenPHPContainer fully tears down a site's per-site FrankenPHP
+// container: stop the unit (the container is Restart=always, so removing only
+// the quadlet leaves it running and orphaned), drop the quadlet, and reload the
+// daemon. Shared by the CLI runtime switch and siteops' demote-to-FPM so the
+// teardown sequence lives in one place. Best-effort: each step is independent.
+func RemoveFrankenPHPContainer(siteName string) {
+	_ = StopUnit(FrankenPHPContainerName(siteName))
+	_ = RemoveFrankenPHPQuadlet(siteName)
+	_ = DaemonReloadFn()
+}
+
 // shellJoin quotes each argument for embedding in a quadlet Exec= line.
 // Quadlet Exec values are passed through podman's argv parser which already
 // handles single-word args; anything with whitespace needs quoting.
@@ -154,7 +184,12 @@ func shellJoin(args []string) string {
 	out := make([]string, len(args))
 	for i, a := range args {
 		if strings.ContainsAny(a, " \t\"'\\") {
-			out[i] = `"` + strings.ReplaceAll(a, `"`, `\"`) + `"`
+			// Escape backslashes before quotes so an arg ending in a backslash
+			// can't turn the closing quote into an escaped one; splitSystemdExec
+			// (and systemd's own Exec parser) decode \\ and \" symmetrically.
+			esc := strings.ReplaceAll(a, `\`, `\\`)
+			esc = strings.ReplaceAll(esc, `"`, `\"`)
+			out[i] = `"` + esc + `"`
 		} else {
 			out[i] = a
 		}

@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/origin"
 )
 
-const changelogRawURL = "https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/CHANGELOG.md"
+// changelogURLs returns raw changelog URLs in priority order, read live.
+var changelogURLs = origin.ChangelogURLs
 
 // UpdateInfo holds the result of a successful update check when a newer version exists.
 type UpdateInfo struct {
@@ -32,7 +34,21 @@ type updateCheckState struct {
 // (no network, GitHub unreachable, etc.). Network fetches are rate-limited to once
 // per 24 hours via a cache file at config.UpdateCheckFile().
 func CachedUpdateCheck(currentVersion string) (*UpdateInfo, error) {
-	latest := cachedLatest()
+	return evaluateUpdate(currentVersion, cachedLatest())
+}
+
+// ForceUpdateCheck queries GitHub for the latest release right away, ignoring the
+// 24-hour cache, and refreshes the cache with the result. Use it when the user
+// explicitly asks to check for updates and expects a live answer. Returns nil, nil
+// when already current or when the network fetch fails silently.
+func ForceUpdateCheck(currentVersion string) (*UpdateInfo, error) {
+	return evaluateUpdate(currentVersion, freshLatest())
+}
+
+// evaluateUpdate compares currentVersion against a latest tag and returns update
+// info only when latest is a strictly-greater release the caller should be told
+// about. latest == "" (unknown / fetch failed) yields nil, nil.
+func evaluateUpdate(currentVersion, latest string) (*UpdateInfo, error) {
 	if latest == "" {
 		return nil, nil
 	}
@@ -59,15 +75,19 @@ func CachedUpdateCheck(currentVersion string) (*UpdateInfo, error) {
 // cachedLatest returns the latest release version tag, using a 24-hour disk cache.
 // Returns "" on any error so callers degrade silently.
 func cachedLatest() string {
-	cacheFile := config.UpdateCheckFile()
-
-	if data, err := os.ReadFile(cacheFile); err == nil {
+	if data, err := os.ReadFile(config.UpdateCheckFile()); err == nil {
 		var state updateCheckState
 		if json.Unmarshal(data, &state) == nil && time.Since(state.CheckedAt) < 24*time.Hour {
 			return state.LatestVersion
 		}
 	}
+	return freshLatest()
+}
 
+// freshLatest fetches the latest release tag from GitHub and refreshes the disk
+// cache with the result. Returns "" on any error so callers degrade silently.
+func freshLatest() string {
+	cacheFile := config.UpdateCheckFile()
 	latest, err := FetchLatestVersion()
 	if err != nil {
 		// Cache the failure for 1 hour to avoid hammering GitHub on every invocation.
@@ -84,6 +104,7 @@ func cachedLatest() string {
 
 func writeCache(path string, state updateCheckState) {
 	data, _ := json.Marshal(state)
+	config.GuardRealWrite(path)
 	os.WriteFile(path, data, 0o644) //nolint:errcheck
 }
 
@@ -102,7 +123,20 @@ func WriteUpdateCache(version string) {
 // Returns an empty string and a non-nil error when the fetch fails.
 func FetchChangelog(currentVersion, latestVersion string) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, changelogRawURL, nil) //nolint:noctx
+	var errs []string
+	for _, url := range changelogURLs() {
+		body, err := fetchChangelogFrom(client, url)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		return extractChangelogSections(body, currentVersion, latestVersion), nil
+	}
+	return "", fmt.Errorf("fetching changelog: %s", strings.Join(errs, "; "))
+}
+
+func fetchChangelogFrom(client *http.Client, url string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
 	if err != nil {
 		return "", err
 	}
@@ -113,13 +147,13 @@ func FetchChangelog(currentVersion, latestVersion string) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d fetching changelog", resp.StatusCode)
+		return "", fmt.Errorf("HTTP %d fetching changelog from %s", resp.StatusCode, url)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
-	return extractChangelogSections(string(body), currentVersion, latestVersion), nil
+	return string(body), nil
 }
 
 // extractChangelogSections parses changelog markdown and returns sections where

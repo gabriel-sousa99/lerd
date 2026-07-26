@@ -3,13 +3,13 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/gabriel-sousa99/lerd/internal/activityping"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 )
 
 // NewIdleCmd returns the parent `lerd idle` command: a global on/off toggle, a
@@ -49,20 +49,19 @@ func newIdlePinCmd(verb string, pinned bool) *cobra.Command {
 			if !pinned {
 				verbed = "unpinned"
 			}
-			fmt.Printf("%s %s (idle-suspend %s).\n", verbed, args[0], map[bool]string{true: "off", false: "on"}[pinned])
+			feedback.Begin()
+			feedback.Done(fmt.Sprintf("%s %s (idle-suspend %s)", verbed, args[0], map[bool]string{true: "off", false: "on"}[pinned]))
 			return nil
 		},
 	}
 }
 
-// SetSitePinned toggles whether a site is excluded from idle-suspend.
+// SetSitePinned toggles whether a site is excluded from idle-suspend. It delegates
+// to the locked, single-field config mutator so a pin/unpin can't clobber a
+// concurrent idle-engine write (the old FindSite -> mutate -> AddSite replaced the
+// whole record and would lose a SetSiteIdleSuspendedWorkers write that raced it).
 func SetSitePinned(name string, pinned bool) error {
-	site, err := config.FindSite(name)
-	if err != nil {
-		return err
-	}
-	site.Pinned = pinned
-	return config.AddSite(*site)
+	return config.SetSitePinned(name, pinned)
 }
 
 func newIdleToggleCmd(verb string, enabled bool) *cobra.Command {
@@ -99,7 +98,15 @@ func setIdleEnabled(enabled bool) error {
 	if err := config.SaveGlobal(cfg); err != nil {
 		return err
 	}
-	fmt.Printf("Idle-suspend %s.\n", onOff(enabled))
+	// Persisted flag is the source of truth on boot; this signal makes the
+	// running watcher start or tear down the session now instead of next boot.
+	if enabled {
+		activityping.Enable()
+	} else {
+		activityping.Disable()
+	}
+	feedback.Begin()
+	feedback.Done("idle-suspend " + onOff(enabled))
 	return nil
 }
 
@@ -116,7 +123,8 @@ func setIdleTimeout(dur string) error {
 	if err := config.SaveGlobal(cfg); err != nil {
 		return err
 	}
-	fmt.Printf("Idle timeout set to %s.\n", compactDuration(d))
+	feedback.Begin()
+	feedback.Done("idle timeout set to " + compactDuration(d))
 	return nil
 }
 
@@ -169,24 +177,28 @@ func runIdleStatus() error {
 
 	timeout := cfg.IdleSuspendTimeout()
 	now := time.Now()
-	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 3, ' ', 0)
+	var rows [][]string
 	for _, s := range reg.Sites {
 		if s.Ignored {
 			continue
 		}
-		fmt.Fprintf(tw, "  %s\t%s\n", s.Name, idleSiteStatus(s, lastActive, uiErr, timeout, now))
+		rows = append(rows, []string{s.Name, idleSiteStatus(s, lastActive, uiErr, timeout, now)})
 		// A worktree idles independently, so list each under its site. The site's
 		// pause/pin still applies (the engine skips a paused or pinned site whole).
 		for _, wt := range worktrees[s.Name] {
-			label := "  " + s.Name + "/" + wt.Branch
-			fmt.Fprintf(tw, "  %s\t%s\n", label, idleWorktreeStatus(s, wt, uiErr, timeout, now))
+			label := "↳ " + s.Name + "/" + wt.Branch
+			rows = append(rows, []string{label, idleWorktreeStatus(s, wt, uiErr, timeout, now)})
 		}
 	}
-	return tw.Flush()
+	if len(rows) > 0 {
+		feedback.Table([]string{"Site", "Status"}, rows)
+	}
+	return nil
 }
 
-// idleSiteStatus renders a single unambiguous state for a site: paused sites are
-// excluded from idle-suspend; a site whose workers are suspended, or that has
+// idleSiteStatus renders a single unambiguous state for a site: paused, pinned
+// and proxy-only sites are excluded from idle-suspend; a site whose workers are
+// suspended, or that has
 // gone past the timeout with nothing left to suspend, reads "idle"; anything
 // more recent reads "active".
 func idleSiteStatus(s config.Site, lastActive map[string]int64, uiErr error, timeout time.Duration, now time.Time) string {
@@ -195,6 +207,10 @@ func idleSiteStatus(s config.Site, lastActive map[string]int64, uiErr error, tim
 	}
 	if s.Pinned {
 		return "pinned"
+	}
+	// Nothing lerd supervises, so the engine never sleeps it.
+	if s.IsProxyOnly() {
+		return "proxy only"
 	}
 	if uiErr != nil {
 		return "(lerd-ui not running)"
@@ -211,6 +227,9 @@ func idleWorktreeStatus(s config.Site, wt idleWtState, uiErr error, timeout time
 	}
 	if s.Pinned {
 		return "pinned"
+	}
+	if s.IsProxyOnly() {
+		return "proxy only"
 	}
 	if uiErr != nil {
 		return "(lerd-ui not running)"

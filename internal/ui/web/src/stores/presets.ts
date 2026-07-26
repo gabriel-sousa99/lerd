@@ -15,6 +15,11 @@ export interface Preset {
   image?: string;
   dashboard?: string;
   depends_on?: string[];
+  // Declared by the preset YAML: discovery category, icon-set key, and the
+  // services this preset's admin UI administers.
+  category?: string;
+  icon?: string;
+  admin_for?: string[];
   missing_deps?: string[];
   installed?: boolean;
   installed_tags?: string[];
@@ -82,6 +87,16 @@ export const discoverablePresets = derived(presets, ($p) =>
 export function availableVersions(p: Preset): PresetVersion[] {
   const installed = new Set(p.installed_tags || []);
   return (p.versions || []).filter((v) => !installed.has(v.tag));
+}
+
+// Text match for a preset against a free-text query (name, description, image).
+// Shared by the preset modal search and the command palette so both filter the
+// same way. Empty query matches everything; terms are ANDed.
+export function matchesPresetQuery(p: Preset, query: string): boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const hay = (p.name + ' ' + (p.description || '') + ' ' + (p.image || '')).toLowerCase();
+  return terms.every((t) => hay.includes(t));
 }
 
 // Localized label for a preset's Add button, reflecting the live install
@@ -191,7 +206,7 @@ export async function installPreset(p: Preset): Promise<InstallResult> {
     }));
     return { ok: true, name: finalEvent.name || p.name };
   } catch (e) {
-    const err = e instanceof Error ? e.message : 'Request failed';
+    const err = e instanceof Error ? e.message : m.common_requestFailed();
     updatePreset(p.name, (x) => ({ ...x, installing: false, error: err }));
     return { ok: false, error: err };
   }

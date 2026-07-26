@@ -42,6 +42,13 @@ export default defineConfig(() => ({
   test: {
     globals: true,
     environment: 'jsdom',
-    setupFiles: ['./src/test-setup.ts']
+    setupFiles: ['./src/test-setup.ts'],
+    // The compiled paraglide bundle is ~8.6 MB across 1167 modules (1163 keys ×
+    // 14 locales), and every store that surfaces a message pulls it in. The
+    // first `await import()` inside a test therefore pays that transform: ~5 s
+    // alone, more when 16 workers transform it concurrently, which tipped a
+    // dozen store suites past vitest's 5 s default even on an idle machine.
+    // The tests themselves are fast; only the one-off module graph is not.
+    testTimeout: 30000
   }
 }));

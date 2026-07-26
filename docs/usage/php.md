@@ -13,22 +13,33 @@
 | `lerd xdebug off [version]` | Disable Xdebug and restart the FPM container |
 | `lerd xdebug status` | Show Xdebug enabled/disabled state and active mode for all installed PHP versions |
 | `lerd xdebug pause [site] [--list] [--pid PID]` | Break the IDE debugger into a running worker/CLI process via Xdebug's control socket. `--list` shows candidate processes |
-| `lerd php:ext add <ext> [version] [--apk-deps "pkg ..."]` | Add a custom PHP extension to the FPM image and rebuild; `--apk-deps` lists extra Alpine packages the extension needs to build |
-| `lerd php:ext remove <ext> [version]` | Remove a custom PHP extension and rebuild |
-| `lerd php:ext list [version]` | List custom extensions configured for a PHP version |
+| `lerd php:ext add <ext> [--apk-deps "pkg ..."]` | Add a custom PHP extension to every PHP image and rebuild the current version; `--apk-deps` lists extra Alpine packages the extension needs to build |
+| `lerd php:ext remove <ext>` | Remove a custom PHP extension from every PHP image and rebuild |
+| `lerd php:ext list` | List your declared extensions, and what each PHP version's image actually loaded |
 | `lerd php:bun install [version]` | Install a musl bun inside the PHP-FPM container, into a persistent volume |
 | `lerd php:bun remove` | Remove the in-container bun and clear its shared persistent volume |
 | `lerd php:bun update [version]` | Update the container's bun in place (`bun upgrade`) |
 | `lerd php:bun version [version]` | Show the bun version installed in the container |
-| `lerd php:pkg add <package...> [--php version]` | Install extra Alpine packages into the FPM image and rebuild |
-| `lerd php:pkg remove <package...> [--php version]` | Remove extra Alpine packages and rebuild |
-| `lerd php:pkg list [--php version]` | List the extra packages configured for a PHP version |
+| `lerd php:pkg add <package...>` | Install extra Alpine packages into every FPM image and rebuild the current version |
+| `lerd php:pkg remove <package...>` | Remove extra Alpine packages from every FPM image and rebuild |
+| `lerd php:pkg list` | List your declared packages, and what each PHP version's image actually installed |
+| `lerd php:ports add <host:container...> [--php version]` | Publish a host port on the version's shell container; a bare number publishes the same port straight through, and a busy host port shifts to the next free one |
+| `lerd php:ports remove <host...> [--php version]` | Unpublish a host port from the version's shell container |
+| `lerd php:ports list [--php version]` | List the extra host ports published for a PHP version |
 | `lerd pest:browser install [version]` | Set up in-container Pest browser testing (musl chromium + Playwright shim); see [browser testing](browser-testing#pest-browser-testing-playwright) |
 | `lerd pest:browser remove [version]` | Remove chromium from the FPM image and disable Pest browser testing |
 | `lerd pest:browser doctor [version]` | Diagnose the Pest browser testing setup for a PHP version |
 | `lerd php:ini [version]` | Open the user php.ini for a PHP version in `$EDITOR` |
 
 If no version is given, the version is resolved from the current directory (`.php-version` or `composer.json`, falling back to the global default).
+
+Inside a linked site, the commands that run PHP in a container (`lerd php`, `lerd composer`, `lerd console`, `lerd php:shell`) use the version the site is registered on, which is the version its FPM container serves. That matters when a framework clamps the version at link time: a Laravel 13 project pinning `.php-version` to 8.1 is linked on 8.5, because Laravel 13 supports 8.3 to 8.5, and composer then runs on 8.5 too rather than resolving 8.1 from the file and quietly using a different PHP than the site itself.
+
+A git worktree resolves ahead of the site it belongs to. A worktree inherits its parent site's version until you pin one with `lerd isolate` from inside the checkout, and from then on the whole toolchain follows that pin: the worktree's own vhost, `lerd php`, `lerd composer`, and everything else that runs PHP in a container. This holds wherever the checkout lives, including inside the parent site's own directory, so a worktree on 8.3 under a site on 8.5 runs composer on 8.3 rather than picking up the parent's version.
+
+When a command needs a version that is not installed and you decline the install, lerd offers to switch to one you already have and pins the choice. Inside a worktree that pin is written on the checkout itself, so the switch travels with the branch and the parent site keeps the version it was on.
+
+So that the project agrees with what actually runs, `lerd link` pins the resolved version into `.php-version`, the same file `lerd isolate` and the dashboard's PHP dropdown write. A pin the framework does not support is rewritten to the version lerd runs, and a version outside the framework's range is clamped rather than accepted, so the file, the site registry and the container can never drift apart. Sites with no lerd-managed PHP version (host-proxy, and custom containers whose version comes from their Containerfile) are left untouched.
 
 ---
 
@@ -99,6 +110,20 @@ To change the global default (applies to all projects that don't have a per-proj
 lerd use 8.5
 ```
 
+## Framework PHP ranges
+
+Each framework version declares the PHP range it supports (for example Laravel 11 supports PHP 8.2 to 8.4). Lerd clamps the resolved PHP version into that range so a site never runs on a version its framework can't boot, and the PHP version picker in the dashboard and the TUI shows out-of-range versions as disabled rather than hiding them, so the constraint is visible.
+
+The range comes from the framework definition that matches your project. Lerd detects the framework major version from `composer.json` (for Laravel, the `laravel/framework` constraint) and loads that version's definition.
+
+### Legacy projects
+
+When a project's framework version predates every definition lerd ships, lerd serves it with the **lowest** available definition instead of the latest. A Laravel 6 project, for instance, is served by the Laravel 10 definition rather than Laravel 13.
+
+In that case the version is a best-effort guess: the definition targets a newer framework than your project, so its PHP range is **not** enforced. PHP clamping is relaxed and every installed version stays selectable, which lets a legacy Laravel 6 app keep running on PHP 7.4 even though the Laravel 10 definition asks for 8.1 and up. Pin the version you want with `lerd isolate 7.4`.
+
+Newer-than-shipped versions fall back to the latest definition as before, with its range enforced normally.
+
 ---
 
 ## FPM lifecycle
@@ -163,7 +188,7 @@ lerd xdebug pause --list          # list running PHP processes that expose a con
 lerd xdebug pause --pid 1234      # break the IDE into that process
 ```
 
-`pause` uses Xdebug's [control socket](https://xdebug.org/docs/xdebugctl) (Xdebug >= 3.3, baked into lerd's FPM images) via the `xdebugctl` tool. It is the practical way to debug a **queue/Horizon worker, a scheduled task, or a CLI script** — processes where you can't set a trigger cookie. Run it from a project directory (or pass a site name); lerd resolves the site's container, scopes the candidate list to that site's own processes, and tells the running process to connect to your IDE on port `9003`. The worker must have been started *after* Xdebug was enabled, and your IDE must be listening.
+`pause` uses Xdebug's [control socket](https://xdebug.org/docs/xdebugctl) (Xdebug >= 3.3, baked into lerd's FPM images) via the `xdebugctl` tool. It is the practical way to debug a **queue/Horizon worker, a scheduled task, or a CLI script** — processes where you can't set a trigger cookie. Run it from a project directory (or pass a site name); lerd resolves the site's container, scopes the candidate list to that site's own processes, and tells the running process to connect to your IDE on port `9003`. The worker must have been started *after* Xdebug was enabled, and your IDE must be listening. Because `xdebugctl` ships only in the shared FPM image, `pause` is PHP-FPM only; FrankenPHP and custom-container sites run their own image without it (the regular `lerd xdebug on` toggle still works on them).
 
 For ordinary web requests under `--on-demand`, use the [Xdebug Helper](https://xdebug.org/docs/step_debug#browser-extensions) browser extension (or append `?XDEBUG_TRIGGER=1`) to trigger a session per page.
 
@@ -209,7 +234,7 @@ PHP 7.4 and 8.0 are available as a frozen legacy tier for old projects (Laravel 
 
 - They are end-of-life upstream and get no security patches. Use them only for local work on legacy apps.
 - Xdebug is pinned to the last release supporting that PHP line (3.1.6 for 7.4, 3.3.2 for 8.0).
-- The `mongodb` extension is unavailable (it requires PHP 8.1+); everything else in the standard bundle is present.
+- The `mongodb` extension is unavailable (it requires PHP 8.1+), and so is `random` (a PHP core extension only from 8.2); everything else in the standard bundle is present.
 - The base image is Alpine 3.16, so the bundled Node.js is 16.x.
 
 Use them like any other version:
@@ -224,18 +249,60 @@ lerd fetch 7.4 8.0
 
 ## Custom extensions
 
-The default lerd FPM image ships ~30 extensions covering the vast majority of Laravel projects (`bcmath`, `bz2`, `calendar`, `curl`, `dba`, `exif`, `gd`, `gmp`, `igbinary`, `imagick`, `intl`, `ldap`, `mbstring`, `mongodb`, `mysqli`, `opcache`, `pcntl`, `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`, `redis`, `soap`, `shmop`, `sockets`, `sqlite3`, `sysvmsg`, `sysvsem`, `sysvshm`, `xdebug`, `xsl`, `zip`, and more).
+The default lerd FPM image ships ~30 extensions covering the vast majority of Laravel projects (`bcmath`, `bz2`, `calendar`, `curl`, `dba`, `exif`, `ftp`, `gd`, `gmp`, `igbinary`, `imagick`, `intl`, `ldap`, `mbstring`, `mongodb`, `mysqli`, `opcache`, `pcntl`, `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`, `redis`, `soap`, `shmop`, `sockets`, `sqlite3`, `sysvmsg`, `sysvsem`, `sysvshm`, `xdebug`, `xsl`, `zip`, and more).
+
+Two of those names are version-gated, because the image genuinely cannot build them everywhere: `random` is a PHP core extension only from 8.2, and `mongodb` builds only on 8.1 and up. On older versions they are not part of the bundle, and `lerd park` warns when a project requires one rather than staying quiet and letting `composer install` fail its platform check.
 
 To add an extension that isn't in the bundle:
 
 ```bash
-lerd php:ext add swoole          # uses detected/default PHP version
-lerd php:ext add swoole 8.3      # explicit version
+lerd php:ext add swoole
 ```
 
-This rebuilds the FPM image with the extension installed and restarts the container. Extensions are persisted in `~/.config/lerd/config.yaml` so they survive `lerd php:rebuild`.
+Extensions belong to you, not to a PHP version. One declared set applies to every PHP image lerd builds, so a site that changes version keeps them. The version you are on is rebuilt and verified straight away; other installed versions carry the old set until they are rebuilt, and lerd says which ones those are.
 
-After the rebuild, lerd checks that the extension actually loaded (`php -m`); if the PECL build failed, `lerd php:ext add` exits with an error and removes the extension from the config again, rather than reporting success for an extension that isn't there.
+Those deferred versions are rebuilt by the next command that touches them, which is usually `lerd use`, `lerd link`, `lerd fetch`, `lerd unpause` or `lerd start`. When that happens to a version whose container is already running, lerd restarts the container onto the image it just built, so the running PHP always matches what `lerd php:ext list` and the dashboard report for it.
+
+Extensions are persisted in `~/.config/lerd/config.yaml` under `php.extensions`, so they survive `lerd php:rebuild`.
+
+After the rebuild, lerd checks that the extension actually loaded (`php -m`); if the PECL build failed, `lerd php:ext add` exits with an error and removes the extension from the config again, rather than reporting success for an extension that isn't there. A rebuild that fails outright is reverted the same way, so a name that cannot build is not left declared and retried by every command after it.
+
+#### What each version actually loaded
+
+A declared set cannot always be honoured. `mongodb` does not build below 8.1, and the legacy 7.4 and 8.0 images are Alpine 3.16, where some packages do not exist. lerd records what each version's image really loaded, verified after its build, and never advertises what an image does not have:
+
+```bash
+lerd php:ext list
+```
+
+```
+Declared, for every PHP version:
+  - mongodb
+  - swoole
+
+Per version:
+  PHP 7.4  swoole (cannot load: mongodb)
+  PHP 8.1  image predates this set, run 'lerd php:rebuild 8.1'
+  PHP 8.4  mongodb, swoole
+  PHP 8.5  mongodb, swoole
+```
+
+The three states are different problems. An image that **predates the set** was built before you declared something, and a rebuild fixes it. Something an image **cannot load** did not build on that version, and a rebuild will not change that. A version with no image at all is not listed. Nothing is reported as present unless that image really has it.
+
+The dashboard shows the same thing, plus every module the image loads, under **System → PHP → Extensions**. The module list is `php -m` read from the image itself, so it is what your code will actually see; it is fetched when you open the tab and cached against the image, so a rebuild refreshes it and nothing else pays for it. The TUI's System view carries a shorter `Extras · PHP <version>` line per version, from the same recorded data.
+
+Changing a site's PHP version is exactly when it would silently lose an extension, so lerd checks the target image at that moment. An image built before you declared something can be brought up to date with a rebuild:
+
+```
+$ lerd isolate 8.3
+ ✓ PHP pinned to 8.3
+ ⚠ PHP 8.3's image predates your custom extensions and packages
+       run 'lerd php:rebuild 8.3' to bring it up to date
+```
+
+An extension that genuinely cannot build on that version is reported differently, because no rebuild will fix it.
+
+One that loaded on **no version at all** is reported differently again. A version boundary shows up on some versions and not others, so an extension missing from every one of them is usually the build failing rather than the versions refusing it, and `lerd php:ext list` says so instead of reading it as a capability gap.
 
 Some extensions need extra Alpine packages to compile. lerd already knows the ones for `imap` (`imap-dev krb5-dev openssl-dev c-client`); for anything else, pass them with `--apk-deps`:
 
@@ -247,8 +314,8 @@ lerd php:ext add imap                                  # deps known to lerd, no 
 The packages are saved alongside the extension in `~/.config/lerd/config.yaml` (under `php.ext_apk_deps`), so they reapply on every `lerd php:rebuild`.
 
 ```bash
-lerd php:ext list                # show custom extensions (and their apk deps) for current version
-lerd php:ext remove swoole       # remove and rebuild
+lerd php:ext list                # show your custom extensions and their apk deps
+lerd php:ext remove swoole       # remove from every version and rebuild
 ```
 
 ### php.ini settings
@@ -260,13 +327,26 @@ lerd php:ini          # detected/default version
 lerd php:ini 8.3      # explicit version
 ```
 
-This opens the file in `$EDITOR` (falls back to `nano`/`vim`). After saving, restart FPM to apply:
-
-```bash
-systemctl --user restart lerd-php84-fpm
-```
+This opens the file in `$EDITOR` (falls back to `nano`/`vim`). Saving restarts the affected FPM containers automatically, so the change applies straight away.
 
 The file is created automatically with commented-out examples when lerd first sets up the PHP version.
+
+#### Shared settings across versions
+
+A setting placed in a per-version file only applies to that version, so a site that changes PHP version silently loses it. For a setting you want everywhere, edit the shared file instead:
+
+```bash
+lerd php:ini shared   # applies to every PHP version
+```
+
+The shared file lives at `~/.local/share/lerd/php/shared/95-lerd-shared.ini` and is mounted into every PHP container (FPM, custom-image FPM, and FrankenPHP) below the per-version `98-lerd-user.ini`. Because `conf.d` loads alphabetically and the last file wins, layering happens for free:
+
+- A key set only in the shared file applies to all versions.
+- A key set in both files takes the per-version value on that version, and the shared value everywhere else.
+
+Nothing is merged and nothing is migrated: your existing per-version files keep working and keep winning. A key becomes shared only when you put it in the shared file. An unknown or removed directive on a given version is ignored (a startup notice, not a fatal), so a version-specific setting never breaks the others.
+
+In the web UI, open **System → PHP**, pick a version, and use the **Editing** dropdown at the top of its php.ini tab to switch to the shared file. Over MCP it is reachable through `runtime` with `ini_read` / `ini_write` / `ini_reset` (pass `shared: true`).
 
 ### Locales and internationalisation
 
@@ -346,9 +426,24 @@ What you get inside the container:
 
 If you want extra packages in the image (additional CLI tools, language toolchains, etc.), use `lerd php:ext` for PHP extensions, or fork the Containerfile at `internal/podman/quadlets/lerd-php-fpm.Containerfile`.
 
-For other tools and runtime libraries, `lerd php:pkg add <packages>` installs Alpine packages into the FPM image's runtime stage and rebuilds, for example `lerd php:pkg add htop vim`. The packages are saved in `~/.config/lerd/config.yaml` (under `php.packages`, keyed by version) and re-applied on every rebuild, so they survive `php:rebuild` and base image updates, exactly like custom extensions. They are layered onto the shared image rather than baked into the published base, so they only affect your local build. A non-existent package name fails the rebuild and the change is reverted.
+For other tools and runtime libraries, `lerd php:pkg add <packages>` installs Alpine packages into the FPM image's runtime stage and rebuilds, for example `lerd php:pkg add htop vim`. The packages are saved in `~/.config/lerd/config.yaml` (under `php.packages`) and re-applied on every rebuild, so they survive `php:rebuild` and base image updates, exactly like custom extensions. Like extensions, one declared set applies to every PHP version. They are layered onto the shared image rather than baked into the published base, so they only affect your local build. A non-existent package name fails the rebuild and the change is reverted.
 
 For [bun](https://bun.sh) specifically, run `lerd php:bun install` to drop a musl bun into the container's persistent `/root/.bun` volume (so `lerd shell` has it without rebuilding the image). See [bun](node#bun) for the full host and container story.
+
+### Reachable ports
+
+By default a TCP port you open by hand inside `lerd shell` is not reachable at `localhost:PORT` on the host, because the PHP-FPM container has no published host ports of its own. Framework servers like [Reverb](queue-workers) or an in-container Vite worker are reachable, but only because a worker exposes them through the nginx proxy on the site's `.test` domain (`https://your-site.test/app`), not as a raw localhost port; Xdebug likewise connects outbound to your IDE rather than listening on a published port. When you instead want to run a process directly in the container (a Vite dev server, a websocket, an ad-hoc HTTP or debug listener) and hit it straight from a host browser or tool, publish the port on the version's shell container:
+
+```bash
+lerd php:ports add 5173        # localhost:5173 -> container 5173 (same port through)
+lerd php:ports add 8080:80     # localhost:8080 -> container 80
+lerd php:ports list
+lerd php:ports remove 5173
+```
+
+The same list is available in the dashboard under **System > PHP > (version) > Ports**. If the host port is already taken (by a lerd service, another PHP version's list, or any other listener) lerd shifts it to the next free one and tells you where it landed, so an add never fails on a collision. Ports bind loopback by default and follow `lerd lan:expose` like every other lerd port. Changing the list restarts that version's FPM container, so PHP bounces for every site on that version.
+
+This is a per-version pool, not per site. There is one shared FPM container per PHP version serving every site on it, so a published port maps to whichever single process binds it inside, and two sites wanting the same in-container port on the same version collide. It is a power-user escape hatch: for anything you can reach for a blessed path instead, prefer [host-proxy](host-proxy) (run the dev server on the host) or a worker with a proxy, which both scope cleanly to a single site.
 
 ---
 
@@ -359,4 +454,19 @@ When you run `lerd park` or `lerd link`, Lerd reads `composer.json` and warns if
 ```
 [!] my-app requires PHP extensions not in the image: swoole
     Run: lerd php:ext add swoole
+```
+
+An extension can also be one the site's PHP version cannot have at all, rather than one that is merely absent from the image. `random` is a PHP core extension only from 8.2, and `mongodb` builds only on 8.1 and up, so on an older site no image rebuild can supply them and `lerd php:ext add` would fail after several minutes of building. Lerd says so up front instead of offering an install that cannot work:
+
+```
+[!] my-app requires ext-random, which is not available on PHP 8.1 (first shipped on 8.2)
+    lerd php:ext add cannot build it. Move the site to PHP 8.2 or newer, or require a polyfill package instead.
+```
+
+A requirement can also fail even though the extension is in the image, because composer names a few extensions differently from the name they are installed under. Composer builds its `ext-*` names from the module name PHP reports, and OPcache reports itself as `Zend OPcache`, so composer publishes `ext-zend-opcache` and never `ext-opcache`. A `composer.json` asking for `ext-opcache` therefore fails its platform check on `composer install` even though OPcache is loaded, and `lerd php:ext add opcache` will not help because nothing is actually missing. Lerd recognises both spellings and tells you which one composer wants:
+
+```
+[!] my-app requires ext-opcache, which composer publishes as ext-zend-opcache
+    The extension is in the image; composer install will still fail its platform check.
+    Require ext-zend-opcache in composer.json instead.
 ```

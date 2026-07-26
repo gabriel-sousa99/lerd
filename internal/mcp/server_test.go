@@ -10,6 +10,28 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
+// decodeContent asserts a tool result carries exactly one text content block
+// and unmarshals that block's JSON text into v. It is the shared shape every
+// "handler returns content" regression test checks.
+func decodeContent(t *testing.T, result any, v any) {
+	t.Helper()
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatal("result is not a map")
+	}
+	content, ok := m["content"].([]map[string]any)
+	if !ok || len(content) != 1 {
+		t.Fatal("result has no content block")
+	}
+	text, ok := content[0]["text"].(string)
+	if !ok {
+		t.Fatal("content block has no text")
+	}
+	if err := json.Unmarshal([]byte(text), v); err != nil {
+		t.Fatal("content is not valid JSON:", err)
+	}
+}
+
 func TestStripANSI_removesColorCodes(t *testing.T) {
 	input := "\x1b[32mOK\x1b[0m some text \x1b[31mFAIL\x1b[0m"
 	got := stripANSI(input)
@@ -165,6 +187,55 @@ func TestExecEnvCheck_missingKeys(t *testing.T) {
 	}
 }
 
+// TestExecServiceEnv_returnsContent guards the same "no output" regression for
+// the service env action: a built-in service's env vars must come back inside a
+// content block, not as a bare map the host can't render.
+func TestExecServiceEnv_returnsContent(t *testing.T) {
+	var name string
+	for _, s := range knownServices() {
+		if len(builtinServiceEnv(s)) > 0 {
+			name = s
+			break
+		}
+	}
+	if name == "" {
+		t.Skip("no built-in service exposes env vars")
+	}
+
+	result, rpcErr := execServiceEnv(map[string]any{"name": name})
+	if rpcErr != nil {
+		t.Fatal("unexpected rpc error:", rpcErr.Message)
+	}
+	var parsed struct {
+		Service string            `json:"service"`
+		Vars    map[string]string `json:"vars"`
+	}
+	decodeContent(t, result, &parsed)
+	if parsed.Service != name {
+		t.Errorf("expected service=%q, got %q", name, parsed.Service)
+	}
+	if len(parsed.Vars) == 0 {
+		t.Error("expected at least one env var")
+	}
+}
+
+// TestExecDNSDiagnose_returnsContent guards the same "no output" regression for
+// the diag dns_diagnose action, whose handler returned a bare Diagnostic struct.
+// The result must come back inside a content block regardless of probe outcome.
+func TestExecDNSDiagnose_returnsContent(t *testing.T) {
+	result, rpcErr := execDNSDiagnose(map[string]any{"tld": "test"})
+	if rpcErr != nil {
+		t.Fatal("unexpected rpc error:", rpcErr.Message)
+	}
+	var parsed struct {
+		TLD string `json:"tld"`
+	}
+	decodeContent(t, result, &parsed)
+	if parsed.TLD != "test" {
+		t.Errorf("expected tld=test, got %q", parsed.TLD)
+	}
+}
+
 // TestToolList_underSizeCeiling guards against regrowth of the tools/list
 // manifest sent on every MCP session. Every byte above the ceiling is in
 // context for the whole session; raise the ceiling only with a justified
@@ -172,8 +243,16 @@ func TestExecEnvCheck_missingKeys(t *testing.T) {
 func TestToolList_underSizeCeiling(t *testing.T) {
 	// Consolidating ~80 flat tools into ten resource groups (site, service, db,
 	// env, runtime, worker, exec, framework, diag, worktree) roughly halved the
-	// manifest from the prior 32000-byte ceiling to this.
-	const ceiling = 18000
+	// manifest from the prior 32000-byte ceiling. Bumped 18000 → 18500 for the
+	// `service port` action, then 18500 → 18800 for the diag `route_timing` and
+	// `optimize_route` actions, then 18800 → 19100 for `profiler_report` and its
+	// `args` property, then 19100 → 19500 for the runtime `ports_list`, `ports_add`,
+	// `ports_remove` actions and their `host`/`container` properties, then
+	// 19500 → 20600 for the `workspace` group (justified content additions, kept
+	// terse), then 20600 → 20650 for the `diag` `doctor_fix` action, then
+	// 20650 → 21150 for the runtime `ini_read`/`ini_write`/`ini_reset` actions
+	// and their `shared`/`content` properties.
+	const ceiling = 21150
 	got, err := json.Marshal(toolList())
 	if err != nil {
 		t.Fatalf("marshal tool list: %v", err)

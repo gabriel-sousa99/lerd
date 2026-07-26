@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -31,6 +32,14 @@ const (
 	wsOpPong  = 0xA
 )
 
+// maxWSFrameBytes caps a single inbound frame payload: the client declares the
+// length before any data arrives, so without a ceiling a forged length forces a
+// multi-gigabyte allocation. 64 MiB matches the LSP message ceiling.
+const maxWSFrameBytes = 64 << 20
+
+// errFrameTooLarge is returned when a client declares a payload over the cap.
+var errFrameTooLarge = errors.New("ui: websocket frame exceeds size limit")
+
 // wsConn wraps a hijacked net.Conn with the buffered reader from the
 // handshake so WriteText and ReadFrame can share the same underlying stream.
 type wsConn struct {
@@ -38,9 +47,69 @@ type wsConn struct {
 	br   *bufio.Reader
 }
 
+// wsOriginAllowed defends against cross-site WebSocket hijacking: browsers
+// don't apply CORS to the WS handshake, so without this an arbitrary page
+// could open a socket to the dashboard. A missing Origin means a non-browser
+// client (lerd's own tools, curl), which isn't a hijack vector. Otherwise the
+// Origin must be in the CORS allowlist, or be same-origin with the request Host
+// AND target a local-network host, which keeps custom-domain and LAN access
+// working while closing the DNS-rebinding hole (see isLocalNetworkHost).
+func wsOriginAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	if allowedCORSOrigins[origin] {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	// Hostnames are case-insensitive (RFC 3986), and r.Host casing isn't
+	// guaranteed to match the browser-normalised Origin, so compare case-folded.
+	if !strings.EqualFold(u.Host, r.Host) {
+		return false
+	}
+	return isLocalNetworkHost(u.Host)
+}
+
+// isLocalNetworkHost reports whether hostport (host or host:port) names a
+// machine on the local network. The same-origin check above is not enough on
+// its own: under DNS rebinding a page on http://evil.example whose A record is
+// rebound to a loopback or LAN address sends Origin and Host both equal to
+// evil.example, so a bare same-origin test passes and the socket opens.
+//
+// Rebinding fundamentally needs a DNS name (an IP-literal Host can't be
+// rebound), so the rule is: any IP literal is fine (it's a host the user
+// pointed a browser at directly: loopback, a LAN address, or an explicit
+// public bind that is already gated by remote-control auth), while a hostname
+// is accepted only under localhost or one of the reserved local TLDs. .test and
+// .localhost are lerd's own managed TLDs (resolved to loopback by lerd-dns,
+// never publicly resolvable per RFC 6761) and .local is mDNS, so none can be
+// pointed at an attacker's server. An attacker's public domain is rejected.
+func isLocalNetworkHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]") // strip IPv6 literal brackets
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	h := strings.ToLower(host)
+	return h == "localhost" ||
+		strings.HasSuffix(h, ".localhost") ||
+		strings.HasSuffix(h, ".test") ||
+		strings.HasSuffix(h, ".local")
+}
+
 // wsUpgrade performs the RFC6455 handshake and returns a wsConn ready for
 // ReadFrame / WriteText. The http.ResponseWriter must support Hijack.
 func wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
+	if !wsOriginAllowed(r) {
+		return nil, errors.New("websocket origin not allowed")
+	}
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		return nil, errors.New("missing Upgrade: websocket header")
 	}
@@ -105,6 +174,9 @@ func (c *wsConn) WriteClose() error {
 }
 
 func (c *wsConn) writeFrame(op byte, payload []byte) error {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout)); err != nil {
+		return err
+	}
 	header := make([]byte, 2, 10)
 	header[0] = 0x80 | op // FIN | opcode
 	n := len(payload)
@@ -155,6 +227,10 @@ func (c *wsConn) ReadFrame() (op byte, payload []byte, err error) {
 			return
 		}
 		plen = int(binary.BigEndian.Uint64(ext[:]))
+	}
+	if plen < 0 || plen > maxWSFrameBytes {
+		err = errFrameTooLarge
+		return
 	}
 	var mask [4]byte
 	if masked {

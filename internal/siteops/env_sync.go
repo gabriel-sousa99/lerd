@@ -12,12 +12,16 @@ import (
 // actually changed since oldPrimary. Returns the first non-nil error so
 // callers can warn; a worktree-detection failure is treated as no worktrees
 // rather than as a fatal error because the parent sync has already landed.
+//
+// Oracle fork: the parent write goes through SyncSiteEnv, so a site bound to a
+// fullstack proxy keeps pointing at the unified proxy domain instead of having
+// its same-origin wiring overwritten with its own domain.
 func SyncEnvIfPrimaryChanged(site *config.Site, oldPrimary string) error {
 	newPrimary := site.PrimaryDomain()
 	if newPrimary == oldPrimary {
 		return nil
 	}
-	if err := envfile.SyncPrimaryDomain(site.Path, newPrimary, site.Secured); err != nil {
+	if err := SyncSiteEnv(*site); err != nil {
 		return err
 	}
 	scheme := "http"

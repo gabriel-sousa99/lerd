@@ -2,10 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Toast notifications: lightweight right-aligned banners stacked above the
@@ -133,14 +134,23 @@ func (m *Model) renderToasts(width int) string {
 	if len(m.toasts) == 0 {
 		return ""
 	}
+	// Right-align the raw stack within the full width. Used by the modal
+	// path, which stacks toasts as a section rather than compositing them.
+	return lipgloss.PlaceHorizontal(width, lipgloss.Right, m.toastStack())
+}
+
+// toastStack returns the raw toast boxes joined vertically with no horizontal
+// placement, so the overlay compositor can anchor each line to the right edge
+// itself without painting full-width blank rows over the content beneath.
+func (m *Model) toastStack() string {
+	if len(m.toasts) == 0 {
+		return ""
+	}
 	boxes := make([]string, 0, len(m.toasts))
 	for _, t := range m.toasts {
 		boxes = append(boxes, renderToastBox(t))
 	}
-	stack := strings.Join(boxes, "\n")
-	// Right-align the stack within the full width so each toast sits in
-	// the bottom-right corner of its row.
-	return lipgloss.PlaceHorizontal(width, lipgloss.Right, stack)
+	return strings.Join(boxes, "\n")
 }
 
 // renderToastBox draws one toast: coloured severity dot, bold title, dim
@@ -184,7 +194,7 @@ func toastDot(k toastKind) string {
 	}
 }
 
-func toastBorderColor(k toastKind) lipgloss.Color {
+func toastBorderColor(k toastKind) color.Color {
 	switch k {
 	case toastFail:
 		return colFailing

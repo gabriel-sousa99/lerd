@@ -37,6 +37,60 @@ func TestIsShell_empty(t *testing.T) {
 	}
 }
 
+func TestPortPreflightConflicts(t *testing.T) {
+	// Isolate config so nginx ports fall back to the 80/443 defaults and the
+	// DNS check is the fixed 5300, making CollectPortChecks deterministic.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
+
+	notRunning := func(string) bool { return false }
+	running := func(string) bool { return true }
+	dnsDown := func() bool { return false }
+	dnsUp := func() bool { return true }
+
+	hasPort := func(cs []PortCheck, port string) bool {
+		for _, c := range cs {
+			if c.Port == port {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("foreign listener on 80 is a conflict", func(t *testing.T) {
+		list := "herd-nginx 1234 herd 6u IPv4 TCP 0.0.0.0:80 (LISTEN)"
+		got := portPreflightConflicts(list, notRunning, dnsDown)
+		if !hasPort(got, "80") {
+			t.Fatalf("expected port 80 conflict, got %+v", got)
+		}
+	})
+
+	t.Run("lerd-nginx already running is not a conflict", func(t *testing.T) {
+		list := "conmon 1234 sdp 6u IPv4 TCP 0.0.0.0:80 (LISTEN)"
+		got := portPreflightConflicts(list, running, dnsUp)
+		if len(got) != 0 {
+			t.Fatalf("expected no conflicts when lerd owns the ports, got %+v", got)
+		}
+	})
+
+	t.Run("answering dnsmasq holding 5300 is not a conflict", func(t *testing.T) {
+		list := "dnsmasq 60498 sdp 5u IPv4 TCP 127.0.0.1:5300 (LISTEN)"
+		got := portPreflightConflicts(list, notRunning, dnsUp)
+		if hasPort(got, "5300") {
+			t.Fatalf("expected 5300 suppressed when dns is answering, got %+v", got)
+		}
+	})
+
+	t.Run("all ports free yields no conflicts", func(t *testing.T) {
+		got := portPreflightConflicts("", notRunning, dnsDown)
+		if len(got) != 0 {
+			t.Fatalf("expected no conflicts on an empty listener list, got %+v", got)
+		}
+	})
+}
+
 func TestEnsurePortForwarding(t *testing.T) {
 	// Should not error on any platform
 	if err := ensurePortForwarding(); err != nil {
@@ -117,6 +171,33 @@ func TestFileChangedBy(t *testing.T) {
 	}
 	if changed {
 		t.Error("a failed mutate should report no change")
+	}
+}
+
+// An upgrade that only refreshes quadlets must rewrite a custom-FPM site's
+// quadlet too, or additions to the shared FPM template (the shared php.ini
+// mount from #944) never back-fill and `php:ini shared` silently no-ops for it.
+func TestRefreshUnreferencedCustomQuadlets_RoutesCustomFPM(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	var got []string
+	orig := writeCustomFPMQuadletFn
+	writeCustomFPMQuadletFn = func(name, version string) error {
+		got = append(got, name+"@"+version)
+		return nil
+	}
+	t.Cleanup(func() { writeCustomFPMQuadletFn = orig })
+
+	reg := &config.SiteRegistry{Sites: []config.Site{
+		{Name: "shop", Path: t.TempDir(), Runtime: "fpm-custom", PHPVersion: "8.4"},
+		{Name: "paused", Path: t.TempDir(), Runtime: "fpm-custom", PHPVersion: "8.4", Paused: true},
+	}}
+
+	refreshUnreferencedCustomQuadlets(map[string]bool{}, reg)
+
+	if len(got) != 1 || got[0] != "shop@8.4" {
+		t.Errorf("custom-FPM refresh routing = %v, want only [shop@8.4]", got)
 	}
 }
 
@@ -590,6 +671,25 @@ func TestReadConfirmAnswer(t *testing.T) {
 	}
 }
 
+// Successive prompts share one input source (reconcile asks per tool), so a
+// single answer must consume exactly its own line. Reading ahead past the
+// newline swallows a user's typed-ahead Enter and makes the next prompt appear
+// to hang until they press Enter again.
+func TestReadConfirmAnswerConsumesSingleLine(t *testing.T) {
+	r := strings.NewReader("\ny\n")
+	var first, second bool
+	withSilencedStdout(t, func() {
+		first = readConfirmAnswer(r, "one?", false)
+		second = readConfirmAnswer(r, "two?", false)
+	})
+	if first {
+		t.Fatalf("first answer = true, want false (empty line keeps the no default)")
+	}
+	if !second {
+		t.Fatalf("second answer = false, want true; the first read consumed past its own line")
+	}
+}
+
 // When stdin is a pipe (not a TTY) and /dev/tty isn't accessible either,
 // promptSource must report no terminal so confirmInstallPromptDefault can
 // fall back to the default rather than reading EOF from the pipe.
@@ -644,5 +744,34 @@ func TestParseDNSMode(t *testing.T) {
 			t.Errorf("parseDNSMode(%q) = (%v, %v), want (%v, %v)",
 				c.in, gotEnabled, gotOK, c.wantEnabled, c.wantOK)
 		}
+	}
+}
+
+// TestMergeMigrationRestarts_keepsHealTornDownContainers guards the install
+// regression where a run that triggered both the podman-upgrade heal and a
+// network migration overwrote the heal-torn-down container list with the
+// migration's, leaving those services stopped. The merge must keep both sets,
+// de-duplicated.
+func TestMergeMigrationRestarts_keepsHealTornDownContainers(t *testing.T) {
+	healed := []string{"lerd-mysql", "lerd-redis"}
+	recreated := []string{"lerd-redis", "lerd-postgres"}
+
+	got := mergeMigrationRestarts(healed, recreated)
+
+	has := func(s string) bool {
+		for _, c := range got {
+			if c == s {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []string{"lerd-mysql", "lerd-redis", "lerd-postgres"} {
+		if !has(c) {
+			t.Errorf("%s missing from merged restart set %v", c, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("expected the de-duplicated union of 3 containers, got %v", got)
 	}
 }

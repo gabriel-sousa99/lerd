@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 // These builder tests are platform-agnostic — they exercise pure string
@@ -12,7 +15,7 @@ import (
 func TestBuildDarwinExecWorkerService_PointsAtGuardScript(t *testing.T) {
 	serviceUnit := buildDarwinExecWorkerService("/run/workers/lerd-queue-alpha.sh", "always")
 
-	if !strings.Contains(serviceUnit, "ExecStart=/bin/sh /run/workers/lerd-queue-alpha.sh") {
+	if !strings.Contains(serviceUnit, "ExecStart=/bin/sh '/run/workers/lerd-queue-alpha.sh'") {
 		t.Errorf("service unit should call guard script via /bin/sh, got:\n%s", serviceUnit)
 	}
 	if !strings.Contains(serviceUnit, "Restart=always") {
@@ -23,22 +26,19 @@ func TestBuildDarwinExecWorkerService_PointsAtGuardScript(t *testing.T) {
 	}
 }
 
-func TestBuildDarwinExecWorkerService_UnquotedPath(t *testing.T) {
-	// launchd's parseServiceUnit uses strings.Fields on ExecStart, which
-	// splits on whitespace — the path to the guard script must contain
-	// no spaces or quotes. Our constructor should produce a clean
-	// whitespace-free argument.
-	unit := buildDarwinExecWorkerService("/run/workers/lerd-queue-alpha.sh", "always")
+func TestBuildDarwinExecWorkerService_ScriptPathSurvivesTheSplit(t *testing.T) {
+	// The launchd translator splits ExecStart into argv, so a guard script
+	// under a data dir with a space in it has to come back as one argument.
+	script := "/Users/me/My Data/lerd/workers/lerd-queue-alpha.sh"
+	unit := buildDarwinExecWorkerService(script, "always")
 	line := findLine(unit, "ExecStart=")
 	if line == "" {
 		t.Fatalf("no ExecStart= line")
 	}
-	// "ExecStart=/bin/sh /path" should have exactly 3 whitespace-split
-	// fields after the `=`: /bin/sh, /path.
-	rhs := strings.TrimPrefix(line, "ExecStart=")
-	fields := strings.Fields(rhs)
-	if len(fields) != 2 {
-		t.Errorf("ExecStart RHS should have 2 fields, got %d: %q", len(fields), rhs)
+	args := services.SplitExecStart(strings.TrimPrefix(line, "ExecStart="))
+	want := []string{"/bin/sh", script}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("ExecStart argv = %q, want %q", args, want)
 	}
 }
 
@@ -64,12 +64,13 @@ func TestBuildDarwinExecWorkerGuardScript_WrapsPodmanExec(t *testing.T) {
 
 func TestBuildDarwinContainerWorkerUnit_UsesFPMImage(t *testing.T) {
 	unit := buildDarwinContainerWorkerUnit(
-		"lerd-queue-alpha",   // unitName
-		"8.4",                // phpVersion
-		"/Users/u/alpha",     // sitePath
-		"/Users/u/home",      // homeDir
-		"/lerd/php.conf",     // phpConfFile
-		"/lerd/php-user.ini", // phpUserIniFile
+		"lerd-queue-alpha",     // unitName
+		"8.4",                  // phpVersion
+		"/Users/u/alpha",       // sitePath
+		"/Users/u/home",        // homeDir
+		"/lerd/php.conf",       // phpConfFile
+		"/lerd/php-user.ini",   // phpUserIniFile
+		"/lerd/php-shared.ini", // phpSharedIniFile
 		"php artisan queue:work",
 		"always",
 		false, // custom container
@@ -81,6 +82,7 @@ func TestBuildDarwinContainerWorkerUnit_UsesFPMImage(t *testing.T) {
 		"WorkingDir=/Users/u/alpha",
 		"Exec=php artisan queue:work",
 		"Restart=always",
+		"Volume=/lerd/php-shared.ini:/usr/local/etc/php/conf.d/95-lerd-shared.ini:ro",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("container unit missing %q:\n%s", want, unit)
@@ -94,7 +96,7 @@ func TestBuildDarwinContainerWorkerUnit_CustomContainerUsesSiteImage(t *testing.
 		"",
 		"/Users/u/alpha",
 		"/Users/u/home",
-		"", "",
+		"", "", "",
 		"node worker.js",
 		"always",
 		true, // custom container = true, image comes from caller
@@ -107,7 +109,7 @@ func TestBuildDarwinContainerWorkerUnit_CustomContainerUsesSiteImage(t *testing.
 func TestBuildDarwinHostWorkerService_PointsAtGuardScript(t *testing.T) {
 	unit := buildDarwinHostWorkerService("/run/workers/lerd-vite-alpha.sh", "always")
 
-	if !strings.Contains(unit, "ExecStart=/bin/sh /run/workers/lerd-vite-alpha.sh") {
+	if !strings.Contains(unit, "ExecStart=/bin/sh '/run/workers/lerd-vite-alpha.sh'") {
 		t.Errorf("host worker service unit should /bin/sh the guard, got:\n%s", unit)
 	}
 	if !strings.Contains(unit, "Restart=always") {
@@ -181,4 +183,65 @@ func findLine(body, prefix string) string {
 		}
 	}
 	return ""
+}
+
+func TestWorkerBuilders_ForceColour(t *testing.T) {
+	t.Setenv("NO_COLOR", "") // the assertions below are the colour-on path
+	unit := buildDarwinContainerWorkerUnit(
+		"lerd-queue-alpha", "8.4", "/Users/u/alpha", "/Users/u/home",
+		"/lerd/php.conf", "/lerd/php-user.ini", "/lerd/php-shared.ini",
+		"php artisan queue:work", "always", false,
+	)
+	if !strings.Contains(unit, `Environment="FORCE_COLOR=1"`) {
+		t.Errorf("container worker unit should force colour:\n%s", unit)
+	}
+
+	custom := buildDarwinContainerWorkerUnit(
+		"lerd-custom-alpha", "", "/Users/u/alpha", "/Users/u/home",
+		"", "", "", "node worker.js", "always", true,
+	)
+	if !strings.Contains(custom, `Environment="FORCE_COLOR=1"`) {
+		t.Errorf("custom container worker unit should force colour:\n%s", custom)
+	}
+
+	guard := buildDarwinHostWorkerGuardScript("/bin/fnm", "/lerd/bin", "22", "/site", "npm run dev", "")
+	if !strings.Contains(guard, "export FORCE_COLOR=1") {
+		t.Errorf("host worker guard should export the colour vars:\n%s", guard)
+	}
+
+	exec := buildWorkerExecCommand("/usr/bin/podman", "/site", "lerd-php84-fpm", "php artisan queue:work", nil)
+	if !strings.Contains(exec, "--env=FORCE_COLOR=1") {
+		t.Errorf("exec worker command should pass the colour vars:\n%s", exec)
+	}
+	if !strings.HasSuffix(exec, "lerd-php84-fpm php artisan queue:work") {
+		t.Errorf("exec worker command should end with container and command:\n%s", exec)
+	}
+}
+
+// The worker's own env has to land before the container name, or podman reads
+// it as part of the command instead of as a flag.
+func TestBuildWorkerExecCommand_EnvArgsPrecedeContainer(t *testing.T) {
+	exec := buildWorkerExecCommand("/usr/bin/podman", "/site", "lerd-php84-fpm", "php artisan queue:work",
+		[]string{"--env=CHOKIDAR_INTERVAL=2000"})
+
+	if !strings.Contains(exec, "--env=CHOKIDAR_INTERVAL=2000") {
+		t.Fatalf("exec worker command should carry the env args:\n%s", exec)
+	}
+	if strings.Index(exec, "--env=CHOKIDAR_INTERVAL=2000") > strings.Index(exec, "lerd-php84-fpm") {
+		t.Errorf("env args must come before the container name:\n%s", exec)
+	}
+	if !strings.HasSuffix(exec, "lerd-php84-fpm php artisan queue:work") {
+		t.Errorf("exec worker command should end with container and command:\n%s", exec)
+	}
+}
+
+func TestWorkerBuilders_RespectNoColor(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	guard := buildDarwinHostWorkerGuardScript("/bin/fnm", "/lerd/bin", "22", "/site", "npm run dev", "")
+	if strings.Contains(guard, "FORCE_COLOR") {
+		t.Errorf("NO_COLOR should suppress the colour exports:\n%s", guard)
+	}
+	if got := workerColorArgs(); got != "" {
+		t.Errorf("workerColorArgs() = %q, want empty under NO_COLOR", got)
+	}
 }

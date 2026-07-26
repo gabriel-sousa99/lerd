@@ -25,6 +25,20 @@ func TestEveryMCPToolIsDocumented(t *testing.T) {
 	}
 }
 
+// TestEveryMCPActionIsDocumented is the same guard one level down. Tool names
+// alone drifted clean while `tls_renew` and `preset_search` shipped documented
+// nowhere, so an assistant reading the reference could not know they existed.
+// Actions are matched backtick-wrapped, the form the reference lists them in.
+func TestEveryMCPActionIsDocumented(t *testing.T) {
+	for tool, actions := range mcp.ToolActions() {
+		for _, action := range actions {
+			if !strings.Contains(lerdReference, "`"+action+"`") {
+				t.Errorf("action %q of tool %q is missing from aidocs/lerd-reference.md", action, tool)
+			}
+		}
+	}
+}
+
 func TestWriteGlobalAISkills_writesAllThreeFiles(t *testing.T) {
 	home := t.TempDir()
 
@@ -183,7 +197,7 @@ func TestWriteGlobalAISkills_replacesExistingLerdBlock(t *testing.T) {
 	if strings.Contains(string(got), "stale lerd content") {
 		t.Errorf("stale lerd block was not replaced")
 	}
-	if !strings.Contains(string(got), "Lerd — Laravel Local Dev Environment") {
+	if !strings.Contains(string(got), "Lerd, a local PHP development environment") {
 		t.Errorf("fresh lerd block not written")
 	}
 }
@@ -234,7 +248,6 @@ func TestWriteProjectAISkills_writesAllArtefacts(t *testing.T) {
 	want := []string{
 		".mcp.json",
 		".cursor/mcp.json",
-		".ai/mcp/mcp.json",
 		".junie/mcp/mcp.json",
 		".gemini/settings.json",
 		".vscode/mcp.json",
@@ -258,6 +271,11 @@ func TestWriteProjectAISkills_writesAllArtefacts(t *testing.T) {
 	// Codex MCP is global-only: no project config file should be written.
 	if _, err := os.Stat(filepath.Join(dir, ".codex", "config.toml")); !os.IsNotExist(err) {
 		t.Errorf("expected no project .codex/config.toml (Codex is global-only), err=%v", err)
+	}
+	// Windsurf is global-only and .ai/ belongs to Laravel Boost: lerd must never
+	// write a project .ai/mcp/mcp.json.
+	if _, err := os.Stat(filepath.Join(dir, ".ai", "mcp", "mcp.json")); !os.IsNotExist(err) {
+		t.Errorf("expected no project .ai/mcp/mcp.json (Windsurf is global-only), err=%v", err)
 	}
 	if !ProjectHasLerdSkills(dir) {
 		t.Errorf("ProjectHasLerdSkills should return true after WriteProjectAISkills")
@@ -488,6 +506,25 @@ func TestRemoveProjectAISkills_roundTripWithWrite(t *testing.T) {
 	}
 }
 
+func TestRunMCPEject_roundTripWithInject(t *testing.T) {
+	dir := t.TempDir()
+	if err := runMCPInject(dir); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	if !ProjectHasLerdSkills(dir) {
+		t.Fatal("precondition: inject should have produced markers")
+	}
+	if err := runMCPEject(dir); err != nil {
+		t.Fatalf("eject: %v", err)
+	}
+	if ProjectHasLerdSkills(dir) {
+		t.Errorf("ProjectHasLerdSkills should be false after eject")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".mcp.json")); !os.IsNotExist(err) {
+		t.Errorf(".mcp.json should be gone after eject, err=%v", err)
+	}
+}
+
 func TestRemoveProjectAISkills_preservesUnrelatedMCPEntries(t *testing.T) {
 	abs := t.TempDir()
 	_ = os.WriteFile(filepath.Join(abs, ".mcp.json"),
@@ -537,9 +574,13 @@ func TestIsLerdBuiltImage_matchers(t *testing.T) {
 // globally for every client, so drift upward gets expensive fast. Raise the
 // ceiling only when adding content that justifies the bytes. Unifying the three
 // former per-client constants onto this one leaner reference dropped the prior
-// 57000-byte SKILL.md ceiling to this.
+// 57000-byte SKILL.md ceiling to 26000; bumped to this for the `workspace` tool
+// group and for the package-manager, worker-state and preset-metadata rules an
+// assistant was previously getting wrong, then 28500 → 28700 for the `diag`
+// `doctor_fix` action, then 28700 → 29400 for the runtime `ini_*` php.ini
+// actions and the shared-vs-per-version guidance.
 func TestLerdReference_underSizeCeiling(t *testing.T) {
-	const ceiling = 26000
+	const ceiling = 29400
 	if got := len(lerdReference); got > ceiling {
 		t.Errorf("lerd-reference.md is %d bytes, ceiling is %d — trim before raising", got, ceiling)
 	}

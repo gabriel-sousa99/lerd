@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -22,7 +21,7 @@ import (
 // is intentionally excluded — it carries octane-specific behaviour and is
 // tracked separately.
 var frankenPHPRuntimeExtensions = []string{
-	"bcmath", "bz2", "calendar", "dba", "exif", "gd", "gmp", "intl", "ldap",
+	"bcmath", "bz2", "calendar", "dba", "exif", "ftp", "gd", "gmp", "intl", "ldap",
 	"mysqli", "opcache", "pcntl", "pdo_mysql", "pdo_pgsql", "shmop", "soap",
 	"sockets", "sysvmsg", "sysvsem", "sysvshm", "xsl", "zip",
 	"redis", "igbinary", "imagick", "mongodb",
@@ -83,8 +82,8 @@ func frankenPHPContainerfileHash(customExts, packages []string) (string, error) 
 // (each custom extension's apk build deps folded in) baked into the derived image
 // for a version, so the build and the staleness check hash the same inputs.
 func frankenPHPBuildInputs(cfg *config.GlobalConfig, version string) (exts, packages []string) {
-	exts = cfg.GetExtensions(version)
-	packages = cfg.GetPackages(version)
+	exts = cfg.GetExtensions()
+	packages = cfg.GetPackages()
 	for _, ext := range exts {
 		packages = append(packages, cfg.GetExtApkDeps(ext)...)
 	}
@@ -142,7 +141,7 @@ func buildFrankenPHPImage(version string, force bool, customExts, packages []str
 		return fmt.Errorf("hashing FrankenPHP Containerfile: %w", err)
 	}
 	if !force {
-		if exec.Command(PodmanBin(), "image", "exists", imageName).Run() == nil &&
+		if execCommand(PodmanBin(), "image", "exists", imageName).Run() == nil &&
 			imageLabelFn(imageName, frankenPHPContainerfileHashLabel) == hash {
 			return nil // image exists and is current
 		}
@@ -178,13 +177,16 @@ func buildFrankenPHPImage(version string, force bool, customExts, packages []str
 		args = append(args, "--no-cache")
 	}
 	args = append(args, "-f", cfPath, tmp)
-	cmd := exec.Command(PodmanBin(), args...)
+	cmd := execCommand(PodmanBin(), args...)
 	cmd.Stdout = w
 	cmd.Stderr = w
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("building FrankenPHP PHP %s image: %w", version, err)
 	}
 	fmt.Fprintf(w, "  FrankenPHP PHP %s image built successfully.\n", version)
+	if OnImageRebuilt != nil {
+		OnImageRebuilt()
+	}
 	return nil
 }
 

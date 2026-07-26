@@ -10,5 +10,11 @@ var iconPNG []byte
 //go:embed assets/icon-white.png
 var iconWhitePNG []byte
 
+//go:embed assets/icon-dark.png
+var iconDarkPNG []byte
+
+//go:embed assets/icon-green.png
+var iconGreenPNG []byte
+
 //go:embed assets/icon-mono.png
 var iconMonoPNG []byte

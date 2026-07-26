@@ -1,0 +1,77 @@
+<h2>Seção Sites — afford de proxy fullstack</h2>
+<p class="subtitle">Perto do link e da versão PHP. Dois estados: site ainda sem proxy (cria) e site já usado por um proxy (abre/edita).</p>
+
+<style>
+  .lerd { --red:#e5484d; --card:#1d2027; --border:#2a2e37; --muted:#8b909a; --txt:#e6e8ec; }
+  .lerd .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;color:var(--txt);font-size:13px;max-width:600px;margin:0 auto 18px;box-shadow:0 12px 40px rgba(0,0,0,.4)}
+  .lerd .ph{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);gap:12px}
+  .lerd .ph h1{margin:0;font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .lerd .lk{font-family:monospace;font-size:11.5px;color:var(--red);text-decoration:none;display:block;margin-top:3px}
+  .lerd .sd{width:8px;height:8px;border-radius:50%;background:#86efac;flex:none}
+  .lerd .sec{padding:12px 18px;border-bottom:1px solid var(--border)}
+  .lerd .sec:last-child{border-bottom:none}
+  .lerd .st{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:9px}
+  .lerd .ir{display:flex;align-items:center;justify-content:space-between;padding:5px 0;font-size:12.5px}
+  .lerd .ir .k{color:var(--muted)}
+  .lerd .verbox{display:inline-flex;align-items:center;gap:6px;background:#0f1115;border:1px solid var(--border);border-radius:7px;padding:4px 9px;font-family:monospace;font-size:12px}
+  .lerd .b{padding:6px 11px;border-radius:8px;font-size:12px;border:1px solid var(--border);background:transparent;color:var(--txt);cursor:pointer}
+  .lerd .b.pri{background:var(--red);border-color:var(--red);color:#fff}
+  .lerd .pbox{display:flex;align-items:center;justify-content:space-between;background:#0f1115;border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+  .lerd .pbox .l{display:flex;align-items:center;gap:9px}
+  .lerd .pbox .tag{font-size:10px;text-transform:uppercase;letter-spacing:.04em;background:rgba(252,165,165,.12);color:#fca5a5;border-radius:5px;padding:2px 7px}
+  .lerd .pbox a{font-family:monospace;font-size:12px;color:#7dd3fc;text-decoration:none}
+  .lerd .muted{color:var(--muted);font-size:11.5px}
+  .lerd .cap{max-width:600px;margin:0 auto 6px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+</style>
+
+<div class="lerd">
+
+  <div class="cap">Estado 1 — site -api ainda sem proxy fullstack</div>
+  <div class="panel">
+    <div class="ph">
+      <div>
+        <h1><span class="sd"></span>retencao-api</h1>
+        <a class="lk" href="#">https://retencao-api.localhost</a>
+      </div>
+      <button class="b">Restart</button>
+    </div>
+    <div class="sec">
+      <div class="ir"><span class="k">PHP</span><span class="verbox">8.2 ▾</span></div>
+      <div class="ir"><span class="k">Framework</span><span>Laravel</span></div>
+    </div>
+    <div class="sec">
+      <div class="st">Proxy fullstack</div>
+      <div class="pbox">
+        <span class="muted">Servir este site como API sob um domínio único com seu SPA.</span>
+        <button class="b pri">+ Criar proxy fullstack</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="cap">Estado 2 — site já é a API de um proxy fullstack</div>
+  <div class="panel">
+    <div class="ph">
+      <div>
+        <h1><span class="sd"></span>retencao-api</h1>
+        <a class="lk" href="#">https://retencao-api.localhost</a>
+      </div>
+      <button class="b">Restart</button>
+    </div>
+    <div class="sec">
+      <div class="ir"><span class="k">PHP</span><span class="verbox">8.2 ▾</span></div>
+      <div class="ir"><span class="k">Framework</span><span>Laravel</span></div>
+    </div>
+    <div class="sec">
+      <div class="st">Proxy fullstack</div>
+      <div class="pbox">
+        <span class="l">
+          <span class="tag">API</span>
+          <span>em <a href="#">retencao.localhost</a></span>
+          <span class="muted">· /api /sanctum /broadcasting /storage</span>
+        </span>
+        <button class="b">Editar ↗</button>
+      </div>
+    </div>
+  </div>
+
+</div>

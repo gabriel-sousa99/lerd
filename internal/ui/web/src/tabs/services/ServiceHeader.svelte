@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, type Snippet } from 'svelte';
   import StatusPill from '$components/StatusPill.svelte';
+  import Icon from '$components/Icon.svelte';
   import ButtonMenu, { type ButtonMenuAction } from '$components/ButtonMenu.svelte';
   import ServiceDependencies from './ServiceDependencies.svelte';
   import ServiceDeleteModal from './ServiceDeleteModal.svelte';
@@ -14,12 +15,18 @@
     serviceAction,
     streamServiceAction,
     checkServiceUpdates,
-    updateProgress,
-    loadServices
+    updateProgress
   } from '$stores/services';
   import { adminServiceFor } from '$stores/presetSuggestions';
-  import { openDashboard } from '$stores/dashboard';
+  import { openDashboard, openServiceDashboard } from '$stores/dashboard';
+  import { databases } from '$stores/databases';
+  import { accessMode } from '$stores/accessMode';
   import { m } from '../../paraglide/messages.js';
+
+  // Service ports and their web UIs bind to loopback on the host, so their
+  // localhost links are dead from a remote (LAN) dashboard. Disable the open
+  // actions with a "host only" hint rather than offering links that can't work.
+  const remote = $derived(!$accessMode.loopback);
 
   function localDetailLabel(s: Service): string {
     if (s.queue_site) return m.services_labels_queueWorker();
@@ -39,18 +46,47 @@
 
   const admin = $derived(adminServiceFor(svc, $allServices));
 
+  // The database engine's database count, loaded by its Databases tab. Null
+  // until loaded (or for non-database services), so nothing renders early.
+  const dbCount = $derived.by(() => {
+    if (!svc.is_database) return null;
+    const engine = $databases.find((e) => e.service === svc.name);
+    return engine ? engine.databases.length : null;
+  });
+
   async function openAdmin() {
     if (!admin) return;
-    if (admin.status !== 'active') {
-      await serviceAction(admin.name, 'start');
-      await loadServices();
-    }
-    const latest = $allServices.find((s) => s.name === admin.name) || admin;
-    openDashboard(latest);
+    await openServiceDashboard(admin);
   }
 
   const isWorker = $derived(isServiceWorker(svc));
   const active = $derived(svc.status === 'active');
+  // When active and a host port is exposed, the status pill shows the port (a
+  // moved port reads at a glance) and copies 127.0.0.1:<port> on click; otherwise
+  // it falls back to the status word.
+  const exposedPort = $derived(active && svc.port ? svc.port : 0);
+  const exposedAddr = $derived(exposedPort ? `127.0.0.1:${exposedPort}` : '');
+  let portCopied = $state(false);
+  let portCopyTimer: ReturnType<typeof setTimeout> | null = null;
+  async function copyExposedAddr() {
+    if (!exposedAddr) return;
+    try {
+      await navigator.clipboard.writeText(exposedAddr);
+      portCopied = true;
+      if (portCopyTimer) clearTimeout(portCopyTimer);
+      portCopyTimer = setTimeout(() => (portCopied = false), 1500);
+    } catch {
+      /* clipboard unavailable; nothing to recover */
+    }
+  }
+  const pillLabel = $derived(exposedPort ? String(exposedPort) : svc.status);
+  const pillTitle = $derived(
+    exposedPort
+      ? portCopied
+        ? m.common_copied()
+        : m.services_portPillTitle({ addr: exposedAddr })
+      : ''
+  );
   const portConflicts = $derived(
     !active && svc.port_conflicts && svc.port_conflicts.length > 0 ? svc.port_conflicts : []
   );
@@ -188,32 +224,39 @@
       });
     }
 
+    // Strip the click/link and grey out an open action when the dashboard is
+    // viewed remotely: the target is a loopback-only localhost URL.
+    const openAct = (a: ButtonMenuAction): ButtonMenuAction =>
+      remote
+        ? { id: a.id, tone: a.tone, icon: a.icon, disabled: true, label: `${a.label} · ${m.services_hostOnly()}`, title: m.services_hostOnly() }
+        : a;
+
     if (active && admin) {
       const adminLabel = m.services_openAdmin({ name: serviceLabel(admin.name) });
-      rest.push({
+      rest.push(openAct({
         id: 'admin',
         tone: 'info',
         icon: icons.external,
         label: adminLabel,
         title: adminLabel,
         onclick: openAdmin
-      });
+      }));
     } else if (active && svc.dashboard) {
-      rest.push({
+      rest.push(openAct({
         id: 'dashboard',
         icon: icons.external,
         label: m.services_dashboard(),
         title: m.services_dashboard(),
         onclick: () => openDashboard(svc)
-      });
+      }));
     } else if (active && svc.connection_url) {
-      rest.push({
+      rest.push(openAct({
         id: 'connection',
         icon: icons.external,
         label: m.services_openConnection(),
         title: svc.connection_url,
         href: svc.connection_url
-      });
+      }));
     }
 
     if (!isWorker && !active && !updating) {
@@ -316,7 +359,21 @@
         {#if svc.version && !isWorker}
           <span class="text-xs font-normal tabular-nums text-gray-500 dark:text-gray-400">{svc.version}</span>
         {/if}
-        <StatusPill tone={active ? 'ok' : 'muted'} label={svc.status} />
+        <StatusPill
+          tone={active ? 'ok' : 'muted'}
+          label={pillLabel}
+          title={pillTitle}
+          onclick={exposedPort ? copyExposedAddr : undefined}
+        />
+        {#if dbCount !== null}
+          <span
+            class="inline-flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400"
+            title={m.databases_count({ count: dbCount })}
+          >
+            <Icon name="database" class="w-3.5 h-3.5" />
+            {dbCount}
+          </span>
+        {/if}
         {#if portConflicts.length > 0}
           <span
             class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-500/30"
