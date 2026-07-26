@@ -26,9 +26,14 @@ jobs:
       fail-fast: false
       matrix:
         php: ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+        # amd64 only. Oracle publishes no linux.arm64 Instant Client for 21.x
+        # (19.x is the newest ARM build), so oci8 cannot link on aarch64 —
+        # every arm64 cell failed with "skipping incompatible libclntsh.so".
+        # Shipping 19.x on ARM would silently contradict the 21.18 this fork
+        # advertises, so the Oracle images are x86_64 until Oracle ships 21.x
+        # for ARM. arm64 hosts keep building from source, as they did before.
         arch:
           - { name: amd64, runner: ubuntu-latest }
-          - { name: arm64, runner: ubuntu-24.04-arm }
 
     steps:
       - uses: actions/checkout@v4
@@ -190,12 +195,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify both arch images exist
+      # amd64 only — see the matrix comment: oci8 cannot link against Oracle's
+      # x64-only Instant Client on aarch64, so there is no arm64 cell to wait on.
+      - name: Verify the arch image exists
         run: |
           BASE="ghcr.io/gabriel-sousa99/lerd-php${{ steps.tag.outputs.php_short }}-fpm-base"
           TAG="${{ steps.tag.outputs.tag }}"
           MISSING=""
-          for a in amd64 arm64; do
+          for a in amd64; do
             docker manifest inspect "${BASE}:${TAG}-${a}" > /dev/null 2>&1 || MISSING="$MISSING ${a}"
           done
           if [ -n "$MISSING" ]; then
@@ -219,12 +226,14 @@ jobs:
             fi
           fi
 
-      - name: Create and push multi-arch manifest
+      # Single-arch for now: listing a ${TAG}-arm64 that no cell publishes makes
+      # imagetools fail and the pullable ${TAG} never appears, which is what
+      # sends every install back to a from-source build.
+      - name: Create and push the manifest
         if: steps.check.outputs.exists != 'true'
         run: |
           BASE="ghcr.io/gabriel-sousa99/lerd-php${{ steps.tag.outputs.php_short }}-fpm-base"
           TAG="${{ steps.tag.outputs.tag }}"
           docker buildx imagetools create \
             --tag "${BASE}:${TAG}" \
-            "${BASE}:${TAG}-amd64" \
-            "${BASE}:${TAG}-arm64"
+            "${BASE}:${TAG}-amd64"

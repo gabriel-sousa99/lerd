@@ -112,12 +112,22 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
 # the Instant Client itself is copied separately in the runtime stage below.
 # pecl package is pinned per-PHP-major where the rolling "oci8" tag drops
 # support; PHP 8.2+ tracks the latest.
+#
+# 8.1 gets 3.2.1, not 3.3.0: 3.3.0's package.xml claims min PHP 8.1, but its
+# generated oci8_arginfo.h references ZEND_STR_SENSITIVEPARAMETER and
+# ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES, both of which only exist from 8.2, so the
+# build dies at compile time. The metadata is optimistic; the compiler is not.
+#
+# This image is x86_64-only by necessity: Oracle publishes no linux.arm64
+# Instant Client for 21.x (only 19.x), and linking oci8 against the x64
+# libclntsh on aarch64 fails with "skipping incompatible libclntsh.so".
 RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
     && case "$PHPVER" in \
         5.6)             OCI8_PKG="oci8-2.0.12" ;; \
         7.2|7.3|7.4)     OCI8_PKG="oci8-2.2.0" ;; \
         8.0)             OCI8_PKG="oci8-3.0.1" ;; \
-        8.1|8.2|8.3)     OCI8_PKG="oci8-3.3.0" ;; \
+        8.1)             OCI8_PKG="oci8-3.2.1" ;; \
+        8.2|8.3)         OCI8_PKG="oci8-3.3.0" ;; \
         8.4)             OCI8_PKG="oci8-3.4.1" ;; \
         *)               OCI8_PKG="oci8" ;; \
     esac \
