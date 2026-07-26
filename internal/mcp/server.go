@@ -1203,7 +1203,7 @@ func execDoctor() (any, *rpcError) {
 		return toolOK(stripANSI(strings.TrimSpace(out.String()))), nil
 	}
 
-	report["how_to_fix"] = "Each finding carries fix.tier. 'auto': call diag action doctor_fix to apply the safe repairs (it runs the non-sudo fixes and re-checks), then call doctor again to confirm. 'manual': the repair needs sudo, so give the user the finding's hint as the exact command to run, never run sudo yourself. 'none': external state (a foreign process on a port, a config syntax error) to explain to the user. If a finding is unclear or cannot be fixed here, offer to file it on GitHub with diag action bug_report (an anonymised report to attach to a new issue at https://github.com/lerd-env/lerd/issues)."
+	report["how_to_fix"] = "Each finding carries fix.tier. 'auto': call diag action doctor_fix to apply the safe repairs (it runs the non-sudo fixes and re-checks), then call doctor again to confirm. 'manual': the repair needs sudo, so give the user the finding's hint as the exact command to run, never run sudo yourself. 'none': external state (a foreign process on a port, a config syntax error) to explain to the user. If a finding is unclear or cannot be fixed here, offer to file it on GitHub with diag action bug_report (an anonymised report to attach to a new issue at https://github.com/gabriel-sousa99/lerd/issues)."
 
 	data, _ := json.MarshalIndent(report, "", "  ")
 	return toolOK(string(data)), nil

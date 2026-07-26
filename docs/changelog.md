@@ -7,7 +7,41 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — merge upstream v1.24.1 → v1.30.1
+## [1.30.1-oracle.1] — 2026-07-26
+
+Fork (Oracle Edition). Correções de URLs que apontavam para o lugar errado —
+todas encontradas ao verificar a release `1.30.1-oracle.0`.
+
+### Fixed
+
+- **`lerd whatsnew` não mostrava nada.** A URL do changelog errava duas vezes:
+  apontava para a branch `main` (que segue o upstream e não tem nenhuma entrada
+  do fork) e buscava `CHANGELOG.md`, que é um **symlink** — o raw.github serve o
+  *caminho* de destino como corpo, devolvendo 200 com o texto
+  `docs/changelog.md`. Agora busca `oracle-oci8-support/docs/changelog.md`, com
+  teste que fixa branch e arquivo.
+- **Os instaladores nos docs e nas notas de release instalavam o software
+  errado.** `raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh`
+  serve um instalador antigo com `REPO="geodro/lerd"` — a org que nem existe
+  mais. As URLs `https://lerd.sh/install.sh` (macOS) instalavam o upstream, sem
+  Oracle. As 8 ocorrências passam a apontar para
+  `oracle-oci8-support/install.sh`.
+- Item **"Debug & Oracle help"** da bandeja abria um 404: `DEBUG.md` só existe
+  no fork, e o link nomeava `main`.
+- Relatórios de bug do MCP mandavam abrir issue em `lerd-env/lerd`, o upstream.
+- Tap errado no aviso de Homebrew (`lerd-env/lerd` → `gabriel-sousa99/lerd`).
+- `svelte-check` limpo (0 erros): o mock de `fetch` em `version.test.ts` não
+  declarava argumentos, então ler `calls[0][0]` era erro de tipo.
+
+### Docs
+
+- Avisos de que a flake NixOS e o app desktop são **do upstream**: a flake
+  empacota o binário sem Oracle (use as releases do fork), enquanto o desktop
+  funciona sem alteração por ser só uma janela sobre o dashboard local.
+
+---
+
+## [1.30.1-oracle.0] — 2026-07-26 — merge upstream v1.24.1 → v1.30.1
 
 Fork (Oracle Edition). Integra 663 commits do upstream (`lerd-env/lerd`), de
 v1.24.1 a v1.30.1. Todas as features do fork foram preservadas; o resumo abaixo

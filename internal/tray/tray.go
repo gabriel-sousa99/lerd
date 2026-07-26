@@ -251,7 +251,9 @@ func handleDebugGuide(item *systray.MenuItem) {
 		return
 	}
 	for range item.ClickedCh {
-		url := "https://github.com/gabriel-sousa99/lerd/blob/main/docs/DEBUG.md"
+		// DEBUG.md is fork-only, and the fork's `main` still tracks upstream,
+		// so the branch has to be named explicitly or this 404s.
+		url := "https://github.com/gabriel-sousa99/lerd/blob/oracle-oci8-support/docs/DEBUG.md"
 		opener := "xdg-open"
 		if runtime.GOOS == "darwin" {
 			opener = "open"

@@ -13,11 +13,11 @@ Tested and known-good: Ubuntu, Fedora, Arch, Debian, Mint, Pop!\_OS, openSUSE, C
 ::: code-group
 
 ```bash [curl]
-curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 ```
 
 ```bash [wget]
-wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 ```
 
 ```bash [From source]
@@ -85,11 +85,11 @@ You can also re-run the installer:
 ::: code-group
 
 ```bash [curl]
-curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash -s -- --update
 ```
 
 ```bash [wget]
-wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/main/install.sh | bash -s -- --update
+wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash -s -- --update
 ```
 
 :::
@@ -136,11 +136,11 @@ bash install.sh --check
 ::: code-group
 
 ```bash [curl]
-curl -fsSL https://lerd.sh/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 ```
 
 ```bash [wget]
-wget -qO- https://lerd.sh/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash
 ```
 
 :::
@@ -166,7 +166,7 @@ lerd install
 Podman is installed automatically as a Homebrew dependency.
 
 ::: warning Untrusted tap
-Recent Homebrew versions refuse to load formulae from third-party taps until they're trusted. If you see `Refusing to load formula ... from untrusted tap`, run `brew trust lerd-env/lerd` once, then retry.
+Recent Homebrew versions refuse to load formulae from third-party taps until they're trusted. If you see `Refusing to load formula ... from untrusted tap`, run `brew trust gabriel-sousa99/lerd` once, then retry.
 :::
 
 ### Update
@@ -183,7 +183,7 @@ If you're running a local development build (a `git describe` version like `1.25
 
 ```bash
 lerd uninstall                                    # tears down launchd agents, DNS resolver, containers
-curl -fsSL https://lerd.sh/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-support/install.sh | bash -s -- --uninstall
 ```
 
 Run `lerd uninstall` first (while the binary is still present) so the DNS resolver and Podman state are cleaned up, then the installer's `--uninstall` removes the launchd agents and the binary. If you installed via Homebrew, finish with `brew uninstall lerd` instead of the second command. On macOS the installer detects when the binary is still present and pauses to remind you to run `lerd uninstall` first, since the DNS resolver (`/etc/resolver/test`, removed with sudo) and the Podman machine are unreachable once the binary is gone; if it can't reach a terminal it prints the manual removal commands at the end instead.
@@ -196,6 +196,10 @@ There is no native Windows build. Lerd runs on Windows through WSL2, where the s
 
 NixOS's declarative model doesn't fit the one-line installer's imperative DNS and self-install steps, so the community [`lerd-nixos`](https://github.com/lerd-env/lerd-nixos) flake packages the `lerd` binary and provides the `configuration.nix` blocks the stack needs (rootless Podman, `*.test`-only DNS routing, the mkcert CA, and the systemd fixes for `lerd-ui` / `lerd-watcher`). See the [NixOS guide](./nixos) for the complete runbook from a fresh install.
 
+::: warning Oracle Edition on NixOS
+That flake is upstream's and packages **upstream's** binary, which has no Oracle Instant Client and no `oci8`. The `configuration.nix` blocks it provides are still the right host setup, but fetch the binary from [this fork's releases](https://github.com/gabriel-sousa99/lerd/releases) instead of the flake's, or you lose the Oracle support this fork exists for.
+:::
+
 ## Desktop app (optional)
 
 The dashboard runs in any browser, but [Lerd Desktop](https://github.com/lerd-env/lerd-desktop) wraps it in a dedicated window with [native desktop notifications](../features/notifications) for captured mail, worker failures and finished operations. It is optional and entirely separate from the lerd install itself, which keeps working unchanged without it.
@@ -205,5 +209,9 @@ It ships for Linux as a Flatpak:
 ```bash
 flatpak install --user https://lerd.sh/lerd.flatpakref
 ```
+
+::: info Upstream's build
+The desktop app is upstream's and this fork does not rebuild it. That is fine: it is a window around the dashboard your local `lerd-ui` already serves, so it works against this fork unchanged. Only the `lerd` binary itself needs to be the Oracle Edition.
+:::
 
 Update it with `flatpak update`. Once it is installed, `lerd dashboard` and the tray's **Open Dashboard** open the app instead of a browser tab, and clicking a native notification opens it through its `lerd://` scheme. The one-line installer also offers to set it up for you on Linux.

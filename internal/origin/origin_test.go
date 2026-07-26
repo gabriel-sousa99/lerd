@@ -37,6 +37,28 @@ func TestAllEndpointsServeTheirPublisher(t *testing.T) {
 	}
 }
 
+// The changelog URL has two ways to look right and still serve nothing: naming
+// `main` (which tracks upstream and has none of the fork's entries) and naming
+// the repo-root CHANGELOG.md, a symlink that raw.github serves as its target
+// *path* with a 200. Both shipped at once in v1.30.1-oracle.0 and left `lerd
+// whatsnew` blank, so pin the branch and the real file.
+func TestChangelogURLNamesForkBranchAndRealFile(t *testing.T) {
+	got := ChangelogURLs()
+	if len(got) == 0 {
+		t.Fatal("empty changelog list")
+	}
+	u := got[0]
+	if !strings.Contains(u, "/oracle-oci8-support/") {
+		t.Errorf("changelog URL %q does not name the fork's default branch", u)
+	}
+	if !strings.HasSuffix(u, "/docs/changelog.md") {
+		t.Errorf("changelog URL %q must fetch docs/changelog.md, not the CHANGELOG.md symlink", u)
+	}
+	if strings.Contains(u, "/main/") {
+		t.Errorf("changelog URL %q points at main, which tracks upstream", u)
+	}
+}
+
 func TestBaseImageRefFormat(t *testing.T) {
 	refs := BaseImageRefs("84", "abc")
 	if len(refs) != 1 || refs[0] != "ghcr.io/gabriel-sousa99/lerd-php84-fpm-base:abc" {

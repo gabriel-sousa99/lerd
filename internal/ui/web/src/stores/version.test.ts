@@ -60,7 +60,9 @@ describe('version store', () => {
   });
 
   it('requests a live refresh when forced', async () => {
-    const spy = vi.fn(async () =>
+    // Declare the args even though the body ignores them: without them the mock's
+    // call tuple types as [] and reading calls[0][0] below is a type error.
+    const spy = vi.fn(async (..._args: unknown[]) =>
       new Response(JSON.stringify({ current: '1.19.0', has_update: false }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' }

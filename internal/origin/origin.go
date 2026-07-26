@@ -19,6 +19,11 @@ const (
 	mainRepo       = "gabriel-sousa99/lerd" // releases, installer, changelog
 	frameworksRepo = "lerd-env/frameworks"
 	servicesRepo   = "lerd-env/services"
+
+	// defaultBranch is the fork's default branch, where the Oracle work lives.
+	// The fork's `main` still tracks upstream, so anything fetched by raw URL
+	// has to name this branch explicitly or it silently serves upstream's file.
+	defaultBranch = "oracle-oci8-support"
 )
 
 // StoreBaseURLs returns the framework-store base. The definitions live under a
@@ -68,11 +73,18 @@ func ReleaseAPIBaseURLs() []string {
 }
 
 // ChangelogURLs lists raw changelog URLs.
+//
+// Oracle fork: two corrections over upstream's path. The fork's default branch
+// is oracle-oci8-support, not main (main tracks upstream and carries none of the
+// fork's entries), and the repo-root CHANGELOG.md is a symlink — raw.github
+// serves a symlink's target *path* as the body, so that URL returned the literal
+// string "docs/changelog.md" with a 200 and `lerd whatsnew` rendered nothing.
+// Fetch the real file on the real branch instead.
 func ChangelogURLs() []string {
 	if list := splitList(os.Getenv("LERD_CHANGELOG_URL")); len(list) > 0 {
 		return list
 	}
-	return []string{"https://raw.githubusercontent.com/" + mainRepo + "/main/CHANGELOG.md"}
+	return []string{"https://raw.githubusercontent.com/" + mainRepo + "/" + defaultBranch + "/docs/changelog.md"}
 }
 
 // BaseImageRefs lists GHCR refs for a prebuilt PHP-FPM base image, where phpShort
