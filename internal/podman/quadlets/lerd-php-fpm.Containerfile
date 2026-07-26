@@ -78,7 +78,10 @@ RUN apk update && apk add --no-cache \
              && rm -rf /tmp/imagick) \
          || true; } \
     && { (yes '' | pecl install igbinary && docker-php-ext-enable igbinary) || true; } \
-    && { (yes '' | pecl install mongodb && docker-php-ext-enable mongodb) || true; } \
+    && { (PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
+          && if [ "$PHPVER" = "7.4" ]; then yes '' | pecl install mongodb-1.16.2; \
+             else yes '' | pecl install mongodb; fi \
+          && docker-php-ext-enable mongodb) || true; } \
     && { (yes '' | pecl install pcov && docker-php-ext-enable pcov) || true; } \
     && { (apk add --no-cache libmemcached-dev zlib-dev \
           && yes '' | pecl install memcached && docker-php-ext-enable memcached) || true; } \
@@ -121,8 +124,22 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
 # This image is x86_64-only by necessity: Oracle publishes no linux.arm64
 # Instant Client for 21.x (only 19.x), and linking oci8 against the x64
 # libclntsh on aarch64 fails with "skipping incompatible libclntsh.so".
-RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
-    && case "$PHPVER" in \
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')"; \
+    apk add --no-cache libaio libnsl gcompat libc6-compat libstdc++ unzip; \
+    mkdir -p /opt/oracle && cd /opt/oracle; \
+    curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/2118000/instantclient-basic-linux.x64-21.18.0.0.0dbru.zip; \
+    curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/2118000/instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip; \
+    unzip -qo instantclient-basic-linux.x64-21.18.0.0.0dbru.zip; \
+    unzip -qo instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip; \
+    rm -f /opt/oracle/*.zip; \
+    ln -sfn /opt/oracle/instantclient_21_18 /opt/oracle/instantclient; \
+    pecl channel-update pecl.php.net; \
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+      echo "Skipping OCI8 on ARM64 (no compatible Oracle Instant Client in this image)"; \
+    else \
+      case "$PHPVER" in \
         5.6)             OCI8_PKG="oci8-2.0.12" ;; \
         7.2|7.3|7.4)     OCI8_PKG="oci8-2.2.0" ;; \
         8.0)             OCI8_PKG="oci8-3.0.1" ;; \
@@ -130,19 +147,11 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
         8.2|8.3)         OCI8_PKG="oci8-3.3.0" ;; \
         8.4)             OCI8_PKG="oci8-3.4.1" ;; \
         *)               OCI8_PKG="oci8" ;; \
-    esac \
-    && apk add --no-cache libaio libnsl gcompat libc6-compat libstdc++ unzip \
-    && mkdir -p /opt/oracle && cd /opt/oracle \
-    && curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/2118000/instantclient-basic-linux.x64-21.18.0.0.0dbru.zip \
-    && curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/2118000/instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip \
-    && unzip -qo instantclient-basic-linux.x64-21.18.0.0.0dbru.zip \
-    && unzip -qo instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip \
-    && rm -f /opt/oracle/*.zip \
-    && ln -sfn /opt/oracle/instantclient_21_18 /opt/oracle/instantclient \
-    && pecl channel-update pecl.php.net \
-    && echo "instantclient,/opt/oracle/instantclient" | pecl install "$OCI8_PKG" \
-    && docker-php-ext-enable oci8 \
-    && rm -rf /opt/oracle/instantclient_21_18/sdk /tmp/pear /var/cache/apk/*
+      esac; \
+      printf "instantclient,/opt/oracle/instantclient\n" | pecl install "$OCI8_PKG"; \
+      docker-php-ext-enable oci8; \
+    fi; \
+    rm -rf /opt/oracle/instantclient_21_18/sdk /tmp/pear /var/cache/apk/*
 
 # lerd_devtools: lerd's engine-level Debug-window capture (queries, mail, views,
 # events, jobs, http). Compiled in the builder so its .so and the
