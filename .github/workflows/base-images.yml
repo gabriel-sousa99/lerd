@@ -2,7 +2,9 @@ name: Build Base Images
 
 on:
   push:
-    branches: [main]
+    # The fork's default branch, not main — main still tracks upstream, so a
+    # Containerfile change here would never have rebuilt the Oracle base images.
+    branches: [oracle-oci8-support]
     paths:
       - 'internal/podman/quadlets/lerd-php-fpm.Containerfile'
       - 'internal/podman/devtools/**'
