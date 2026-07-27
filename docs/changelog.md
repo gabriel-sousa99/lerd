@@ -7,6 +7,22 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.30.1-oracle.3] — 2026-07-26
+
+Fork (Oracle Edition). Release de correção a partir do último PR mergeado (#9),
+focada em manter o build das imagens estável em combinações específicas de
+arquitetura e versão de PHP.
+
+### Fixed
+
+- **OCI8 em ARM64 não quebra mais o build.** O processo agora detecta
+  `aarch64/arm64` e pula a instalação do OCI8 com mensagem explícita, em vez de
+  tentar linkar contra Instant Client incompatível.
+- **MongoDB PECL no PHP 7.4 volta a instalar.** O Containerfile fixa
+  `mongodb-1.16.2` para 7.4 e mantém `mongodb` latest para as demais versões.
+
+---
+
 ## [1.30.1-oracle.2] — 2026-07-26
 
 Fork (Oracle Edition). **As imagens base com Oracle finalmente existem no

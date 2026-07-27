@@ -78,7 +78,7 @@ Esta fork adiciona, por cima de tudo isso:
 | Instalar versão PHP                | só CLI                       | **botão no dashboard + SSE logs ao vivo**                           |
 | Service presets adicionais         | mysql/postgres/redis/…       | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**             |
 | Xdebug por padrão                  | `start_with_request=yes`     | **`=trigger`** (sem spam em CLI sem IDE)                            |
-| Versão                             | `1.30.1`                     | `1.30.1-oracle.N`                                                   |
+| Versão                             | `1.30.1`                     | `1.30.1-oracle.3`                                                   |
 
 ### Extensões PHP nas imagens
 
@@ -193,7 +193,7 @@ O script verifica `podman`/`git`/`mkcert`, baixa o binário para
 NÃO** → sites em `http://meusite.localhost/` (sem sudo, RFC 6761).
 
 ```bash
-lerd about    # confirma "Lerd Oracle Edition" e versão 1.30.1-oracle.N
+lerd about    # confirma "Lerd Oracle Edition" e versão 1.30.1-oracle.3
 ```
 
 > [!TIP]
