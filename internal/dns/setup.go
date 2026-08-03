@@ -4,10 +4,12 @@ package dns
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -46,8 +48,9 @@ func resolvedDropinFor(tld string) string {
 const lerdNMUnmanaged = "/etc/NetworkManager/conf.d/lerd-dns-link.conf"
 
 // lerdSudoersPath is the passwordless DNS grant lerd installs. Teardown removes
-// it, so this is a package const both sides share.
-const lerdSudoersPath = "/etc/sudoers.d/lerd"
+// it, so both sides share this. A var, not a const, so tests can redirect the
+// write off the real /etc.
+var lerdSudoersPath = "/etc/sudoers.d/lerd"
 
 // Pre-1.30 builds shipped lerd0 as an NM keyfile connection. Kept so setup can
 // migrate those hosts off it and Teardown can clean it up.
@@ -959,6 +962,109 @@ func removeSudoersGrant() bool {
 // InstallSudoers writes a sudoers drop-in granting the current user passwordless
 // access to resolvectl commands. This is required for the autostart service which
 // runs non-interactively and cannot prompt for a sudo password.
+// WriteSudoersForUser writes the DNS sudoers drop-in directly, without the
+// interactive `sudo tee` that InstallSudoers uses. The caller must already be
+// root. `lerd bootstrap --system` calls this so a package maintainer script can
+// grant the passwordless DNS rules up front, letting a later unattended install
+// configure the resolver without a prompt. Idempotent.
+func WriteSudoersForUser(user string) error {
+	if err := validSudoersUser(user); err != nil {
+		return err
+	}
+	content := renderLinuxSudoers(user)
+	if err := checkSudoersSyntax(content); err != nil {
+		return err
+	}
+	// Compare against the real file, not the user-owned marker: this runs as
+	// root, where the marker resolves to root's HOME and says nothing about the
+	// target user. A stale one there claimed the grant was in place and skipped
+	// the write, leaving an install with no drop-in at all. Root can read
+	// /etc/sudoers.d, so the file itself is the authority here.
+	if existing, err := os.ReadFile(lerdSudoersPath); err == nil && string(existing) == content {
+		return nil
+	}
+	if err := os.WriteFile(lerdSudoersPath, []byte(content), 0440); err != nil {
+		return fmt.Errorf("writing sudoers drop-in: %w", err)
+	}
+	return nil
+}
+
+// sudoersUserPattern is the shape a name must have to be spliced into a
+// sudoers rule. Deliberately tighter than what useradd will accept: this string
+// becomes the first field of every line in a file sudo parses, and a space in
+// it is enough to make the whole drop-in invalid.
+var sudoersUserPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}\$?$`)
+
+func validSudoersUser(user string) error {
+	switch {
+	case user == "":
+		return fmt.Errorf("cannot determine target user")
+	case !sudoersUserPattern.MatchString(user):
+		return fmt.Errorf("refusing to write a sudoers rule for %q: not a valid user name", user)
+	}
+	return nil
+}
+
+// visudoCheck runs the syntax check; a var so tests can drive both answers on a
+// host that may not ship visudo.
+var visudoCheck = func(path string) ([]byte, error) {
+	return exec.Command("visudo", "-c", "-f", path).CombinedOutput()
+}
+
+// checkSudoersSyntax refuses to install a drop-in sudo cannot parse. A drop-in
+// that fails to parse is not a grant that merely does not work: depending on
+// the sudo build it can take the rest of the configuration down with it, so it
+// is checked before it lands rather than after. A host with no visudo is not a
+// reason to skip the write; the rule shape is already constrained above.
+func checkSudoersSyntax(content string) error {
+	f, err := os.CreateTemp("", "lerd-sudoers-*")
+	if err != nil {
+		return nil
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		return nil
+	}
+	f.Close()
+	if err := os.Chmod(f.Name(), 0440); err != nil {
+		return nil
+	}
+	out, err := visudoCheck(f.Name())
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return nil
+	}
+	return fmt.Errorf("refusing to install an invalid sudoers drop-in: %s", strings.TrimSpace(string(out)))
+}
+
+// RecordSudoersForUser stores the user-owned marker for a drop-in that a root
+// pass has just written. The root process cannot leave it: sudo hands it root's
+// own HOME, so the marker would land there and the user's side would keep
+// re-running the grant on every install.
+func RecordSudoersForUser(user string) {
+	if user == "" {
+		return
+	}
+	recordSudoersInstalled([]byte(renderLinuxSudoers(user)))
+}
+
+// SudoersCurrent reports whether the drop-in lerd would write for this user is
+// already recorded as installed, so an install can skip the root pass entirely
+// when there is nothing left for it to do.
+func SudoersCurrent() bool {
+	user := os.Getenv("USER")
+	if user == "" {
+		user = os.Getenv("LOGNAME")
+	}
+	if user == "" {
+		return false
+	}
+	return sudoersInstalled([]byte(renderLinuxSudoers(user)))
+}
+
 func InstallSudoers() error {
 	user := os.Getenv("USER")
 	if user == "" {

@@ -8,10 +8,84 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 )
+
+// ── package-managed detection ─────────────────────────────────────────────────
+
+func TestIsSystemPackageManaged(t *testing.T) {
+	// The /usr prefixes only mean "a package manager put it there" on Linux;
+	// on macOS /usr/local is an ordinary prefix and Intel Homebrew's own.
+	linuxOnly := runtime.GOOS == "linux"
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/usr/bin/lerd", linuxOnly},
+		{"/usr/local/bin/lerd", linuxOnly},
+		{"/var/usrlocal/bin/lerd", linuxOnly},
+		{"/nix/store/abc123-lerd-1.30.0/bin/lerd", true},
+		{"/home/george/.local/bin/lerd", false},
+		{"/opt/lerd/lerd", false},
+		{"/tmp/lerd", false},
+	}
+	for _, c := range cases {
+		if got := isSystemPackageManaged(c.path); got != c.want {
+			t.Errorf("isSystemPackageManaged(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
+func TestPackageManagerHints(t *testing.T) {
+	orig := lookPath
+	t.Cleanup(func() { lookPath = orig })
+
+	stub := func(present ...string) {
+		lookPath = func(bin string) (string, error) {
+			for _, p := range present {
+				if bin == p {
+					return "/usr/bin/" + bin, nil
+				}
+			}
+			return "", os.ErrNotExist
+		}
+	}
+
+	stub("dnf")
+	if got := packageManagerUpdateHint("/usr/bin/lerd"); got != "sudo dnf upgrade lerd" {
+		t.Errorf("dnf update hint = %q", got)
+	}
+	if got := packageManagerRemoveHint("/usr/bin/lerd"); got != "sudo dnf remove lerd" {
+		t.Errorf("dnf remove hint = %q", got)
+	}
+
+	stub("pacman")
+	if got := packageManagerUpdateHint("/usr/bin/lerd"); got != "sudo pacman -Syu lerd" {
+		t.Errorf("pacman update hint = %q", got)
+	}
+
+	// Atomic Fedora has both; rpm-ostree owns layered packages, so it wins.
+	stub("rpm-ostree", "dnf")
+	if got := packageManagerUpdateHint("/usr/bin/lerd"); got != "rpm-ostree upgrade" {
+		t.Errorf("rpm-ostree update hint = %q", got)
+	}
+
+	// A Nix store path decides by itself, whatever is on PATH.
+	stub("apt")
+	if got := packageManagerUpdateHint("/nix/store/abc-lerd/bin/lerd"); !strings.Contains(got, "nix profile upgrade") {
+		t.Errorf("nix update hint = %q", got)
+	}
+
+	// No known package manager present falls back to a generic sentence.
+	stub("")
+	if got := packageManagerUpdateHint("/usr/bin/lerd"); !strings.Contains(got, "package manager") {
+		t.Errorf("fallback update hint = %q", got)
+	}
+}
 
 // ── stripV ───────────────────────────────────────────────────────────────────
 

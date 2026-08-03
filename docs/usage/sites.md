@@ -6,7 +6,7 @@
 |---|---|
 | `lerd init` | Interactive wizard: choose PHP version, HTTPS, and services, then save `.lerd.yaml` and apply |
 | `lerd init --fresh` | Re-run the wizard with existing `.lerd.yaml` values as defaults |
-| `lerd park [dir]` | Register all Laravel projects inside `dir` (defaults to cwd) |
+| `lerd park [dir]` | Register every PHP project inside `dir` as a site, and keep doing so as new ones appear (defaults to cwd) |
 | `lerd unpark [dir]` | Remove a parked directory and unlink all its sites |
 | `lerd link [domain]` | Register the current directory as a site (domain name without TLD, defaults to directory name). On a fresh project in an interactive terminal it runs the `lerd init` wizard first |
 | `lerd unlink` | Unlink the current directory site (removes all domains) |
@@ -15,7 +15,7 @@
 | `lerd domain list` | List all domains for the current site |
 | `lerd sites` | Table view of all registered sites |
 | `lerd open [name]` | Open the site in the default browser |
-| `lerd share [name]` | Expose the site publicly via ngrok or Expose (auto-detected) |
+| `lerd share [name]` | Expose the site publicly via ngrok, cloudflared, or Expose (auto-detected) |
 | `lerd secure [name]` | Issue a mkcert TLS cert and enable HTTPS, updates `APP_URL` in `.env` |
 | `lerd unsecure [name]` | Remove TLS and switch back to HTTP, updates `APP_URL` in `.env` |
 | `lerd pause [name]` | Pause a site: stop its workers and replace the vhost with a landing page |
@@ -34,7 +34,9 @@
 
 `lerd init` runs an interactive wizard, writes the answers to `.lerd.yaml` in the project root, and then applies the configuration: linking the site, enabling HTTPS if requested, picking a database, and starting any required services.
 
-`lerd link` and `lerd init` overlap on purpose. When you run `lerd link` on a project that has no `.lerd.yaml` yet and you're in an interactive terminal, link routes straight into the init wizard, so you don't have to know to reach for `init` first. If the project already has a `.lerd.yaml`, link just applies it. And in a non-interactive shell (a script, CI, `lerd park`, or any piped invocation) link always does a fast, bare auto-detected registration with no wizard, so automation never blocks on a prompt. Passing an explicit domain (`lerd link myapp`) also skips the wizard and links directly.
+`lerd link` and `lerd init` overlap on purpose. When you run `lerd link` on a project that has no `.lerd.yaml` yet and you're in an interactive terminal, link routes straight into the init wizard, so you don't have to know to reach for `init` first. If the project already has a `.lerd.yaml`, link just applies it. In a non-interactive shell (a script, CI, or any piped invocation) link does a fast auto-detected registration with no wizard, so automation never blocks on a prompt. Passing an explicit domain (`lerd link myapp`) also skips the wizard and links directly.
+
+Every way of linking a project resolves the same plan: the CLI, the dashboard's **+** button, `lerd park`, the parked-directory watcher, and the MCP `site link` action. They differ only in what they are allowed to do, and the difference is deliberate. A link you type can prompt, write `.php-version` and `.node-version`, install services, issue a certificate, and supervise a dev command the project declares. An unattended link (park and the watcher) reads the same committed configuration but never prompts, never writes into the project, and never runs anything the repository authored.
 
 ```bash
 cd ~/Projects/my-app
@@ -90,6 +92,48 @@ Use `--fresh` to re-run the wizard while keeping existing values as defaults:
 ```bash
 lerd init --fresh
 ```
+
+---
+
+## Parking a directory of projects
+
+`lerd park ~/Code` registers every PHP project directly inside a directory, and
+records the directory so the watcher keeps up with it: a project you clone into
+it later is registered on its own, and one you delete is unlinked.
+
+```bash
+lerd park ~/Code
+```
+
+```
+ parking /home/me/Code
+ → linking 128 projects… ████████████░░░░░░░░ 74/128 · shop ⠙
+ ✓ linking 128 projects 126 linked, 2 skipped
+ → publishing… ✓ 126 site(s) serving
+```
+
+Each project writes only its own vhost and PHP unit; the reloads that publish
+them run once for the whole batch. That matters at scale, because those steps
+rewrite every quadlet and every container hosts entry, so doing them per project
+made a large directory take minutes rather than seconds.
+
+A parked link reads the project's committed `.lerd.yaml`, its domains, public
+directory and PHP version, but it runs unattended, so it stops short of
+anything that needs a decision or runs code the repository wrote. It never
+prompts, never writes `.php-version` or `.node-version` into your project, never
+installs services, and never issues a certificate.
+
+Some projects are reported as skipped rather than registered:
+
+- A directory that is not a PHP project at all.
+- A git worktree of a project that is already a site; worktrees inherit the
+  parent's registration and are served at `branch.domain.test`.
+- A project that declares its own runtime, a custom container, a host-proxy dev
+  server, FrankenPHP, or a custom FPM image. Each needs an image built or a
+  command run, which an unattended sweep should not do on its own. Run `lerd
+  link` in the project to set it up, after which the watcher leaves it alone.
+
+Use `lerd unpark <dir>` to stop watching a directory and unlink its sites.
 
 ---
 
@@ -271,6 +315,16 @@ Paths are compared after resolving symlinks, and the resolved path is what gets 
 
 You can link a new site directly from the dashboard by clicking the **+** button in the sites panel header. A directory browser modal lets you navigate to the project folder and click **Link This Directory**. After linking, the site's `.env` is auto-configured and the UI switches to the new site's settings.
 
+Clicking **Link This Directory** is the consent a terminal link would ask for, so
+a project that declares a host-proxy dev command has that command started for
+you. The command is printed in the modal's output, so what lerd runs on your host
+is on screen either way.
+
+The environment step can fail on its own, a project with no framework, or a
+framework that declares no env file, has nothing to configure. The site is still
+linked, and the modal says what went wrong instead of closing on a clean
+success.
+
 ---
 
 ## Unlinked domains
@@ -392,7 +446,7 @@ Lerd automatically creates a subdomain for each `git worktree` checkout. See [Gi
 
 ## Sharing sites
 
-`lerd share` exposes the current site via a public tunnel. Requires [ngrok](https://ngrok.com/download), [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), or [Expose](https://expose.dev) to be installed.
+`lerd share` exposes the current site via a public tunnel. Requires [ngrok](https://ngrok.com/download), [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), or [Expose](https://expose.dev) to be installed, or an ngrok auth token so lerd can run ngrok as a container. A tool installed with Homebrew is found by the dashboard too, which does not inherit your shell's `PATH`.
 
 | Command | Description |
 |---|---|
@@ -403,6 +457,88 @@ Lerd automatically creates a subdomain for each `git worktree` checkout. See [Gi
 | `lerd share --expose` | Force Expose |
 | `lerd share --localhost-run` | Force localhost.run (SSH, no signup) |
 | `lerd share --serveo` | Force serveo.net (SSH, no signup) |
+| `lerd share --domain <hostname>` | Serve on your own Cloudflare-managed hostname (implies Cloudflare Tunnel) |
+| `lerd share --token <token>` | ngrok auth token for this run, overriding the stored one |
+| `lerd share:tool [tool]` | Show or set the default tunnel tool (`ngrok`, `cloudflare`, `expose`, `serveo`, `localhost-run`, or `auto`) |
+| `lerd share:domain [domain]` | Show or set the base domain a Cloudflare share is served under (`none` forgets it) |
+| `lerd share:token [token]` | Show whether an ngrok auth token is stored, or set one (`none` forgets it) |
+
+Every tunnel is served through a small local proxy rather than pointed straight at nginx. The proxy sets the `Host` nginx routes on, dials a secured site over HTTPS without tripping on the local mkcert certificate, and rewrites the site's own `.test` domain out of redirects and asset URLs so the public hostname survives. Without it a secured site answers the first request with a redirect to its `.test` address, which means nothing to whoever opened the public URL.
+
+That rewrite covers more than the plain form of an address. JSON escapes its slashes, so the same URL reaches the browser as `https:\/\/site.test\/path` inside a payload embedded in the page or returned from an XHR, and it is matched in that form too. An external redirect does not always travel in a `Location` header either, since a framework can hand its own client one through a header of its own, so `Content-Location` and `X-Inertia-Location` are rewritten alongside it. Rewritten URLs always come back over `https`, because the tunnel is TLS and a plain-http one would be refused as mixed content.
+
+### ngrok without installing it
+
+ngrok is the one tool with a published image, so lerd can run it from `ngrok/ngrok:latest` under podman when the binary is not on the machine. A container carries none of the host's ngrok configuration, so this needs an auth token:
+
+```bash
+lerd share:token 2abcXYZ...   # get one at https://dashboard.ngrok.com/get-started/your-authtoken
+lerd share                     # ngrok is now an option even with nothing installed
+```
+
+The token authenticates an installed ngrok too, so a binary that was never run through `ngrok config add-authtoken` works the same way. `lerd share --token` overrides the stored token for a single run without replacing it.
+
+An installed tool always wins over the image: pulling one is the slower route to the same URL. The container only stands in when nothing is installed, where it ranks ahead of the signup-free SSH tools because storing a token is a deliberate choice of ngrok.
+
+The token is a credential. It is stored in `~/.config/lerd/config.yaml`, which is tightened to owner-only the moment a token is saved, it is passed to the container through the environment rather than the command line so it cannot be read off `ps`, and it is never printed back or returned by the dashboard's API. In the dashboard, the cog next to ngrok in the share menu sets and clears it.
+
+How the container reaches that local proxy depends on the platform, because the proxy is a host process either way. On Linux the container shares the host's own network namespace, so the proxy really is on loopback and ngrok is given the port. On macOS the container runs inside the podman machine VM, whose loopback is not the host's, so it is pointed at `host.containers.internal` instead. Sharing the VM's network namespace there would dial the VM, where nothing is listening, and every request would come back as ngrok's `ERR_NGROK_8012`.
+
+The container runs as `lerd-ngrok-<site>` (with the branch appended for a worktree), so a running tunnel appears alongside lerd's other containers in the dashboard's resource usage. The name is also how it is cleaned up. A container does not die with the process that started it: podman's supervisor is reparented out of the client's process tree and cgroup, so killing `lerd-ui` outright would otherwise leave the site publicly tunnelled. Stopping a tunnel removes the container by name rather than signalling a process, and every `lerd-ui` start sweeps any tunnel container a previous run left behind.
+
+### Tunnels from the dashboard
+
+The same tunnels can be started from the [web UI](../features/web-ui.md)'s share menu: hover the wifi button in a site's header and pick a tool (or the auto entry, which follows the same detection order and `share:tool` default as the CLI). The dashboard waits for the tool's public URL and shows it next to the domain with a hover-QR. A tunnel started from the UI belongs to the `lerd-ui` daemon, so it ends when you stop it or when the daemon shuts down, and it is not restored on restart. If the daemon is killed outright rather than asked to stop, the next start reaps whatever tunnel survived, so a public URL never outlives the dashboard that owns it.
+
+A shared site is marked in the sites list too: a violet globe against the row while a public tunnel is up, a teal wifi icon while it is on the LAN, both captioned with the address. A share on one of the site's worktrees counts for the row, since the list has one row per site.
+
+A `lerd share` running in a terminal shows up there as well. The CLI records the share while it runs and clears the record on the way out, so the dashboard reflects it like one of its own, labelled as started from the CLI. Stopping it from the dashboard signals that `lerd share` to exit. A share whose process is killed outright leaves its record behind; the dashboard drops it as soon as it notices the process is gone.
+
+### Sharing a worktree
+
+Run `lerd share` from inside a git worktree and lerd tunnels that branch's own domain (`<branch>.<site>.test`), not the parent checkout's. The worktree inherits the parent's registration, so there is nothing to link first: the command resolves the parent site and the branch you are standing in. The same is true of `lerd lan:share`, which assigns the branch its own LAN port, and of `lerd open`, which opens the branch domain.
+
+A worktree tunnel is independent of the parent's. Both can run at once, each on its own public URL, and stopping one leaves the other alone. In the dashboard, switch to the worktree's tab and the share menu acts on that branch.
+
+Naming a site explicitly (`lerd share myapp`) always means the site itself, never one of its branches.
+
+### Default tunnel tool
+
+Auto-detection picks the first installed tool, which may not be the one you want. `lerd share:tool cloudflare` pins the default; from then on a bare `lerd share` uses Cloudflare Tunnel even with ngrok installed. A tool flag still overrides the default per run, and `lerd share:tool auto` restores auto-detection.
+
+### Sharing on your own domain
+
+Quick tunnels hand out a fresh random `trycloudflare.com` URL on every run. When you need a stable URL (sending a client the same link twice, webhook or OAuth callback targets), pass `--domain` with a hostname whose DNS is managed by Cloudflare:
+
+```bash
+lerd share --domain dev.example.com
+```
+
+Custom hostnames are a Cloudflare Tunnel feature, so `--domain` selects that tool on its own. You never need `--cloudflare` alongside it, and it wins over a different default set with `lerd share:tool`. Combining it with another tool flag is rejected rather than silently ignored.
+
+#### A base domain, so you never type the hostname
+
+`--domain` takes a full hostname and applies to one run. Set a base domain instead and every Cloudflare share is served under it, with lerd composing the hostname from the site name:
+
+```bash
+lerd share:domain example.com   # myapp.test is shared on myapp.example.com
+lerd share:domain               # show the current one
+lerd share:domain none          # forget it, back to quick tunnels
+```
+
+The hostname follows the site's own domain rather than the folder the project sits in, so a `scorediviner.test` served out of a `score-diviner` directory is shared on `scorediviner.example.com`.
+
+The dashboard asks the first time you pick Cloudflare Tunnel from the share menu: type the base domain, or skip it for a quick tunnel. Tick **Remember this answer** and it stops asking, whichever way you answered. The cog next to the Cloudflare entry reopens that dialog whenever you want to change the domain, or clear it so lerd asks again.
+
+A worktree's subdomain flattens into one label, so `feat-login.myapp.test` is shared on `feat-login-myapp.example.com`: a Cloudflare certificate covers one level of subdomain and no more.
+
+`lerd share --domain` still wins for a single run, and the other tunnel tools ignore the base domain: no other one can hand out a subdomain of a domain you own.
+
+#### How the named tunnel is set up
+
+On the first run cloudflared opens a browser window to authorize your Cloudflare account (a one-time login that writes `~/.cloudflared/cert.pem`). The dashboard has no terminal to run that login in, so a share from the UI stops and tells you to run `cloudflared tunnel login` once. lerd then creates a named tunnel called `lerd-<site>`, routes the hostname to it with a CNAME record, and starts the tunnel. Later runs reuse the same tunnel and hostname, so the URL never changes. Re-routing a hostname that already points at the same tunnel is a no-op; if the record exists but points somewhere else, lerd leaves it alone and prints a note asking you to check it.
+
+A freshly created DNS record takes a moment to become visible. If you open the URL in the first seconds and your resolver caches the miss, it can keep answering NXDOMAIN for up to 30 minutes even though the tunnel is healthy.
 
 A local reverse proxy rewrites the `Host` header to the site's domain so nginx routes to the correct vhost. Response `Location` headers and HTML/CSS/JS/JSON body references to the local domain are also rewritten to the public tunnel URL, so redirects and asset links work correctly in the browser.
 

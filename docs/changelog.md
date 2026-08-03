@@ -7,6 +7,170 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.31.0-oracle.0] — 2026-08-03 — merge upstream v1.30.1 → v1.31.0
+
+Fork (Oracle Edition). Integra 58 commits do upstream (`lerd-env/lerd`), de
+v1.30.1 a v1.31.0. Todas as features do fork foram preservadas; o resumo abaixo
+cobre o que **mudou de comportamento** na integração.
+
+O ciclo do upstream é sobre as rotas de entrada e saída do lerd: instalação
+unificada via `lerd bootstrap` (inclusive um caminho totalmente não-interativo
+para pacotes), nvm dirigindo o Node ao lado do fnm embutido, bancos migrando do
+Go para o store (create/drop/export/import e snapshots declarados no preset), e
+compartilhamento de site com domínio próprio no Cloudflare, ngrok rodando da
+própria imagem e dev server servido no domínio do site.
+
+### Added
+
+- **Oracle por alias do `tnsnames.ora` e por wallet do Autonomous.** Banco
+  corporativo raramente é endereçado por `host:port/service`: é endereçado por
+  alias, e o Autonomous Database por um wallet baixado do console. O Instant
+  Client procura os dois em `$TNS_ADMIN`, e a imagem nunca definia essa variável
+  (definia `ORACLE_HOME`, que é outro botão), então nenhuma das duas formas
+  funcionava e não havia onde pôr os arquivos. A imagem passa a exportar
+  `TNS_ADMIN` e o quadlet do FPM monta
+  `~/.config/lerd/oracle/network/admin` sobre esse caminho, **somente leitura**,
+  no mesmo desenho do mount de `~/.ssh`. O diretório é criado no primeiro start
+  com modo `0700`, porque wallet é credencial. Nada entra na imagem nem no
+  repositório. O wallet funciona **como baixado**: o `sqlnet.ora` do zip aponta
+  `DIRECTORY` para `?/network/admin` e o `?` expande para `ORACLE_HOME`, então a
+  imagem linka `ORACLE_HOME/network/admin` de volta no `TNS_ADMIN` em vez de
+  exigir que cada um descubra e reescreva essa linha.
+- **Rebuild das imagens base históricas.** O upstream passou a republicar os
+  hashes de recipe que releases recentes ainda resolvem, para que quem está uma
+  versão atrás não fique preso a uma base sem patch. Os jobs `historic-plan`,
+  `historic-build` e `historic-manifest` foram adotados, apontando para o
+  registry do fork (`ghcr.io/gabriel-sousa99`) e **somente amd64**, pela mesma
+  razão da matriz principal: a Oracle não publica Instant Client linux.arm64
+  para 21.x, então oci8 não linka em aarch64.
+- **Pacote `internal/linker`.** O upstream extraiu toda a resolução de link
+  (domínios, modo, framework, runtime) de `internal/cli/link.go` para um pacote
+  próprio dirigido por policy. O fork acompanhou a refatoração.
+- **Submenus na tray.** O menu virou submenus agrupados; a entrada
+  "Debug & Oracle help…" do fork passou a viver no submenu de configurações.
+- 41 chaves novas de i18n do upstream (share, shareDomain, shareToken) nos 14
+  idiomas, somadas às 28 chaves próprias do fork (proxies, editor de .env).
+
+### Changed
+
+- **Prompt de banco no link foi religado ao novo fluxo.** O
+  `promptLinkDatabaseChoice` do fork vivia no meio do bloco que o upstream
+  removeu. Ele agora roda dentro do trecho que atende sites PHP e **antes** de
+  `ensureRequiredServices`, para que o gate "nenhum serviço declarado ainda"
+  continue lendo a escolha do próprio projeto, e não os serviços que o framework
+  acabou de exigir. A escolha é propagada em `plan.Project`.
+- **Defaults de DNS do fork migraram para `resolveDNSChoice`.** O upstream
+  extraiu a decisão de DNS para essa função nova, chamada bem antes do ponto
+  onde o fork perguntava. Os defaults do fork foram portados para lá: DNS
+  gerenciado desligado, TLD `.localhost`, e o texto do prompt que deixa claro que
+  **HTTPS continua funcionando**. Falha ao ler o config agora assume DNS
+  desligado, e não ligado.
+- **Validação de nome de banco saiu do fork e virou do upstream.** O
+  `validDBName` que o fork adicionou no `cli/env.go` foi substituído por
+  `serviceops.ValidateDatabaseName`, que o upstream chama dentro de
+  `expandEntityCommand` — ou seja, vale para todo comando declarado de entidade,
+  não só para o clone. O teste de regressão de injeção do fork acompanhou a
+  validação e agora mira o ponto real de enforcement.
+- **`GenerateProxyVhost` mantém o parâmetro `secured` e ganha o guard do
+  upstream.** O fork precisa escolher entre vhost HTTP e `-ssl`, e remover a
+  contraparte obsoleta; o upstream passou a rejeitar valores que encerrariam a
+  diretiva nginx. As duas coisas convivem agora.
+- **Falha ao reescrever quadlets de FPM passa a ser propagada por
+  `PublishLinks`.** O endurecimento que o fork tinha em `FinishLink` caiu, na
+  refatoração do upstream, exatamente sobre `PublishLinks`, que é o passo
+  compartilhado pelo link de um site e pelo park de um diretório. O resultado é
+  que um `lerd park` agora **falha** nesse caso, onde o fork antes apenas
+  avisava. É mais estrito de propósito: o aviso dizia que os sites podiam ficar
+  inalcançáveis até rodar `lerd start` de novo.
+- **`tinker_symbols.go` e `tinker_lint.go` removidos.** Não tinham chamador
+  nenhum: o último commit a tocá-los é o do upstream que levou os editores para o
+  Monaco com `phpantom_lsp`, ou seja, eram a implementação substituída. O
+  autocomplete e os diagnósticos da aba Tinker vêm do LSP.
+
+> **As imagens base precisam ser reconstruídas nesta versão.** O template da
+> imagem mudou (camada Oracle em aarch64 e `TNS_ADMIN`), então o hash da receita
+> mudou junto e um install cai no build local até o workflow `base-images`
+> republicar. `TNS_ADMIN` só chega a quem usa imagem publicada depois disso.
+
+### Security
+
+Uma auditoria do código próprio da fork depois do merge encontrou três brechas em
+superfícies que o upstream não revisa porque não existem nele.
+
+- **Injeção de diretiva no quadlet do proxy em managed mode.** O gerador escapava
+  apenas aspas no `cmd` e interpolava `node_version` e `path` crus, então uma
+  quebra de linha fechava a linha do `Exec=` e a seguinte entrava como diretiva
+  própria, executada **no host** pelo systemd (não dentro do container). A
+  validação entra no `Proxy.Validate`, cobrindo CLI, HTTP e `proxies.yaml` editado
+  à mão de uma vez, reusando o `ContainsUnitInjectionChars` que o upstream já
+  aplica a todo campo de um custom service. O writer do quadlet valida de novo,
+  porque o `proxies.yaml` é carregado sem validação.
+- **Quatro endpoints da fork fora do gate de loopback.** Com `lan:expose` e
+  `remote-control on`, um cliente da LAN com a senha do dashboard alcançava
+  `POST /api/proxies` (que monta diretório arbitrário do host num container e roda
+  comando arbitrário nele, mais do que o `/api/sites/link` já restrito por esse
+  motivo), o `/editor` de um site (abre processo gráfico no host), o
+  `/api/debug/*`, e a **leitura** do bloco `Environment=` de um serviço, que
+  devolve `ORACLE_PASSWORD` e companhia — só o `PUT` estava protegido. A
+  documentação em `queries.md` já afirmava que o endpoint do editor era
+  loopback-only, garantia que o código nunca implementou.
+- **Vhost do proxy fullstack sem o guard de valor do nginx.** Era o único gerador
+  de vhost fora da regra que o v1.31.0 passou a aplicar a todos: emitia `root` sem
+  aspas, e um projeto num caminho com espaço produz config que o nginx recusa
+  inteiro, **derrubando todos os outros sites** junto. Agora passa por um `Root`
+  com aspas espelhando o `VhostData.Root`, valida todo valor substituído, e chama
+  o `GuardRealWrite` que faltava ali e no `SaveProxies`.
+
+### Fixed
+
+- **`lerd env` não zera mais credenciais Oracle preenchidas à mão.** O baseline
+  aplicava `DB_HOST`, `DB_USERNAME` e `DB_PASSWORD` vazios sem condição alguma, e
+  o wizard justamente instrui a deixar esses campos em branco para preencher no
+  `.env` depois, então a execução seguinte apagava as credenciais. O comentário
+  acima do bloco afirmava o contrário do que o código fazia. O baseline agora só
+  semeia chave que o `.env` deixa vazia, o bloco `oracle:` do `.lerd.yaml` continua
+  tendo precedência, e `DB_CONNECTION` segue sendo reafirmado porque é a própria
+  escolha de banco.
+- **`oracle-xe` não vaza mais para a multi-seleção de Serviços.** O conjunto de
+  nomes de banco vinha só dos serviços instalados, e um preset default nunca
+  entrava nele, então dava para marcar `oracle-xe` com o Database ainda em
+  `sqlite` e gravar dois `DB_CONNECTION` no `.env`. A exclusão passa a perguntar a
+  família ao próprio preset, então um engine novo publicado no store fica fora da
+  lista de serviços sem mudança de código, e o `oracle-xe` aparece como opção de
+  Database, que é o que ele é.
+- **Camada Oracle da imagem em aarch64.** A checagem de arquitetura vinha depois
+  do download do Instant Client x64, então um host arm64 baixava e descompactava
+  ~80 MB de biblioteca inutilizável antes de descobrir que ia pular o oci8, e o
+  simlink de compatibilidade apontava para `libc.musl-x86_64.so.1` fixo, criando
+  um **link quebrado** num caminho que o loader consulta. A checagem sobe para
+  antes do download e o simlink deriva o nome do musl da arquitetura, checando o
+  alvo antes de criar.
+- **Manifesto de host tools era lido da branch `main`.** `main` acompanha o
+  upstream e não carrega os pins da fork; passa a usar a branch default, o mesmo
+  acerto que o `ChangelogURLs` uma função abaixo já documentava ter feito.
+- **CA do mkcert continua sendo instalada com DNS desligado.** O upstream moveu
+  a instalação da CA para dentro de `if wantDNS`, cujo ramo `else` dizia
+  literalmente "skipping mkcert CA" — o que quebraria o desenho do fork, em que
+  HTTPS não depende de DNS gerenciado. A chamada foi içada de volta para fora do
+  bloco, agora usando o helper `ensureMkcertCA(unattended)` do upstream (que
+  também trata o caminho não-interativo) em vez da cópia inline do fork.
+
+### Fixed (testes)
+
+- **Testes de unit file de worker no host não vazam mais o nvm do desenvolvedor.**
+  Quatro testes de `worker_host_linux_test.go` montam um ambiente Node controlado
+  (PATH fixado, `HOME` temporário), mas não isolavam `NVM_DIR` — e `nvmDir()` lê
+  `$NVM_DIR` antes de cair para `~/.nvm`. Numa máquina com nvm instalado, a
+  pré-condição "nenhum Node resolvível" nunca era estabelecida: o Node real do host
+  entrava na resolução, então `..._bunFallbackWhenNodeUnmanaged` e
+  `..._unmanagedNoNodeHoldsBack` falhavam, e `..._unmanagedNodeBakesResolvedDir` e
+  `..._unmanagedNoNodeNonNodeCommandRuns` passavam por sorte, sem testar o que
+  afirmavam. Os quatro agora fixam `NVM_DIR` no próprio `HOME` do teste, seguindo o
+  padrão que o upstream já usa em `worker_preflight_test.go`. Reproduzia igual no
+  v1.31.0 puro, ou seja, não era regressão da integração.
+
+---
+
 ## [1.30.1-oracle.3] — 2026-07-26
 
 Fork (Oracle Edition). Release de correção a partir do último PR mergeado (#9),

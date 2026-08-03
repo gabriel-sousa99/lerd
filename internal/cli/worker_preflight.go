@@ -3,9 +3,33 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 )
+
+// validateWorkerUnitFields refuses any value that would break out of its line
+// in a generated unit. Every one of these is interpolated into a single-line
+// directive, and a project's .lerd.yaml can set the worker ones, so checking
+// only the command left label, restart and schedule free to open a [Service]
+// section of their own and add an ExecStartPre systemd would run. Checking the
+// whole set at the generation boundary makes that structural rather than a
+// property of whichever field someone remembered.
+func validateWorkerUnitFields(unitName string, fields map[string]string) error {
+	// Sorted so the same bad unit always names the same field first.
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if config.ContainsUnitInjectionChars(fields[name]) {
+			return fmt.Errorf("worker unit %q: %s must not contain newline or NUL", unitName, name)
+		}
+	}
+	return nil
+}
 
 // workerStartPreflight gates a WorkerStartForSite call on the framework's
 // declared dependency rules. Two checks, in order:
@@ -26,12 +50,21 @@ import (
 // watcher's per-unit cooldown then prevents thrashing on a permanent
 // failure.
 func workerStartPreflight(sitePath, workerName string, w config.FrameworkWorker) error {
-	// A worker's command (from .lerd.yaml custom_workers or a framework def)
-	// is interpolated into the unit's ExecStart line. Refuse newline/NUL so a
-	// command from a cloned repo can't inject an extra systemd directive such
-	// as ExecStartPost=/bin/sh -c '...' onto its own line.
-	if config.ContainsUnitInjectionChars(w.Command) || config.ContainsUnitInjectionChars(w.ReloadCommand) {
-		return fmt.Errorf("worker %q has an invalid command: must not contain newline or NUL", workerName)
+	// Every one of these reaches a line of the generated unit, and a cloned
+	// repo's .lerd.yaml custom_workers entry can set them all. The unit writer
+	// checks the same set again at its own boundary; this one is here so a
+	// start reports the offending field rather than failing later.
+	if err := validateWorkerUnitFields(workerName, map[string]string{
+		"command":        w.Command,
+		"reload command": w.ReloadCommand,
+		"label":          w.Label,
+		"restart":        w.Restart,
+		"schedule":       w.Schedule,
+	}); err != nil {
+		return err
+	}
+	if msg := hostWorkerNoNodeMsg(workerName, sitePath, w); msg != "" {
+		return errors.New(msg)
 	}
 	if w.Check != nil && !config.MatchesRule(sitePath, *w.Check) {
 		if msg := hostWorkerNotReadyMsg(workerName, sitePath, w); msg != "" {
@@ -60,6 +93,31 @@ func hostWorkerNotReadyMsg(workerName, sitePath string, w config.FrameworkWorker
 		return ""
 	}
 	return fmt.Sprintf("%s worker not started: JS dependencies are not installed. Run `lerd setup` to install them, then `lerd worker start %s`.", workerName, workerName)
+}
+
+// hostWorkerNoNodeMsg returns an actionable message for a host node worker
+// whose command needs the Node toolchain while Node is unmanaged and neither a
+// system node/npm nor bun can be resolved anywhere. Without the gate the unit
+// would crash-loop on `npm: command not found`. Returns "" when the worker
+// isn't affected (managed Node, bun available, or a non-Node command).
+func hostWorkerNoNodeMsg(workerName, sitePath string, w config.FrameworkWorker) string {
+	if !w.Host || !isNodeProject(sitePath) || lerdManagesNode() {
+		return ""
+	}
+	if !nodeDet.CommandUsesNode(w.Command) || bunRunnerFor(sitePath, false) != "" {
+		return ""
+	}
+	if len(nodeDet.SystemNodeBinDirs()) > 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s worker not started: %v", workerName, errNoUsableNode())
+}
+
+// errNoUsableNode is the shared no-Node error for the preflight gate and the
+// host-worker unit generators (the generators also hit it on the boot restore
+// path, which never runs the preflight).
+func errNoUsableNode() error {
+	return errors.New("lerd is not managing Node.js and no node/npm (or bun) could be found on this system. Install Node.js, or run `lerd install` to let lerd manage it")
 }
 
 // describeRule renders a FrameworkRule for an end-user error message.

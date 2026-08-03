@@ -34,10 +34,19 @@ func removeWorkerExecArtifacts(_ string) {}
 // restart-loop every 5s under Restart=always.
 func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, command, restart, schedule, fpmUnit string, host bool) (bool, error) {
 	// Generation-boundary guard so every caller is covered (incl. the boot
-	// restore path): a newline in the command would inject a second systemd
-	// directive from a cloned repo's .lerd.yaml custom_workers entry.
-	if config.ContainsUnitInjectionChars(command) {
-		return false, fmt.Errorf("worker unit %q: command must not contain newline or NUL", unitName)
+	// restore path): every value below is a line of the unit, and a cloned
+	// repo's .lerd.yaml can set the worker ones.
+	if err := validateWorkerUnitFields(unitName, map[string]string{
+		"command":     command,
+		"label":       label,
+		"restart":     restart,
+		"schedule":    schedule,
+		"site name":   siteName,
+		"site path":   sitePath,
+		"PHP version": phpVersion,
+		"FPM unit":    fpmUnit,
+	}); err != nil {
+		return false, err
 	}
 	if host {
 		return writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart, fpmUnit)
@@ -129,11 +138,7 @@ func writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, resta
 		// directly, no fnm wrap. Put ~/.bun/bin on PATH so a bare `bun` resolves.
 		shellCommand = nodeDet.Bunify(command)
 		envPath = filepath.Dir(bun) + ":" + envPath
-	} else if isNodeProject(sitePath) && lerdManagesNode() {
-		// Only route through fnm when lerd is actually managing Node; otherwise
-		// run the command directly so the user's system node/npm on PATH is used
-		// (after node:unmanage there is no fnm Node to exec into).
-		fnm := filepath.Join(config.BinDir(), "fnm")
+	} else if isNodeProject(sitePath) {
 		nodeVersion, err := nodeDet.DetectVersion(sitePath)
 		if err != nil {
 			if cfg, _ := config.LoadGlobal(); cfg != nil {
@@ -143,7 +148,20 @@ func writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, resta
 				nodeVersion = defaultNodeVersion
 			}
 		}
-		shellCommand = fmt.Sprintf("%s exec --using=%s -- %s", fnm, nodeVersion, command)
+		if lerdManagesNode() {
+			// Route through the version manager only when lerd is actually
+			// managing Node (after node:unmanage there is no managed Node).
+			shellCommand = nodeDet.Active().ExecPrefix(nodeVersion) + " " + command
+		} else if dirs := nodeDet.SystemNodeBinDirsFor(nodeVersion); len(dirs) > 0 {
+			// Unmanaged Node runs the command directly, but the unit never
+			// inherits the login PATH, so bake in where node/npm actually live
+			// (nvm, snap, a self-installed fnm, …) — issue #1143.
+			envPath = strings.Join(dirs, ":") + ":" + envPath
+		} else if nodeDet.CommandUsesNode(command) {
+			// Nothing resolvable: refuse the unit rather than crash-looping
+			// on `npm: command not found` every 5 seconds.
+			return false, errNoUsableNode()
+		}
 	}
 	escaped := strings.ReplaceAll(shellCommand, "'", `'"'"'`)
 	// Order after and pull up the site's FPM container: host tools like Vite

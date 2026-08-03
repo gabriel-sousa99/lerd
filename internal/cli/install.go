@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +65,8 @@ func NewInstallCmd() *cobra.Command {
 		"Preselect the DNS mode and skip the prompt: 'managed' (.test + HTTPS) or 'localhost' (.localhost, plain HTTP)")
 	cmd.Flags().Bool("from-update", false, "")
 	_ = cmd.Flags().MarkHidden("from-update")
+	cmd.Flags().Bool("unattended", false,
+		"Run non-interactively for package installs on Linux: no prompts, and skip the sudo-gated system steps that `lerd bootstrap` handles")
 	return cmd
 }
 
@@ -140,6 +141,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		noIPv6 = true
 	}
 	fromUpdate, _ := cmd.Flags().GetBool("from-update")
+	unattended, _ := cmd.Flags().GetBool("unattended")
 	dnsFlag, _ := cmd.Flags().GetString("dns")
 	// Captured before any step writes config: a missing file means this is a
 	// first install, the only time the DNS question is asked. Every later run
@@ -147,6 +149,17 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// dns:disable rather than by re-prompting.
 	_, cfgStatErr := os.Stat(config.GlobalConfigFile())
 	configExisted := cfgStatErr == nil
+	// Unattended runs are driven by a package maintainer script: reuse the
+	// non-interactive update path for prompts. The sudo-gated system steps are
+	// skipped here because `lerd bootstrap --system` performs them as root
+	// beforehand, and the mkcert CA's system-trust is done afterward by
+	// `lerd bootstrap --trust-ca`, so managed .test DNS works with no prompts.
+	if err := checkUnattendedSupported(unattended); err != nil {
+		return err
+	}
+	if unattended {
+		fromUpdate = true
+	}
 	if noIPv6 {
 		podman.MarkIPv6Disabled("lerd")
 		feedback.Line("IPv6 disabled by user, lerd network will be v4-only")
@@ -163,8 +176,19 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 	ensurePortsAvailable()
 
-	if err := ensureUnprivilegedPorts(); err != nil {
-		return err
+	// Resolved before the root pass below, which needs to know whether to
+	// install the resolver sudoers grant. The side effects of a changed answer
+	// (TLD rename, persistence) stay further down, once the directories and
+	// network this run depends on exist.
+	wantDNS, haveDNSConfig, prevEnabled, prevTLD := resolveDNSChoice(fromUpdate, configExisted, dnsFlag)
+
+	// Skipped under --unattended: this escalates to root, which a package
+	// maintainer script cannot answer for. `lerd bootstrap --system` already
+	// applied the same steps beforehand.
+	if !unattended {
+		if err := runSystemSetup(wantDNS); err != nil {
+			return err
+		}
 	}
 	if err := ensurePortForwarding(); err != nil {
 		return err
@@ -187,16 +211,6 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	ok()
-
-	// 1b. Enable systemd linger so user services (lerd-dns, lerd-nginx, the
-	// PHP-FPM containers) survive screen blank, lock, and logout. Without
-	// linger, Ubuntu/GNOME tears down the rootless Podman containers when
-	// the session goes inactive and lerd appears to "stop working" until
-	// the next manual `lerd install`. This is the single biggest source of
-	// "DNS just stopped" issues reported in the wild — see #153.
-	if err := ensureSystemdLinger(); err != nil {
-		fmt.Printf("    WARN: %v\n", err)
-	}
 
 	// 2. Podman network
 	// Containers removed by recreate are restarted AFTER the quadlet refresh
@@ -250,7 +264,89 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 	ok()
 
-	// 3. Binaries (composer, fnm, mkcert)
+	// Resolve Node management and which version manager to drive BEFORE
+	// downloadBinaries, which skips the fnm zip when node.manager is "nvm".
+	bunPath := nodeDet.BunPath()
+	if bunPath != "" {
+		feedback.Line(fmt.Sprintf("bun detected at %s, lerd will use it automatically for projects that use bun", bunPath))
+	}
+
+	var savedNode *bool
+	savedManager := ""
+	savedNvmDir := ""
+	if nodeCfg, err := config.LoadGlobal(); err == nil && nodeCfg != nil {
+		if v, set := nodeCfg.NodeManagedPref(); set {
+			savedNode = &v
+		}
+		savedManager = nodeCfg.Node.Manager
+		savedNvmDir = nodeCfg.NodeNvmDir()
+	}
+	systemNode := detectSystemNode()
+	nvmDetected := detectNvm()
+	wantLerdNode, promptNode, nodeDefault := nodeManageDecision(fromUpdate, unattended, savedNode, systemNode != "", nvmDetected, lerdManagesNode())
+	if promptNode {
+		if systemNode != "" {
+			feedback.Line("Node.js detected at " + systemNode)
+		} else {
+			feedback.Line("nvm detected at " + nodeDet.DiscoverNvmDir())
+		}
+		prompt := "Let lerd manage Node.js versions (installs shims, may override system node)?"
+		switch {
+		case nvmDetected:
+			prompt += " Decline to leave Node to your existing nvm."
+		case bunPath != "":
+			prompt += " Decline to keep your system Node and use bun."
+		}
+		wantLerdNode = confirmInstallPromptDefault(prompt, nodeDefault)
+	}
+
+	// Only on the run that actually makes the choice: once persisted, savedManager
+	// is set and neither line comes back.
+	nodeManager := nodeManagerChoice(savedManager, wantLerdNode, nvmDetected)
+	if savedManager == "" && nvmDetected {
+		if nodeManager == "nvm" {
+			feedback.Line("leaving Node to your nvm, lerd will run npm and npx through it")
+		} else {
+			feedback.Line("using the bundled fnm for lerd-managed Node, switch with: lerd node:manager nvm")
+		}
+	}
+
+	// Captured before the save below: a flip either way leaves existing host
+	// worker units routing through the old manager until they are regenerated.
+	nodeStateChanged := nodeStateFlipped(lerdManagesNode(), savedManager, wantLerdNode, nodeManager)
+
+	nvmDirToSave := savedNvmDir
+	if nodeManager == "nvm" {
+		if nvmDirToSave == "" {
+			nvmDirToSave = nodeDet.DiscoverNvmDir()
+		}
+	} else {
+		nvmDirToSave = ""
+	}
+
+	if nodeCfg, err := config.LoadGlobal(); err == nil && nodeCfg != nil {
+		changed := false
+		if v, set := nodeCfg.NodeManagedPref(); !set || v != wantLerdNode {
+			nodeCfg.SetNodeManaged(wantLerdNode)
+			changed = true
+		}
+		if nodeCfg.Node.Manager != nodeManager {
+			nodeCfg.SetNodeManager(nodeManager)
+			changed = true
+		}
+		if nodeCfg.NodeNvmDir() != nvmDirToSave {
+			nodeCfg.SetNodeNvmDir(nvmDirToSave)
+			changed = true
+		}
+		if changed {
+			if err := config.SaveGlobal(nodeCfg); err != nil {
+				fmt.Printf("    WARN: persist Node-management choice: %v\n", err)
+			}
+		}
+	}
+
+	// 3. Binaries (composer, fnm, mkcert) — after manager is persisted so an
+	// nvm choice skips the fnm download.
 	step("Downloading binaries")
 	if err := downloadBinaries(os.Stdout); err != nil {
 		return err
@@ -269,77 +365,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		wantLaravelInstaller = confirmInstallPrompt("Install Laravel installer (laravel new)?")
 	}
 
-	// lerd never installs bun itself, but if the user already has it we say so
-	// and soften the Node prompt: a bun user can decline lerd-managed Node and
-	// keep a clean system. Detected bun is used automatically for bun projects
-	// and mirrored into the PHP container on setup.
-	bunPath := nodeDet.BunPath()
-	if bunPath != "" {
-		feedback.Line(fmt.Sprintf("bun detected at %s, lerd will use it automatically for projects that use bun", bunPath))
-	}
-
-	// Resolve the Node-management choice from the persisted preference, the
-	// on-disk shim state (for configs predating the preference), and whether a
-	// system node exists. Update runs non-interactively so a prior node:unmanage
-	// survives; a fresh install only prompts when a system node is present.
-	var savedNode *bool
-	if nodeCfg, err := config.LoadGlobal(); err == nil && nodeCfg != nil {
-		if v, set := nodeCfg.NodeManagedPref(); set {
-			savedNode = &v
-		}
-	}
-	systemNode := detectSystemNode()
-	wantLerdNode, promptNode, nodeDefault := nodeManageDecision(fromUpdate, savedNode, systemNode != "", lerdManagesNode())
-	if promptNode {
-		feedback.Line("Node.js detected at " + systemNode)
-		prompt := "Let lerd manage Node.js versions (installs fnm shims, may override system node)?"
-		if bunPath != "" {
-			prompt += " Decline to keep your system Node and use bun."
-		}
-		wantLerdNode = confirmInstallPromptDefault(prompt, nodeDefault)
-	}
-	if nodeCfg, err := config.LoadGlobal(); err == nil && nodeCfg != nil {
-		if v, set := nodeCfg.NodeManagedPref(); !set || v != wantLerdNode {
-			nodeCfg.SetNodeManaged(wantLerdNode)
-			if err := config.SaveGlobal(nodeCfg); err != nil {
-				fmt.Printf("    WARN: persist Node-management choice: %v\n", err)
-			}
-		}
-	}
-
-	// Ask whether lerd should manage local DNS. Prompted on every direct
-	// `lerd install` (fresh or rerun) with the default reflecting the saved
-	// choice, so users can flip the mode without hand-editing config.yaml.
-	// `lerd update` re-execs install with --from-update; in that path the
-	// saved choice is honoured silently so updates are non-interactive.
-	// Oracle fork defaults: lerd-managed DNS off, TLD .localhost. *.localhost
-	// resolves to loopback on every modern OS without dnsmasq or sudo. Existing
-	// installs keep whatever choice they previously saved (read from config below).
-	wantDNS := false
-	prevEnabled := false
-	prevTLD := "localhost"
-	dnsCfg, loadErr := config.LoadGlobal()
-	if loadErr != nil || dnsCfg == nil {
-		if loadErr != nil {
-			fmt.Printf("    WARN: load config (%v); proceeding with DNS enabled\n", loadErr)
-		}
-	} else {
-		prevEnabled = dnsCfg.DNS.Enabled
-		if dnsCfg.DNS.TLD != "" {
-			prevTLD = dnsCfg.DNS.TLD
-		}
-		var flagDNS *bool
-		if v, ok := parseDNSMode(dnsFlag); ok {
-			flagDNS = &v
-		}
-		want, needPrompt := dnsManageDecision(fromUpdate, configExisted, flagDNS, prevEnabled)
-		if needPrompt {
-			want = confirmInstallPromptDefault(
-				"Let lerd manage DNS for local sites (No: use *.localhost, no dnsmasq, no sudo — HTTPS still works)?",
-				false,
-			)
-		}
-		wantDNS = want
+	// Apply what the DNS answer resolved above implies for existing sites and
+	// for the saved config.
+	if haveDNSConfig {
 		// Only flip TLD on a real toggle and only when the current TLD is the
 		// canonical default for the previous state; preserves any custom TLD
 		// the user has set in config.yaml.
@@ -374,12 +402,19 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 		// Persist on any real change, and always on a first install so the
 		// remembered choice exists on disk for the next run to honour, even when
-		// the user just accepted the enabled default.
+		// the user just accepted the enabled default. Re-read rather than reusing
+		// the copy the decision was made from: the Node-management steps above
+		// save their own, and writing back a pre-Node snapshot would drop it.
 		if !configExisted || prevEnabled != wantDNS || newTLD != prevTLD {
-			dnsCfg.DNS.Enabled = wantDNS
-			dnsCfg.DNS.TLD = newTLD
-			if err := config.SaveGlobal(dnsCfg); err != nil {
+			cur, err := config.LoadGlobal()
+			if err != nil || cur == nil {
 				fmt.Printf("    WARN: persist DNS choice: %v\n", err)
+			} else {
+				cur.DNS.Enabled = wantDNS
+				cur.DNS.TLD = newTLD
+				if err := config.SaveGlobal(cur); err != nil {
+					fmt.Printf("    WARN: persist DNS choice: %v\n", err)
+				}
 			}
 		}
 	}
@@ -405,22 +440,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// must be trusted by the system even when the user picks the DNS-off
 	// path. Without this, browsers reject every per-site cert as "not
 	// trusted" even though the cert is technically valid.
-	//
-	// When the CA is already in the system trust store, mkcert -install is a
-	// silent no-op that never prompts, so skip the gold sudo header and swallow
-	// its "already installed" banner. Only a genuine first install announces
-	// the sudo step and runs interactively.
-	mkcertCmd := exec.Command(certs.MkcertPath(), "-install")
-	if certs.CATrusted() {
-		mkcertCmd.Stdout = io.Discard
-		mkcertCmd.Stderr = io.Discard
-	} else {
-		feedback.Sudo("Installing mkcert CA")
-		mkcertCmd.Stdin = os.Stdin
-		mkcertCmd.Stdout = os.Stdout
-		mkcertCmd.Stderr = os.Stderr
-	}
-	mkcertCmd.Run() //nolint:errcheck
+	ensureMkcertCA(unattended)
 
 	// mkcert only adds the CA to the browser NSS stores when certutil is
 	// present, and it exits 0 with a warning otherwise (which the discard
@@ -443,9 +463,12 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		dnsChanged = dnsChanged || confChanged
 		ok()
 
-		// InstallSudoers prints its own gold "🔒 Installing DNS sudoers rule"
-		// line when it actually writes the drop-in, so no header is printed here.
-		dns.InstallSudoers() //nolint:errcheck
+		// Platform-dependent: on Linux the root pass already installed the grant
+		// and this is a no-op, while macOS writes it here because its rule names
+		// the TLD, which is only settled once the choice above was persisted.
+		if !unattended {
+			ensureResolverSudoers()
+		}
 	} else {
 		feedback.Line("DNS disabled, skipping dnsmasq and sudoers (mkcert CA still installed)")
 	}
@@ -1041,11 +1064,12 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 	// Re-sync host workers to the current JS runtime once the Node-management
 	// state is finalized. This makes "install bun, then `lerd update`" switch
-	// Vite and friends onto bun with no manual re-link. Gated on bun being
-	// present (no reason to touch workers otherwise) and on autostart (don't
-	// start units the user disabled); change-detection inside means only
+	// Vite and friends onto bun with no manual re-link, and makes answering the
+	// management question move existing workers onto the manager that answer
+	// selects, the way node:manage / node:unmanage already do. Gated on autostart
+	// (don't start units the user disabled); change-detection inside means only
 	// workers whose command actually changes get restarted.
-	if autostartOn && bunPath != "" {
+	if autostartOn && (bunPath != "" || nodeStateChanged) {
 		regenerateHostWorkers()
 	}
 
@@ -1169,23 +1193,10 @@ func refreshUnreferencedCustomQuadlets(seenSvc map[string]bool, reg *config.Site
 // output is unparseable (non-systemd init, container without logind, …) we
 // silently skip rather than fail the install.
 func ensureSystemdLinger() error {
-	user := os.Getenv("USER")
-	if user == "" {
-		user = os.Getenv("LOGNAME")
-	}
-	if user == "" {
+	if !defaultLingerNeeded() {
 		return nil
 	}
-	if _, err := exec.LookPath("loginctl"); err != nil {
-		return nil
-	}
-	out, err := exec.Command("loginctl", "show-user", user).Output()
-	if err != nil {
-		return nil
-	}
-	if !strings.Contains(string(out), "Linger=no") {
-		return nil
-	}
+	user := currentUserName()
 
 	feedback.Warn("systemd user linger is disabled for this account")
 	feedback.Note("without it, lerd's containers (DNS, nginx, PHP-FPM) are torn down by")
@@ -1206,19 +1217,67 @@ func ensureSystemdLinger() error {
 	return nil
 }
 
-// ensureUnprivilegedPorts checks net.ipv4.ip_unprivileged_port_start and
-// offers to set it to 80 so rootless Podman can bind to ports 80 and 443.
-func ensureUnprivilegedPorts() error {
-	const sysctlPath = "/proc/sys/net/ipv4/ip_unprivileged_port_start"
-	data, err := os.ReadFile(sysctlPath)
-	if err != nil {
-		// Not available on this kernel — skip
+// checkUnattendedSupported refuses --unattended where the other half of the
+// arrangement does not exist. The flag skips the sudo-gated steps because
+// `lerd bootstrap --system` and `--trust-ca` do them as root around it, and
+// bootstrap is Linux-only; anywhere else the flag would silently leave the
+// resolver grant unwritten and the CA untrusted, which reads as broken HTTPS
+// and a watcher asking for a password rather than as a missing feature.
+func checkUnattendedSupported(unattended bool) error {
+	if !unattended || runtime.GOOS == "linux" {
 		return nil
+	}
+	return fmt.Errorf("--unattended is for package installs on Linux, where `lerd bootstrap` applies the root-level setup around it; run `lerd install` without it")
+}
+
+// currentUserName resolves the login name the per-user setup steps apply to.
+func currentUserName() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	return os.Getenv("LOGNAME")
+}
+
+// unprivilegedPortStart reads the sysctl gating rootless binds of 80/443. ok is
+// false on a kernel that does not expose it, where there is nothing to set.
+func unprivilegedPortStart() (int, bool) {
+	data, err := os.ReadFile("/proc/sys/net/ipv4/ip_unprivileged_port_start")
+	if err != nil {
+		return 0, false
 	}
 	val := 1024
 	fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &val)
-	if val <= 80 {
-		return nil // already fine
+	return val, true
+}
+
+func defaultUnprivPortsNeeded() bool {
+	val, available := unprivilegedPortStart()
+	return available && val > 80
+}
+
+// defaultLingerNeeded acts only on a clear "Linger=no". A missing or
+// unparseable loginctl reads as nothing to do rather than as a failure.
+func defaultLingerNeeded() bool {
+	user := currentUserName()
+	if user == "" {
+		return false
+	}
+	if _, err := exec.LookPath("loginctl"); err != nil {
+		return false
+	}
+	out, err := exec.Command("loginctl", "show-user", user).Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "Linger=no")
+}
+
+// ensureUnprivilegedPorts checks net.ipv4.ip_unprivileged_port_start and
+// offers to set it to 80 so rootless Podman can bind to ports 80 and 443.
+func ensureUnprivilegedPorts() error {
+	val, available := unprivilegedPortStart()
+	if !available || val <= 80 {
+		return nil
 	}
 
 	feedback.Warn("port 80/443 require net.ipv4.ip_unprivileged_port_start ≤ 80 (current: %d)", val)
@@ -1329,12 +1388,10 @@ func installLaravelInstaller() error {
 	return cmd.Run()
 }
 
-// lerdManagesNode reports whether lerd's node shim is present in its bin dir,
-// meaning the user opted in to fnm-based node version management.
+// lerdManagesNode reports whether lerd is managing Node for this host
+// (persisted node.managed preference, or the historical node PATH shim).
 func lerdManagesNode() bool {
-	shim := filepath.Join(config.BinDir(), "node")
-	_, err := os.Stat(shim)
-	return err == nil
+	return nodeDet.Managed()
 }
 
 // nodeManageDecision resolves whether lerd should manage Node.js for this
@@ -1342,24 +1399,67 @@ func lerdManagesNode() bool {
 // preference always wins silently, and a config predating the field adopts the
 // current on-disk shim state as that choice without asking. Only a genuine
 // first-time install (no saved preference and no shim) prompts, and then only
-// when a system node exists; with none it defaults to managed. Update never
-// prompts. When needPrompt is true the caller runs the prompt and overrides want
-// with the answer.
-func nodeManageDecision(fromUpdate bool, saved *bool, systemNodeDetected, shimPresent bool) (want, needPrompt, promptDefault bool) {
+// when the user already has a Node setup of their own; with none it defaults to
+// managed. An nvm install counts as one even when no version is installed into
+// it yet, which the system-node probe cannot see. Update never prompts. When
+// needPrompt is true the caller runs the prompt and overrides want with the
+// answer.
+//
+// A package install cannot ask, so it answers by detection instead: an existing
+// nvm drives Node, otherwise lerd manages it through fnm. It must not fall
+// through to the update branch, which reads the answer off the shim state. On a
+// first install there is no shim yet, so that recorded "unmanaged" and left the
+// package to provision no Node at all, deferring it to whenever something first
+// needed one.
+func nodeManageDecision(fromUpdate, unattended bool, saved *bool, systemNodeDetected, nvmDetected, shimPresent bool) (want, needPrompt, promptDefault bool) {
 	if saved != nil {
 		return *saved, false, *saved
 	}
-	if shimPresent || fromUpdate {
-		return shimPresent, false, shimPresent
+	if shimPresent {
+		return true, false, true
 	}
-	if systemNodeDetected {
+	if unattended {
+		return !nvmDetected, false, !nvmDetected
+	}
+	if fromUpdate {
+		return false, false, false
+	}
+	if systemNodeDetected || nvmDetected {
 		return true, true, true
 	}
 	return true, false, true
 }
 
+// nodeManagerChoice picks the Node version manager to drive. A saved choice is
+// never revisited. Otherwise it follows the one management question: lerd-managed
+// Node uses the bundled fnm, since managing means owning the versions in lerd's
+// own tool, and declining hands Node back to an existing nvm so `lerd npm`, npx
+// and setup runs follow it instead of an fnm no version is ever installed into.
+// Users who want lerd to manage Node through their nvm switch with
+// `lerd node:manager nvm` or the dashboard.
+func nodeManagerChoice(saved string, wantLerdNode, nvmDetected bool) string {
+	if saved != "" {
+		return saved
+	}
+	if !wantLerdNode && nvmDetected {
+		return "nvm"
+	}
+	return "fnm"
+}
+
+// nodeStateFlipped reports whether this install run changed which Node host
+// workers should run: the management answer moved, or the version manager did.
+// An empty prevManager is a config predating the setting, which meant fnm, so a
+// first-time write of "fnm" is not a flip.
+func nodeStateFlipped(prevManaged bool, prevManager string, managed bool, manager string) bool {
+	if prevManager == "" {
+		prevManager = "fnm"
+	}
+	return prevManaged != managed || prevManager != manager
+}
+
 // ensureNodeManaged is called by the node:install/use/uninstall commands to
-// guard against running fnm operations while the user has opted out of
+// guard against running version-manager operations while the user has opted out of
 // lerd-managed Node. Prompts for confirmation and writes shims on accept.
 // Returns an error when stdin is not a TTY so scripted callers fail loudly
 // instead of silently flipping the user's choice.
@@ -1371,7 +1471,11 @@ func ensureNodeManaged() error {
 		return fmt.Errorf("lerd is not managing Node.js; run 'lerd install' to enable it")
 	}
 	fmt.Println("Lerd is currently using your system Node.js.")
-	fmt.Println("Continuing will install fnm-managed shims into", config.BinDir(), "and override your system node, npm and npx in PATH.")
+	if nodeDet.WritesPathShims(nodeDet.Active()) {
+		fmt.Println("Continuing will install lerd-managed shims into", config.BinDir(), "and override your system node, npm and npx in PATH.")
+	} else {
+		fmt.Println("Continuing will let lerd drive your existing nvm for install/use/default (your shell's nvm keeps owning node/npm/npx on PATH).")
+	}
 	if !confirmInstallPromptDefault("Switch to lerd-managed Node.js?", false) {
 		return fmt.Errorf("aborted")
 	}
@@ -1382,16 +1486,17 @@ func ensureNodeManaged() error {
 	return nil
 }
 
-// ensureDefaultNode installs the configured default Node.js version via fnm
-// and pins it as the fnm default if no version is already set up. Skips when
-// fnm already has a working default so reruns of `lerd install` stay quiet.
+// ensureDefaultNode installs the configured default Node.js version via the
+// active version manager and pins it as the default if no version is already set
+// up. Skips when the manager already has a working default so reruns of
+// `lerd install` stay quiet.
 func ensureDefaultNode() {
-	fnmPath := filepath.Join(config.BinDir(), "fnm")
-	if _, err := os.Stat(fnmPath); err != nil {
-		fmt.Printf("    WARN: fnm not found at %s, skipping default Node install\n", fnmPath)
+	mgr := nodeDet.Active()
+	if !mgr.Available() {
+		fmt.Printf("    WARN: %s not found, skipping default Node install\n", mgr.Name())
 		return
 	}
-	if exec.Command(fnmPath, "exec", "--using=default", "--", "true").Run() == nil {
+	if mgr.HasDefault() {
 		return
 	}
 	version := "22"
@@ -1399,12 +1504,12 @@ func ensureDefaultNode() {
 		version = cfg.Node.DefaultVersion
 	}
 	step(fmt.Sprintf("Installing Node.js %s", version))
-	if out, err := exec.Command(fnmPath, "install", version).CombinedOutput(); err != nil {
-		fmt.Printf("    WARN: fnm install %s: %s\n", version, strings.TrimSpace(string(out)))
+	if err := mgr.Install(version); err != nil {
+		fmt.Printf("    WARN: %v\n", err)
 		return
 	}
-	if out, err := exec.Command(fnmPath, "default", version).CombinedOutput(); err != nil {
-		fmt.Printf("    WARN: fnm default %s: %s\n", version, strings.TrimSpace(string(out)))
+	if err := mgr.SetDefault(version); err != nil {
+		fmt.Printf("    WARN: %v\n", err)
 		return
 	}
 	ok()
@@ -1445,6 +1550,15 @@ func detectSystemNode() string {
 		}
 	}
 	return ""
+}
+
+// detectNvm reports whether a user-installed nvm is present, so declining
+// lerd-managed Node can hand Node back to it instead of the bundled fnm. Both
+// layouts count: the script install's $NVM_DIR/nvm.sh, and Homebrew's, which
+// keeps nvm.sh under its own prefix and leaves NVM_DIR holding only the
+// versions.
+func detectNvm() bool {
+	return nodeDet.ScriptPresent()
 }
 
 // confirmInstallPrompt asks a [Y/n] question. Must be called before any
@@ -1489,6 +1603,40 @@ func dnsManageDecision(fromUpdate, configExisted bool, flag *bool, savedEnabled 
 	// port-53 conflict, and HTTPS still works because the mkcert CA is trusted
 	// either way. The user is still asked, so .test remains one keystroke away.
 	return false, true
+}
+
+// resolveDNSChoice decides whether lerd manages local DNS for this run, and
+// prompts when the answer is not already settled. It runs early because the
+// answer decides whether the root pass installs the resolver sudoers grant.
+// haveConfig is false when the config could not be read, in which case the
+// caller skips the TLD and persistence side effects and proceeds with DNS on.
+func resolveDNSChoice(fromUpdate, configExisted bool, dnsFlag string) (want, haveConfig, prevEnabled bool, prevTLD string) {
+	cfg, err := config.LoadGlobal()
+	if err != nil || cfg == nil {
+		if err != nil {
+			fmt.Printf("    WARN: load config (%v); proceeding with DNS off\n", err)
+		}
+		return false, false, false, "localhost"
+	}
+	prevEnabled = cfg.DNS.Enabled
+	// Oracle fork default TLD is .localhost, which resolves to loopback by
+	// RFC 6761 without dnsmasq or sudo.
+	prevTLD = "localhost"
+	if cfg.DNS.TLD != "" {
+		prevTLD = cfg.DNS.TLD
+	}
+	var flagDNS *bool
+	if v, ok := parseDNSMode(dnsFlag); ok {
+		flagDNS = &v
+	}
+	want, needPrompt := dnsManageDecision(fromUpdate, configExisted, flagDNS, prevEnabled)
+	if needPrompt {
+		want = confirmInstallPromptDefault(
+			"Let lerd manage DNS for local sites (No: use *.localhost, no dnsmasq, no sudo — HTTPS still works)?",
+			false,
+		)
+	}
+	return want, true, prevEnabled, prevTLD
 }
 
 // confirmInstallPromptDefault is like confirmInstallPrompt but lets the caller
@@ -1557,60 +1705,6 @@ func readLine(r io.Reader) string {
 	return b.String()
 }
 
-// downloadFile downloads a URL to a local file, printing a progress bar to w.
-func downloadFile(url, dest string, mode os.FileMode, w io.Writer) error {
-	fmt.Fprintf(w, "\n      Downloading %s\n      ", url)
-
-	resp, err := http.Get(url) //nolint:gosec,noctx
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
-	}
-
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	written, err := io.Copy(f, &progressReader{r: resp.Body, total: resp.ContentLength, w: w})
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(w, " (%d bytes)\n", written)
-
-	return os.Chmod(dest, mode)
-}
-
-type progressReader struct {
-	r       io.Reader
-	total   int64
-	written int64
-	w       io.Writer
-}
-
-func (p *progressReader) Read(b []byte) (int, error) {
-	n, err := p.r.Read(b)
-	p.written += int64(n)
-	if p.total > 0 {
-		pct := int(float64(p.written) / float64(p.total) * 50)
-		bar := ""
-		for i := 0; i < 50; i++ {
-			if i < pct {
-				bar += "="
-			} else {
-				bar += " "
-			}
-		}
-		fmt.Fprintf(p.w, "\r      [%s] %d%%", bar, pct*2)
-	}
-	return n, err
-}
-
 func addShellShims(manageNode bool) error {
 	home, _ := os.UserHomeDir()
 	binDir := config.BinDir()
@@ -1620,7 +1714,6 @@ func addShellShims(manageNode bool) error {
 	if lerdBin == "" {
 		lerdBin = filepath.Join(home, ".local", "bin", "lerd")
 	}
-	fnmBin := filepath.Join(binDir, "fnm")
 
 	// Write php shim
 	phpShim := fmt.Sprintf("#!/bin/sh\nexec %s php \"$@\"\n", lerdBin)
@@ -1651,38 +1744,18 @@ func addShellShims(manageNode bool) error {
 		return fmt.Errorf("writing laravel shim: %w", err)
 	}
 
-	// Write node/npm/npx shims. Prefer routing through the lerd binary so
-	// `npm install -g` lands in lerd's managed prefix and the per-bin
-	// wrappers under ~/.local/bin/ stay in sync, but fall back to a direct
-	// fnm invocation when lerd is not reachable (e.g. inside Alpine-based
-	// PHP containers, since lerd is glibc-linked).
-	// Only written when lerd is managing Node versions; otherwise existing
-	// shims are removed so the user's system node stops being masked by a
-	// stale fnm shim from a prior managed install.
-	if manageNode {
-		nodeShimTmpl := `#!/bin/sh
-LERD="%s"
-if [ -x "$LERD" ]; then
-  exec "$LERD" %s "$@"
-fi
-FNM="%s"
-VERSION=""
-for f in .node-version .nvmrc; do
-  [ -f "$f" ] && VERSION=$(tr -d '[:space:]' < "$f") && break
-done
-if [ -n "$VERSION" ]; then
-  "$FNM" install "$VERSION" >/dev/null 2>&1 || true
-  exec "$FNM" exec --using="$VERSION" -- %s "$@"
-else
-  if ! "$FNM" exec --using=default -- true >/dev/null 2>&1; then
-    printf 'No Node.js version available via lerd. Run: lerd node:install 22\n' >&2
-    exit 1
-  fi
-  exec "$FNM" exec --using=default -- %s "$@"
-fi
-`
+	// Write node/npm/npx PATH shims only when the active manager needs them.
+	// fnm has no shell hook, so the shims are how `node` on PATH reaches fnm.
+	// nvm is already loaded by the user's shell; putting lerd wrappers ahead of
+	// it makes `nvm ls` / `nvm use` hang, so managed-nvm only removes any stale
+	// shims and leaves PATH to nvm. CLI (`lerd node`/`npm`) and host workers
+	// still drive nvm through Active() either way.
+	// When manageNode is false, existing shims are removed so a prior managed
+	// install stops masking the user's node.
+	if manageNode && nodeDet.WritesPathShims(nodeDet.Active()) {
+		mgr := nodeDet.Active()
 		for _, bin := range []string{"node", "npm", "npx"} {
-			shim := fmt.Sprintf(nodeShimTmpl, lerdBin, bin, fnmBin, bin, bin)
+			shim := mgr.ShimScript(lerdBin, bin)
 			if err := os.WriteFile(filepath.Join(binDir, bin), []byte(shim), 0755); err != nil {
 				return fmt.Errorf("writing %s shim: %w", bin, err)
 			}

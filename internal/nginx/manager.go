@@ -47,6 +47,38 @@ func detectSiteProxy(site config.Site) (path string, port int, ok bool) {
 	return proxy.Path, proxyPort, true
 }
 
+// detectSiteDevServer returns the prefix and host port for a site whose
+// framework declares a dev server, once that server has been pinned to a port.
+// An unpinned site has never started one, so nothing is proxied.
+func detectSiteDevServer(site config.Site) (base string, port int) {
+	if site.DevServerPort == 0 {
+		return "", 0
+	}
+	tool := config.DevServerToolInstalled(site.Path)
+	if tool == nil {
+		return "", 0
+	}
+	return tool.Base, site.DevServerPort
+}
+
+// detectWorktreeDevServer is detectSiteDevServer for a worktree checkout, whose
+// port is pinned on the parent site under the worktree's directory base.
+func detectWorktreeDevServer(siteName, path string) (base string, port int) {
+	site, err := config.FindSite(siteName)
+	if err != nil || site == nil {
+		return "", 0
+	}
+	port = site.WorktreeDevPorts[filepath.Base(path)]
+	if port == 0 {
+		return "", 0
+	}
+	tool := config.DevServerToolInstalled(path)
+	if tool == nil {
+		return "", 0
+	}
+	return tool.Base, port
+}
+
 type nginxConfData struct {
 	Resolver        string
 	AccessLogTarget string
@@ -69,9 +101,13 @@ type VhostData struct {
 	ProxyPort       int    // port the worker listens on inside the PHP-FPM container
 	CustomContainer string // container name for custom container sites (e.g. "lerd-custom-nestapp")
 	CustomPort      int    // port the app listens on inside the custom container
-	UpstreamHost    string // host-proxy upstream address (e.g. "host.containers.internal")
-	UpstreamPort    int    // host-proxy upstream port (the dev server's host port)
-	BackendSSL      bool   // proxy to the backend via HTTPS (app serves TLS on its own port)
+	// DevServerBase is the URL prefix a host dev server serves everything
+	// under, so one location covers its assets and its hot-reload socket.
+	DevServerBase string
+	DevServerPort int
+	UpstreamHost  string // host-proxy upstream address (e.g. "host.containers.internal")
+	UpstreamPort  int    // host-proxy upstream port (the dev server's host port)
+	BackendSSL    bool   // proxy to the backend via HTTPS (app serves TLS on its own port)
 	// LerdSite / LerdBranch surface the parent site name and (for worktrees)
 	// the branch to PHP via fastcgi_param so the debug bridge can tag events
 	// with stable identifiers instead of guessing from DOCUMENT_ROOT.
@@ -158,6 +194,59 @@ func frameworkNginxBlock(w io.Writer, framework, domain, snippet, sitePath, publ
 // of the directive it lands in: braces open or close blocks, `;` ends a
 // directive, `#` comments out the rest of the line, newlines do both.
 const nginxValueForbidden = "{};#\n\r\x00"
+
+// validate refuses any value that could break out of the directive it lands in.
+// A project's .lerd.yaml supplies the domains, the public dir and the path, and
+// a worktree's domain carries a git branch name, which may legally contain `;`
+// and braces. Checked here rather than per field so a field added to the struct
+// later is covered without anyone remembering. Ints and bools cannot carry
+// syntax, so only the strings are examined.
+//
+// Paths reach the template through nginxQuote, which handles whitespace but not
+// these; a quoted token still ends at an unescaped `"`, and `;` inside one is
+// only safe while the quoting holds.
+func (d VhostData) validate() error {
+	// Substituted bare, so anything that ends a directive or opens a block is
+	// syntax the value must not carry.
+	for name, v := range map[string]string{
+		"server names":     d.ServerNames,
+		"domain":           d.Domain,
+		"cert domain":      d.CertDomain,
+		"proxy path":       d.ProxyPath,
+		"PHP version":      d.PHPVersion,
+		"FPM container":    d.FPMContainer,
+		"custom container": d.CustomContainer,
+		"upstream host":    d.UpstreamHost,
+		"site":             d.LerdSite,
+		"branch":           d.LerdBranch,
+	} {
+		if i := strings.IndexAny(v, nginxValueForbidden); i >= 0 {
+			return fmt.Errorf("nginx %s %q contains %q, which would end the directive it lands in", name, v, string(v[i]))
+		}
+	}
+	// The paths reach the templates only through Root(), which quotes them, so
+	// `;` and `#` are literal there and a directory legitimately containing one
+	// still serves. A line break is the one thing quoting does not contain.
+	for name, v := range map[string]string{"path": d.Path, "public dir": d.PublicDir} {
+		if i := strings.IndexAny(v, "\n\r\x00"); i >= 0 {
+			return fmt.Errorf("nginx %s %q contains %q, which would break out of its line", name, v, string(v[i]))
+		}
+	}
+	return nil
+}
+
+// renderVhost validates the substituted values and renders the template. Every
+// vhost goes through here, so nothing reaches conf.d without being checked.
+func renderVhost(tmpl *template.Template, data VhostData) ([]byte, error) {
+	if err := data.validate(); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
 
 // nginxQuote renders a filesystem path as a quoted nginx token. nginx splits a
 // directive on whitespace, so a project under a path with a space would give
@@ -300,6 +389,7 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 	serverNames := serverNamesWithWildcards(site.Domains)
 
 	proxyPath, proxyPort, hasProxy := detectSiteProxy(site)
+	devBase, devPort := detectSiteDevServer(site)
 	fpmContainer := podman.FPMContainerName(site, phpVersion)
 	data := VhostData{
 		Domain:          site.PrimaryDomain(),
@@ -312,14 +402,17 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 		Proxy:           hasProxy,
 		ProxyPath:       proxyPath,
 		ProxyPort:       proxyPort,
+		UpstreamHost:    hostProxyUpstream(),
+		DevServerBase:   devBase,
+		DevServerPort:   devPort,
 		LerdSite:        site.Name,
 		Profiling:       profilerEnabled(),
 		RequestTimeout:  resolveRequestTimeout(site.Path),
 		FrameworkNginx:  resolveFrameworkNginx(site, publicDir, fpmContainer),
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 
@@ -328,7 +421,7 @@ func GenerateVhost(site config.Site, phpVersion string) error {
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // GenerateSSLVhost renders the SSL vhost template and writes it to conf.d.
@@ -347,6 +440,7 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 	serverNames := serverNamesWithWildcards(site.Domains)
 
 	proxyPath, proxyPort, hasProxy := detectSiteProxy(site)
+	devBase, devPort := detectSiteDevServer(site)
 	fpmContainer := podman.FPMContainerName(site, phpVersion)
 	data := VhostData{
 		Domain:          site.PrimaryDomain(),
@@ -360,14 +454,17 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 		Proxy:           hasProxy,
 		ProxyPath:       proxyPath,
 		ProxyPort:       proxyPort,
+		UpstreamHost:    hostProxyUpstream(),
+		DevServerBase:   devBase,
+		DevServerPort:   devPort,
 		LerdSite:        site.Name,
 		Profiling:       profilerEnabled(),
 		RequestTimeout:  resolveRequestTimeout(site.Path),
 		FrameworkNginx:  resolveFrameworkNginx(site, publicDir, fpmContainer),
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 
@@ -376,7 +473,7 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // GenerateFrankenPHPVhost renders the HTTP vhost template for a FrankenPHP
@@ -400,8 +497,8 @@ func GenerateFrankenPHPVhost(site config.Site) error {
 		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
@@ -409,7 +506,7 @@ func GenerateFrankenPHPVhost(site config.Site) error {
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // GenerateFrankenPHPSSLVhost renders the HTTPS vhost template for a FrankenPHP site.
@@ -432,8 +529,8 @@ func GenerateFrankenPHPSSLVhost(site config.Site) error {
 		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
@@ -441,7 +538,7 @@ func GenerateFrankenPHPSSLVhost(site config.Site) error {
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // GenerateCustomVhost renders the HTTP vhost template for a custom container
@@ -467,8 +564,8 @@ func GenerateCustomVhost(site config.Site) error {
 		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 
@@ -477,7 +574,7 @@ func GenerateCustomVhost(site config.Site) error {
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // GenerateCustomSSLVhost renders the SSL vhost template for a custom container
@@ -503,8 +600,8 @@ func GenerateCustomSSLVhost(site config.Site) error {
 		RequestTimeout:  resolveRequestTimeout(site.Path),
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 
@@ -513,7 +610,7 @@ func GenerateCustomSSLVhost(site config.Site) error {
 	}
 	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // hostProxyUpstream returns the host address nginx proxies a host-proxy site to.
@@ -564,8 +661,8 @@ func generateHostProxyVhost(site config.Site, tmplName, confName string, ssl boo
 		data.CertDomain = site.PrimaryDomain()
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 
@@ -574,7 +671,7 @@ func generateHostProxyVhost(site config.Site, tmplName, confName string, ssl boo
 	}
 	confPath := filepath.Join(config.NginxConfD(), confName)
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // GenerateWorktreeVhostFor picks GenerateWorktreeSSLVhost or GenerateWorktreeVhost
@@ -628,6 +725,7 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 	}
 
 	publicDir, fpmContainer, frameworkNginx := worktreeVhostConfig(domain, path, phpVersion, siteName)
+	devBase, devPort := detectWorktreeDevServer(siteName, path)
 	data := VhostData{
 		Domain:          domain,
 		ServerNames:     domain + " *." + domain,
@@ -638,13 +736,16 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 		PublicDir:       publicDir,
 		LerdSite:        siteName,
 		LerdBranch:      branch,
+		UpstreamHost:    hostProxyUpstream(),
+		DevServerBase:   devBase,
+		DevServerPort:   devPort,
 		Profiling:       profilerEnabled(),
 		RequestTimeout:  resolveRequestTimeout(path),
 		FrameworkNginx:  frameworkNginx,
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 
@@ -653,7 +754,7 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 	}
 	confPath := filepath.Join(config.NginxConfD(), domain+".conf")
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // GenerateWorktreeSSLVhost renders the SSL vhost template for a worktree checkout,
@@ -670,6 +771,7 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 	}
 
 	publicDir, fpmContainer, frameworkNginx := worktreeVhostConfig(domain, path, phpVersion, siteName)
+	devBase, devPort := detectWorktreeDevServer(siteName, path)
 	data := VhostData{
 		Domain:          domain,
 		ServerNames:     domain + " *." + domain,
@@ -681,13 +783,16 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 		PublicDir:       publicDir,
 		LerdSite:        siteName,
 		LerdBranch:      branch,
+		UpstreamHost:    hostProxyUpstream(),
+		DevServerBase:   devBase,
+		DevServerPort:   devPort,
 		Profiling:       profilerEnabled(),
 		RequestTimeout:  resolveRequestTimeout(path),
 		FrameworkNginx:  frameworkNginx,
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 
@@ -696,7 +801,7 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 	}
 	confPath := filepath.Join(config.NginxConfD(), domain+".conf")
 	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, buf.Bytes(), 0644)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // GenerateWorktreeHostProxyVhostFor renders a worktree's host-proxy vhost: nginx
@@ -727,15 +832,15 @@ func GenerateWorktreeHostProxyVhostFor(domain, path, parentDomain string, upstre
 	if err != nil {
 		return err
 	}
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	rendered, err := renderVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
 		return err
 	}
 	config.GuardRealWrite(filepath.Join(config.NginxConfD(), domain+".conf"))
-	return os.WriteFile(filepath.Join(config.NginxConfD(), domain+".conf"), buf.Bytes(), 0644)
+	return os.WriteFile(filepath.Join(config.NginxConfD(), domain+".conf"), rendered, 0644)
 }
 
 // landingVhostConf renders a minimal vhost for site that serves htmlFile (read
@@ -881,6 +986,21 @@ type proxyVhostData struct {
 	RequestTimeout int
 }
 
+// renderProxyVhost is renderVhost for the LAN proxy template, which carries its
+// own smaller data type. Same rule: nothing substituted may end its directive.
+func renderProxyVhost(tmpl *template.Template, data proxyVhostData) ([]byte, error) {
+	for name, v := range map[string]string{"domain": data.Domain, "upstream host": data.UpstreamHost} {
+		if i := strings.IndexAny(v, nginxValueForbidden); i >= 0 {
+			return nil, fmt.Errorf("nginx %s %q contains %q, which would end the directive it lands in", name, v, string(v[i]))
+		}
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // GenerateProxyVhost renders the proxy vhost for domain. When secured is
 // false it writes conf.d/<domain>.conf (HTTP); when true it writes
 // conf.d/<domain>-ssl.conf and removes any leftover plain conf so the two
@@ -907,8 +1027,9 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured b
 		UpstreamPort:   upstreamPort,
 		RequestTimeout: resolveRequestTimeout(""),
 	}
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+
+	rendered, err := renderProxyVhost(tmpl, data)
+	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
@@ -916,7 +1037,7 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured b
 	}
 	confPath := filepath.Join(config.NginxConfD(), confName)
 	config.GuardRealWrite(confPath)
-	if err := os.WriteFile(confPath, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(confPath, rendered, 0644); err != nil {
 		return err
 	}
 	// When flipping HTTP<->HTTPS, remove the stale counterpart so the two

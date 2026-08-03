@@ -11,6 +11,10 @@ Adições desta fork que vivem no painel web (`http://lerd.localhost`).
   Source badge mostra "preset" vs "override do usuário". + adicionar variável /
   remover por linha. Save escreve em `~/.config/lerd/services/<name>.yaml` —
   precisa Restart do serviço pra aplicar (avisado na UI).
+  **Loopback-only:** o bloco `Environment=` carrega credenciais
+  (`ORACLE_PASSWORD`, `POSTGRES_PASSWORD`, …), então tanto a leitura quanto a
+  escrita ficam restritas à máquina local, como já acontece com a aba Env de um
+  site. Um cliente da LAN recebe 403 mesmo com credenciais válidas.
 
 > Subir um projeto **preserva o `.env`**: só `APP_URL`/`SESSION_DOMAIN`/
 > `SANCTUM_STATEFUL_DOMAINS`/`VITE_REVERB_*`/`REVERB_*` são tocados; `DB_*`,
@@ -73,6 +77,10 @@ fullstack"** para criar/editar direto dali. Ver [Proxies](../README.md#proxies-p
 - **`oracle-xe`** (gvenzl/oracle-xe:21-slim-faststart) — Oracle XE 21c local pra
   dev. Cria automaticamente `LERDPDB` + usuário `lerd_app/lerd`.
   `userns: keep-id:uid=54321,gid=54321` + `chown_data` pra rootless. NLS_LANG pt-BR.
+  No wizard do `lerd init` ele aparece como opção de **Database** (escolha única),
+  não na multi-seleção de Serviços: é um banco, e oferecê-lo como serviço deixava
+  marcar `oracle-xe` com o Database ainda em `sqlite`, gravando dois
+  `DB_CONNECTION` diferentes no `.env`.
 - **`typesense`** (typesense/typesense:28.0) — search engine open-source,
   alternativa Meilisearch/Algolia. Configura `SCOUT_DRIVER=typesense` no `.env`.
 - **`typesense-dashboard`** (bfritscher/typesense-dashboard) — companion web pra

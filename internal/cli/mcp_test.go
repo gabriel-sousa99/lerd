@@ -578,9 +578,11 @@ func TestIsLerdBuiltImage_matchers(t *testing.T) {
 // group and for the package-manager, worker-state and preset-metadata rules an
 // assistant was previously getting wrong, then 28500 → 28700 for the `diag`
 // `doctor_fix` action, then 28700 → 29400 for the runtime `ini_*` php.ini
-// actions and the shared-vs-per-version guidance.
+// actions and the shared-vs-per-version guidance, then 29400 → 29700 for the
+// fnm/nvm version-manager choice (`node.manager`), then 29700 → 30300 for the
+// db `import` provider-dump handling and the `php_list` base-image update flag.
 func TestLerdReference_underSizeCeiling(t *testing.T) {
-	const ceiling = 29400
+	const ceiling = 30300
 	if got := len(lerdReference); got > ceiling {
 		t.Errorf("lerd-reference.md is %d bytes, ceiling is %d — trim before raising", got, ceiling)
 	}

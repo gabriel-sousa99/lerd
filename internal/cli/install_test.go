@@ -530,6 +530,39 @@ func TestDetectSystemNode_findsNvmDirEvenWhenPathIsEmpty(t *testing.T) {
 	}
 }
 
+// An nvm with no Node versions in it is invisible to detectSystemNode, so
+// detectNvm is what makes the management question reach that user at all.
+func TestDetectNvm(t *testing.T) {
+	t.Run("empty nvm dir under NVM_DIR counts", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("NVM_DIR", tmp)
+		if detectNvm() {
+			t.Error("detectNvm true for a directory with no nvm.sh")
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "nvm.sh"), []byte("#!/bin/bash\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if !detectNvm() {
+			t.Error("detectNvm false even though $NVM_DIR holds nvm.sh")
+		}
+	})
+
+	t.Run("falls back to ~/.nvm", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("NVM_DIR", "")
+		t.Setenv("HOME", tmp)
+		if err := os.MkdirAll(filepath.Join(tmp, ".nvm"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, ".nvm", "nvm.sh"), []byte("#!/bin/bash\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if !detectNvm() {
+			t.Error("detectNvm false for an nvm.sh in the default ~/.nvm")
+		}
+	})
+}
+
 func TestDetectSystemNode_findsNpmInPath(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -589,6 +622,51 @@ func TestAddShellShims_OptOutRemovesNodeShims(t *testing.T) {
 	for _, bin := range []string{"php", "composer", "laravel"} {
 		if _, err := os.Stat(filepath.Join(binDir, bin)); err != nil {
 			t.Errorf("%s shim should survive opt-out: %v", bin, err)
+		}
+	}
+}
+
+// TestAddShellShims_NvmSkipsNodeShims: with node.manager=nvm, managed mode must
+// not put node/npm/npx wrappers on PATH (nvm already owns them) and must clear
+// any stale shims left from a prior fnm install.
+func TestAddShellShims_NvmSkipsNodeShims(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("HOME", tmp)
+	t.Setenv("SHELL", "/bin/sh")
+
+	cfg, err := config.LoadGlobal()
+	if err != nil || cfg == nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	cfg.SetNodeManager("nvm")
+	if err := config.SaveGlobal(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(tmp, "lerd", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, bin := range []string{"node", "npm", "npx"} {
+		if err := os.WriteFile(filepath.Join(binDir, bin), []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := addShellShims(true); err != nil {
+		t.Fatalf("addShellShims(true) with nvm: %v", err)
+	}
+	for _, bin := range []string{"node", "npm", "npx"} {
+		if _, err := os.Stat(filepath.Join(binDir, bin)); err == nil {
+			t.Errorf("%s shim must not exist when manager is nvm", bin)
+		} else if !os.IsNotExist(err) {
+			t.Errorf("%s shim stat: %v", bin, err)
+		}
+	}
+	for _, bin := range []string{"php", "composer", "laravel"} {
+		if _, err := os.Stat(filepath.Join(binDir, bin)); err != nil {
+			t.Errorf("%s shim should still be written: %v", bin, err)
 		}
 	}
 }

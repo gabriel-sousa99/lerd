@@ -17,7 +17,7 @@
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Flerd-ff2d20?logo=reddit)](https://reddit.com/r/lerd)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/5JK54s7xCC)
 
-[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.30.1-blue)](https://github.com/lerd-env/lerd)
+[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.31.0-blue)](https://github.com/lerd-env/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
 [![PHP](https://img.shields.io/badge/PHP-5.6%20%E2%80%93%208.5-777BB4)]()
 
@@ -43,8 +43,8 @@
 > - 🌐 **Domínios `.test` automáticos** com TLS em um comando, ou [desative o DNS gerenciado pelo lerd](https://lerd.sh/features/dns/) e use `*.localhost` (sem dnsmasq, sem mexer no resolver do sistema, sem sudo na parte de DNS); o DNS é ciente de VPN e re-sincroniza os resolvers dos containers em menos de um segundo quando um túnel conecta/desconecta
 > - 🐘 **Versão de PHP por projeto** (8.1–8.5, mais uma faixa legacy congelada 7.4 / 8.0 para projetos em stack antigo), troca com um clique
 > - ⚡ **Runtime FrankenPHP** por site como alternativa ao PHP-FPM compartilhado, com modo worker do Laravel Octane e Symfony Runtime
-> - 📦 **Isolamento de Node.js** por projeto (Node 22, 24)
-> - 🖥️ **Web UI embutida** com dashboard raiz, widgets ao vivo, command palette global (Cmd+K), instalar/remover versões de PHP e Node pela página System, e sete idiomas de dashboard (inglês, alemão, espanhol, francês, indonésio, holandês, português)
+> - 📦 **Isolamento de Node.js** por projeto (Node 22, 24) pelo fnm embutido ou por um **nvm** que você já tenha, alternável pelo dashboard, ou **bun** como runtime JS no host e, opt-in, dentro do container
+> - 🖥️ **Web UI embutida** com dashboard raiz, widgets ao vivo, command palette global (Cmd+K), instalar/remover versões de PHP e Node pela página System, e quatorze idiomas de dashboard
 > - ✏️ **Edição de config no navegador** — nginx por site e global, `php.ini` por versão, arquivos `.env` e tuning de runtime de banco/serviço, cada um validado (`nginx -t` onde se aplica), com backups timestampados e restauração em um clique
 > - 🧪 **Aba Tinker** — REPL PHP no navegador por site com autocomplete (models do projeto, helpers do composer, built-ins do PHP), checagem de sintaxe ao vivo (`php -l`) e árvore colapsável para a saída de `dump()`. Funciona em Laravel (`artisan tinker`), Symfony e qualquer projeto PHP baseado em composer
 > - 🛰️ **Janela de Debug** que intercepta todo `dump()` / `dd()` e transmite para o dashboard, TUI (tecla `D`), MCP e `lerd dump tail`, escopado por site e por branch de worktree, deixando a resposta original limpa a menos que você ligue o passthrough. A mesma janela captura queries SQL com detecção de N+1 e slow-query, além de e-mails enviados, views renderizadas, eventos disparados, jobs enfileirados e HTTP de saída, tanto em Laravel quanto Symfony, com captura opcional (opt-in) da atividade dos workers de fila
@@ -53,6 +53,11 @@
 > - 🗄️ **Serviços em um clique**: MySQL, PostgreSQL, Redis, Meilisearch, RustFS, Mailpit, Gotenberg, Stripe Mock, Reverb e mais. Todo serviço padrão é um preset YAML que você pode atualizar, migrar, reverter ou reinstalar no lugar, incluindo um reinstall com reset de dados que recria automaticamente os bancos e buckets dos sites vinculados, além de snapshots de banco sob demanda (criar / listar / restaurar / apagar) via CLI, dashboard e MCP
 > - 🌳 **Git worktrees de primeira classe** com domínios de branch auto-detectados, versões PHP/Node por worktree, isolamento opcional de banco por worktree (clone do main ou vazio), proxy LAN-share por worktree, templating de `env_overrides` no `.lerd.yaml` para apps multi-tenant, SANs de certificado wildcard automáticos para `*.branch.site.test`, um worker de dev server Vite embutido que roda no host por branch, e um modal no dashboard para adicionar e remover worktrees sem tocar na CLI
 > - ⚒️ **Auto-recuperação de workers**: workers de queue, schedule, horizon, reverb e stripe que falharam aparecem em todo lugar (CLI, banner do dashboard, TUI, MCP) e são recuperados com um clique ou `lerd worker heal`, com auto-reload opt-in do Horizon (`horizon:listen`) para o dev pegar mudanças de código sem restart manual (alternável pelo dashboard)
+> - 🌍 **Compartilhar um site** na LAN com porta estável e QR code, ou publicamente por ngrok, cloudflared, Expose, serveo ou localhost.run, pela CLI ou pelo menu de share do dashboard. Defina um domínio base no Cloudflare uma vez e todo share é servido em `<site>.<domínio>`, então um webhook ou callback OAuth mantém a URL entre execuções, e o ngrok roda da própria imagem publicada numa máquina que nunca o instalou
+> - 🎨 **Dev server no domínio do próprio site**: um Vite rodando serve os assets e o socket de hot-reload sob o hostname do site em vez de anunciar `localhost:5173`, então uma página compartilhada, aberta pela LAN ou de worktree chega estilizada. Nada no projeto é editado e nada é declarado por framework
+> - 🧷 **Wiring de banco na IDE** (JetBrains): o projeto ganha um data source apontando para o banco dele no lerd, na porta que realmente responde no host, escrito no link e atualizado conforme o banco muda, sem tocar em nenhum data source que não seja do lerd
+> - 🗃️ **Entidades e ações declaradas no preset**: create, drop, export, import e snapshots saíram do Go e viraram declaração YAML, então o MongoDB ganha a aba Databases inteira e o RustFS lista seus buckets na mesma grade — um engine novo no store ganha essas operações sem release do binário
+> - 📌 **Host tools fixados** (Composer, fnm, mkcert) atrás de um manifesto publicado em vez do que o `releases/latest` servir no dia, com a versão pendente no card do System como o botão que aplica a atualização
 > - 📋 **Logs ao vivo** de PHP-FPM, Queue, Schedule, Reverb, por site
 > - 🔒 **Rootless & daemonless** — Podman-native, sem Docker, dual-stack IPv4 + IPv6
 > - 🤖 **Servidor MCP** — deixe assistentes de IA (Claude Code, Windsurf, Junie) gerenciarem seu ambiente diretamente
@@ -67,6 +72,7 @@ Esta fork adiciona, por cima de tudo isso:
 | ---------------------------------- | ---------------------------- | ------------------------------------------------------------------- |
 | Driver Oracle (`oci8`)             | instalar manual              | **compilado em toda imagem** (`oci8` 2.0.12 → 3.4.1 por versão PHP) |
 | Oracle Instant Client              | n/a                          | **21.18 LTS** em `/opt/oracle/instantclient`                        |
+| `tnsnames.ora` / wallet Autonomous | n/a                          | **`$TNS_ADMIN` montado read-only** de `~/.config/lerd/oracle/network/admin` |
 | `memcached` / `amqp`               | precisa `lerd php:ext`       | **pré-instaladas**                                                  |
 | `openssh-client` no container      | ausente (composer ssh falha) | **instalado** + `$HOME/.ssh` montado em `/root/.ssh`                |
 | Suporte PHP                        | 7.4 → 8.5                    | **5.6 → 8.5** (5.6 legacy com libresolv shim)                       |
@@ -78,7 +84,7 @@ Esta fork adiciona, por cima de tudo isso:
 | Instalar versão PHP                | só CLI                       | **botão no dashboard + SSE logs ao vivo**                           |
 | Service presets adicionais         | mysql/postgres/redis/…       | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**             |
 | Xdebug por padrão                  | `start_with_request=yes`     | **`=trigger`** (sem spam em CLI sem IDE)                            |
-| Versão                             | `1.30.1`                     | `1.30.1-oracle.3`                                                   |
+| Versão                             | `1.31.0`                     | `1.31.0-oracle.0`                                                   |
 
 ### Extensões PHP nas imagens
 
@@ -193,7 +199,7 @@ O script verifica `podman`/`git`/`mkcert`, baixa o binário para
 NÃO** → sites em `http://meusite.localhost/` (sem sudo, RFC 6761).
 
 ```bash
-lerd about    # confirma "Lerd Oracle Edition" e versão 1.30.1-oracle.3
+lerd about    # confirma "Lerd Oracle Edition" e versão 1.31.0-oracle.0
 ```
 
 > [!TIP]
@@ -253,6 +259,49 @@ oracle:
   password: ${ORACLE_PASSWORD}   # use placeholder e set no shell
   charset: AL32UTF8              # ou WE8MSWIN1252, WE8ISO8859P15
 ```
+
+### `tnsnames.ora` e wallet (Autonomous Database)
+
+Banco corporativo raramente é endereçado por `host:port/service`: é endereçado
+por **alias** do `tnsnames.ora`, e o Autonomous Database exige um **wallet**
+baixado do console. O Instant Client procura os dois em `$TNS_ADMIN`, que nas
+imagens do fork é `/opt/oracle/network/admin`, montado **read-only** a partir de:
+
+```
+~/.config/lerd/oracle/network/admin/
+```
+
+O diretório é criado no primeiro `lerd start` com modo `0700` (é credencial).
+Largue os arquivos lá e reinicie o PHP:
+
+```bash
+# alias: copie o tnsnames.ora corporativo
+cp /caminho/tnsnames.ora ~/.config/lerd/oracle/network/admin/
+
+# Autonomous: descompacte o wallet inteiro (cwallet.sso, sqlnet.ora, tnsnames.ora…)
+unzip Wallet_MEUDB.zip -d ~/.config/lerd/oracle/network/admin/
+
+lerd restart
+```
+
+Depois use o **alias** onde iria o host, sem porta nem service name:
+
+```yaml
+oracle:
+  host: MEUDB_high        # alias do tnsnames.ora / wallet
+  username: app_user
+  password: ${ORACLE_PASSWORD}
+```
+
+Conferir de dentro do container:
+
+```bash
+lerd php -r 'echo getenv("TNS_ADMIN"), PHP_EOL;'   # /opt/oracle/network/admin
+lerd php -r 'var_dump(oci_connect("app_user", getenv("DB_PASSWORD"), "MEUDB_high") !== false);'
+```
+
+Nada disso entra na imagem nem no repositório: o wallet fica só no host, montado
+somente-leitura, então um container não consegue reescrevê-lo.
 
 ---
 

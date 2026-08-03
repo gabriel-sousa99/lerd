@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -86,11 +88,57 @@ func ValidateProxyRoutes(routes []Route) error {
 	return nil
 }
 
+// safeProxyNodeVersion is the shape node_version may have before it is
+// interpolated into an image tag (node:<v>-alpine). It mirrors
+// node.safeVersionPattern, which cannot be imported here because package node
+// already imports this one.
+var safeProxyNodeVersion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+
+// validateProxyGeneratedValues refuses values that would break out of the line
+// they land in. A managed proxy's Command, NodeVersion and Path are written into
+// a podman quadlet's Exec=, Image= and Volume= directives, and Name/Domains
+// reach a generated nginx vhost, so a newline in any of them could append a
+// directive of its own.
+func (p Proxy) validateProxyGeneratedValues() error {
+	fields := map[string]string{
+		"name": p.Name, "path": p.Path, "cmd": p.Command,
+		"node_version": p.NodeVersion, "upstream_host": p.UpstreamHost,
+		"site": p.Site,
+	}
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if ContainsUnitInjectionChars(fields[name]) {
+			return fmt.Errorf("%s must not contain newline or NUL", name)
+		}
+	}
+	for _, d := range p.Domains {
+		if ContainsUnitInjectionChars(d) {
+			return fmt.Errorf("domain %q must not contain newline or NUL", d)
+		}
+	}
+	for _, r := range p.Routes {
+		if ContainsUnitInjectionChars(r.Path) || ContainsUnitInjectionChars(r.Site) {
+			return fmt.Errorf("route %q must not contain newline or NUL", r.Path)
+		}
+	}
+	if p.NodeVersion != "" && !safeProxyNodeVersion.MatchString(p.NodeVersion) {
+		return fmt.Errorf("invalid node_version %q: use digits, letters, dots, dashes and slashes only", p.NodeVersion)
+	}
+	return nil
+}
+
 // Validate checks structural invariants of a whole proxy (no I/O — site
 // existence is verified at the write path, not here). A simple proxy needs a
 // valid base port and no base Site. A fullstack proxy (Site set or Routes
 // present) needs exactly one base target and valid routes.
 func (p Proxy) Validate() error {
+	if err := p.validateProxyGeneratedValues(); err != nil {
+		return err
+	}
 	if !p.IsFullstack() {
 		if p.Site != "" {
 			return fmt.Errorf("proxy simples não pode ter site na base")
@@ -283,6 +331,7 @@ func SaveProxies(reg *ProxyRegistry) error {
 		return err
 	}
 	path := ProxiesFile()
+	guardRealWrite(path)
 	if err := os.MkdirAll(DataDir(), 0755); err != nil {
 		return err
 	}

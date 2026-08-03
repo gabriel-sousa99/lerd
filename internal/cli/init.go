@@ -1000,9 +1000,34 @@ func buildDatabaseOptions() ([]huh.Option[string], map[string]bool) {
 	nameSet["oracle"] = true
 	options = append(options, huh.NewOption("Oracle (external DB, oci8 baked into image)", "oracle"))
 
+	// Bundled default presets in a database family are databases, not services.
+	// Asking the preset for its family rather than matching names keeps a newly
+	// published engine out of the Services multi-select without a code change;
+	// without this an engine like oracle-xe could be ticked as a service while
+	// the Database select still said sqlite, and both wrote DB_CONNECTION.
+	defaultDBs := make([]string, 0, 2)
+	for _, name := range config.DefaultPresetNames() {
+		if nameSet[name] {
+			continue
+		}
+		meta, err := config.DefaultPresetMeta(name)
+		if err != nil || meta == nil || dbFamilyOf(meta) == "" {
+			continue
+		}
+		defaultDBs = append(defaultDBs, name)
+	}
+	sort.Strings(defaultDBs)
+	for _, name := range defaultDBs {
+		nameSet[name] = true
+		options = append(options, huh.NewOption(formatDBOptionLabel(name), name))
+	}
+
 	if customs, err := config.ListCustomServices(); err == nil {
 		var dbCustoms []*config.CustomService
 		for _, svc := range customs {
+			if nameSet[svc.Name] {
+				continue
+			}
 			if dbFamilyOf(svc) != "" {
 				dbCustoms = append(dbCustoms, svc)
 			}
@@ -1426,7 +1451,7 @@ func applyProjectConfig(cwd string) error {
 	linkSkipSummary = false
 	if ranLink {
 		if site, err := config.FindSiteByPath(cwd); err == nil {
-			printLinkSummary(*site, start)
+			printLinkSummary(*site, start, syncIDEDataSource(site.Path).wrote())
 		}
 	}
 	return nil

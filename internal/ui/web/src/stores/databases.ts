@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { apiFetch, apiJson, apiUrl, decodeJSONResult, decodeJSONText } from '$lib/api';
+import { createLoadStates } from '$lib/loadState';
 import { m } from '../paraglide/messages.js';
 
 export interface Snapshot {
@@ -26,8 +27,16 @@ export interface DatabaseEngine {
   port?: number;
   icon?: string;
   connection_url?: string;
+  // Each capability mirrors an action the engine's preset declares, so they can
+  // diverge (an engine may list and drop without offering dumps).
   supports_create: boolean;
+  supports_drop: boolean;
+  supports_export: boolean;
+  supports_import: boolean;
   supports_snapshot: boolean;
+  // Declared dump format the export/import actions exchange; "sql" for the SQL
+  // engines, empty for engines with their own archive format.
+  dump_format?: string;
   databases: DatabaseEntry[];
   error?: string;
 }
@@ -45,13 +54,19 @@ function upsert(engine: DatabaseEngine): void {
   });
 }
 
+// engineLoads tracks where each engine's fetch stands, so a view can say it is
+// loading rather than reading an engine it has not received yet as a stopped one.
+export const engineLoads = createLoadStates();
+
 // loadEngine fetches a single engine and merges it into the store. Failures keep
 // the last good copy rather than blanking the view.
 export async function loadEngine(service: string): Promise<void> {
+  engineLoads.start(service);
   try {
     upsert(await apiJson<DatabaseEngine>(`/api/databases/${encodeURIComponent(service)}`));
+    engineLoads.settle(service, false);
   } catch {
-    /* keep the last good copy */
+    engineLoads.settle(service, true);
   }
 }
 
@@ -71,6 +86,12 @@ type Result = {
   // Distinct complaints dropped past the cap, so a trimmed list never reads as
   // the whole of what went wrong.
   omitted?: number;
+  // What the daemon held back on the way in, so a load that came out clean
+  // because lerd filtered it says so rather than looking untouched.
+  skipped?: ImportIssue[];
+  // Extensions the load needed and the daemon created, so a database that
+  // gained one is never changed without a word.
+  created?: ImportIssue[];
 };
 
 async function post(service: string, path: string, body: unknown): Promise<Result> {
@@ -129,12 +150,14 @@ export function importDatabase(
   service: string,
   database: string,
   file: File,
-  onProgress?: (p: ImportProgress) => void
+  onProgress?: (p: ImportProgress) => void,
+  fresh = false
 ): Promise<Result> {
   const form = new FormData();
-  // The database field goes first because the daemon walks the parts in order
+  // Every field goes before the file because the daemon walks the parts in order
   // and streams the file straight into the engine without buffering the body.
   form.append('database', database);
+  if (fresh) form.append('fresh', 'true');
   form.append('file', file);
   return new Promise<Result>((resolve) => {
     const finish = async (out: Result) => {

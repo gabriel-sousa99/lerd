@@ -80,7 +80,7 @@ func TestRenderFullstack_SiteBase(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	for _, want := range []string{
-		"root /home/u/blog/public;", // server-level root for site base
+		`root "/home/u/blog/public";`, // server-level root for site base, quoted so a path with a space stays one token
 		"index index.php index.html;",
 		"try_files $uri $uri/ /index.php?$query_string;", // catch-all for site base
 		"location ~ \\.php$ {",                           // base php handler
