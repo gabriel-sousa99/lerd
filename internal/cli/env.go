@@ -1003,19 +1003,17 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// 3a-ter. Oracle is external (no lerd container service). When listed in
 	// .lerd.yaml — either as a `services:` entry from the init wizard or via
 	// the oracle: block written manually — apply the standard Laravel/oci8
-	// env keys. Values are layered: baseline defaults from oracleEnvVarsDefault
-	// (so unset keys are zeroed out), then overrides from `.lerd.yaml` oracle:
-	// block on top. Empty user-supplied fields pass through as-is so the user
-	// can fill them in directly in .env without the wizard clobbering edits.
+	// env keys. Values are layered: the baseline only seeds keys the .env leaves
+	// blank (DB_CONNECTION excepted, since the database choice owns it), then
+	// overrides from the `.lerd.yaml` oracle: block on top. That ordering is what
+	// lets the wizard's "leave blank to fill later" work: a host or password typed
+	// straight into .env survives every later run.
 	// No service to start, no DB to create — the schema lives on a remote
 	// Oracle server (corporate / Autonomous / RDS / Free Tier).
 	proj, _ := config.LoadProjectConfig(cwd)
 	if lerdYAMLServices["oracle"] || (proj != nil && proj.Oracle != nil) {
 		fmt.Printf("  From .lerd.yaml %-4s — applying lerd connection values (external server)\n", "oracle")
-		for _, kv := range serviceEnvVars("oracle") {
-			k, v, _ := strings.Cut(kv, "=")
-			updates[k] = v
-		}
+		seedEnvDefaults(envPath, serviceEnvVars("oracle"), updates)
 		if proj != nil && proj.Oracle != nil {
 			if proj.Oracle.Host != "" {
 				updates["DB_HOST"] = proj.Oracle.Host

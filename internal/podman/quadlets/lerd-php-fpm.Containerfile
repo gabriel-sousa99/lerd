@@ -124,21 +124,26 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
 # This image is x86_64-only by necessity: Oracle publishes no linux.arm64
 # Instant Client for 21.x (only 19.x), and linking oci8 against the x64
 # libclntsh on aarch64 fails with "skipping incompatible libclntsh.so".
+# The arch gate comes first: the archives below are the x64 build, so on aarch64
+# there is nothing worth fetching. The directory is still created because the
+# runtime stage's COPY --from=builder cannot be made conditional; it just arrives
+# empty, and no oci8 is enabled to look for it.
 RUN set -eux; \
     ARCH="$(uname -m)"; \
     PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')"; \
-    apk add --no-cache libaio libnsl gcompat libc6-compat libstdc++ unzip; \
-    mkdir -p /opt/oracle && cd /opt/oracle; \
-    curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/2118000/instantclient-basic-linux.x64-21.18.0.0.0dbru.zip; \
-    curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/2118000/instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip; \
-    unzip -qo instantclient-basic-linux.x64-21.18.0.0.0dbru.zip; \
-    unzip -qo instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip; \
-    rm -f /opt/oracle/*.zip; \
+    mkdir -p /opt/oracle/instantclient_21_18; \
     ln -sfn /opt/oracle/instantclient_21_18 /opt/oracle/instantclient; \
-    pecl channel-update pecl.php.net; \
     if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
-      echo "Skipping OCI8 on ARM64 (no compatible Oracle Instant Client in this image)"; \
+      echo "Skipping Oracle Instant Client and OCI8 on ${ARCH}: Oracle publishes no linux.arm64 build for 21.x"; \
     else \
+      apk add --no-cache libaio libnsl gcompat libc6-compat libstdc++ unzip; \
+      cd /opt/oracle; \
+      curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/2118000/instantclient-basic-linux.x64-21.18.0.0.0dbru.zip; \
+      curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/2118000/instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip; \
+      unzip -qo instantclient-basic-linux.x64-21.18.0.0.0dbru.zip; \
+      unzip -qo instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip; \
+      rm -f /opt/oracle/*.zip; \
+      pecl channel-update pecl.php.net; \
       case "$PHPVER" in \
         5.6)             OCI8_PKG="oci8-2.0.12" ;; \
         7.2|7.3|7.4)     OCI8_PKG="oci8-2.2.0" ;; \
@@ -220,8 +225,11 @@ RUN apk add --no-cache libaio libnsl gcompat libc6-compat libstdc++ \
 # On Alpine 3.8 (PHP 5.6 base) musl doesn't expose libresolv.so.2 separately
 # and Oracle libclntsh.so insists on dlopen'ing it. The shim is harmless on
 # newer Alpine — gcompat already provides resolv.h symbols there, so this
-# symlink is essentially a no-op except on the legacy tier.
-RUN [ -e /lib/libresolv.so.2 ] || ln -sf /lib/libc.musl-x86_64.so.1 /lib/libresolv.so.2
+# symlink is essentially a no-op except on the legacy tier. The musl soname
+# carries the arch, and the target is checked first so a mismatch leaves no
+# dangling link at a path the loader searches.
+RUN MUSL="/lib/libc.musl-$(uname -m).so.1"; \
+    if [ ! -e /lib/libresolv.so.2 ] && [ -e "$MUSL" ]; then ln -sf "$MUSL" /lib/libresolv.so.2; fi
 COPY --from=builder /opt/oracle/instantclient_21_18 /opt/oracle/instantclient_21_18
 RUN ln -sfn /opt/oracle/instantclient_21_18 /opt/oracle/instantclient
 ENV ORACLE_HOME=/opt/oracle/instantclient \

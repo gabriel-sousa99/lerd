@@ -2,8 +2,11 @@ package nginx
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"text/template"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -21,6 +24,13 @@ type ProxyTarget struct {
 	LocationName string // site mode: named location label (e.g. site_retencao_api)
 }
 
+// Root is the document root as the templates render it, quoted so a path with a
+// space stays a single nginx token. Mirrors VhostData.Root, which every site
+// vhost goes through.
+func (t ProxyTarget) Root() string {
+	return nginxQuote(t.DocRoot)
+}
+
 // ProxyRouteSpec binds a path prefix to a resolved target.
 type ProxyRouteSpec struct {
 	Path   string
@@ -33,6 +43,53 @@ type ProxyVhostSpec struct {
 	Secured bool
 	Base    ProxyTarget      // catch-all "/"
 	Routes  []ProxyRouteSpec // path-prefixed routes
+}
+
+// validate refuses any value that could break out of the directive it lands in,
+// the same rule VhostData.validate applies to every site vhost. The doc roots
+// are quoted rather than rejected for whitespace, so only the characters that
+// end a directive or open a block are refused.
+func (s ProxyVhostSpec) validate() error {
+	values := map[string]string{
+		"domain": s.Domain,
+	}
+	addTarget := func(label string, t ProxyTarget) {
+		values[label+" doc root"] = t.DocRoot
+		values[label+" upstream host"] = t.UpstreamHost
+		values[label+" site name"] = t.SiteName
+		values[label+" location name"] = t.LocationName
+		values[label+" php version"] = t.PHPShort
+	}
+	addTarget("base", s.Base)
+	for i, r := range s.Routes {
+		label := fmt.Sprintf("route %d", i+1)
+		values[label+" path"] = r.Path
+		addTarget(label, r.Target)
+	}
+
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		v := values[name]
+		if i := strings.IndexAny(v, nginxValueForbidden); i >= 0 {
+			return fmt.Errorf("nginx %s %q contains %q, which would end the directive it lands in", name, v, string(v[i]))
+		}
+	}
+	// A quote in a doc root would close the quoted token Root emits.
+	for name, v := range map[string]string{"base doc root": s.Base.DocRoot} {
+		if strings.Contains(v, `"`) {
+			return fmt.Errorf("nginx %s %q contains a quote, which would close the quoted token", name, v)
+		}
+	}
+	for i, r := range s.Routes {
+		if strings.Contains(r.Target.DocRoot, `"`) {
+			return fmt.Errorf("nginx route %d doc root %q contains a quote, which would close the quoted token", i+1, r.Target.DocRoot)
+		}
+	}
+	return nil
 }
 
 // siteLocations dedups the named locations needed for site targets so the
@@ -57,6 +114,9 @@ func (s ProxyVhostSpec) siteLocations() []ProxyTarget {
 // writes conf.d/<domain>.conf (HTTP) or <domain>-ssl.conf (HTTPS),
 // removing the stale counterpart like GenerateProxyVhost does.
 func GenerateFullstackProxyVhost(spec ProxyVhostSpec) error {
+	if err := spec.validate(); err != nil {
+		return err
+	}
 	tmplName := "vhost-proxy-fullstack.conf.tmpl"
 	confName := spec.Domain + ".conf"
 	stale := spec.Domain + "-ssl.conf"
@@ -83,7 +143,9 @@ func GenerateFullstackProxyVhost(spec ProxyVhostSpec) error {
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(config.NginxConfD(), confName), buf.Bytes(), 0644); err != nil {
+	confPath := filepath.Join(config.NginxConfD(), confName)
+	config.GuardRealWrite(confPath)
+	if err := os.WriteFile(confPath, buf.Bytes(), 0644); err != nil {
 		return err
 	}
 	_ = os.Remove(filepath.Join(config.NginxConfD(), stale))

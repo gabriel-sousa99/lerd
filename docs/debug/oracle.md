@@ -105,6 +105,14 @@ lerd env                                              # reescreve DB_CHARSET e N
 lerd restart
 ```
 
+> **Credenciais escritas à mão sobrevivem ao `lerd env`.** O wizard deixa
+> host/usuário/senha em branco de propósito ("preencha depois"), então o baseline
+> do Oracle só semeia as chaves que o `.env` deixa vazias: um `DB_HOST`,
+> `DB_USERNAME` ou `DB_PASSWORD` que você digitou direto no `.env` não é zerado
+> nas execuções seguintes. O bloco `oracle:` do `.lerd.yaml`, quando preenchido,
+> continua tendo precedência, e `DB_CONNECTION` é sempre reafirmado porque é a
+> escolha de banco em si.
+
 ### 🔴 `ORA-21561` ao usar `oci_pconnect` com persistência
 
 ⚠️ Bug conhecido do Instant Client 21.x quando combina connection pooling com SELinux ativo. Não acontece no fork porque os quadlets já têm `--security-opt=label=disable`. Se persistir:

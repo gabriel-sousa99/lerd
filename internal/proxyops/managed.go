@@ -57,6 +57,12 @@ func WriteManagedQuadlet(p config.Proxy) error {
 	if !p.Managed {
 		return fmt.Errorf("proxy %s não está em managed mode", p.Name)
 	}
+	// Second line of defence, mirroring how a custom service is validated on
+	// save and again here: proxies.yaml is loaded without validation, so a
+	// hand-edited value must not reach the rendered unit.
+	if err := p.Validate(); err != nil {
+		return fmt.Errorf("proxy %s inválido: %w", p.Name, err)
+	}
 	content := generateManagedQuadlet(p)
 	if err := podman.WriteQuadlet(ManagedUnitName(p.Name), content); err != nil {
 		return err

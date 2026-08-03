@@ -40,6 +40,19 @@ var loopbackOnlyRoutePrefixes = []string{
 	// Replaces executables on the host's PATH, so it stays with the terminal
 	// and link routes rather than behind Basic auth alone.
 	"/api/tools",
+	// A managed proxy runs a container that bind-mounts an arbitrary host path
+	// and executes an arbitrary command, which is strictly more than the
+	// arbitrary-path linking /api/sites/link is already gated for.
+	"/api/proxies",
+	// Runs doctor and dns:check and returns journalctl output for lerd's units.
+	"/api/debug",
+}
+
+// loopbackOnlyServiceSubactions are the per-service actions (under
+// /api/services/{name}/) restricted to loopback, following the same rule as the
+// site subactions: gating "/env" also gates every nested route under it.
+var loopbackOnlyServiceSubactions = []string{
+	"/env", // container Environment= block (ORACLE_PASSWORD, POSTGRES_PASSWORD, …)
 }
 
 // loopbackOnlySiteSubactions are the per-site actions (under
@@ -52,6 +65,7 @@ var loopbackOnlySiteSubactions = []string{
 	"/terminal", // opens an interactive shell on the host
 	"/env",      // raw .env content + backups + restore (APP_KEY, DB creds, tokens)
 	"/tinker",   // evaluates arbitrary PHP in the site's container (full env: DB creds, secrets) — host RCE, same risk class as /terminal
+	"/editor",   // spawns a GUI editor process on the host, same class as /terminal
 }
 
 // fromHost reports whether r's source IP belongs to one of the host's
@@ -113,16 +127,26 @@ func isLoopbackOnlyPath(path string) bool {
 			return true
 		}
 	}
-	if !strings.HasPrefix(path, "/api/sites/") {
+	if matchesSubaction(path, "/api/sites/", loopbackOnlySiteSubactions) {
+		return true
+	}
+	return matchesSubaction(path, "/api/services/", loopbackOnlyServiceSubactions)
+}
+
+// matchesSubaction reports whether path is prefix + "<name>" followed by one of
+// actions, or anything nested under it, so a new subresource cannot escape the
+// gate by failing to be listed.
+func matchesSubaction(path, prefix string, actions []string) bool {
+	if !strings.HasPrefix(path, prefix) {
 		return false
 	}
-	rest := strings.TrimPrefix(path, "/api/sites/")
+	rest := strings.TrimPrefix(path, prefix)
 	slash := strings.Index(rest, "/")
 	if slash < 0 {
 		return false
 	}
 	after := rest[slash:]
-	for _, action := range loopbackOnlySiteSubactions {
+	for _, action := range actions {
 		if after == action || strings.HasPrefix(after, action+"/") {
 			return true
 		}

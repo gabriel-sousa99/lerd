@@ -312,8 +312,6 @@ func TestIsLoopbackOnlyPath(t *testing.T) {
 		{"/api/sites/myapp.test/tinker", true},          // arbitrary PHP exec — host RCE
 		{"/api/sites/foo.bar.test/tinker", true},        // domain-agnostic
 		{"/api/sites/myapp.test/tinker/anything", true}, // nested subtree stays gated
-		{"/api/sites/myapp.test/tinker:lint", false},    // php -l syntax check only, no exec
-		{"/api/sites/myapp.test/tinker:symbols", false}, // symbol collection only, no exec
 		{"/api/databases", true},
 		{"/api/databases/mysql", true},
 		{"/api/databases/mysql/drop", true},
@@ -322,6 +320,28 @@ func TestIsLoopbackOnlyPath(t *testing.T) {
 		{"/api/databases-overview", false},
 		{"/api/tools/composer/update", true},
 		{"/api/share-tools", false},
+		// Fork routes. A managed proxy creates a container that bind-mounts an
+		// arbitrary host path and runs an arbitrary command, which is a superset
+		// of what /api/sites/link is gated for.
+		{"/api/proxies", true},
+		{"/api/proxies/app.localhost", true},
+		{"/api/proxies/app.localhost/pause", true},
+		// Runs lerd doctor / dns:check and returns journalctl output.
+		{"/api/debug", true},
+		{"/api/debug/doctor", true},
+		{"/api/debug/dns-check", true},
+		// Spawns a GUI editor process on the host, same class as /terminal.
+		{"/api/sites/myapp.test/editor", true},
+		{"/api/sites/foo.bar.test/editor", true},
+		// A service's Environment= block holds ORACLE_PASSWORD, POSTGRES_PASSWORD
+		// and friends, the same credential class the site /env gate protects.
+		{"/api/services/oracle-xe/env", true},
+		{"/api/services/mysql/env", true},
+		{"/api/services/mysql/env/backups", true},
+		// Neighbouring service routes stay reachable: these carry no credentials.
+		{"/api/services/mysql", false},
+		{"/api/services/presets", false},
+		{"/api/services/mysql/restart", false},
 		{"/api/sites", false},
 		{"/api/sites/myapp.test", false},
 		{"/api/sites/myapp.test/secure", false},

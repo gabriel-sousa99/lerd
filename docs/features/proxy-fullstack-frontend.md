@@ -85,3 +85,17 @@ Verifique também que `SESSION_SECURE_COOKIE` é coerente com o `secured` do pro
 `lerd proxy rm` ou `lerd proxy edit --path ""` zera as chaves de API-base da SPA
 (grava `URL_API=`). O lerd não conhece a URL de dev original; reconfigure
 manualmente (ex.: `URL_API=http://localhost:8000`) para rodar a SPA fora do proxy.
+
+## Acesso pela LAN
+
+O subtree `/api/proxies` do dashboard é **loopback-only**: mesmo com
+`lan:expose` e `remote-control on` e credenciais válidas, um cliente da LAN
+recebe 403. Um proxy em managed mode cria um container que monta um diretório
+qualquer do host e roda um comando qualquer nele, ou seja, mais do que o
+`/api/sites/link` que já era restrito por esse motivo. Criar e editar proxies
+segue funcionando normalmente pela máquina local e pela CLI.
+
+Os valores que chegam ao quadlet e ao vhost (`cmd`, `node_version`, `path`,
+`name`, domínios) são validados na gravação **e** de novo na hora de gerar o
+unit, porque o `proxies.yaml` é lido sem validação e uma edição manual não pode
+injetar diretiva no unit gerado.

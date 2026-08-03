@@ -3,12 +3,12 @@ server {
     listen [::]:80;
     server_name {{.Domain}};
 {{if .Base.IsSite}}
-    root {{.Base.DocRoot}};
+    root {{.Base.Root}};
     index index.php index.html;
 {{end}}
 {{range .Routes}}
     location ^~ {{.Path}} {
-{{if .Target.IsSite}}        root {{.Target.DocRoot}};
+{{if .Target.IsSite}}        root {{.Target.Root}};
         try_files $uri @{{.Target.LocationName}};
 {{else}}        proxy_pass http://{{.Target.UpstreamHost}}:{{.Target.UpstreamPort}};
         proxy_http_version 1.1;
@@ -25,7 +25,7 @@ server {
 {{end}}
 {{range siteLocations}}
     location @{{.LocationName}} {
-        root {{.DocRoot}};
+        root {{.Root}};
         set $fpm "lerd-php{{.PHPShort}}-fpm";
         fastcgi_pass $fpm:9000;
         fastcgi_index index.php;

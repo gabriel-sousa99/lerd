@@ -75,11 +75,15 @@ func ReleaseAPIBaseURLs() []string {
 // ToolsManifestURLs lists raw URLs of the pinned host-tool manifest
 // (internal/tools/tools.yaml); the embedded copy is the fallback when none
 // answer.
+//
+// Oracle fork: read from the fork's default branch, for the same reason
+// ChangelogURLs does. main tracks upstream, so a manifest fetched from there
+// serves upstream's pins rather than this fork's.
 func ToolsManifestURLs() []string {
 	if list := splitList(os.Getenv("LERD_TOOLS_URL")); len(list) > 0 {
 		return list
 	}
-	return []string{"https://raw.githubusercontent.com/" + mainRepo + "/main/internal/tools/tools.yaml"}
+	return []string{"https://raw.githubusercontent.com/" + mainRepo + "/" + defaultBranch + "/internal/tools/tools.yaml"}
 }
 
 // ExtraToolHosts lists additional hosts a published tool manifest may point at,

@@ -12,6 +12,7 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -46,6 +47,33 @@ var oracleEnvVarsDefault = []string{
 	"DB_DATABASE=XEPDB1",
 	"DB_USERNAME=",
 	"DB_PASSWORD=",
+}
+
+// envKeysOwnedByChoice are the keys the database selection itself decides, so
+// they are re-asserted on every run. Everything else in a baseline only fills a
+// blank.
+var envKeysOwnedByChoice = map[string]bool{"DB_CONNECTION": true}
+
+// seedEnvDefaults stages defaults into updates without overwriting what the user
+// already wrote. The baseline seeds the key shape for an external server whose
+// real values live in .lerd.yaml or are typed straight into .env, so a key that
+// already holds a value is left alone and only the selection-owned keys are
+// re-asserted. Without this a blank left in the wizard came back as an empty
+// DB_HOST/DB_USERNAME/DB_PASSWORD on the next `lerd env`, wiping credentials the
+// user had filled in by hand.
+func seedEnvDefaults(envPath string, defaults []string, updates map[string]string) {
+	existing := envfile.ReadValues(envPath)
+	for _, kv := range defaults {
+		k, v, _ := strings.Cut(kv, "=")
+		if envKeysOwnedByChoice[k] {
+			updates[k] = v
+			continue
+		}
+		if strings.TrimSpace(existing[k]) != "" {
+			continue
+		}
+		updates[k] = v
+	}
 }
 
 // serviceEnvVars returns the recommended Laravel .env KEY=VALUE pairs for a

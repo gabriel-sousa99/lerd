@@ -59,6 +59,26 @@ func TestChangelogURLNamesForkBranchAndRealFile(t *testing.T) {
 	}
 }
 
+// The tools manifest lives in the fork's own tree, so it has to be fetched from
+// the branch that carries the fork's work. main tracks upstream, so a manifest
+// read from there is upstream's pins, not this fork's.
+func TestToolsManifestURLNamesForkBranch(t *testing.T) {
+	got := ToolsManifestURLs()
+	if len(got) == 0 {
+		t.Fatal("empty tools manifest list")
+	}
+	u := got[0]
+	if !strings.Contains(u, "/oracle-oci8-support/") {
+		t.Errorf("tools manifest URL %q does not name the fork's default branch", u)
+	}
+	if strings.Contains(u, "/main/") {
+		t.Errorf("tools manifest URL %q points at main, which tracks upstream", u)
+	}
+	if !strings.HasSuffix(u, "/internal/tools/tools.yaml") {
+		t.Errorf("tools manifest URL %q must fetch internal/tools/tools.yaml", u)
+	}
+}
+
 func TestBaseImageRefFormat(t *testing.T) {
 	refs := BaseImageRefs("84", "abc")
 	if len(refs) != 1 || refs[0] != "ghcr.io/gabriel-sousa99/lerd-php84-fpm-base:abc" {
