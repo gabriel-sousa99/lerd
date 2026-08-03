@@ -72,6 +72,7 @@ Esta fork adiciona, por cima de tudo isso:
 | ---------------------------------- | ---------------------------- | ------------------------------------------------------------------- |
 | Driver Oracle (`oci8`)             | instalar manual              | **compilado em toda imagem** (`oci8` 2.0.12 → 3.4.1 por versão PHP) |
 | Oracle Instant Client              | n/a                          | **21.18 LTS** em `/opt/oracle/instantclient`                        |
+| `tnsnames.ora` / wallet Autonomous | n/a                          | **`$TNS_ADMIN` montado read-only** de `~/.config/lerd/oracle/network/admin` |
 | `memcached` / `amqp`               | precisa `lerd php:ext`       | **pré-instaladas**                                                  |
 | `openssh-client` no container      | ausente (composer ssh falha) | **instalado** + `$HOME/.ssh` montado em `/root/.ssh`                |
 | Suporte PHP                        | 7.4 → 8.5                    | **5.6 → 8.5** (5.6 legacy com libresolv shim)                       |
@@ -258,6 +259,49 @@ oracle:
   password: ${ORACLE_PASSWORD}   # use placeholder e set no shell
   charset: AL32UTF8              # ou WE8MSWIN1252, WE8ISO8859P15
 ```
+
+### `tnsnames.ora` e wallet (Autonomous Database)
+
+Banco corporativo raramente é endereçado por `host:port/service`: é endereçado
+por **alias** do `tnsnames.ora`, e o Autonomous Database exige um **wallet**
+baixado do console. O Instant Client procura os dois em `$TNS_ADMIN`, que nas
+imagens do fork é `/opt/oracle/network/admin`, montado **read-only** a partir de:
+
+```
+~/.config/lerd/oracle/network/admin/
+```
+
+O diretório é criado no primeiro `lerd start` com modo `0700` (é credencial).
+Largue os arquivos lá e reinicie o PHP:
+
+```bash
+# alias: copie o tnsnames.ora corporativo
+cp /caminho/tnsnames.ora ~/.config/lerd/oracle/network/admin/
+
+# Autonomous: descompacte o wallet inteiro (cwallet.sso, sqlnet.ora, tnsnames.ora…)
+unzip Wallet_MEUDB.zip -d ~/.config/lerd/oracle/network/admin/
+
+lerd restart
+```
+
+Depois use o **alias** onde iria o host, sem porta nem service name:
+
+```yaml
+oracle:
+  host: MEUDB_high        # alias do tnsnames.ora / wallet
+  username: app_user
+  password: ${ORACLE_PASSWORD}
+```
+
+Conferir de dentro do container:
+
+```bash
+lerd php -r 'echo getenv("TNS_ADMIN"), PHP_EOL;'   # /opt/oracle/network/admin
+lerd php -r 'var_dump(oci_connect("app_user", getenv("DB_PASSWORD"), "MEUDB_high") !== false);'
+```
+
+Nada disso entra na imagem nem no repositório: o wallet fica só no host, montado
+somente-leitura, então um container não consegue reescrevê-lo.
 
 ---
 

@@ -35,6 +35,10 @@ Volume={{.ZshHistoryDir}}:/root/.zsh_state:rw
 # known_hosts + id_* keys for clone/fetch over ssh. read-only so a runaway
 # composer plugin can't rewrite authorized_keys on the host. Fork addition.
 Volume={{.HostSSHDir}}:/root/.ssh:ro
+# Oracle TNS_ADMIN: tnsnames.ora, sqlnet.ora and an Autonomous wallet live on the
+# host and are mounted read-only, so an alias or a wallet never enters an image or
+# a repository. Empty until the user drops files in. Fork addition.
+Volume={{.OracleTNSAdminDir}}:/opt/oracle/network/admin:ro
 # Persistent home for an optional in-container musl bun (lerd php:bun install).
 # bun installs and self-updates here; survives image rebuilds and is shared
 # across PHP versions. Empty until the user opts in.

@@ -30,7 +30,7 @@ Toda imagem PHP do fork tem:
 | Código        | Significado                                       | Causa frequente                                     |
 |---------------|---------------------------------------------------|-----------------------------------------------------|
 | `ORA-12541`   | TNS:no listener                                   | Servidor inalcançável ou listener offline           |
-| `ORA-12154`   | Could not resolve the connect identifier          | Service name errado no `DB_DATABASE`                |
+| `ORA-12154`   | Could not resolve the connect identifier          | Service name errado no `DB_DATABASE`, ou alias que não está no `tnsnames.ora` montado |
 | `ORA-12545`   | Connect failed: target host or object does not exist | Host inválido ou firewall                       |
 | `ORA-12170`   | TNS:Connect timeout occurred                      | Latência alta / firewall com drop                   |
 | `ORA-01017`   | invalid username/password; logon denied           | Credenciais erradas                                 |
@@ -86,6 +86,35 @@ until podman logs <oracle-container> 2>&1 | grep -q 'DATABASE IS READY'; do slee
 lerd php artisan migrate                              # usa rede lerd interna
 podman run --rm --network=host lerd-php85-fpm:local <cmd>   # usa rede host (acessa 127.0.0.1:1521)
 ```
+
+### 🔴 `ORA-12154` usando alias do `tnsnames.ora` ou wallet do Autonomous
+
+🔍 Diagnóstico: o Instant Client só lê `tnsnames.ora`, `sqlnet.ora` e wallet de
+`$TNS_ADMIN`. Confirme que a variável está apontando e que os arquivos chegaram
+no container:
+
+```bash
+lerd php -r 'echo getenv("TNS_ADMIN"), PHP_EOL;'                       # /opt/oracle/network/admin
+lerd php -r 'print_r(scandir(getenv("TNS_ADMIN")));'                    # tnsnames.ora, sqlnet.ora, cwallet.sso…
+```
+
+🟢 Conserto: os arquivos vão no host, não na imagem. O diretório é montado
+read-only a partir de `~/.config/lerd/oracle/network/admin/`:
+
+```bash
+cp /caminho/tnsnames.ora ~/.config/lerd/oracle/network/admin/
+# Autonomous: descompacte o wallet inteiro no mesmo diretório
+unzip Wallet_MEUDB.zip -d ~/.config/lerd/oracle/network/admin/
+lerd restart
+```
+
+Depois use o alias no lugar do host, sem porta nem service name
+(`host: MEUDB_high` no bloco `oracle:` do `.lerd.yaml`).
+
+💡 O `sqlnet.ora` que vem no wallet costuma trazer `DIRECTORY="?/network/admin"`,
+onde `?` expande para `$ORACLE_HOME` (o diretório do Instant Client, não o do
+wallet). A imagem já linka `$ORACLE_HOME/network/admin` no `TNS_ADMIN`, então o
+wallet funciona como baixado, sem editar essa linha.
 
 ### 🔴 Acentuação portuguesa virou `?` ou caracteres trocados
 

@@ -998,6 +998,7 @@ func renderFPMQuadletContent(version string) (string, error) {
 	content = strings.ReplaceAll(content, "{{.SpxDataDir}}", config.SpxDataDir())
 	content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
 	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
+	content = strings.ReplaceAll(content, "{{.OracleTNSAdminDir}}", hostOracleTNSAdminDir())
 	content = applyShellMounts(content, short)
 	content = InjectExtraVolumes(content, ExtraVolumePaths())
 	return content, nil
@@ -1065,6 +1066,30 @@ func RewriteFPMQuadlets() error {
 		}
 	}
 	return nil
+}
+
+// oracleTNSAdminContainerPath is where Instant Client looks for tnsnames.ora,
+// sqlnet.ora and a wallet inside the container. The image exports it as
+// TNS_ADMIN; the host directory below is mounted over it.
+const oracleTNSAdminContainerPath = "/opt/oracle/network/admin"
+
+// hostOracleTNSAdminDir returns the host directory mounted read-only at
+// TNS_ADMIN, creating it so the bind mount succeeds on first start. Enterprise
+// Oracle is reached through a tnsnames.ora alias rather than host:port/service,
+// and Autonomous Database through a wallet (cwallet.sso + sqlnet.ora); dropping
+// either into this directory is the whole setup step, and neither ever enters an
+// image or a repository. Mode 0700 because a wallet is a credential set. Falls
+// back to /dev/null when the directory cannot be created, so the mount line
+// stays syntactically valid the way hostSSHDir does.
+func hostOracleTNSAdminDir() string {
+	dir := filepath.Join(config.ConfigDir(), "oracle", "network", "admin")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "/dev/null"
+	}
+	// An existing directory from an earlier run keeps whatever mode it had, so
+	// tighten it: this holds credentials.
+	_ = os.Chmod(dir, 0o700)
+	return dir
 }
 
 // zshHistoryDir returns the per-PHP-version host directory that backs the

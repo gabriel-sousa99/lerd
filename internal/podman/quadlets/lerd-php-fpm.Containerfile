@@ -232,8 +232,21 @@ RUN MUSL="/lib/libc.musl-$(uname -m).so.1"; \
     if [ ! -e /lib/libresolv.so.2 ] && [ -e "$MUSL" ]; then ln -sf "$MUSL" /lib/libresolv.so.2; fi
 COPY --from=builder /opt/oracle/instantclient_21_18 /opt/oracle/instantclient_21_18
 RUN ln -sfn /opt/oracle/instantclient_21_18 /opt/oracle/instantclient
+# TNS_ADMIN is the directory Instant Client reads tnsnames.ora, sqlnet.ora and an
+# Autonomous wallet from, which is how an enterprise database is addressed: by
+# alias rather than by host:port/service. The quadlet mounts the host's copy over
+# this path read-only, so the directory exists here and is empty in the image.
+#
+# The symlink is for an unedited wallet: a downloaded Autonomous wallet's
+# sqlnet.ora says DIRECTORY="?/network/admin", and Oracle expands "?" to
+# $ORACLE_HOME, which here is the Instant Client dir. Pointing that path back at
+# TNS_ADMIN means the wallet works as downloaded instead of requiring every user
+# to find and rewrite that line.
+RUN mkdir -p /opt/oracle/network/admin /opt/oracle/instantclient/network \
+    && ln -sfn /opt/oracle/network/admin /opt/oracle/instantclient/network/admin
 ENV ORACLE_HOME=/opt/oracle/instantclient \
-    LD_LIBRARY_PATH=/opt/oracle/instantclient
+    LD_LIBRARY_PATH=/opt/oracle/instantclient \
+    TNS_ADMIN=/opt/oracle/network/admin
 
 # Runtime system libs for user-configured custom extensions (e.g.
 # imap needs c-client.so). Empty when no custom exts have apk deps.
