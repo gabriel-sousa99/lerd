@@ -487,6 +487,7 @@ onBeforeUnmount(() => {
           <div class="card cmp-wrap reveal d1" style="padding:8px 8px 0">
             <table class="cmp" id="cmp-table"></table>
           </div>
+          <p class="cmp-note reveal d2">Coming from Windows? Herd has no Linux build and Laragon is Windows-only. Lerd gives you both workflows natively, see <a :href="withBase('/getting-started/laragon-linux')">Laragon for Linux</a> and the <a :href="withBase('/getting-started/comparison')">full comparison</a>.</p>
         </div>
       </section>
 
@@ -524,11 +525,11 @@ onBeforeUnmount(() => {
 
       <!-- ============ DEV DIGEST BANNER ============ -->
       <div class="wrap">
-        <a class="digest" :href="withBase('/digest/v1.30.0.html')" target="_blank" rel="noopener">
+        <a class="digest" :href="withBase('/digest/v1.31.0.html')" target="_blank" rel="noopener">
           <span class="digest-pill">NEW</span>
           <span class="digest-body">
-            <span class="digest-title">v1.30.0 dev digest</span>
-            <span class="digest-sub">One declared extension set applied to every PHP image, an engine's databases managed from the dashboard with snapshots and imports, and a doctor that repairs what it safely can.</span>
+            <span class="digest-title">v1.31.0 dev digest</span>
+            <span class="digest-sub">A Cloudflare base domain set once so every share keeps its URL, ngrok from its published image with nothing installed, and a dev server served on the site's own domain.</span>
           </span>
           <span class="digest-cta">Read the digest&nbsp;→</span>
         </a>
@@ -557,7 +558,7 @@ onBeforeUnmount(() => {
             <a href="#features">Features</a>
             <a href="#dashboard">Web UI</a>
             <a href="#mcp">MCP server</a>
-            <a href="#compare">vs Herd / DDEV</a>
+            <a href="#compare">vs Herd / Laragon / DDEV</a>
           </div>
           <div>
             <h5>Resources</h5>
@@ -565,6 +566,7 @@ onBeforeUnmount(() => {
             <a :href="withBase('/getting-started/requirements')">Documentation</a>
             <a :href="withBase('/usage/sites')">Site management</a>
             <a :href="withBase('/getting-started/laravel')">Laravel walkthrough</a>
+            <a :href="withBase('/getting-started/laragon-linux')">Laragon for Linux</a>
           </div>
           <div>
             <h5>Community</h5>

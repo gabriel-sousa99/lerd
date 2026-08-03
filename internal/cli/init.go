@@ -1426,7 +1426,7 @@ func applyProjectConfig(cwd string) error {
 	linkSkipSummary = false
 	if ranLink {
 		if site, err := config.FindSiteByPath(cwd); err == nil {
-			printLinkSummary(*site, start)
+			printLinkSummary(*site, start, syncIDEDataSource(site.Path).wrote())
 		}
 	}
 	return nil

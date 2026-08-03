@@ -43,6 +43,11 @@ type Site struct {
 	// header rewritten. LAN devices can reach the site at <lanIP>:LANPort
 	// without any DNS configuration.
 	LANPort int `yaml:"lan_port,omitempty"`
+	// DevServerPort, when non-zero, is the host port the site's dev server is
+	// pinned to. It has to be stable and known ahead of time, because the
+	// site's vhost proxies to it and the tool would otherwise drift to the
+	// next free port whenever several sites run at once.
+	DevServerPort int `yaml:"dev_server_port,omitempty"`
 	// ContainerPort, when non-zero, means this site uses a per-project custom
 	// container instead of the shared PHP-FPM image. The value is the port the
 	// app listens on inside the container; nginx reverse-proxies to it.
@@ -88,6 +93,11 @@ type Site struct {
 	// and a manual pause never clobber each other's restore list. Idle-suspend
 	// itself is configured globally (config.yaml idle_suspend), not per site.
 	IdleSuspendedWorkers []string `yaml:"idle_suspended_workers,omitempty"`
+
+	// WorktreeDevPorts pins each worktree's dev server to its own host
+	// port, keyed by the worktree's directory base like the idle map. A
+	// worktree runs its own dev server, so it cannot share the parent's pin.
+	WorktreeDevPorts map[string]int `yaml:"worktree_dev_server_ports,omitempty"`
 
 	// WorktreeIdleSuspended records, per git worktree (keyed by the worktree's
 	// unit-slug base), the workers the idle engine stopped while that worktree was
@@ -201,6 +211,8 @@ type siteYAML struct {
 	PublicDir             string              `yaml:"public_dir,omitempty"`
 	AppURL                string              `yaml:"app_url,omitempty"`
 	LANPort               int                 `yaml:"lan_port,omitempty"`
+	DevServerPort         int                 `yaml:"dev_server_port,omitempty"`
+	WorktreeDevPorts      map[string]int      `yaml:"worktree_dev_server_ports,omitempty"`
 	ContainerPort         int                 `yaml:"container_port,omitempty"`
 	ContainerSSL          bool                `yaml:"container_ssl,omitempty"`
 	Runtime               string              `yaml:"runtime,omitempty"`
@@ -233,6 +245,8 @@ func (s Site) toYAML() siteYAML {
 		PublicDir:             s.PublicDir,
 		AppURL:                s.AppURL,
 		LANPort:               s.LANPort,
+		DevServerPort:         s.DevServerPort,
+		WorktreeDevPorts:      s.WorktreeDevPorts,
 		ContainerPort:         s.ContainerPort,
 		ContainerSSL:          s.ContainerSSL,
 		Runtime:               s.Runtime,
@@ -270,6 +284,8 @@ func (sy siteYAML) toSite() Site {
 		PublicDir:             sy.PublicDir,
 		AppURL:                sy.AppURL,
 		LANPort:               sy.LANPort,
+		DevServerPort:         sy.DevServerPort,
+		WorktreeDevPorts:      sy.WorktreeDevPorts,
 		ContainerPort:         sy.ContainerPort,
 		ContainerSSL:          sy.ContainerSSL,
 		Runtime:               sy.Runtime,
@@ -445,6 +461,13 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
+// domainForbidden are the characters a domain may never carry. The nginx set
+// (a directive ends at `;`, blocks open and close on braces, `#` comments the
+// rest of the line) plus whitespace and the separators that would make one
+// domain read as several, or as a path when it names a vhost file, plus the
+// quotes that would close a string literal in any file a domain is written into.
+const domainForbidden = "{};#\n\r\x00 \t/\\'\""
+
 // AddSite appends or updates a site in the registry.
 func AddSite(site Site) error {
 	// A site name flows into systemd unit file names and bodies (Description=,
@@ -453,6 +476,15 @@ func AddSite(site Site) error {
 	// path), closing the injection even for callers that bypass SiteNameAndDomain.
 	if ContainsUnitInjectionChars(site.Name) || strings.ContainsRune(site.Name, '/') {
 		return fmt.Errorf("invalid site name %q: must not contain newline, NUL, or slash", site.Name)
+	}
+	// A domain is written into the vhost's server_name, and a project's
+	// .lerd.yaml supplies the list. The vhost generator refuses these too; this
+	// is the registry side, so a bad domain is rejected when the site is linked
+	// rather than when nginx is next rendered.
+	for _, d := range site.Domains {
+		if i := strings.IndexAny(d, domainForbidden); i >= 0 {
+			return fmt.Errorf("invalid domain %q: must not contain %q", d, string(d[i]))
+		}
 	}
 	// Store the resolved path so two spellings of one directory (on ostree hosts
 	// /home is a symlink to /var/home, and os.Getwd can return either) register

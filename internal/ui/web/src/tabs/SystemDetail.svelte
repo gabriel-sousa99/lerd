@@ -11,6 +11,7 @@
   import DebugDetail from './system/DebugDetail.svelte';
   import NodePage from './system/NodePage.svelte';
   import LerdDetail from './system/LerdDetail.svelte';
+  import ToolsDetail from './system/ToolsDetail.svelte';
   import WorkerModeDetail from './system/WorkerModeDetail.svelte';
 
   const selected = $derived($routeRest || 'lerd');
@@ -39,6 +40,8 @@
   <NodePage />
 {:else if selected === 'workermode'}
   <WorkerModeDetail />
+{:else if selected === 'tools'}
+  <ToolsDetail />
 {:else}
   <LerdDetail />
 {/if}

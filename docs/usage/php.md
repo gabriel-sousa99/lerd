@@ -33,6 +33,8 @@
 
 If no version is given, the version is resolved from the current directory (`.php-version` or `composer.json`, falling back to the global default).
 
+Versions are written as `major.minor`, but common spellings are accepted everywhere a version is typed: `php8.4`, `84` and `8.4.7` all normalize to `8.4`. Anything that does not resolve to a supported version is rejected up front, so a typo can never end up as the stored default and break image names.
+
 Inside a linked site, the commands that run PHP in a container (`lerd php`, `lerd composer`, `lerd console`, `lerd php:shell`) use the version the site is registered on, which is the version its FPM container serves. That matters when a framework clamps the version at link time: a Laravel 13 project pinning `.php-version` to 8.1 is linked on 8.5, because Laravel 13 supports 8.3 to 8.5, and composer then runs on 8.5 too rather than resolving 8.1 from the file and quietly using a different PHP than the site itself.
 
 A git worktree resolves ahead of the site it belongs to. A worktree inherits its parent site's version until you pin one with `lerd isolate` from inside the checkout, and from then on the whole toolchain follows that pin: the worktree's own vhost, `lerd php`, `lerd composer`, and everything else that runs PHP in a container. This holds wherever the checkout lives, including inside the parent site's own directory, so a worktree on 8.3 under a site on 8.5 runs composer on 8.3 rather than picking up the parent's version.
@@ -138,6 +140,8 @@ Lerd automatically manages which PHP-FPM containers are running based on which v
 
 **Auto-start**: FPM is started automatically when you link a site (`lerd link`, `lerd park`, `lerd isolate`) or change the global default (`lerd use`). When unpausing a site, lerd also ensures the required FPM container is running before restoring the nginx vhost.
 
+**Build on first use**: when a link lands on a PHP version this machine has never built (an older framework clamps to a version below the ones you have, say), `lerd link` builds that version's image before starting it, so the site serves rather than answering 502. The build streams its progress as a link step. If the build cannot run (an unattended `lerd park` sweep withholds builds) or fails, the site is still registered and lerd names the one command that finishes the job, `lerd php:rebuild <version>`.
+
 **Manual control**: unused PHP versions (no active sites) can be started and stopped manually from the dashboard (System > PHP > Start / Stop). From the CLI:
 
 ```bash
@@ -188,7 +192,7 @@ lerd xdebug pause --list          # list running PHP processes that expose a con
 lerd xdebug pause --pid 1234      # break the IDE into that process
 ```
 
-`pause` uses Xdebug's [control socket](https://xdebug.org/docs/xdebugctl) (Xdebug >= 3.3, baked into lerd's FPM images) via the `xdebugctl` tool. It is the practical way to debug a **queue/Horizon worker, a scheduled task, or a CLI script** — processes where you can't set a trigger cookie. Run it from a project directory (or pass a site name); lerd resolves the site's container, scopes the candidate list to that site's own processes, and tells the running process to connect to your IDE on port `9003`. The worker must have been started *after* Xdebug was enabled, and your IDE must be listening. Because `xdebugctl` ships only in the shared FPM image, `pause` is PHP-FPM only; FrankenPHP and custom-container sites run their own image without it (the regular `lerd xdebug on` toggle still works on them).
+`pause` uses Xdebug's [control socket](https://xdebug.org/docs/xdebugctl) (Xdebug >= 3.3, baked into lerd's FPM images) via the `xdebugctl` tool. It is the practical way to debug a **queue/Horizon worker, a scheduled task, or a CLI script**: processes where you can't set a trigger cookie. Run it from a project directory (or pass a site name); lerd resolves the site's container, scopes the candidate list to that site's own processes, and tells the running process to connect to your IDE on port `9003`. The worker must have been started *after* Xdebug was enabled, and your IDE must be listening. Because `xdebugctl` ships only in the shared FPM image, `pause` is PHP-FPM only; FrankenPHP and custom-container sites run their own image without it (the regular `lerd xdebug on` toggle still works on them).
 
 For ordinary web requests under `--on-demand`, use the [Xdebug Helper](https://xdebug.org/docs/step_debug#browser-extensions) browser extension (or append `?XDEBUG_TRIGGER=1`) to trigger a session per page.
 
@@ -225,6 +229,16 @@ lerd fetch --local
 lerd fetch --local 8.5
 lerd php:rebuild --local
 ```
+
+### When the base image is refreshed
+
+The base image tag is a hash of the recipe, so an upstream `php:X.Y-fpm-alpine` refresh, including a security patch Alpine has already shipped, republishes the same tag with new content. Nothing about your machine changes when that happens, so lerd records the digest of the base each image was built from and compares it against what the registry serves now, a manifest lookup with no pull. When they differ, the version is flagged as having an update available.
+
+You see it in three places. **System → PHP** marks the version card with an up arrow and offers "Rebuild on the new base" as its first action, which streams the rebuild the same way an install does. The same menu has **Check for updates**, which bypasses the cached digest and asks the registry right now. And `lerd doctor` reports the version as a warning with `lerd php:rebuild <version>` as the fix, so `lerd doctor --fix` picks it up too. If push notifications are on, a version that becomes stale while the dashboard is open announces itself like a service update does.
+
+The check is cached for six hours and never runs on the dashboard's critical path, so an offline machine stays quiet rather than reporting a false update. A version whose image was built locally (`--local`) has no recorded base and is never flagged: there is no published image behind it to compare against.
+
+On the publishing side, an upstream refresh rebuilds the hash tag main computes plus the ones the last two stable releases resolve to, each from its own git checkout. Staying a release or two behind still gets you the patched base without updating lerd first.
 
 ---
 
@@ -419,7 +433,7 @@ The in-container shell is deliberately isolated from your host shell config. Eve
 
 What you get inside the container:
 
-- **starship** as the default prompt — branch, dir, git status, all the usual.
+- **starship** as the default prompt, branch, dir, git status, all the usual.
 - **eza**, **bat**, **fzf**, **zoxide** on `$PATH` for nicer file listing, paging, fuzzy-find, and `cd` history.
 - Shell history persisted under `~/.local/share/lerd/shell-state/php-<version>/zsh/history`, so commands survive container rebuilds.
 - `HostName=` set to your host's hostname so the prompt reads `root@your-machine` instead of the auto-generated container id.

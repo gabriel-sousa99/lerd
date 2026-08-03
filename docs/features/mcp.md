@@ -53,7 +53,7 @@ All clients share a single canonical tool reference, so the guidance never drift
 
 > **During `lerd install`:** If Claude Code is detected, you'll be prompted to run this automatically.
 
-> **During `lerd update`:** When MCP is globally registered, the context files that already exist are rewritten from the newly installed binary so they stay in sync with any added or renamed tools. Update never creates files for a client you haven't set up — to pick up a newly supported assistant, re-run `lerd mcp:enable-global`.
+> **During `lerd update`:** When MCP is globally registered, the context files that already exist are rewritten from the newly installed binary so they stay in sync with any added or renamed tools. Update never creates files for a client you haven't set up, to pick up a newly supported assistant, re-run `lerd mcp:enable-global`.
 
 ### Project-scoped registration
 
@@ -120,7 +120,7 @@ The MCP surface is **twelve grouped tools**, each driven by an `action` argument
 
 | Tool | Actions |
 |---|---|
-| `site` | `list` (discover sites — call first), `link`, `unlink`, `domain_add`, `domain_remove`, `group_assign`, `group_unassign`, `group_label`, `group_db`, `group_list`, `tls_enable`, `tls_disable`, `tls_renew`, `php`, `node`, `pause`, `unpause`, `restart`, `rebuild`, `runtime`, `nginx_read`, `nginx_write`, `nginx_reset`, `park`, `unpark` |
+| `site` | `list` (discover sites, call first), `link`, `unlink`, `domain_add`, `domain_remove`, `group_assign`, `group_unassign`, `group_label`, `group_db`, `group_list`, `tls_enable`, `tls_disable`, `tls_renew`, `php`, `node`, `pause`, `unpause`, `restart`, `rebuild`, `runtime`, `nginx_read`, `nginx_write`, `nginx_reset`, `park`, `unpark` |
 | `service` | `start`, `stop`, `restart`, `pin`, `unpin`, `update`, `rollback`, `migrate`, `remove`, `reinstall`, `add`, `expose`, `port`, `env`, `config_read`, `config_write`, `config_restore`, `config_reset`, `config_list_backups`, `preset_list`, `preset_search`, `preset_install`, `check_updates` |
 | `db` | `list`, `set`, `move`, `create`, `export`, `import`, `snapshot`, `snapshots`, `restore`, `snapshot_delete` |
 | `env` | `setup`, `check`, `override` |
@@ -145,7 +145,9 @@ A **site group** (the `site` tool's `group_*` actions) nests a real site under a
 
 ### Service presets carry their own discovery metadata
 
-`preset_list` returns each preset's `category`, `icon` and `admin_for`. `admin_for` names the services a preset's admin UI administers, and it is **not** `depends_on`: phpMyAdmin depends on mysql but administers mariadb too, and RedisInsight administers valkey without depending on it. To answer "which dashboard administers this database", read `admin_for`.
+`preset_list` returns each preset's `category`, `icon` and `admin_for`. `admin_for` names the services a preset's admin UI administers, and it is **not** `depends_on`: phpMyAdmin depends on mysql (satisfied by MariaDB via `env_role`) but administers both, and RedisInsight depends on redis (satisfied by Valkey) while administering both. To answer "which dashboard administers this database", read `admin_for`.
+
+`service` start/stop/restart use the same `serviceops` path as the CLI, Web UI, and TUI: `depends_on` resolution (including family / `env_role` drop-ins), reverse-dependent start, soft stop cascade, and `discover_family` / pinned-dependency-host consumer regen. Stop failures surface as errors rather than a silent OK. Do not assume MCP is a thinner StartUnit wrapper.
 
 ### Reading logs
 

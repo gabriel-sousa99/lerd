@@ -7,6 +7,93 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.31.0-oracle.0] — 2026-08-03 — merge upstream v1.30.1 → v1.31.0
+
+Fork (Oracle Edition). Integra 58 commits do upstream (`lerd-env/lerd`), de
+v1.30.1 a v1.31.0. Todas as features do fork foram preservadas; o resumo abaixo
+cobre o que **mudou de comportamento** na integração.
+
+O ciclo do upstream é sobre as rotas de entrada e saída do lerd: instalação
+unificada via `lerd bootstrap` (inclusive um caminho totalmente não-interativo
+para pacotes), nvm dirigindo o Node ao lado do fnm embutido, bancos migrando do
+Go para o store (create/drop/export/import e snapshots declarados no preset), e
+compartilhamento de site com domínio próprio no Cloudflare, ngrok rodando da
+própria imagem e dev server servido no domínio do site.
+
+### Added
+
+- **Rebuild das imagens base históricas.** O upstream passou a republicar os
+  hashes de recipe que releases recentes ainda resolvem, para que quem está uma
+  versão atrás não fique preso a uma base sem patch. Os jobs `historic-plan`,
+  `historic-build` e `historic-manifest` foram adotados, apontando para o
+  registry do fork (`ghcr.io/gabriel-sousa99`) e **somente amd64**, pela mesma
+  razão da matriz principal: a Oracle não publica Instant Client linux.arm64
+  para 21.x, então oci8 não linka em aarch64.
+- **Pacote `internal/linker`.** O upstream extraiu toda a resolução de link
+  (domínios, modo, framework, runtime) de `internal/cli/link.go` para um pacote
+  próprio dirigido por policy. O fork acompanhou a refatoração.
+- **Submenus na tray.** O menu virou submenus agrupados; a entrada
+  "Debug & Oracle help…" do fork passou a viver no submenu de configurações.
+- 41 chaves novas de i18n do upstream (share, shareDomain, shareToken) nos 14
+  idiomas, somadas às 28 chaves próprias do fork (proxies, editor de .env).
+
+### Changed
+
+- **Prompt de banco no link foi religado ao novo fluxo.** O
+  `promptLinkDatabaseChoice` do fork vivia no meio do bloco que o upstream
+  removeu. Ele agora roda dentro do trecho que atende sites PHP e **antes** de
+  `ensureRequiredServices`, para que o gate "nenhum serviço declarado ainda"
+  continue lendo a escolha do próprio projeto, e não os serviços que o framework
+  acabou de exigir. A escolha é propagada em `plan.Project`.
+- **Defaults de DNS do fork migraram para `resolveDNSChoice`.** O upstream
+  extraiu a decisão de DNS para essa função nova, chamada bem antes do ponto
+  onde o fork perguntava. Os defaults do fork foram portados para lá: DNS
+  gerenciado desligado, TLD `.localhost`, e o texto do prompt que deixa claro que
+  **HTTPS continua funcionando**. Falha ao ler o config agora assume DNS
+  desligado, e não ligado.
+- **Validação de nome de banco saiu do fork e virou do upstream.** O
+  `validDBName` que o fork adicionou no `cli/env.go` foi substituído por
+  `serviceops.ValidateDatabaseName`, que o upstream chama dentro de
+  `expandEntityCommand` — ou seja, vale para todo comando declarado de entidade,
+  não só para o clone. O teste de regressão de injeção do fork acompanhou a
+  validação e agora mira o ponto real de enforcement.
+- **`GenerateProxyVhost` mantém o parâmetro `secured` e ganha o guard do
+  upstream.** O fork precisa escolher entre vhost HTTP e `-ssl`, e remover a
+  contraparte obsoleta; o upstream passou a rejeitar valores que encerrariam a
+  diretiva nginx. As duas coisas convivem agora.
+- **Falha ao reescrever quadlets de FPM passa a ser propagada por
+  `PublishLinks`.** O endurecimento que o fork tinha em `FinishLink` caiu, na
+  refatoração do upstream, exatamente sobre `PublishLinks`, que é o passo
+  compartilhado pelo link de um site e pelo park de um diretório. O resultado é
+  que um `lerd park` agora **falha** nesse caso, onde o fork antes apenas
+  avisava. É mais estrito de propósito: o aviso dizia que os sites podiam ficar
+  inalcançáveis até rodar `lerd start` de novo.
+
+### Fixed
+
+- **CA do mkcert continua sendo instalada com DNS desligado.** O upstream moveu
+  a instalação da CA para dentro de `if wantDNS`, cujo ramo `else` dizia
+  literalmente "skipping mkcert CA" — o que quebraria o desenho do fork, em que
+  HTTPS não depende de DNS gerenciado. A chamada foi içada de volta para fora do
+  bloco, agora usando o helper `ensureMkcertCA(unattended)` do upstream (que
+  também trata o caminho não-interativo) em vez da cópia inline do fork.
+
+### Fixed (testes)
+
+- **Testes de unit file de worker no host não vazam mais o nvm do desenvolvedor.**
+  Quatro testes de `worker_host_linux_test.go` montam um ambiente Node controlado
+  (PATH fixado, `HOME` temporário), mas não isolavam `NVM_DIR` — e `nvmDir()` lê
+  `$NVM_DIR` antes de cair para `~/.nvm`. Numa máquina com nvm instalado, a
+  pré-condição "nenhum Node resolvível" nunca era estabelecida: o Node real do host
+  entrava na resolução, então `..._bunFallbackWhenNodeUnmanaged` e
+  `..._unmanagedNoNodeHoldsBack` falhavam, e `..._unmanagedNodeBakesResolvedDir` e
+  `..._unmanagedNoNodeNonNodeCommandRuns` passavam por sorte, sem testar o que
+  afirmavam. Os quatro agora fixam `NVM_DIR` no próprio `HOME` do teste, seguindo o
+  padrão que o upstream já usa em `worker_preflight_test.go`. Reproduzia igual no
+  v1.31.0 puro, ou seja, não era regressão da integração.
+
+---
+
 ## [1.30.1-oracle.3] — 2026-07-26
 
 Fork (Oracle Edition). Release de correção a partir do último PR mergeado (#9),

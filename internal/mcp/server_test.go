@@ -251,8 +251,14 @@ func TestToolList_underSizeCeiling(t *testing.T) {
 	// 19500 → 20600 for the `workspace` group (justified content additions, kept
 	// terse), then 20600 → 20650 for the `diag` `doctor_fix` action, then
 	// 20650 → 21150 for the runtime `ini_read`/`ini_write`/`ini_reset` actions
-	// and their `shared`/`content` properties.
-	const ceiling = 21150
+	// and their `shared`/`content` properties, then 21150 → 21200 for the `db`
+	// `fresh` property, with five descriptions in the same tool trimmed to pay
+	// for most of it, then 21200 → 22100 for three capabilities that had no MCP
+	// surface at all: db `extension_list`/`extension_add`, service `entities`/
+	// `entity_action` (everything a preset declares that is not a database), and
+	// runtime `node_manager`. Description verbosity in the same three tools was
+	// trimmed to pay for part of it.
+	const ceiling = 22100
 	got, err := json.Marshal(toolList())
 	if err != nil {
 		t.Fatalf("marshal tool list: %v", err)
