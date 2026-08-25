@@ -1051,7 +1051,7 @@ func RewriteFPMQuadlets() error {
 
 	if len(changedUnits) > 0 {
 		var errs []error
-		if err := DaemonReload(); err != nil {
+		if err := DaemonReloadFn(); err != nil {
 			errs = append(errs, fmt.Errorf("daemon-reload after quadlet rewrite: %w", err))
 		}
 		for _, unit := range changedUnits {
@@ -1421,7 +1421,7 @@ func EnsurePathMounted(path, phpVersion string) {
 
 	if len(changedUnits) > 0 {
 		var failed bool
-		if err := DaemonReload(); err != nil {
+		if err := DaemonReloadFn(); err != nil {
 			fmt.Fprintf(os.Stderr, "lerd: daemon-reload after mounting %s failed: %v\n", path, err)
 			failed = true
 		}
