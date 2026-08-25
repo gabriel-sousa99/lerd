@@ -493,9 +493,14 @@ lerd proxy add app.localhost --port 5173 --path ~/proj/app \
 lerd proxy ls | rm <dom> | unsecure <dom> | start <dom> | logs <dom> -f
 ```
 
-Há uma aba **Proxies** no dashboard com a mesma funcionalidade. Por baixo:
-`nginx proxy_pass` para `host.containers.internal:<porta>`, HTTPS via `mkcert`,
-headers `Upgrade`/`Connection` (Vite HMR/WS funcionam).
+Há uma aba **Proxies** no dashboard com navegação em lista e detalhe, configuração
+de aliases, upstream HTTP/HTTPS, health check, timeout, TLS, autostart e rotas
+independentes. As abas de operação mostram alcance e latência do upstream,
+tráfego, logs de proxies gerenciados, estado do Nginx, certificado e o vhost
+gerado em modo somente leitura. O monitoramento ocorre apenas enquanto o detalhe
+está aberto. Por baixo: `nginx proxy_pass` para
+`host.containers.internal:<porta>`, HTTPS via `mkcert`, headers
+`Upgrade`/`Connection` (Vite HMR/WS funcionam).
 
 ### Fullstack (SPA + API na mesma origem)
 

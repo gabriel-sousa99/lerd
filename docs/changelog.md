@@ -7,6 +7,40 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.33.1-oracle.1] — 2026-08-25 — proxy operations dashboard
+
+Fork (Oracle Edition). Esta versão transforma a tela de proxies em uma superfície
+operacional completa, alinhada às páginas de Sites e Serviços, sem alterar o
+comportamento dos proxies já configurados.
+
+### Added
+
+- **Configuração avançada de proxies no dashboard.** Proxies simples e fullstack
+  agora aceitam aliases, upstream HTTP ou HTTPS, host e porta, health check,
+  timeout, TLS, autostart e rotas com destinos independentes. Os valores continuam
+  declarativos em `proxies.yaml`, são validados antes da gravação e regeneram o
+  vhost controlado pelo lerd.
+- **Monitoramento e diagnóstico sob demanda.** A tela de detalhe acompanha
+  alcance e latência do upstream, status HTTP, Nginx, vhost, certificado e unit
+  gerenciado enquanto estiver aberta. O diagnóstico também expõe o vhost gerado
+  em modo somente leitura, sem aceitar caminhos fornecidos pelo cliente.
+- **Tráfego e logs por proxy.** Requisições usam o agregador de timings já
+  compartilhado pelos sites, com namespace próprio para evitar colisões, e
+  proxies gerenciados exibem o journal do dev server na aba Logs.
+
+### Changed
+
+- **A navegação de proxies segue o restante do projeto.** A lista e o detalhe
+  reutilizam os padrões visuais de Sites e Serviços, com visão geral, tráfego,
+  logs e configuração e diagnóstico. Estado e tráfego atualizam a cada dez
+  segundos somente enquanto o detalhe está montado, além da atualização manual.
+- **Configurações anteriores permanecem compatíveis.** Campos novos são
+  opcionais e preservam HTTP, ausência de health path e o timeout efetivo anterior
+  quando não declarados. As rotas `/api/proxies` continuam protegidas pelo gate
+  de controle remoto existente.
+
+---
+
 ## [1.33.1-oracle.0] — 2026-08-25 — merge upstream v1.31.0 → v1.33.1
 
 Fork (Oracle Edition). Integra 266 commits do upstream (`lerd-env/lerd`), de
