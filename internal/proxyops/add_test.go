@@ -40,6 +40,35 @@ func TestAddProxyHappyPath(t *testing.T) {
 	}
 }
 
+func TestAddProxyAdvancedSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	StubForTests()
+	defer UnstubForTests()
+
+	p, err := Add(AddOptions{
+		Domain:         "spa.localhost",
+		Aliases:        []string{"app.localhost"},
+		Port:           9443,
+		UpstreamHost:   "127.0.0.1",
+		UpstreamScheme: "https",
+		HealthPath:     "/healthz",
+		TimeoutSeconds: 120,
+		NoSecure:       true,
+		Path:           dir,
+	})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if len(p.Domains) != 2 || p.Domains[1] != "app.localhost" {
+		t.Fatalf("domains = %v", p.Domains)
+	}
+	if p.UpstreamHost != "127.0.0.1" || p.UpstreamScheme != "https" ||
+		p.HealthPath != "/healthz" || p.TimeoutSeconds != 120 {
+		t.Fatalf("advanced settings = %+v", p)
+	}
+}
+
 func TestAddProxyRejectsDuplicateDomain(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)

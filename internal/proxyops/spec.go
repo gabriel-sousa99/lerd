@@ -26,9 +26,12 @@ func resolveProxySpec(p config.Proxy) (nginx.ProxyVhostSpec, error) {
 	}
 
 	spec := nginx.ProxyVhostSpec{
-		Domain:  p.PrimaryDomain(),
-		Secured: p.Secured,
-		Base:    base,
+		Domain:         p.PrimaryDomain(),
+		Domains:        p.Domains,
+		Secured:        p.Secured,
+		UpstreamScheme: p.EffectiveUpstreamScheme(),
+		RequestTimeout: p.EffectiveTimeoutSeconds(86400),
+		Base:           base,
 	}
 	for _, r := range p.Routes {
 		t, err := resolveTarget(r.Site, r.UpstreamPort, r.UpstreamHost)

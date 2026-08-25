@@ -15,14 +15,19 @@ import (
 // is true; NoSecure flips to plain HTTP; Managed/Command/Node/AutoStart
 // are for the managed dev-server toggle.
 type AddOptions struct {
-	Domain      string
-	Port        int
-	Path        string
-	NoSecure    bool
-	Managed     bool
-	Command     string
-	NodeVersion string
-	AutoStart   bool
+	Domain         string
+	Aliases        []string
+	Port           int
+	UpstreamHost   string
+	UpstreamScheme string
+	HealthPath     string
+	TimeoutSeconds int
+	Path           string
+	NoSecure       bool
+	Managed        bool
+	Command        string
+	NodeVersion    string
+	AutoStart      bool
 
 	// Fullstack: Site routes the base (/) to a lerd site; Routes maps path
 	// prefixes to their own targets. Empty Routes+Site == simple proxy.
@@ -56,29 +61,44 @@ func Add(opts AddOptions) (config.Proxy, error) {
 		}
 	}
 
-	domain := strings.ToLower(opts.Domain)
-
-	if existing, err := config.FindProxyByDomain(domain); err == nil && existing != nil {
-		return config.Proxy{}, fmt.Errorf("já existe um proxy para %s", domain)
+	domain := strings.ToLower(strings.TrimSpace(opts.Domain))
+	domains := []string{domain}
+	seen := map[string]bool{domain: true}
+	for _, alias := range opts.Aliases {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		if alias != "" && !seen[alias] {
+			seen[alias] = true
+			domains = append(domains, alias)
+		}
 	}
-	if site, err := config.FindSiteByDomain(domain); err == nil && site != nil {
-		return config.Proxy{}, fmt.Errorf("domínio %s já está registrado como site PHP (%s)", domain, site.Name)
+
+	for _, candidate := range domains {
+		if existing, err := config.FindProxyByDomain(candidate); err == nil && existing != nil {
+			return config.Proxy{}, fmt.Errorf("já existe um proxy para %s", candidate)
+		}
+		if site, err := config.FindSiteByDomain(candidate); err == nil && site != nil {
+			return config.Proxy{}, fmt.Errorf("domínio %s já está registrado como site PHP (%s)", candidate, site.Name)
+		}
 	}
 
 	name, _ := ProxyNameAndDomain(domain, "")
 
 	p := config.Proxy{
-		Name:         name,
-		Domains:      []string{domain},
-		UpstreamPort: opts.Port,
-		Path:         opts.Path,
-		Secured:      !opts.NoSecure,
-		Managed:      opts.Managed,
-		Command:      opts.Command,
-		NodeVersion:  opts.NodeVersion,
-		AutoStart:    opts.AutoStart,
-		Site:         opts.Site,
-		Routes:       opts.Routes,
+		Name:           name,
+		Domains:        domains,
+		UpstreamPort:   opts.Port,
+		UpstreamHost:   opts.UpstreamHost,
+		UpstreamScheme: opts.UpstreamScheme,
+		HealthPath:     opts.HealthPath,
+		TimeoutSeconds: opts.TimeoutSeconds,
+		Path:           opts.Path,
+		Secured:        !opts.NoSecure,
+		Managed:        opts.Managed,
+		Command:        opts.Command,
+		NodeVersion:    opts.NodeVersion,
+		AutoStart:      opts.AutoStart,
+		Site:           opts.Site,
+		Routes:         opts.Routes,
 	}
 
 	if err := p.Validate(); err != nil {

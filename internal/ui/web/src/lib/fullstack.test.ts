@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { buildApiRoutes, defaultApiPaths, suggestUnifiedDomain } from './fullstack';
+import {
+  buildApiRoutes,
+  defaultApiPaths,
+  editableRoutesFrom,
+  routesFromEditable,
+  suggestUnifiedDomain
+} from './fullstack';
 
 describe('buildApiRoutes', () => {
   it('default paths for a site target', () => {
@@ -41,5 +47,22 @@ describe('suggestUnifiedDomain', () => {
   });
   it('handles a full -api.localhost domain', () => {
     expect(suggestUnifiedDomain('retencao-api.localhost')).toBe('retencao.localhost');
+  });
+});
+
+describe('per-route proxy editor', () => {
+  it('round-trips mixed site and port targets without flattening them', () => {
+    const routes = [
+      { path: '/api', site: 'backend' },
+      { path: '/assets', upstream_host: '127.0.0.2', upstream_port: 4173 }
+    ];
+
+    expect(routesFromEditable(editableRoutesFrom(routes))).toEqual(routes);
+  });
+
+  it('trims values and omits the default upstream host', () => {
+    expect(routesFromEditable([
+      { path: ' /api ', mode: 'port', site: '', port: 8000, host: ' host.containers.internal ' }
+    ])).toEqual([{ path: '/api', upstream_port: 8000 }]);
   });
 });

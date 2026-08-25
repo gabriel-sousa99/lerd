@@ -4,6 +4,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 // Test hook.
@@ -26,6 +27,7 @@ func Remove(name string) error {
 	if err := config.RemoveProxy(name); err != nil {
 		return err
 	}
+	_ = reqstats.RemoveKey(config.RequestStatsFile(), reqstats.ProxyKey(name))
 	_ = nginxReloadFn()
 	unbindSitesEnv(sites)
 	if p.Path != "" {

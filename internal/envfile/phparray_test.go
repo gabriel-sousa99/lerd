@@ -529,8 +529,8 @@ func TestReadPhpArray_OmitsExpressionValues(t *testing.T) {
 // this one extra check.
 func phpLint(t *testing.T, path string) {
 	t.Helper()
-	bin, err := exec.LookPath("php")
-	if err != nil {
+	bin := hostPHPForLint()
+	if bin == "" {
 		return
 	}
 	out, err := exec.Command(bin, "-l", path).CombinedOutput()
@@ -538,6 +538,25 @@ func phpLint(t *testing.T, path string) {
 		body, _ := os.ReadFile(path)
 		t.Fatalf("php rejected the rewritten file: %v\n%s\n--- file ---\n%s", err, out, body)
 	}
+}
+
+// hostPHPForLint ignores lerd's own php shim: invoking that wrapper from this
+// unit test starts an FPM container and turns a syntax check into a runtime test.
+func hostPHPForLint() string {
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		candidate := filepath.Join(dir, "php")
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		body, _ := os.ReadFile(candidate)
+		wrapper := string(body)
+		if strings.Contains(wrapper, "lerd php") || strings.Contains(wrapper, `exec "$LERD" php`) {
+			continue
+		}
+		return candidate
+	}
+	return ""
 }
 
 // A key naming a node and another key descending through it cannot both hold:

@@ -26,13 +26,16 @@ type Route struct {
 // host). Independent of `Site` (PHP) — different lifecycle, no framework,
 // no worktrees, no env file.
 type Proxy struct {
-	Name         string   `yaml:"-"`
-	Domains      []string `yaml:"-"`
-	UpstreamPort int      `yaml:"upstream_port"`
-	UpstreamHost string   `yaml:"upstream_host,omitempty"`
-	Path         string   `yaml:"path,omitempty"`
-	Secured      bool     `yaml:"secured"`
-	Paused       bool     `yaml:"paused,omitempty"`
+	Name           string   `yaml:"-"`
+	Domains        []string `yaml:"-"`
+	UpstreamPort   int      `yaml:"upstream_port"`
+	UpstreamHost   string   `yaml:"upstream_host,omitempty"`
+	UpstreamScheme string   `yaml:"upstream_scheme,omitempty"`
+	HealthPath     string   `yaml:"health_path,omitempty"`
+	TimeoutSeconds int      `yaml:"timeout_seconds,omitempty"`
+	Path           string   `yaml:"path,omitempty"`
+	Secured        bool     `yaml:"secured"`
+	Paused         bool     `yaml:"paused,omitempty"`
 
 	Managed     bool   `yaml:"managed,omitempty"`
 	NodeVersion string `yaml:"node_version,omitempty"`
@@ -58,6 +61,23 @@ func (p Proxy) PrimaryDomain() string {
 // (base served by a PHP site, or any extra path routes). A plain proxy
 // (port base, no routes) returns false and keeps the simple vhost template.
 func (p Proxy) IsFullstack() bool { return p.Site != "" || len(p.Routes) > 0 }
+
+// EffectiveUpstreamScheme keeps existing proxy files backward compatible.
+func (p Proxy) EffectiveUpstreamScheme() string {
+	if p.UpstreamScheme == "" {
+		return "http"
+	}
+	return p.UpstreamScheme
+}
+
+// EffectiveTimeoutSeconds returns the configured timeout or the caller's
+// legacy fallback when the proxy predates per-proxy timeouts.
+func (p Proxy) EffectiveTimeoutSeconds(fallback int) int {
+	if p.TimeoutSeconds > 0 {
+		return p.TimeoutSeconds
+	}
+	return fallback
+}
 
 // ValidateProxyRoutes checks route paths and targets. Each path must start
 // with "/", differ from "/", be unique, and carry exactly one target
@@ -103,6 +123,7 @@ func (p Proxy) validateProxyGeneratedValues() error {
 	fields := map[string]string{
 		"name": p.Name, "path": p.Path, "cmd": p.Command,
 		"node_version": p.NodeVersion, "upstream_host": p.UpstreamHost,
+		"upstream_scheme": p.UpstreamScheme, "health_path": p.HealthPath,
 		"site": p.Site,
 	}
 	names := make([]string, 0, len(fields))
@@ -138,6 +159,15 @@ func (p Proxy) validateProxyGeneratedValues() error {
 func (p Proxy) Validate() error {
 	if err := p.validateProxyGeneratedValues(); err != nil {
 		return err
+	}
+	if scheme := p.EffectiveUpstreamScheme(); scheme != "http" && scheme != "https" {
+		return fmt.Errorf("upstream_scheme inválido: %q", p.UpstreamScheme)
+	}
+	if p.HealthPath != "" && p.HealthPath[0] != '/' {
+		return fmt.Errorf("health_path deve começar com /: %q", p.HealthPath)
+	}
+	if p.TimeoutSeconds < 0 || p.TimeoutSeconds > 86400 {
+		return fmt.Errorf("timeout_seconds deve estar entre 1 e 86400, ou 0 para o padrão")
 	}
 	if !p.IsFullstack() {
 		if p.Site != "" {
@@ -185,54 +215,63 @@ func findFullstackProxyForSiteIn(reg *ProxyRegistry, siteName string) (*Proxy, b
 }
 
 type proxyYAML struct {
-	Name         string   `yaml:"name"`
-	Domains      []string `yaml:"domains"`
-	UpstreamPort int      `yaml:"upstream_port"`
-	UpstreamHost string   `yaml:"upstream_host,omitempty"`
-	Path         string   `yaml:"path,omitempty"`
-	Secured      bool     `yaml:"secured"`
-	Paused       bool     `yaml:"paused,omitempty"`
-	Managed      bool     `yaml:"managed,omitempty"`
-	NodeVersion  string   `yaml:"node_version,omitempty"`
-	Command      string   `yaml:"cmd,omitempty"`
-	AutoStart    bool     `yaml:"auto_start,omitempty"`
-	Site         string   `yaml:"site,omitempty"`
-	Routes       []Route  `yaml:"routes,omitempty"`
+	Name           string   `yaml:"name"`
+	Domains        []string `yaml:"domains"`
+	UpstreamPort   int      `yaml:"upstream_port"`
+	UpstreamHost   string   `yaml:"upstream_host,omitempty"`
+	UpstreamScheme string   `yaml:"upstream_scheme,omitempty"`
+	HealthPath     string   `yaml:"health_path,omitempty"`
+	TimeoutSeconds int      `yaml:"timeout_seconds,omitempty"`
+	Path           string   `yaml:"path,omitempty"`
+	Secured        bool     `yaml:"secured"`
+	Paused         bool     `yaml:"paused,omitempty"`
+	Managed        bool     `yaml:"managed,omitempty"`
+	NodeVersion    string   `yaml:"node_version,omitempty"`
+	Command        string   `yaml:"cmd,omitempty"`
+	AutoStart      bool     `yaml:"auto_start,omitempty"`
+	Site           string   `yaml:"site,omitempty"`
+	Routes         []Route  `yaml:"routes,omitempty"`
 }
 
 func (p Proxy) toYAML() proxyYAML {
 	return proxyYAML{
-		Name:         p.Name,
-		Domains:      p.Domains,
-		UpstreamPort: p.UpstreamPort,
-		UpstreamHost: p.UpstreamHost,
-		Path:         p.Path,
-		Secured:      p.Secured,
-		Paused:       p.Paused,
-		Managed:      p.Managed,
-		NodeVersion:  p.NodeVersion,
-		Command:      p.Command,
-		AutoStart:    p.AutoStart,
-		Site:         p.Site,
-		Routes:       p.Routes,
+		Name:           p.Name,
+		Domains:        p.Domains,
+		UpstreamPort:   p.UpstreamPort,
+		UpstreamHost:   p.UpstreamHost,
+		UpstreamScheme: p.UpstreamScheme,
+		HealthPath:     p.HealthPath,
+		TimeoutSeconds: p.TimeoutSeconds,
+		Path:           p.Path,
+		Secured:        p.Secured,
+		Paused:         p.Paused,
+		Managed:        p.Managed,
+		NodeVersion:    p.NodeVersion,
+		Command:        p.Command,
+		AutoStart:      p.AutoStart,
+		Site:           p.Site,
+		Routes:         p.Routes,
 	}
 }
 
 func (py proxyYAML) toProxy() Proxy {
 	return Proxy{
-		Name:         py.Name,
-		Domains:      py.Domains,
-		UpstreamPort: py.UpstreamPort,
-		UpstreamHost: py.UpstreamHost,
-		Path:         py.Path,
-		Secured:      py.Secured,
-		Paused:       py.Paused,
-		Managed:      py.Managed,
-		NodeVersion:  py.NodeVersion,
-		Command:      py.Command,
-		AutoStart:    py.AutoStart,
-		Site:         py.Site,
-		Routes:       py.Routes,
+		Name:           py.Name,
+		Domains:        py.Domains,
+		UpstreamPort:   py.UpstreamPort,
+		UpstreamHost:   py.UpstreamHost,
+		UpstreamScheme: py.UpstreamScheme,
+		HealthPath:     py.HealthPath,
+		TimeoutSeconds: py.TimeoutSeconds,
+		Path:           py.Path,
+		Secured:        py.Secured,
+		Paused:         py.Paused,
+		Managed:        py.Managed,
+		NodeVersion:    py.NodeVersion,
+		Command:        py.Command,
+		AutoStart:      py.AutoStart,
+		Site:           py.Site,
+		Routes:         py.Routes,
 	}
 }
 

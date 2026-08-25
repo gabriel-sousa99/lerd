@@ -25,3 +25,12 @@ func TestKeyRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestProxyKeyUsesSeparateNamespace(t *testing.T) {
+	if got := ProxyKey("spa"); got != "proxy:spa" {
+		t.Fatalf("ProxyKey(spa) = %q, want proxy:spa", got)
+	}
+	if KeyBelongsTo(ProxyKey("spa"), "spa") {
+		t.Fatal("proxy stats must not be removed with an unrelated site of the same name")
+	}
+}

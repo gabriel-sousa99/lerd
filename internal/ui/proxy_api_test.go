@@ -116,6 +116,58 @@ func TestProxyAPIUpdateRejectsBadPort(t *testing.T) {
 	}
 }
 
+func TestProxyAPICreatesAndUpdatesAdvancedSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	proxyops.StubForTests()
+	defer proxyops.UnstubForTests()
+
+	body, _ := json.Marshal(map[string]any{
+		"domain": "spa.localhost", "aliases": []string{"admin.spa.localhost"},
+		"port": 9443, "upstream_host": "127.0.0.1", "upstream_scheme": "https",
+		"health_path": "/health", "timeout_seconds": 45, "no_secure": true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/proxies", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	handleProxies(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status create: %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var created proxyDTO
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.UpstreamScheme != "https" || created.HealthPath != "/health" || created.TimeoutSeconds != 45 {
+		t.Fatalf("advanced create fields missing: %+v", created)
+	}
+	if len(created.Domains) != 2 || created.Domains[1] != "admin.spa.localhost" {
+		t.Fatalf("aliases missing: %+v", created.Domains)
+	}
+
+	newAliases := []string{"api.spa.localhost"}
+	updateBody, _ := json.Marshal(map[string]any{
+		"aliases": newAliases, "upstream_scheme": "http", "health_path": "/ready", "timeout_seconds": 10,
+	})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/proxies/spa", bytes.NewReader(updateBody))
+	updateRR := httptest.NewRecorder()
+	handleProxyAction(updateRR, updateReq)
+	if updateRR.Code != http.StatusOK {
+		t.Fatalf("status update: %d body=%s", updateRR.Code, updateRR.Body.String())
+	}
+
+	var updated proxyDTO
+	if err := json.Unmarshal(updateRR.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.UpstreamScheme != "http" || updated.HealthPath != "/ready" || updated.TimeoutSeconds != 10 {
+		t.Fatalf("advanced update fields missing: %+v", updated)
+	}
+	if len(updated.Domains) != 2 || updated.Domains[1] != newAliases[0] {
+		t.Fatalf("aliases not updated: %+v", updated.Domains)
+	}
+}
+
 func TestProxyAPIActionRequiresPost(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)

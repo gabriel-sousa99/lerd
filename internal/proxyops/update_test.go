@@ -44,6 +44,34 @@ func TestUpdateChangesPortRegeneratesVhost(t *testing.T) {
 	}
 }
 
+func TestUpdateAdvancedSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	StubForTests()
+	defer UnstubForTests()
+
+	if _, err := Add(AddOptions{Domain: "spa.localhost", Port: 9000, NoSecure: true, Path: dir}); err != nil {
+		t.Fatal(err)
+	}
+	aliases := []string{"app.localhost", "frontend.localhost"}
+	scheme, health, host := "https", "/ready", "127.0.0.1"
+	timeout := 90
+	updated, err := Update("spa", UpdateOptions{
+		Aliases:        &aliases,
+		UpstreamHost:   &host,
+		UpstreamScheme: &scheme,
+		HealthPath:     &health,
+		TimeoutSeconds: &timeout,
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(updated.Domains) != 3 || updated.Domains[0] != "spa.localhost" ||
+		updated.UpstreamScheme != "https" || updated.HealthPath != "/ready" || updated.TimeoutSeconds != 90 {
+		t.Fatalf("updated = %+v", updated)
+	}
+}
+
 func TestUpdateNoChangeSkipsVhost(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)

@@ -2,6 +2,12 @@ package reqstats
 
 import "strings"
 
+const proxyKeyPrefix = "proxy:"
+
+// ProxyKey keeps proxy traffic distinct from a site with the same name while
+// letting both share the request-timing aggregation and persistence pipeline.
+func ProxyKey(name string) string { return proxyKeyPrefix + name }
+
 // Key is the identity every request-timing view is stored and queried under: the
 // site name, or "<site>/<branch>" for a git worktree. The branch is the sanitized
 // one the HTTP API, MCP and the worktree registries already share, so a reader

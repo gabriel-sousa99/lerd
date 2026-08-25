@@ -25,6 +25,37 @@ export interface ApiTargetInput {
   paths: string[];
 }
 
+export interface EditableRoute {
+  path: string;
+  mode: 'site' | 'port';
+  site: string;
+  port: number;
+  host: string;
+}
+
+export function editableRoutesFrom(routes: Route[]): EditableRoute[] {
+  return routes.map((route) => ({
+    path: route.path,
+    mode: route.site ? 'site' : 'port',
+    site: route.site ?? '',
+    port: route.upstream_port ?? 8000,
+    host: route.upstream_host ?? ''
+  }));
+}
+
+export function routesFromEditable(rows: EditableRoute[]): Route[] {
+  return rows.map((row) => {
+    const path = row.path.trim();
+    if (row.mode === 'site') return { path, site: row.site.trim() };
+    const host = row.host.trim();
+    return {
+      path,
+      upstream_port: row.port,
+      ...(host && host !== 'host.containers.internal' ? { upstream_host: host } : {})
+    };
+  });
+}
+
 // buildApiRoutes turns the modal's fullstack inputs into Route[]. Returns an
 // empty array when the API target is incomplete (no site / no port).
 export function buildApiRoutes(input: ApiTargetInput): Route[] {
