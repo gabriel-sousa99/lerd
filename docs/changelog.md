@@ -39,6 +39,16 @@ comportamento dos proxies já configurados.
   quando não declarados. As rotas `/api/proxies` continuam protegidas pelo gate
   de controle remoto existente.
 
+### Fixed
+
+- **`lerd link`, `unlink`, `unpark`, `auth:ssh` e `install` voltam a funcionar no
+  macOS.** A reescrita dos quadlets de FPM passou a propagar o erro do
+  daemon-reload, mas chamava a função concreta em vez da seam que o macOS aponta
+  para um no-op do launchd. Em uma máquina sem systemd, toda reescrita que
+  alterava algum unit terminava em erro, e esses comandos falhavam junto. A
+  injeção tardia de mount seguia o mesmo caminho e marcava a operação como falha
+  a cada chamada.
+
 ---
 
 ## [1.33.1-oracle.0] — 2026-08-25 — merge upstream v1.31.0 → v1.33.1

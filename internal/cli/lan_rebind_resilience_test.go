@@ -43,6 +43,9 @@ func isolateLaunchAgents(t *testing.T) {
 	t.Helper()
 	// Regeneration refreshes the container hosts file as well as unit files.
 	// Keep that runtime artifact out of the developer's real data directory.
+	// This is also podman's graphroot, so a test reaching a live podman through
+	// this helper strands container storage here and cleanup fails: stub the
+	// podman seams instead.
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	if runtime.GOOS == "darwin" {
 		t.Setenv("HOME", t.TempDir())
@@ -81,6 +84,16 @@ func TestRegenerateLANQuadletsRestartsEveryUnitDespiteFailure(t *testing.T) {
 	services.Mgr = mgr
 	t.Cleanup(func() { services.Mgr = prev })
 
+	// Neither the runtime probe nor the hosts refresh may reach a real podman:
+	// its container storage lands in the temp XDG_DATA_HOME above, and the
+	// unwritable overlay directories it leaves there fail TempDir cleanup.
+	prevProbe := podman.ContainerPublishesLANFn
+	podman.ContainerPublishesLANFn = func(string) (bool, bool) { return false, false }
+	t.Cleanup(func() { podman.ContainerPublishesLANFn = prevProbe })
+	prevWrite := writeContainerHostsFn
+	writeContainerHostsFn = func() error { return nil }
+	t.Cleanup(func() { writeContainerHostsFn = prevWrite })
+
 	err := regenerateLANContainerQuadlets(nil)
 	if err == nil {
 		t.Fatal("a failed restart must be reported, not swallowed")
@@ -114,6 +127,10 @@ func TestRegenerateLANQuadletsHealsRuntimeDrift(t *testing.T) {
 	prev := services.Mgr
 	services.Mgr = mgr
 	t.Cleanup(func() { services.Mgr = prev })
+
+	prevWrite := writeContainerHostsFn
+	writeContainerHostsFn = func() error { return nil }
+	t.Cleanup(func() { writeContainerHostsFn = prevWrite })
 
 	if err := regenerateLANContainerQuadlets(nil); err != nil {
 		t.Fatalf("regenerateLANContainerQuadlets: %v", err)

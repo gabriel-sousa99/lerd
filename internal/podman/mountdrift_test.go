@@ -143,6 +143,11 @@ func TestRewriteFPMQuadletsRestartsDriftedContainer(t *testing.T) {
 	prevLC := UnitLifecycle
 	UnitLifecycle = lc
 	t.Cleanup(func() { UnitLifecycle = prevLC })
+	// macOS points DaemonReloadFn at a launchd no-op; a test binary has no
+	// systemd at all, so keep the seam off a real systemctl on either host.
+	prevReload := DaemonReloadFn
+	DaemonReloadFn = func() error { return nil }
+	t.Cleanup(func() { DaemonReloadFn = prevReload })
 
 	if err := RewriteFPMQuadlets(); err != nil { // writes the quadlet
 		t.Fatal(err)
