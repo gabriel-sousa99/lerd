@@ -19,10 +19,10 @@
   import LensToggle from '$components/LensToggle.svelte';
   import TestEventsToggle from '$components/TestEventsToggle.svelte';
   import TraceBlock from '$components/TraceBlock.svelte';
+  import SourcePath from '$components/SourcePath.svelte';
   import LensLoadMore from '$components/LensLoadMore.svelte';
   import LensGroupLabel from '$components/LensGroupLabel.svelte';
   import { windowGroups, LENS_PAGE } from '$lib/lensWindow';
-  import { openInEditor } from '$lib/editor';
   import { m } from '../paraglide/messages.js';
 
   interface Props {
@@ -210,10 +210,24 @@
                   {#if wireKind === 'view' && d.path}
                     <div>
                       <span class="text-gray-400 mr-1">{m.views_template()}:</span>
-                      <button type="button" class="font-mono text-lerd-red hover:underline break-all" onclick={() => openInEditor(d.path, 1)} title={m.queries_openInEditor()}>{d.path}</button>
+                      <SourcePath file={d.path} />
                     </div>
                   {/if}
-                  {#if wireKind === 'view' && d.data_keys?.length}<div class="text-gray-500 dark:text-gray-400">{m.views_data()}: {d.data_keys.join(', ')}</div>{/if}
+                  {#if wireKind === 'view' && d.data_keys?.length}
+                    <div>
+                      <div class="text-gray-400 mb-0.5">{m.views_data()}</div>
+                      <table class="w-full border-collapse font-mono">
+                        <tbody>
+                          {#each d.data_keys as k (k)}
+                            <tr class="border-t border-gray-100 dark:border-lerd-border/40 align-top">
+                              <td class="py-0.5 pr-3 text-gray-500 dark:text-gray-400 whitespace-nowrap w-px">{k}</td>
+                              <td class="py-0.5 break-all">{d.data_preview?.[k] ?? ''}</td>
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                  {/if}
                   {#if wireKind === 'mail'}
                     <div class="text-gray-400 break-all">
                       {#if d.from?.length}from {d.from.join(', ')} · {/if}to {(d.to ?? []).join(', ')}{#if d.cc?.length} · cc {d.cc.join(', ')}{/if}

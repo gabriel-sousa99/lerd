@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,6 +110,12 @@ type EntityAction struct {
 	// entity (bucket archives need tar, which the mc image does not carry).
 	Image string   `yaml:"image,omitempty" json:"image,omitempty"`
 	Env   []string `yaml:"env,omitempty" json:"env,omitempty"`
+	// ExpectedErrors lists the complaints this action always makes, matched as
+	// substrings of the engine's own line, so a load that only produced those
+	// reads as the success it is. For the imports whose dump necessarily talks
+	// to objects the target already has; never for anything a user's data can
+	// cause.
+	ExpectedErrors []string `yaml:"expected_errors,omitempty" json:"expected_errors,omitempty"`
 }
 
 // UnmarshalYAML accepts either a bare command string or a full mapping.
@@ -201,8 +209,11 @@ type CustomService struct {
 	DependsOn     []string          `yaml:"depends_on,omitempty"`
 	// Category groups the service under a discovery heading and Icon names an
 	// entry in the UI's icon set, so a new preset needs no UI edit to appear.
+	// Color is the brand tint the dashboard paints the mark with, a plain hex
+	// literal; anything else is dropped rather than reaching the page as CSS.
 	Category string `yaml:"category,omitempty" json:"category,omitempty"`
 	Icon     string `yaml:"icon,omitempty" json:"icon,omitempty"`
+	Color    string `yaml:"color,omitempty" json:"color,omitempty"`
 	// AdminFor lists the services this preset's UI administers. It is not
 	// DependsOn: phpMyAdmin starts after a mysql satisfier but administers
 	// mariadb too, and RedisInsight administers valkey while depending on redis
@@ -282,6 +293,13 @@ type CustomService struct {
 	// handler when it runs as PID 1, which makes podman stop time out and
 	// systemctl restart wedge for ~90s.
 	Init bool `yaml:"init,omitempty" json:"init,omitempty"`
+	// StopTimeout is how many seconds podman waits after SIGTERM before it
+	// SIGKILLs the container. Zero means DefaultStopTimeout, which suits images
+	// that exit promptly and keeps a hung one from stalling a stop. Engines that
+	// need to finish writing before they die (a database checkpointing a large
+	// buffer pool) declare a longer one; past this window the process is killed
+	// mid-write and the next start pays for it in crash recovery.
+	StopTimeout int `yaml:"stop_timeout,omitempty" json:"stop_timeout,omitempty"`
 	// ClientShims lists the client tools this service exposes as host shims
 	// (mysqldump, pg_dump, psql…) so host tools and IDEs can run them against
 	// external databases. Empty for services with nothing to expose.
@@ -613,10 +631,14 @@ func continuesHostName(v string, i int) bool {
 	return c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
 }
 
-// uniqueFamilyHosts returns sorted, de-duplicated container hostnames across a
-// comma-separated list of family names. When ServiceRunning is set (production),
-// only members whose unit is active are included so admin UIs do not list
-// offline hosts.
+// uniqueFamilyHosts returns de-duplicated container hostnames across a
+// comma-separated list of family names, in the order the families are named.
+// The first host is the server an admin UI opens on, so a spec that names
+// mysql before mariadb keeps mysql leading however the member names sort;
+// ServicesInFamily already orders within a family, which is all the stability
+// the generated env var needs. When ServiceRunning is set (production), only
+// members whose unit is active are included so admin UIs do not list offline
+// hosts.
 func uniqueFamilyHosts(families string) []string {
 	seen := map[string]bool{}
 	var all []string
@@ -638,7 +660,6 @@ func uniqueFamilyHosts(families string) []string {
 		}
 		all = running
 	}
-	sort.Strings(all)
 	return all
 }
 
@@ -728,12 +749,22 @@ func MaterializeServiceFilesChanged(svc *CustomService) (bool, error) {
 		// importantly, avoids a needless service restart when nothing changed. The
 		// mode is still enforced so a re-materialise stays idempotent on permissions,
 		// but a mode-only fixup is not a content change and triggers no restart.
-		if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		existing, readErr := os.ReadFile(path)
+		if readErr == nil && string(existing) == content {
 			if info, statErr := os.Stat(path); statErr == nil && info.Mode().Perm() != mode.Perm() {
 				if err := os.Chmod(path, mode); err != nil {
 					return changed, fmt.Errorf("chmod %s: %w", path, err)
 				}
 			}
+			syncContentSidecar(path, content, f.Chown)
+			continue
+		}
+		// A restrictive chown:true mount is unreadable to us once podman's :U has
+		// re-owned it, so the compare above cannot run and every pass would rewrite
+		// the file, move its mtime and earn another restart. Compare against the
+		// hash instead. The cost is that bytes tampered with in place are no longer
+		// repaired while the file stays unreadable.
+		if readErr != nil && !os.IsNotExist(readErr) && contentMatchesSidecar(path, content) {
 			continue
 		}
 		// Unlink first: with chown:true podman's :U flag re-owns the file to a
@@ -751,8 +782,34 @@ func MaterializeServiceFilesChanged(svc *CustomService) (bool, error) {
 			return changed, fmt.Errorf("chmod %s: %w", path, err)
 		}
 		changed = true
+		syncContentSidecar(path, content, f.Chown)
 	}
 	return changed, nil
+}
+
+// contentSidecarPath is the hash file recording what was last materialised into
+// path. It is never mounted, so podman's :U never re-owns it and it stays
+// readable when the file it describes does not.
+func contentSidecarPath(path string) string { return path + ".sha256" }
+
+// syncContentSidecar records the hash for the mounts that can become unreadable,
+// so only those carry the extra file. A failed write costs one more rewrite on
+// the next pass, which is not worth failing a materialise over.
+func syncContentSidecar(path, content string, chown bool) {
+	if !chown || contentMatchesSidecar(path, content) {
+		return
+	}
+	sum := sha256.Sum256([]byte(content))
+	_ = os.WriteFile(contentSidecarPath(path), []byte(hex.EncodeToString(sum[:])), 0644)
+}
+
+func contentMatchesSidecar(path, content string) bool {
+	stored, err := os.ReadFile(contentSidecarPath(path))
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256([]byte(content))
+	return string(stored) == hex.EncodeToString(sum[:])
 }
 
 // customServicePath returns the on-disk definition path for a service name, or
@@ -915,4 +972,29 @@ func ListCustomServices() ([]*CustomService, error) {
 		services = append(services, svc)
 	}
 	return services, nil
+}
+
+// DefaultStopTimeout is the graceful-stop window a service gets when its
+// definition declares none. It is deliberately short: an image with a slow
+// shutdown sequence (selenium/supervisord, chromium) would otherwise hold up
+// every stop, and most images exit as soon as they are asked to.
+const DefaultStopTimeout = 5
+
+// StopTimeoutSecs is the graceful-stop window podman must give this service.
+func (s *CustomService) StopTimeoutSecs() int {
+	if s.StopTimeout > 0 {
+		return s.StopTimeout
+	}
+	return DefaultStopTimeout
+}
+
+// UnitStopTimeoutSecs is the window the service manager must give the whole
+// stop, which has to outlast the container's own. podman only starts counting
+// StopTimeoutSecs once the stop reaches it, and still has to reap and remove
+// the container afterwards, so a manager timeout equal to it kills the unit
+// mid-shutdown and undoes the grace the service asked for. Distributions vary
+// here: Arch-family systems ship DefaultTimeoutStopSec=10s, which is already
+// tight for the default window and far too short for a database's.
+func (s *CustomService) UnitStopTimeoutSecs() int {
+	return s.StopTimeoutSecs() + 15
 }

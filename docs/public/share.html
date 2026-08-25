@@ -52,6 +52,12 @@
         color: var(--ink);
       }
 
+      /* Featured-article variant: the same composition on a 2:1 frame, shot at
+         2x for 2200x1100. Add ?featured to the URL, or the class from a
+         capture script. The window keeps its size and re-centres on the
+         shorter frame, so only the vertical breathing room changes. */
+      .frame.featured { height: 600px; }
+
       /* Ambient field — subtle grid, masked to the top, plus warm + cool washes. */
       .frame::before {
         content: "";
@@ -240,5 +246,10 @@
         </p>
       </div>
     </div>
+    <script>
+      if (location.search.includes('featured')) {
+        document.querySelector('.frame').classList.add('featured');
+      }
+    </script>
   </body>
 </html>

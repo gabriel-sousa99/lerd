@@ -7,7 +7,10 @@
 package workerheal
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,12 +20,18 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
+// StateOrphaned marks a per-worktree unit whose checkout is gone. It is kept
+// apart from "failed" because the two need opposite treatment: a failed worker
+// is healed by starting it again, whereas an orphan can never start, so it is
+// pruned instead. Offering a heal for one is offering a button that cannot work.
+const StateOrphaned = "orphaned"
+
 // UnhealthyWorker is a single failing/stuck worker unit.
 type UnhealthyWorker struct {
 	Site      string `json:"site"`
 	Worker    string `json:"worker"`
 	Unit      string `json:"unit"`
-	State     string `json:"state"` // "failed" | "expected-but-stopped" | "unreachable" (process up, server not accepting)
+	State     string `json:"state"` // "failed" | "expected-but-stopped" | "unreachable" (process up, server not accepting) | "orphaned" (worktree gone)
 	LastError string `json:"last_error,omitempty"`
 }
 
@@ -67,7 +76,24 @@ var (
 	lastErrorFn       = readLastError
 	isStoppedFn       = config.IsStopped
 	workerReachableFn = defaultWorkerReachable
+	dirExistsFn       = defaultDirExists
 )
+
+// defaultDirExists reports whether a worktree checkout is still on disk. Asked
+// once per worktree unit per tick, and only for worktree units, so an install
+// with none pays nothing.
+//
+// Only a path that is definitively absent counts as gone. Any other stat error
+// (an unreadable parent, a network mount that dropped, a disk not mounted yet)
+// says nothing about the checkout, and calling it an orphan hands the unit to
+// the pruner, which deletes its unit files.
+func defaultDirExists(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return st.IsDir()
+}
 
 // defaultWorkerReachable probes a running worker that declares a health block.
 // probed is false (keep process-only liveness) when the site has no resolvable
@@ -188,7 +214,9 @@ func Enrich(in []UnhealthyWorker) []UnhealthyWorker {
 		}
 		// A cleanly-stopped worker has no error — its last journal line is just
 		// the "Stopped …" / CPU-summary message, which reads as a false error.
-		if in[i].State == "expected-but-stopped" {
+		// An orphan is pruned rather than shown, so its journal is a fork spent
+		// on a line nobody reads.
+		if in[i].State == "expected-but-stopped" || in[i].State == StateOrphaned {
 			continue
 		}
 		// An unreachable worker's process is still active, so its last journal line
@@ -287,8 +315,10 @@ func Detect() ([]UnhealthyWorker, error) {
 			continue
 		}
 		// Only these states can be unhealthy; skip the rest before the
-		// site-name resolution below so the hot path stays cheap.
-		if state != "failed" && state != "inactive" && state != "active" {
+		// site-name resolution below so the hot path stays cheap. "activating"
+		// earns its place only because a unit whose WorkingDirectory is gone
+		// restarts forever without ever settling anywhere else.
+		if state != "failed" && state != "inactive" && state != "active" && state != "activating" {
 			continue
 		}
 		body := strings.TrimPrefix(unit, "lerd-")
@@ -306,6 +336,27 @@ func Detect() ([]UnhealthyWorker, error) {
 		if suspended[site][worker] {
 			continue // intentionally idle-suspended, not a failure
 		}
+		// A per-worktree unit pins WorkingDirectory to its checkout, so once that
+		// checkout is gone the unit fails at CHDIR before the command ever runs.
+		// Decided on the checkout rather than the unit state, because such a unit
+		// never settles into a failure state to be caught: it flaps between
+		// activating and active for as long as the machine is up, which is how
+		// one reaches four thousand restarts without anything noticing.
+		if probePath != "" && !dirExistsFn(probePath) {
+			out = append(out, UnhealthyWorker{
+				Site:   site,
+				Worker: worker,
+				Unit:   strings.TrimSuffix(unit, ".service"),
+				State:  StateOrphaned,
+			})
+			continue
+		}
+		// Anything still on its way up is not yet a problem; the orphan case above
+		// is the only reason this state is looked at at all.
+		if state == "activating" {
+			continue
+		}
+
 		var detected string
 		switch state {
 		case "failed":
@@ -347,6 +398,21 @@ func Detect() ([]UnhealthyWorker, error) {
 	return out, nil
 }
 
+// Healable drops the workers a heal cannot act on. An orphan has no checkout to
+// run in, so starting it would fail and pruning owns it instead. Every surface
+// that offers a heal filters through here, so the banner, the notification and
+// the heal itself all describe the same set.
+func Healable(ws []UnhealthyWorker) []UnhealthyWorker {
+	out := make([]UnhealthyWorker, 0, len(ws))
+	for _, w := range ws {
+		if w.State == StateOrphaned {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
 // HealUnit clears any failed state and starts the named worker unit. The
 // single "fix this" primitive — every surface (CLI / UI / TUI / MCP) goes
 // through here. Crucially, it does NOT touch .lerd.yaml or rewrite the
@@ -372,7 +438,7 @@ func HealAll(emit func(Event)) (Result, error) {
 		return Result{}, err
 	}
 	report := Result{}
-	for _, u := range unhealthy {
+	for _, u := range Healable(unhealthy) {
 		emit(Event{Phase: "starting", Site: u.Site, Unit: u.Unit})
 		// An unreachable worker's process is still up, so a plain start is a no-op;
 		// restart to rebind its server. Failed/stopped workers just start.

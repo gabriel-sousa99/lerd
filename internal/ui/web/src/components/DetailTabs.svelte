@@ -4,6 +4,9 @@
     label: string;
     hidden?: boolean;
     count?: number;
+    // Drawn dimmer than its siblings: the tab is worth keeping but what it
+    // shows is no longer live, like a stopped worker's journal.
+    muted?: boolean;
   }
 </script>
 
@@ -32,7 +35,9 @@
             onclick={() => onchange(t.id)}
             class="shrink-0 pb-1 text-xs font-medium transition-colors border-b-2 flex items-center gap-1 {active === t.id
               ? 'border-lerd-red text-lerd-red'
-              : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
+              : t.muted
+                ? 'border-transparent text-gray-400 dark:text-gray-600 hover:text-gray-600 dark:hover:text-gray-400'
+                : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
           >{t.label}{#if t.count}<span class="text-[10px] tabular-nums rounded-full px-1.5 py-px bg-gray-200/70 dark:bg-white/10 text-gray-600 dark:text-gray-300">{t.count}</span>{/if}</button>
         {/each}
       {/if}

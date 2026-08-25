@@ -4,6 +4,7 @@ package envfile
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,6 +41,13 @@ func ApplyUpdates(path string, updates map[string]string) error {
 	original, err := os.ReadFile(path)
 	if err != nil {
 		return err
+	}
+	// This writer appends `key=value` lines, which is nonsense in a PHP settings
+	// file: the file stops parsing and every request to the site fails. A caller
+	// that knows the format goes through ApplyUpdatesIn; one that resolved a path
+	// without carrying the format is stopped here rather than breaking the site.
+	if isPHPSource(original) {
+		return fmt.Errorf("%s holds PHP, not dotenv lines; write it through ApplyUpdatesIn with the framework's format", filepath.Base(path))
 	}
 
 	var lines []string
@@ -108,7 +116,7 @@ func ApplyUpdates(path string, updates map[string]string) error {
 	if out == string(original) {
 		return nil
 	}
-	return os.WriteFile(path, []byte(out), info.Mode().Perm())
+	return writeFile(path, []byte(out), info.Mode().Perm())
 }
 
 // validateEnvKey rejects keys that would corrupt .env structure if written
@@ -274,15 +282,24 @@ func ReadKeys(path string) ([]string, error) {
 	return keys, nil
 }
 
-// UpdateAppURL sets APP_URL in the project's .env to scheme://domain.
-// Silently does nothing if no .env exists.
-func UpdateAppURL(projectPath, scheme, domain string) error {
-	envPath := filepath.Join(projectPath, ".env")
+// UpdateAppURL sets the framework's URL key in envFile to scheme://domain.
+// envFile and urlKey come from the framework definition (config.URLTargetFor),
+// so Symfony's DEFAULT_URI in .env.local is written the same way Laravel's
+// APP_URL in .env is. An empty urlKey means the framework holds its base URL
+// somewhere other than the env file. Silently does nothing if the file is absent.
+func UpdateAppURL(projectPath, envFile, urlKey, scheme, domain string) error {
+	if urlKey == "" {
+		return nil
+	}
+	if envFile == "" {
+		envFile = ".env"
+	}
+	envPath := filepath.Join(projectPath, envFile)
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
 		return nil
 	}
 	return ApplyUpdates(envPath, map[string]string{
-		"APP_URL": scheme + "://" + domain,
+		urlKey: scheme + "://" + domain,
 	})
 }
 
@@ -307,14 +324,19 @@ var DomainScopedKeys = []string{
 	"REVERB_PORT",
 }
 
-// SyncPrimaryDomain updates the URL/domain-scoped keys in the project's .env
-// to reflect the current primary domain and TLS state. Only keys that already
-// exist in the .env are touched — keys outside DomainScopedKeys (DB_*, REDIS_*,
-// MAIL_*, credentials, etc.) are never modified, so the automatic flows that
-// run when a project is uploaded to lerd preserve everything the developer
-// already configured. Silently does nothing if no .env exists.
-func SyncPrimaryDomain(projectPath, domain string, secured bool) error {
-	envPath := filepath.Join(projectPath, ".env")
+// SyncPrimaryDomain updates the framework's URL key and VITE_REVERB_HOST/SCHEME/PORT
+// in the project's env file to reflect the current primary domain and TLS state.
+// envFile and urlKey are the framework's, resolved by config.URLTargetFor.
+// Only keys that already exist in the .env are touched.
+// Silently does nothing if no .env exists.
+func SyncPrimaryDomain(projectPath, envFile, urlKey, domain string, secured bool) error {
+	if urlKey == "" {
+		return nil
+	}
+	if envFile == "" {
+		envFile = ".env"
+	}
+	envPath := filepath.Join(projectPath, envFile)
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
 		return nil
 	}
@@ -356,6 +378,9 @@ func SyncPrimaryDomain(projectPath, domain string, secured bool) error {
 	}
 
 	updates := map[string]string{}
+	if urlKey != "" && present[urlKey] {
+		updates[urlKey] = url
+	}
 	for _, k := range DomainScopedKeys {
 		if present[k] {
 			updates[k] = derived[k]
@@ -444,4 +469,14 @@ func RevertFrontendAPIBase(projectPath string) error {
 		return nil
 	}
 	return ApplyUpdates(envPath, updates)
+}
+
+// isPHPSource reports whether a file's contents open with a PHP tag, the one
+// shape the dotenv writer must never append to. A byte-order mark counts as
+// leading whitespace: editors leave them behind and they do not make a settings
+// file any less PHP.
+func isPHPSource(content []byte) bool {
+	body := bytes.TrimPrefix(content, []byte{0xEF, 0xBB, 0xBF})
+	body = bytes.TrimLeft(body, " \t\r\n")
+	return bytes.HasPrefix(body, []byte("<?php")) || bytes.HasPrefix(body, []byte("<?="))
 }

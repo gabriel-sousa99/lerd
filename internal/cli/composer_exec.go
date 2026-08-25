@@ -39,11 +39,7 @@ func runComposer(args []string) error {
 
 	// Sync regardless of composer exit status, so a `composer global remove`
 	// that fails partway still cleans up wrappers whose source bin is gone.
-	lerdBin, _ := os.Executable()
-	if lerdBin == "" {
-		home, _ := os.UserHomeDir()
-		lerdBin = filepath.Join(home, ".local", "bin", "lerd")
-	}
+	lerdBin := config.LerdBinary()
 	if syncErr := syncComposerGlobalBins(composerGlobalBinDir(), config.BinDir(), lerdBin); syncErr != nil {
 		fmt.Fprintf(os.Stderr, "lerd: warning: failed to sync composer global wrappers: %v\n", syncErr)
 	}

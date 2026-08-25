@@ -76,6 +76,25 @@ func mkTestDataDir(t *testing.T, name string, contents string) string {
 	return dir
 }
 
+// mkTestServiceFiles seeds a service's rendered preset files the way
+// MaterializeServiceFilesChanged would, hash sidecar included.
+func mkTestServiceFiles(t *testing.T, name string) string {
+	t.Helper()
+	dir := config.ServiceFilesDir(name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	for file, body := range map[string]string{
+		"pgpass":        "lerd-postgres:5432:*:postgres:lerd\n",
+		"pgpass.sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", file, err)
+		}
+	}
+	return dir
+}
+
 func TestRemoveService_NoData_PreservesDataDir(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmp)
@@ -193,6 +212,40 @@ func TestRemoveService_WithoutData_KeepsTuningOverride(t *testing.T) {
 	// that state.
 	if _, err := os.Stat(tuningPath); err != nil {
 		t.Errorf("tuning override must survive RemoveData=false, stat err = %v", err)
+	}
+}
+
+// The rendered preset files are derived from the definition being deleted, so
+// they go with it whether or not the data does. Left behind, the next install
+// of the same preset inherits them, including one podman re-owned through :U
+// that this user can no longer read.
+func TestRemoveService_ClearsRenderedPresetFiles(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	stubPodmanRemove(t)
+
+	filesDir := mkTestServiceFiles(t, "pgadmin")
+
+	if err := RemoveService("pgadmin", RemoveOptions{RemoveData: false}, func(PhaseEvent) {}); err != nil {
+		t.Fatalf("RemoveService: %v", err)
+	}
+
+	if _, err := os.Stat(filesDir); !os.IsNotExist(err) {
+		t.Errorf("rendered preset files should be gone, stat err = %v", err)
+	}
+}
+
+// A service that never rendered any preset file has no directory to clear, and
+// that is not a failure.
+func TestRemoveService_NoRenderedFilesSucceeds(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	stubPodmanRemove(t)
+
+	if err := RemoveService("redis", RemoveOptions{}, func(PhaseEvent) {}); err != nil {
+		t.Fatalf("RemoveService: %v", err)
 	}
 }
 

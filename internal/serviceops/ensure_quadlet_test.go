@@ -214,6 +214,65 @@ func TestEnsureCustomServiceQuadlet_materialisesBrowserHostsForShareHosts(t *tes
 	}
 }
 
+// TestEnsureCustomServiceQuadlet_reshiftsRecordedPortAnotherServiceHolds: a
+// recorded published port sticks, except when another installed service already
+// publishes it. `service remove` keeps the removed service's config entry, so its
+// port can be handed on and then reclaimed by a reinstall; publishing it anyway
+// would put two units on one port at boot.
+func TestEnsureCustomServiceQuadlet_reshiftsRecordedPortAnotherServiceHolds(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
+
+	orig := podman.DaemonReloadFn
+	t.Cleanup(func() { podman.DaemonReloadFn = orig })
+	podman.DaemonReloadFn = func() error { return nil }
+	origStatus := ensureUnitStatus
+	t.Cleanup(func() { ensureUnitStatus = origStatus })
+	ensureUnitStatus = func(string) (string, error) { return "inactive", nil }
+
+	familyPort, handedOn, free := freeLoopbackPort(t), freeLoopbackPort(t), freeLoopbackPort(t)
+	holder := &config.CustomService{
+		Name:  "holder",
+		Image: "example/x:1",
+		Ports: []string{fmt.Sprintf("%d:3306", handedOn)},
+	}
+	if err := config.SaveCustomService(holder); err != nil {
+		t.Fatalf("SaveCustomService: %v", err)
+	}
+	if err := persistPublishedPort("comeback", handedOn); err != nil {
+		t.Fatalf("persistPublishedPort: %v", err)
+	}
+
+	svc := &config.CustomService{
+		Name:  "comeback",
+		Image: "example/x:1",
+		Ports: []string{fmt.Sprintf("%d:3306", familyPort)},
+	}
+	if err := EnsureCustomServiceQuadlet(svc); err != nil {
+		t.Fatalf("EnsureCustomServiceQuadlet: %v", err)
+	}
+	if got := config.ServicePublishedPort("comeback"); got == handedOn {
+		t.Errorf("kept published port %d though holder already publishes it", got)
+	}
+	if got := podman.PrimaryHostPort(svc.Ports); got == handedOn {
+		t.Errorf("rendered mapping publishes %d, the port holder already binds", got)
+	}
+
+	// A recorded port no other service holds is left exactly where it is.
+	if err := persistPublishedPort("comeback", free); err != nil {
+		t.Fatalf("persistPublishedPort: %v", err)
+	}
+	svc.Ports = []string{fmt.Sprintf("%d:3306", familyPort)}
+	if err := EnsureCustomServiceQuadlet(svc); err != nil {
+		t.Fatalf("EnsureCustomServiceQuadlet: %v", err)
+	}
+	if got := config.ServicePublishedPort("comeback"); got != free {
+		t.Errorf("published port = %d, want the recorded %d to stick", got, free)
+	}
+}
+
 // TestEnsureCustomServiceQuadlet_portShiftNoticeAvoidsStdout: when the port guard
 // shifts a service off a busy port it must not write its notice to os.Stdout.
 // EnsureCustomServiceQuadlet is called in-process by the MCP stdio server, which

@@ -77,6 +77,8 @@ export interface Site {
     db_database?: string;
     lan_port?: number;
     lan_share_url?: string;
+    public_shared?: boolean;
+    public_share_url?: string;
     tunnel_url?: string;
     tunnel_tool?: string;
     tunnel_external?: boolean;
@@ -106,6 +108,8 @@ export interface Site {
   reverb_failing?: boolean;
   lan_port?: number;
   lan_share_url?: string;
+  public_shared?: boolean;
+  public_share_url?: string;
   tunnel_url?: string;
   tunnel_tool?: string;
   tunnel_external?: boolean;
@@ -118,13 +122,24 @@ export interface Site {
 export const sites = writable<Site[]>([]);
 export const sitesLoaded = writable<boolean>(false);
 
-export async function loadSites() {
+// Nothing polls the sites list on a timer, so a load that fails before the
+// first success leaves the dashboard empty until some unrelated mutation
+// publishes a sites payload over the websocket, which on an idle machine can
+// be minutes. Retry until we have a list to show, backing off as we go.
+const sitesRetryDelays = [500, 1500, 4000];
+
+export async function loadSites(attempt = 0): Promise<boolean> {
   try {
     const list = await apiJson<Site[]>('/api/sites');
     sites.set(Array.isArray(list) ? list : []);
     sitesLoaded.set(true);
+    return true;
   } catch {
-    /* keep previous */
+    // A later failure keeps whatever is already on screen; only the cold case
+    // is worth chasing, since there the alternative is showing nothing.
+    if (get(sitesLoaded) || attempt >= sitesRetryDelays.length) return false;
+    setTimeout(() => loadSites(attempt + 1), sitesRetryDelays[attempt]);
+    return false;
   }
 }
 
@@ -208,6 +223,17 @@ export function siteHasLogSources(s: Site): boolean {
       (s.framework_workers || []).some((w) => w.running) ||
       siteWorkerFailing(s)
   );
+}
+
+export type SiteDotColor = 'green' | 'amber' | 'gray';
+
+// The state a site is actually in, in the colors the dashboard tile already
+// gives it: serving, paused, or stopped. An unknown domain reads as stopped
+// rather than inventing a state for a site the store has never seen.
+export function siteDotColor(s: Site | undefined): SiteDotColor {
+  if (!s) return 'gray';
+  if (s.paused) return 'amber';
+  return s.fpm_running ? 'green' : 'gray';
 }
 
 export type WorkerDotColor = 'amber' | 'violet' | 'emerald' | 'sky' | 'indigo';
@@ -630,6 +656,8 @@ export interface ShareToolsInfo {
   base_domain_answered?: boolean;
   // Whether an ngrok token is stored. The token itself never leaves the host.
   ngrok_token_set?: boolean;
+  // Domain a public (reverse-proxy) share is served under, as <site>.<base>.
+  public_base_domain?: string;
 }
 export const loadShareTools = () => apiJson<ShareToolsInfo>('/api/share-tools');
 export const startTunnel = (s: Site, tool: string = '', branch: string = '', domain: string = '') => {
@@ -677,6 +705,28 @@ export async function saveShareNgrokToken(
 }
 export const stopTunnel = (s: Site, branch: string = '') =>
   postAction(site(s.domain, 'tunnel:stop') + (branch ? `?branch=${encodeURIComponent(branch)}` : ''));
+// Starts or stops the public (reverse-proxy) share for the site or a worktree.
+export const togglePublicShare = (s: Site, branch: string = '') => {
+  const wt = branch ? (s.worktrees || []).find((w) => w.branch === branch) : undefined;
+  const isOn = branch ? Boolean(wt?.public_shared) : Boolean(s.public_shared);
+  const action = isOn ? 'public:unshare' : 'public:share';
+  const qs = branch ? `?branch=${encodeURIComponent(branch)}` : '';
+  return postAction(site(s.domain, action) + qs);
+};
+// Sets (or clears, when empty) the public-share base domain.
+export async function savePublicBase(base: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch('/api/share-tools', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_base_domain: base })
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
+  }
+}
 export const toggleQueue = (s: Site) =>
   postAction(site(s.domain, s.queue_running ? 'queue:stop' : 'queue:start'));
 export const toggleHorizon = (s: Site) =>
@@ -741,6 +791,69 @@ export async function runTinker(
       mode: 'php',
       error: e instanceof Error ? e.message : m.common_requestFailed()
     };
+  }
+}
+
+export type TinkerSnippet = {
+  name: string;
+  label: string;
+  source: 'project' | 'tinkerwell' | 'global';
+  content: string;
+};
+
+export async function fetchTinkerSnippets(
+  domain: string,
+  branch: string = ''
+): Promise<TinkerSnippet[]> {
+  try {
+    const res = await apiFetch(tinkerURL(domain, 'tinker:snippets', branch));
+    if (!res.ok) return [];
+    return (await res.json()) as TinkerSnippet[];
+  } catch {
+    return [];
+  }
+}
+
+export type TinkerSnippetsResult = {
+  ok: boolean;
+  snippets?: TinkerSnippet[];
+  error?: string;
+};
+
+// Save and delete answer the refreshed snippet list so the picker can update
+// without a second round trip.
+export async function saveTinkerSnippet(
+  domain: string,
+  snippet: { name: string; source: 'project' | 'global'; content: string },
+  branch: string = ''
+): Promise<TinkerSnippetsResult> {
+  try {
+    const res = await apiFetch(tinkerURL(domain, 'tinker:snippets', branch), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(snippet)
+    });
+    if (!res.ok) return { ok: false, error: (await res.text()).trim() };
+    return { ok: true, snippets: (await res.json()) as TinkerSnippet[] };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
+  }
+}
+
+export async function deleteTinkerSnippet(
+  domain: string,
+  snippet: { name: string; source: string },
+  branch: string = ''
+): Promise<TinkerSnippetsResult> {
+  const base = tinkerURL(domain, 'tinker:snippets', branch);
+  const sep = base.includes('?') ? '&' : '?';
+  const url = `${base}${sep}source=${encodeURIComponent(snippet.source)}&name=${encodeURIComponent(snippet.name)}`;
+  try {
+    const res = await apiFetch(url, { method: 'DELETE' });
+    if (!res.ok) return { ok: false, error: (await res.text()).trim() };
+    return { ok: true, snippets: (await res.json()) as TinkerSnippet[] };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,8 @@ type setupStep struct {
 func NewSetupCmd() *cobra.Command {
 	var allSteps bool
 	var skipOpen bool
+	var listSteps bool
+	var namedSteps []string
 
 	cmd := &cobra.Command{
 		Use:   "setup",
@@ -66,15 +69,119 @@ Additional steps for Laravel projects:
   13. reverb:start           — start Reverb WebSocket server (if configured)
 
 Use --all to skip all selectors and run everything (useful in CI). In --all
-mode with no .lerd.yaml, site registration falls back to auto-detection.`,
+mode with no .lerd.yaml, site registration falls back to auto-detection.
+
+--list-steps prints the plan for this directory as JSON without running or
+configuring anything, and --step runs the named steps and nothing else, so a
+caller with no terminal can show the same list and work through it.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if listSteps {
+				return printSetupStepPlan(cwd, skipOpen)
+			}
+			if len(namedSteps) > 0 {
+				return runNamedSetupSteps(cwd, namedSteps, skipOpen)
+			}
 			return runSetup(allSteps, skipOpen)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&allSteps, "all", "a", false, "Select all steps without prompting (for CI/automation)")
 	cmd.Flags().BoolVar(&skipOpen, "skip-open", false, "Do not open the site in the browser at the end")
+	cmd.Flags().BoolVar(&listSteps, "list-steps", false, "Print the steps this directory would run as JSON and exit")
+	cmd.Flags().StringArrayVar(&namedSteps, "step", nil, "Run only this step, by its label; repeatable")
 	return cmd
+}
+
+// SetupStepInfo is one step as a caller outside setup sees it: the label it
+// selects by, and whether the selector would pre-tick it.
+type SetupStepInfo struct {
+	Label    string `json:"label"`
+	Enabled  bool   `json:"enabled"`
+	Optional bool   `json:"optional"`
+}
+
+type setupStepPlanDoc struct {
+	Steps []SetupStepInfo `json:"steps"`
+}
+
+// SetupStepPlanFor lists the steps setup offers for a directory without running
+// or configuring anything, so the dashboard can show what the terminal selector
+// would show and then run it a step at a time.
+func SetupStepPlanFor(dir string, skipOpen bool) []SetupStepInfo {
+	return setupStepPlan(planSetupSteps(dir, skipOpen)).Steps
+}
+
+// setupStepPlan describes a plan without its run funcs, for printing.
+func setupStepPlan(steps []setupStep) setupStepPlanDoc {
+	doc := setupStepPlanDoc{Steps: make([]SetupStepInfo, 0, len(steps))}
+	for _, s := range steps {
+		doc.Steps = append(doc.Steps, SetupStepInfo{Label: s.label, Enabled: s.enabled, Optional: s.optional})
+	}
+	return doc
+}
+
+// printSetupStepPlan writes the plan for cwd as JSON. Enumerating configures
+// nothing: no wizard, no .lerd.yaml applied, no step run, so it is safe to call
+// on a directory the user is only looking at.
+func printSetupStepPlan(cwd string, skipOpen bool) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(setupStepPlan(planSetupSteps(cwd, skipOpen)))
+}
+
+// selectSetupSteps picks the named steps out of a plan, in plan order rather
+// than the order the names arrived in, since the steps depend on each other
+// (the asset build needs the install that precedes it). A name the plan does
+// not offer is an error naming what it does offer, so a caller working from a
+// stale list is told rather than silently running less than it asked for.
+func selectSetupSteps(steps []setupStep, labels []string) (selected []setupStep, skipped []string) {
+	wanted := make(map[string]bool, len(labels))
+	for _, l := range labels {
+		wanted[strings.TrimSpace(l)] = true
+	}
+
+	for _, s := range steps {
+		if wanted[s.label] {
+			selected = append(selected, s)
+			delete(wanted, s.label)
+		}
+	}
+	for l := range wanted {
+		skipped = append(skipped, l)
+	}
+	sort.Strings(skipped)
+	return selected, skipped
+}
+
+// runNamedSetupSteps runs exactly the steps it is given. The configure phase is
+// skipped: naming steps means the caller has already taken the project through
+// the questions and the link, and re-running it would repeat that work on every
+// invocation. Output is left alone rather than captured, so a caller streaming
+// this sees the step's progress as it happens.
+func runNamedSetupSteps(cwd string, labels []string, skipOpen bool) error {
+	// The plan is re-derived per invocation and its steps are gated on live state:
+	// securing the site, a worker scan, a file the previous step wrote. A label
+	// the plan no longer offers is work that no longer needs doing, so it is
+	// reported and passed over rather than failing the caller's whole queue.
+	selected, skipped := selectSetupSteps(planSetupSteps(cwd, skipOpen), labels)
+	for _, label := range skipped {
+		fmt.Printf("→ %s (nothing left to do)\n", label)
+	}
+	for _, s := range selected {
+		fmt.Printf("→ %s\n", s.label)
+		if err := s.run(); err != nil {
+			if s.optional {
+				feedback.Warn("%s: %v", s.label, err)
+				continue
+			}
+			return fmt.Errorf("%s: %w", s.label, err)
+		}
+	}
+	return nil
 }
 
 // siteServedByPHPFPM reports whether a site has a PHP-FPM container an
@@ -131,6 +238,88 @@ func runSetup(allSteps, skipOpen bool) error {
 		feedback.Warn("%v", err)
 	}
 
+	steps := planSetupSteps(cwd, skipOpen)
+
+	// Determine which steps to run.
+	var selected []string
+	if allSteps {
+		feedback.Begin()
+		for _, s := range steps {
+			selected = append(selected, s.label)
+		}
+	} else {
+		options := make([]string, len(steps))
+		defaults := []string{}
+		for i, s := range steps {
+			options[i] = s.label
+			if s.enabled {
+				defaults = append(defaults, s.label)
+			}
+		}
+
+		selected = defaults // pre-select enabled steps
+		feedback.Begin()
+		if err := huh.NewForm(
+			huh.NewGroup(
+				newMultiSelect("Setup steps", "", options, &selected),
+			),
+		).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin)).Run(); err != nil {
+			return err
+		}
+	}
+
+	if len(selected) == 0 {
+		fmt.Println("No steps selected. Nothing to do.")
+		return nil
+	}
+
+	// Build a set for O(1) lookup.
+	selectedSet := make(map[string]bool, len(selected))
+	for _, s := range selected {
+		selectedSet[s] = true
+	}
+
+	// Execute steps in order. Each step's own output is captured behind a single
+	// feedback line and only surfaced when the step fails, matching the link
+	// flow's "action … ✓" styling. The separating blank line was already printed
+	// before the step selector (or the --all branch below).
+	start := time.Now()
+	for _, s := range steps {
+		if !selectedSet[s.label] {
+			continue
+		}
+		// Animate the spinner on the real stdout (StartOn) while runCapturingStdout
+		// swaps the global os.Stdout to capture the step's own verbose output. The
+		// spinner targets the fixed writer, so the swap can't leak frames into the
+		// captured buffer and long steps still show live progress.
+		prev := os.Stdout
+		step := feedback.StartOn(prev, s.label)
+		out, err := runCapturingStdout(s.run)
+		if err != nil {
+			if s.optional {
+				step.Info("skipped")
+				feedback.Warn("%s: %v", s.label, err)
+				continue
+			}
+			step.Fail(err)
+			_, _ = os.Stdout.Write(out)
+			if !promptContinue() {
+				return fmt.Errorf("setup aborted after %q failed", s.label)
+			}
+			continue
+		}
+		step.OK("")
+	}
+
+	feedback.Success("setup complete", time.Since(start))
+	feedback.Begin()
+	return nil
+}
+
+// planSetupSteps builds the steps setup offers for a directory, without running
+// or configuring anything. Enumeration and execution share it, so a step that
+// was listed is exactly the step that runs.
+func planSetupSteps(cwd string, skipOpen bool) []setupStep {
 	site, _ := config.FindSiteByPath(cwd)
 	// Worktrees aren't registered as sites; fall back to the parent so
 	// setup steps (workers, framework cmds) still apply against cwd.
@@ -448,83 +637,7 @@ func runSetup(allSteps, skipOpen bool) error {
 		})
 	}
 
-	// Determine which steps to run.
-	var selected []string
-	if allSteps {
-		feedback.Begin()
-		for _, s := range steps {
-			selected = append(selected, s.label)
-		}
-	} else {
-		options := make([]string, len(steps))
-		defaults := []string{}
-		for i, s := range steps {
-			options[i] = s.label
-			if s.enabled {
-				defaults = append(defaults, s.label)
-			}
-		}
-
-		selected = defaults // pre-select enabled steps
-		feedback.Begin()
-		if err := huh.NewForm(
-			huh.NewGroup(
-				huh.NewMultiSelect[string]().
-					Title("Setup steps").
-					Options(huh.NewOptions(options...)...).
-					Value(&selected),
-			),
-		).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin)).Run(); err != nil {
-			return err
-		}
-	}
-
-	if len(selected) == 0 {
-		fmt.Println("No steps selected. Nothing to do.")
-		return nil
-	}
-
-	// Build a set for O(1) lookup.
-	selectedSet := make(map[string]bool, len(selected))
-	for _, s := range selected {
-		selectedSet[s] = true
-	}
-
-	// Execute steps in order. Each step's own output is captured behind a single
-	// feedback line and only surfaced when the step fails, matching the link
-	// flow's "action … ✓" styling. The separating blank line was already printed
-	// before the step selector (or the --all branch below).
-	start := time.Now()
-	for _, s := range steps {
-		if !selectedSet[s.label] {
-			continue
-		}
-		// Animate the spinner on the real stdout (StartOn) while runCapturingStdout
-		// swaps the global os.Stdout to capture the step's own verbose output. The
-		// spinner targets the fixed writer, so the swap can't leak frames into the
-		// captured buffer and long steps still show live progress.
-		prev := os.Stdout
-		step := feedback.StartOn(prev, s.label)
-		out, err := runCapturingStdout(s.run)
-		if err != nil {
-			if s.optional {
-				step.Info("skipped")
-				feedback.Warn("%s: %v", s.label, err)
-				continue
-			}
-			step.Fail(err)
-			_, _ = os.Stdout.Write(out)
-			if !promptContinue() {
-				return fmt.Errorf("setup aborted after %q failed", s.label)
-			}
-			continue
-		}
-		step.OK("")
-	}
-
-	feedback.Success("setup complete", time.Since(start))
-	feedback.Begin()
-	return nil
+	return steps
 }
 
 // detectBuildScript reads package.json and returns the best build script name.

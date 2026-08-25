@@ -2,6 +2,7 @@ import { render } from '@testing-library/svelte';
 import { describe, it, expect } from 'vitest';
 import Harness from './SiteHeader.test.svelte';
 import type { Site } from '$stores/sites';
+import { frameworkMarks } from '$stores/frameworkMarks';
 
 const site = {
   domain: 'app.test',
@@ -75,5 +76,28 @@ describe('SiteHeader', () => {
     const { getByText } = render(Harness, { props: { site, withTabs: false } });
 
     expect(getByText('/home/u/Code/app')).toBeInTheDocument();
+  });
+
+  // The framework pill wears its own brand colour, so two sites on different
+  // frameworks are told apart by the badge rather than only by its text.
+  it('paints the framework badge in the framework brand colour', () => {
+    frameworkMarks.set({ laravel: { svg: '<svg></svg>', color: '#ff2d20' } });
+    const { getByText } = render(Harness, {
+      props: { site: { ...site, framework: 'laravel', framework_label: 'Laravel' } as unknown as Site }
+    });
+
+    const badge = getByText(/Laravel/).closest('span[class*="rounded-full"]') as HTMLElement;
+    expect(badge.className).toContain('mark-tint');
+    expect(badge.getAttribute('style')).toContain('--mark-tint');
+  });
+
+  it('leaves the framework badge its default tone when the framework declares no colour', () => {
+    frameworkMarks.set({});
+    const { getByText } = render(Harness, {
+      props: { site: { ...site, framework: 'slim', framework_label: 'Slim' } as unknown as Site }
+    });
+
+    const badge = getByText(/Slim/).closest('span[class*="rounded-full"]') as HTMLElement;
+    expect(badge.className).toContain('text-lerd-red');
   });
 });

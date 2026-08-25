@@ -311,3 +311,166 @@ func TestRemoveInstalledBinaries_leavesUnrelatedNeighbours(t *testing.T) {
 		t.Errorf("removed an unrelated neighbour %s: %v", other, err)
 	}
 }
+
+// ── removeDataDir ────────────────────────────────────────────────────────────
+
+// undeletableDir builds a tree os.RemoveAll cannot clear: the inner directory
+// has no write bit, which is what a subuid-owned service tree looks like to us.
+func undeletableDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "data")
+	sub := filepath.Join(dir, "redis")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "dump.rdb"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0755) })
+	return dir
+}
+
+// fakePodman puts a podman on PATH standing in for the user namespace. It is
+// handed the one directory the test built and refuses anything else, so a
+// mistake here can never widen into a path the test does not own.
+func fakePodman(t *testing.T, owned, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	guard := "#!/bin/sh\ncase \"$4\" in\n  " + owned + ") ;;\n  *) echo \"refusing $4\" >&2; exit 2 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte(guard+script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestRemoveDataDir_removesAPlainTree(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(filepath.Join(dir, "mysql"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if kept := removeDataDir(dir); kept != "" {
+		t.Errorf("removeDataDir = %q, want an empty string", kept)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("%s still present", dir)
+	}
+}
+
+func TestRemoveDataDir_fallsBackToPodmanUnshare(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes the tree without the fallback")
+	}
+	dir := undeletableDir(t)
+	fakePodman(t, dir, "chmod -R u+w \"$4\" && rm -rf \"$4\"\n")
+
+	if kept := removeDataDir(dir); kept != "" {
+		t.Errorf("removeDataDir = %q, want an empty string", kept)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("%s survived the podman unshare fallback", dir)
+	}
+}
+
+func TestRemoveDataDir_reportsTheDirectoryWhenTheFallbackFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes the tree without the fallback")
+	}
+	dir := undeletableDir(t)
+	fakePodman(t, dir, "exit 1\n")
+
+	if kept := removeDataDir(dir); kept != dir {
+		t.Errorf("removeDataDir = %q, want %q so the uninstall can say so", kept, dir)
+	}
+}
+
+// ── removeScriptInstalledBinaries ─────────────────────────────────────────────
+
+// The package-managed guard exists so lerd never deletes a file out of a Cellar
+// or an rpm's file list. It said nothing about ~/.local/bin, which no package
+// manager owns, so a machine carrying both installs kept a script-installed
+// lerd on PATH pointing at a data directory the same run had just deleted.
+func TestRemoveScriptInstalledBinaries_clearsTheInstallDirPair(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	lerd := filepath.Join(binDir, "lerd")
+	tray := filepath.Join(binDir, "lerd-tray")
+	mkbin(t, lerd)
+	mkbin(t, tray)
+
+	removeScriptInstalledBinaries("/usr/bin/lerd")
+
+	for _, p := range []string{lerd, tray} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived, so a broken lerd stays on PATH", p)
+		}
+	}
+}
+
+// Nothing here may reach the binary the package manager is responsible for,
+// which is the whole point of the guard it runs under.
+func TestRemoveScriptInstalledBinaries_neverTouchesThePackagedBinary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	self := filepath.Join(binDir, "lerd")
+	mkbin(t, self)
+
+	removeScriptInstalledBinaries(self)
+
+	if _, err := os.Stat(self); err != nil {
+		t.Error("the running binary is the package manager's to remove, not ours")
+	}
+}
+
+// ── removeServiceUnits ───────────────────────────────────────────────────────
+
+// unitListMgr answers the unit listings the removal walks and records nothing
+// else; the fake it embeds covers the rest of the interface.
+type unitListMgr struct {
+	*fakeServiceMgr
+	containers []string
+	services   []string
+	timers     []string
+}
+
+func (m *unitListMgr) ListContainerUnits(string) []string { return m.containers }
+func (m *unitListMgr) ListServiceUnits(string) []string   { return m.services }
+func (m *unitListMgr) ListTimerUnits(string) []string     { return m.timers }
+
+// A unit that is already failed when its file goes stays behind as failed and
+// not-found, so an uninstalled lerd went on being listed by systemctl on a
+// machine that no longer had one. The installer script has reset them all
+// along; this path deleted the files, reloaded and stopped there. It does not
+// cover a unit that fails after the uninstall has exited, which is a separate
+// problem in how long the stop waits.
+func TestRemoveServiceUnits_resetsEveryUnitItRemoved(t *testing.T) {
+	swapMgr(t, &unitListMgr{
+		fakeServiceMgr: &fakeServiceMgr{},
+		containers:     []string{"lerd-mysql", "lerd-nginx"},
+		services:       []string{"lerd-mysql", "lerd-ui"},
+		timers:         []string{"lerd-backup.timer"},
+	})
+
+	var reset []string
+	orig := resetFailedUnit
+	resetFailedUnit = func(name string) { reset = append(reset, name) }
+	t.Cleanup(func() { resetFailedUnit = orig })
+
+	removeServiceUnits()
+
+	want := []string{"lerd-mysql", "lerd-nginx", "lerd-ui", "lerd-backup"}
+	if !equalStrings(reset, want) {
+		t.Errorf("reset %v, want %v", reset, want)
+	}
+}

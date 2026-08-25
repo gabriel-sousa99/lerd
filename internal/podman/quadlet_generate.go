@@ -32,15 +32,16 @@ func GenerateCustomQuadlet(svc *config.CustomService) string {
 	b.WriteString("Network=lerd\n")
 	// Bound podman's graceful-stop window so images with slow shutdown
 	// sequences (selenium/supervisord, chromium) don't block systemctl stop
-	// for the full 90 s default. Mirrors the --stop-timeout=5 used on macOS.
+	// for the full 90 s default. The service declares its own when the default
+	// would kill it mid-write; see CustomService.StopTimeout.
 	// StopTimeout= in [Container] requires Podman >=5.0; on Ubuntu 24.04's
 	// 4.9.3 the key is unrecognised and quadlet aborts with exit 1, leaving
 	// no service units at all (#299). Fall back to PodmanArgs= which works
 	// on every quadlet-supporting podman.
 	if supportsContainerStopTimeoutKey() {
-		b.WriteString("StopTimeout=5\n")
+		fmt.Fprintf(&b, "StopTimeout=%d\n", svc.StopTimeoutSecs())
 	} else {
-		b.WriteString("PodmanArgs=--stop-timeout=5\n")
+		fmt.Fprintf(&b, "PodmanArgs=--stop-timeout=%d\n", svc.StopTimeoutSecs())
 	}
 
 	// catatonit as PID 1 so SIGTERM reaches the main process. Without
@@ -138,6 +139,11 @@ func GenerateCustomQuadlet(svc *config.CustomService) string {
 
 	b.WriteString("\n[Service]\n")
 	b.WriteString("Restart=always\n")
+	// Outlast the container's own grace. Without this the unit inherits
+	// DefaultTimeoutStopSec, which Arch-family distributions ship at 10s, so
+	// systemd SIGKILLs the stop before podman has spent the window the service
+	// asked for and the container dies mid-write anyway.
+	fmt.Fprintf(&b, "TimeoutStopSec=%d\n", svc.UnitStopTimeoutSecs())
 
 	b.WriteString("\n[Install]\n")
 	b.WriteString("WantedBy=default.target\n")

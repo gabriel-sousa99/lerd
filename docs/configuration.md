@@ -27,11 +27,19 @@ node:
                           # Written at install/switch so lerd-ui and the watcher
                           # (which never load your shell rc) find a custom
                           # $NVM_DIR. Empty falls back to $NVM_DIR or ~/.nvm.
+shims:
+  path_disabled: false    # optional. Set true (or run lerd path:disable) to keep
+                          # lerd's shims dir (~/.local/share/lerd/bin with php,
+                          # composer, node…) off your shell PATH, for typing
+                          # `lerd php` explicitly instead. Honoured by install
+                          # and update, so the rc entry is not re-added. lerd's
+                          # own commands and workers are unaffected.
 share:
   default_tool: cloudflare  # optional. Tunnel tool lerd share uses when no tool
-                            # flag is given: ngrok, cloudflare, expose, serveo or
-                            # localhost-run. Written by lerd share:tool; omitted
-                            # (the default) means auto-detect.
+                            # flag is given: ngrok, cloudflare, expose, serveo,
+                            # localhost-run or pinggy. Written by lerd
+                            # share:tool; omitted (the default) means
+                            # auto-detect.
 nginx:
   http_port: 80
   https_port: 443
@@ -280,6 +288,8 @@ If a service with that name already exists locally and the definitions differ, a
 
 Replace service/mongodb with the version from .lerd.yaml? (y/N)
 ```
+
+Once a service is registered, the registered definition is the one lerd runs. The inline block stays a record of what the project asked for at link time, so an old copy committed months ago cannot put an already-installed service back on the image or the host port it shipped with: `lerd install` regenerates every unit from `~/.config/lerd/services/<name>.yaml`. Use the replace prompt above to move a registered service to a newer inline definition.
 
 ### Custom frameworks
 

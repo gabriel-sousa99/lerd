@@ -168,21 +168,24 @@ func ClampToRange(version, min, max string) string {
 		return version
 	}
 
-	inRange := true
+	// Which bound the version misses decides where it lands when nothing
+	// installed satisfies the range, so track them apart rather than as one
+	// in-range flag.
+	belowMin, aboveMax := false, false
 	if min != "" {
 		mMajor, mMinor := parseMajorMinor(min)
 		if mMajor >= 0 && (major < mMajor || (major == mMajor && minor < mMinor)) {
-			inRange = false
+			belowMin = true
 		}
 	}
 	if max != "" {
 		mMajor, mMinor := parseMajorMinor(max)
 		if mMajor >= 0 && (major > mMajor || (major == mMajor && minor > mMinor)) {
-			inRange = false
+			aboveMax = true
 		}
 	}
 
-	if inRange {
+	if !belowMin && !aboveMax {
 		return version
 	}
 
@@ -199,7 +202,14 @@ func ClampToRange(version, min, max string) string {
 		return best
 	}
 
-	// No installed version in range; fall back to min if set.
+	// Nothing installed satisfies the range, so fall back to the bound the
+	// version missed. Answering min for a version that sat above max handed the
+	// caller the oldest release the framework tolerates rather than the newest
+	// it supports, which is what `lerd new` then tried to scaffold under: a
+	// default of 8.5 against a framework capped at 8.4 asked for 8.1.
+	if aboveMax {
+		return max
+	}
 	if min != "" {
 		return min
 	}

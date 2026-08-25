@@ -8,6 +8,8 @@
 - **DNS resolver**: [NetworkManager](https://networkmanager.dev/) or [systemd-resolved](https://www.freedesktop.org/software/systemd/man/systemd-resolved.service.html) (at least one is required for `.test` DNS)
 - **`systemctl --user` functional**: run `loginctl enable-linger $USER` if needed
 
+You rarely need to install Podman yourself: the [apt and dnf packages](./installation#install-via-apt-ubuntu-debian) declare it as a dependency so it comes in with `lerd`, and the script installer detects a missing Podman and offers to install it. Only the Homebrew-on-Linux route expects the distro's Podman to be there already.
+
 ### Podman 4.5 minimum
 
 ::: warning
@@ -51,6 +53,9 @@ sudo dnf install crun
     - Arch: `nss`
     - Debian/Ubuntu: `libnss3-tools`
     - Fedora: `nss-tools`
+- **`dnsmasq`**: only on hosts where NetworkManager ends up owning DNS rather than systemd-resolved (some Arch setups). NetworkManager's dnsmasq plugin needs the host binary to route `.test` to lerd; the installer detects this combination and offers the package like any other prerequisite. What counts is which resolver actually owns `/etc/resolv.conf`, not merely whether `systemd-resolved.service` is running: a host where the unit is active but `resolv.conf` is still NetworkManager's falls to the dnsmasq plugin and does need the package. Hosts where systemd-resolved really is the resolver never need it, and the `.localhost` mode skips it entirely since `.localhost` resolves to loopback with no resolver configuration at all.
+    - Arch: `dnsmasq`
+    - Debian/Ubuntu: `dnsmasq-base`
 
 ::: tip Go is only needed to build from source
 The released binary is fully static with no runtime dependencies. You do not need Go installed to use Lerd.

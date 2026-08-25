@@ -118,6 +118,7 @@ func Start(currentVersion string) error {
 
 	// Restart any LAN share proxies that were active before this process started.
 	go cli.RestoreLANShareProxies()
+	go cli.RestorePublicShareProxies()
 
 	// A public tunnel must not outlive the process that owns it. Stop them on
 	// the way out, and kill anything a previous run was killed too hard to
@@ -129,10 +130,12 @@ func Start(currentVersion string) error {
 	go cli.ReapOrphanNgrokContainers()
 	stopTunnelsOnShutdown()
 
-	// Single coalescer for the three event sources that need to refresh the
+	// Single coalescer for the two event sources that need to refresh the
 	// container cache and broadcast a snapshot: in-process mutations
-	// (AfterUnitChange), DBus push notifications (SubscribeLerdUnitStateChanges),
-	// and CLI/MCP notifications (/api/internal/notify). A burst of state
+	// (AfterUnitChange) and CLI/MCP notifications (/api/internal/notify).
+	// systemd's DBus subscription is deliberately not one of them: it wakes on
+	// every unit property change on the bus, which costs more at idle than the
+	// polling it would replace. A burst of state
 	// transitions (e.g. a unit cycling activating→active during start) used to
 	// spawn one podman ps subprocess per transition; the coalescer collapses
 	// them into one poll + one publish per ~250ms quiet period.
@@ -210,14 +213,15 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/notifications/target", withCORS(handleNotifyTarget))
 	mux.HandleFunc("/api/notifications/kinds", withCORS(handleNotifyKinds))
 	mux.HandleFunc("/api/lan-qr/", withCORS(handleLANQR))
+	mux.HandleFunc("/api/public-qr/", withCORS(handlePublicQR))
 	mux.HandleFunc("/api/share-tools", withCORS(handleShareTools))
 	mux.HandleFunc("/api/tools/", withCORS(publishAfter(handleTools, eventbus.KindStatus)))
 	mux.HandleFunc("/api/tunnel-qr/", withCORS(handleTunnelQR))
 	mux.HandleFunc("/api/dashboard-qr", withCORS(handleDashboardQR))
 
-	// Cross-process notifier for CLI/MCP. Loopback-only. PollNow in a
-	// goroutine so the handler returns under the CLI's 500 ms POST
-	// timeout while the cache refresh drives the next WS broadcast.
+	// Cross-process notifier for CLI/MCP. It requires dashboard-control
+	// authority. PollNow runs in a goroutine so the handler returns under the
+	// CLI's 500 ms POST timeout while the next WebSocket broadcast refreshes.
 	mux.HandleFunc("/api/internal/notify", func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopbackRequest(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -228,6 +232,12 @@ func Start(currentVersion string) error {
 	})
 
 	mux.HandleFunc("/api/services/presets", withCORS(handleServicePresets))
+	mux.HandleFunc("/api/services/icons", withCORS(handleServiceIcons))
+	mux.HandleFunc("/api/frameworks/marks", withCORS(handleFrameworkMarks))
+	mux.HandleFunc("/api/workers/marks", withCORS(handleWorkerMarks))
+	mux.HandleFunc("/api/frameworks/catalogue", withCORS(handleFrameworkCatalogue))
+	mux.HandleFunc("/api/project/questions", withCORS(handleProjectQuestions))
+	mux.HandleFunc("/api/project/setup-steps", withCORS(handleProjectSetupSteps))
 	mux.HandleFunc("/api/services/presets/", withCORS(publishAfter(handleServicePresetInstall, eventbus.KindServices, eventbus.KindStatus)))
 	mux.HandleFunc("/api/services/", withCORS(publishAfter(handleServiceAction, eventbus.KindServices, eventbus.KindStatus, eventbus.KindSites)))
 	mux.HandleFunc("/api/databases", withCORS(handleDatabases))
@@ -251,11 +261,12 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/node/manage", withCORS(publishAfter(handleNodeManage, eventbus.KindStatus, eventbus.KindSites)))
 	mux.HandleFunc("/api/node/unmanage", withCORS(publishAfter(handleNodeUnmanage, eventbus.KindStatus, eventbus.KindSites)))
 	mux.HandleFunc("/api/node/set-manager", withCORS(publishAfter(handleNodeSetManager, eventbus.KindStatus, eventbus.KindSites)))
-	mux.HandleFunc("/api/sites/link", withCORS(publishAfter(handleSiteLink, eventbus.KindSites)))
 	mux.HandleFunc("/api/sites/reorder", withCORS(publishAfter(handleSiteReorder, eventbus.KindSites)))
 	mux.HandleFunc("/api/sites/worktree-options", withCORS(handleSiteWorktreeOptions))
 	mux.HandleFunc("/api/sites/worktree-add", withCORS(publishAfter(handleSiteWorktreeAdd, eventbus.KindSites)))
 	mux.HandleFunc("/api/browse", withCORS(handleBrowse))
+	mux.HandleFunc("/api/runs", withCORS(publishAfter(handleRuns, eventbus.KindSites)))
+	mux.HandleFunc("/api/runs/", withCORS(handleRunStream))
 	mux.HandleFunc("/api/workspaces", withCORS(publishAfter(handleWorkspaces, eventbus.KindStatus, eventbus.KindSites)))
 	mux.HandleFunc("/api/workspaces/", withCORS(publishAfter(handleWorkspaceRoutes, eventbus.KindStatus, eventbus.KindSites)))
 	mux.HandleFunc("/api/sites/", withCORS(publishAfter(handleSiteAction, eventbus.KindSites, eventbus.KindServices)))
@@ -279,6 +290,7 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/open-folder", withCORS(handleOpenFolder))
 	mux.HandleFunc("/api/profiler/toggle", withCORS(publishAfter(handleProfilerToggle, eventbus.KindProfilerStatus)))
 	mux.HandleFunc("/api/profiler/status", withCORS(handleProfilerStatus))
+	mux.HandleFunc("/api/profiler/captures", withCORS(handleProfilerCaptures))
 	mux.HandleFunc("/api/profiler/clear", withCORS(handleProfilerClear))
 	mux.HandleFunc("/_spx/", handleSpxProxy)
 	mux.HandleFunc("/_svc/", handleDashProxy)
@@ -298,6 +310,7 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/settings/dns-upstream", withCORS(handleSettingsDNSUpstream))
 	mux.HandleFunc("/api/workers/health", withCORS(handleWorkersHealth))
 	mux.HandleFunc("/api/workers/heal", withCORS(handleWorkersHeal))
+	mux.HandleFunc("/api/workers/stop", withCORS(handleWorkersStop))
 	mux.HandleFunc("/api/stats", withCORS(handleStats))
 	mux.HandleFunc("/api/disk", withCORS(handleDisk))
 	mux.HandleFunc("/api/xdebug/", withCORS(publishAfter(handleXdebugAction, eventbus.KindStatus)))
@@ -310,6 +323,10 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/lan/status", withCORS(handleLANStatus))
 	mux.HandleFunc("/api/remote-setup/generate", withCORS(handleRemoteSetupGenerate))
 	mux.HandleFunc("/api/remote-setup", handleRemoteSetup) // intentional: no CORS, no withCORS, served as plain script
+	mux.HandleFunc("/docs/index.json", withCORS(handleDocsIndex))
+	mux.HandleFunc("/docs/search", withCORS(handleDocsSearch))
+	mux.HandleFunc("/docs/page/", withCORS(handleDocsPage))
+	mux.HandleFunc("/docs/", handleDocsAsset)
 	mux.HandleFunc("/manifest.webmanifest", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/manifest+json")
 		base := "http://" + r.Host
@@ -815,31 +832,35 @@ func buildStatus() StatusResponse {
 	}
 }
 
-func buildStatusJSON() []byte { return []byte(mustJSON(buildStatus())) }
+func buildStatusJSON() ([]byte, error) { return []byte(mustJSON(buildStatus())), nil }
 
 // WorktreeResponse is embedded in SiteResponse for each git worktree.
 // PHP/NodeVersion are the effective values; *Override flags signal whether
 // the worktree's .lerd.yaml set them explicitly or it's inherited.
 type WorktreeResponse struct {
-	Branch              string         `json:"branch"`
-	Domain              string         `json:"domain"`
-	Path                string         `json:"path"`
-	PHPVersion          string         `json:"php_version,omitempty"`
-	PHPMin              string         `json:"php_min,omitempty"`
-	PHPMax              string         `json:"php_max,omitempty"`
-	NodeVersion         string         `json:"node_version,omitempty"`
-	PHPVersionOverride  bool           `json:"php_version_override,omitempty"`
-	NodeVersionOverride bool           `json:"node_version_override,omitempty"`
-	FrameworkVersion    string         `json:"framework_version,omitempty"`
-	FrameworkLabel      string         `json:"framework_label,omitempty"`
-	DBIsolated          bool           `json:"db_isolated,omitempty"`
-	DBDatabase          string         `json:"db_database,omitempty"`
-	LANPort             int            `json:"lan_port,omitempty"`
-	LANShareURL         string         `json:"lan_share_url,omitempty"`
-	TunnelURL           string         `json:"tunnel_url,omitempty"`
-	TunnelTool          string         `json:"tunnel_tool,omitempty"`
-	TunnelExternal      bool           `json:"tunnel_external,omitempty"`
-	FrameworkWorkers    []WorkerStatus `json:"framework_workers,omitempty"`
+	Branch              string `json:"branch"`
+	Domain              string `json:"domain"`
+	Path                string `json:"path"`
+	PHPVersion          string `json:"php_version,omitempty"`
+	PHPMin              string `json:"php_min,omitempty"`
+	PHPMax              string `json:"php_max,omitempty"`
+	NodeVersion         string `json:"node_version,omitempty"`
+	PHPVersionOverride  bool   `json:"php_version_override,omitempty"`
+	NodeVersionOverride bool   `json:"node_version_override,omitempty"`
+	FrameworkVersion    string `json:"framework_version,omitempty"`
+	FrameworkLabel      string `json:"framework_label,omitempty"`
+	DBIsolated          bool   `json:"db_isolated,omitempty"`
+	DBDatabase          string `json:"db_database,omitempty"`
+	LANPort             int    `json:"lan_port,omitempty"`
+	LANShareURL         string `json:"lan_share_url,omitempty"`
+	// PublicShared reports the site's public (reverse-proxy) share is running;
+	// PublicShareURL is the "<site>.<base>" it is reached at.
+	PublicShared     bool           `json:"public_shared,omitempty"`
+	PublicShareURL   string         `json:"public_share_url,omitempty"`
+	TunnelURL        string         `json:"tunnel_url,omitempty"`
+	TunnelTool       string         `json:"tunnel_tool,omitempty"`
+	TunnelExternal   bool           `json:"tunnel_external,omitempty"`
+	FrameworkWorkers []WorkerStatus `json:"framework_workers,omitempty"`
 	// Idle-suspend state for the worktree, which idles on its own timer.
 	LastActive           int64    `json:"last_active,omitempty"`
 	Idle                 bool     `json:"idle,omitempty"`
@@ -945,6 +966,8 @@ type SiteResponse struct {
 	DBDatabase       string `json:"db_database,omitempty"`
 	LANPort          int    `json:"lan_port,omitempty"`
 	LANShareURL      string `json:"lan_share_url,omitempty"`
+	PublicShared     bool   `json:"public_shared,omitempty"`
+	PublicShareURL   string `json:"public_share_url,omitempty"`
 	TunnelURL        string `json:"tunnel_url,omitempty"`
 	TunnelTool       string `json:"tunnel_tool,omitempty"`
 	TunnelExternal   bool   `json:"tunnel_external,omitempty"`
@@ -981,22 +1004,37 @@ type SiteResponse struct {
 }
 
 func handleSites(w http.ResponseWriter, _ *http.Request) {
+	// A nil snapshot means the registry could not be read and there is nothing
+	// cached to fall back on. Saying so beats writing a zero-byte body the
+	// dashboard would render as "you have no sites".
+	body := snapshots.Sites()
+	if body == nil {
+		http.Error(w, "sites are temporarily unavailable, the registry could not be read", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(snapshots.Sites())
+	_, _ = w.Write(body)
 }
 
-func buildSitesJSON() []byte { return []byte(mustJSON(buildSites())) }
+func buildSitesJSON() ([]byte, error) {
+	sites, err := buildSites()
+	if err != nil {
+		return nil, err
+	}
+	return []byte(mustJSON(sites)), nil
+}
 
-func buildSites() []SiteResponse {
+func buildSites() ([]SiteResponse, error) {
 	enriched, err := siteinfo.LoadAll(siteinfo.EnrichUI)
 	if err != nil {
-		return []SiteResponse{}
+		return nil, fmt.Errorf("loading sites: %w", err)
 	}
 	_ = siteinfo.PersistVersionChanges(enriched)
 
 	// Resolve the global idle policy once so each site can report whether it is
 	// currently idle (drives the dashboard sleep indicator).
 	idleCfg, _ := config.LoadGlobal()
+	publicBase := cli.PublicBaseDomain()
 	idleOn := idleCfg != nil && idleCfg.IdleSuspend.Enabled
 	idleTimeout := config.DefaultIdleSuspendTimeout
 	if idleCfg != nil {
@@ -1112,6 +1150,8 @@ func buildSites() []SiteResponse {
 				DBDatabase:           wt.DBDatabase,
 				LANPort:              lanPort,
 				LANShareURL:          lanURL,
+				PublicShared:         cli.PublicShareWorktreeRunning(e.Name, wt.Branch),
+				PublicShareURL:       config.PublicShareURL(config.PublicShareWorktreeHost(e.Name, gitpkg.SanitizeBranch(wt.Branch), publicBase)),
 				TunnelURL:            wtTunnel.URL,
 				TunnelTool:           wtTunnel.Tool,
 				TunnelExternal:       wtTunnel.External,
@@ -1182,6 +1222,8 @@ func buildSites() []SiteResponse {
 			DBDatabase:           envfile.ReadKey(filepath.Join(e.Path, ".env"), "DB_DATABASE"),
 			LANPort:              e.LANPort,
 			LANShareURL:          cli.LANShareURL(e.LANPort),
+			PublicShared:         cli.PublicShareRunning(e.Name),
+			PublicShareURL:       config.PublicShareURL(config.PublicShareHost(e.Name, publicBase)),
 			TunnelURL:            tunnel.URL,
 			TunnelTool:           tunnel.Tool,
 			TunnelExternal:       tunnel.External,
@@ -1205,7 +1247,7 @@ func buildSites() []SiteResponse {
 			Workspace:       resolveSiteWorkspace(e, groupMainName, siteWorkspace),
 		})
 	}
-	return sites
+	return sites, nil
 }
 
 // ServicePortMapping describes one published port of a service: its
@@ -1249,6 +1291,7 @@ type ServiceResponse struct {
 	ConnectionURL     string            `json:"connection_url,omitempty"`
 	Category          string            `json:"category,omitempty"`
 	Icon              string            `json:"icon,omitempty"`
+	Color             string            `json:"color,omitempty"`
 	AdminFor          []string          `json:"admin_for,omitempty"`
 	// Preset this service was installed from ("mariadb" for "mariadb-11-8"), so
 	// the UI can match it against another preset's admin_for without guessing.
@@ -1403,21 +1446,31 @@ func presetNameOf(name string, custom *config.CustomService) string {
 	return ""
 }
 
-// servicePresentation resolves a service's discovery metadata from its preset,
-// so a service installed before these fields existed still renders correctly.
-// A genuinely user-defined service falls back to its own stored YAML.
-func servicePresentation(name string, custom *config.CustomService) (category, icon string, adminFor []string) {
+// servicePresentation is a service's discovery metadata as the dashboard needs
+// it: the section it groups under, the glyph and brand colour it draws with,
+// and the services its UI administers.
+type presentation struct {
+	Category string
+	Icon     string
+	Color    string
+	AdminFor []string
+}
+
+// resolvePresentation reads that metadata from the service's preset, so a
+// service installed before these fields existed still renders correctly. A
+// genuinely user-defined service falls back to its own stored YAML.
+func resolvePresentation(name string, custom *config.CustomService) presentation {
 	presetName := name
 	if custom != nil && custom.Preset != "" {
 		presetName = custom.Preset
 	}
 	if p, err := config.LoadPreset(presetName); err == nil {
-		return p.Category, p.Icon, p.AdminFor
+		return presentation{p.Category, p.Icon, config.NormalizeBrandColor(p.Color), p.AdminFor}
 	}
 	if custom != nil {
-		return custom.Category, custom.Icon, custom.AdminFor
+		return presentation{custom.Category, custom.Icon, config.NormalizeBrandColor(custom.Color), custom.AdminFor}
 	}
-	return "", "", nil
+	return presentation{}
 }
 
 // list rebuild so it is not re-read and an error cannot blank the card); pass
@@ -1487,7 +1540,7 @@ func buildServiceResponseWithPortList(services map[string]config.ServiceConfig, 
 	if image == "" && custom != nil {
 		image = custom.Image
 	}
-	category, icon, adminFor := servicePresentation(name, custom)
+	pres := resolvePresentation(name, custom)
 	resp := ServiceResponse{
 		Name:              name,
 		Status:            status,
@@ -1496,9 +1549,10 @@ func buildServiceResponseWithPortList(services map[string]config.ServiceConfig, 
 		Dashboard:         serviceops.WithDashboardPort(dashboardRaw, presetPorts, services[name]),
 		DashboardExternal: dashExternal,
 		ConnectionURL:     serviceops.WithURLPort(connURL, hostPort),
-		Category:          category,
-		Icon:              icon,
-		AdminFor:          adminFor,
+		Category:          pres.Category,
+		Icon:              pres.Icon,
+		Color:             pres.Color,
+		AdminFor:          pres.AdminFor,
 		Preset:            presetNameOf(name, custom),
 		Port:              hostPort,
 		SiteCount:         countSitesUsingService(name),
@@ -1589,7 +1643,7 @@ func handleServices(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(snapshots.Services())
 }
 
-func buildServicesJSON() []byte { return []byte(mustJSON(buildServicesList())) }
+func buildServicesJSON() ([]byte, error) { return []byte(mustJSON(buildServicesList())), nil }
 
 func buildServicesList() []ServiceResponse {
 	// One ss/lsof call shared across all installed-but-stopped services in
@@ -1767,6 +1821,7 @@ type PresetResponse struct {
 	InstalledTags  []string               `json:"installed_tags,omitempty"`
 	Category       string                 `json:"category,omitempty"`
 	Icon           string                 `json:"icon,omitempty"`
+	Color          string                 `json:"color,omitempty"`
 	AdminFor       []string               `json:"admin_for,omitempty"`
 }
 
@@ -1827,10 +1882,57 @@ func handleServicePresets(w http.ResponseWriter, r *http.Request) {
 			InstalledTags:  installedTags,
 			Category:       p.Category,
 			Icon:           p.Icon,
+			Color:          p.Color,
 			AdminFor:       p.AdminFor,
 		})
 	}
 	writeJSON(w, out)
+}
+
+// handleServiceIcons returns every store icon lerd has cached, keyed by preset
+// name. The dashboard reads the marks from here rather than from the store
+// origin, so they keep rendering offline and over remote access, and the markup
+// it inlines is the sanitized copy this binary wrote.
+func handleServiceIcons(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	icons := config.PresetIcons()
+	if icons == nil {
+		icons = map[string]string{}
+	}
+	writeJSON(w, icons)
+}
+
+// handleFrameworkMarks returns the mark and brand colour of every framework
+// this install has a definition for, keyed by framework name. The dashboard
+// reads them from here rather than from the store origin, so a site's framework
+// keeps drawing offline and over remote access, and the markup it inlines is the
+// sanitized copy this binary wrote.
+func handleFrameworkMarks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	marks := config.FrameworkMarks()
+	if marks == nil {
+		marks = map[string]config.FrameworkMark{}
+	}
+	writeJSON(w, marks)
+}
+
+// handleWorkerMarks returns how each cached framework's workers ask to be
+// drawn, and the marks themselves keyed by icon name. Split that way because a
+// mark belongs to the worker rather than to the framework running it: Laravel
+// and Tempest both run Vite and share one drawing, while the tone comes from
+// whichever of the two declared it.
+func handleWorkerMarks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, config.WorkerMarks())
 }
 
 // handleServicePresetInstall installs a bundled preset and streams per-phase
@@ -2327,7 +2429,7 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		resetData := r.URL.Query().Get("resetData") == "true"
 		writeLine, _ := startNDJSONStream(w, r)
 		start := time.Now()
-		err := serviceops.ReinstallService(name, resetData, func(ev serviceops.PhaseEvent) { writeLine(ev) })
+		err := serviceops.ReinstallService(name, serviceops.ReinstallOptions{ResetData: resetData}, func(ev serviceops.PhaseEvent) { writeLine(ev) })
 		if err != nil {
 			writeLine(map[string]any{"phase": "error", "error": err.Error()})
 		}
@@ -3328,6 +3430,41 @@ func handleLANQR(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "qr.png", time.Time{}, bytes.NewReader(png))
 }
 
+// handlePublicQR serves a QR code PNG for the public (reverse-proxy) share URL
+// of a site or one of its worktrees.
+// Path: /api/public-qr/{domain}[?branch=<branch>]
+func handlePublicQR(w http.ResponseWriter, r *http.Request) {
+	domain := strings.TrimPrefix(r.URL.Path, "/api/public-qr/")
+	site, err := config.FindSiteByDomain(domain)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	base := cli.PublicBaseDomain()
+	if base == "" {
+		http.NotFound(w, r)
+		return
+	}
+	var shareURL string
+	if branch := r.URL.Query().Get("branch"); branch != "" {
+		shareURL = config.PublicShareURL(config.PublicShareWorktreeHost(site.Name, gitpkg.SanitizeBranch(branch), base))
+	} else {
+		shareURL = config.PublicShareURL(config.PublicShareHost(site.Name, base))
+	}
+	if shareURL == "" {
+		http.NotFound(w, r)
+		return
+	}
+	png, err := qrcode.Encode(shareURL, qrcode.Medium, 160)
+	if err != nil {
+		http.Error(w, "qr encode: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeContent(w, r, "qr.png", time.Time{}, bytes.NewReader(png))
+}
+
 // handleShareTools reports the supported tunnel tools, which are installed,
 // and what the auto pick would use, so the share menu can render its entries.
 // A POST records the answer to the base-domain question.
@@ -3339,9 +3476,20 @@ func handleShareTools(w http.ResponseWriter, r *http.Request) {
 			// NgrokToken is only present when the token form was submitted, so
 			// a base-domain save cannot clear a stored token by omitting it.
 			NgrokToken *string `json:"ngrok_token"`
+			// PublicBaseDomain is only present when the public-share base form
+			// was submitted, for the same reason.
+			PublicBaseDomain *string `json:"public_base_domain"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSON(w, SiteActionResponse{Error: "invalid request body"})
+			return
+		}
+		if body.PublicBaseDomain != nil {
+			if _, err := cli.SetPublicBaseDomain(*body.PublicBaseDomain); err != nil {
+				writeJSON(w, SiteActionResponse{Error: err.Error()})
+				return
+			}
+			writeJSON(w, SiteActionResponse{OK: true})
 			return
 		}
 		if body.NgrokToken != nil {
@@ -3788,6 +3936,12 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tinker snippets: GET lists, POST saves, DELETE removes.
+	if action == "tinker:snippets" {
+		handleSiteTinkerSnippets(w, r, domain)
+		return
+	}
+
 	// Per-site nginx override editor (GET reads, POST saves + reloads).
 	if action == "nginx" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
 		handleSiteNginx(w, r, domain)
@@ -4095,10 +4249,15 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
 	case "lan:refresh":
-		// Re-bind the share proxy to the current site config. Called from
+		// Re-bind the share proxies to the current site config. Called from
 		// CLI commands (secure/unsecure) that change the backend port the
-		// proxy targets so the running listener picks up the change.
+		// proxies target so the running listeners pick up the change. Public
+		// shares dial the same backend, so they refresh on the same signal.
 		if err := cli.LANShareRefreshIfRunning(site.Name); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		if err := cli.PublicShareRefreshIfRunning(site.Name); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
@@ -4121,6 +4280,32 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := cli.LANShareStop(site.Name); err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "public:share":
+		var err error
+		if branch := r.URL.Query().Get("branch"); branch != "" {
+			_, err = cli.PublicShareStartWorktree(site.Name, branch)
+		} else {
+			_, err = cli.PublicShareStart(site.Name)
+		}
+		if err != nil {
+			writeJSON(w, SiteActionResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, SiteActionResponse{OK: true})
+		return
+	case "public:unshare":
+		var err error
+		if branch := r.URL.Query().Get("branch"); branch != "" {
+			err = cli.PublicShareStopWorktree(site.Name, branch)
+		} else {
+			err = cli.PublicShareStop(site.Name)
+		}
+		if err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
@@ -4240,7 +4425,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if oldDomain != newDomain {
-			if existing, eErr := config.IsDomainUsed(newDomain); eErr == nil && existing != nil && existing.Path != site.Path {
+			if existing, eErr := config.IsDomainUsed(newDomain); eErr == nil && existing != nil && !config.SamePath(existing.Path, site.Path) {
 				writeJSON(w, SiteActionResponse{Error: "domain " + newDomain + " is already used by site " + existing.Name})
 				return
 			}
@@ -4873,6 +5058,22 @@ func handlePHPInstall(w http.ResponseWriter, r *http.Request) {
 	done(map[string]any{"ok": true, "version": version})
 }
 
+var (
+	pollContainersFn  = podman.Cache.PollNow
+	refreshPHPPatchFn = podman.RefreshFPMPHPVersion
+)
+
+// refreshAfterPHPRebuild brings back what a finished rebuild made stale: the
+// container states, the PHP patch probed out of the old image, and the cached
+// status snapshot built from both. It runs before the done event because the
+// client loads status the moment the modal closes, ahead of publishAfter's own
+// invalidation.
+func refreshAfterPHPRebuild(version string) {
+	pollContainersFn()
+	refreshPHPPatchFn(version)
+	snapshots.Invalidate(eventbus.KindStatus)
+}
+
 // handlePHPRebuild answers POST /api/php-versions/{version}/rebuild by
 // force-rebuilding that version's image against the current prebuilt base and
 // restarting everything running on it, streaming the build log as SSE. This is
@@ -4906,7 +5107,7 @@ func handlePHPRebuild(w http.ResponseWriter, r *http.Request, version string) {
 		done(map[string]any{"ok": false, "error": err.Error(), "version": version})
 		return
 	}
-	podman.Cache.PollNow()
+	refreshAfterPHPRebuild(version)
 	done(map[string]any{"ok": true, "version": version})
 }
 
@@ -5368,9 +5569,9 @@ func handleLerdQuit(w http.ResponseWriter, r *http.Request) {
 	go cli.RunQuit() //nolint:errcheck
 }
 
-// handleLerdUpdateTerminal opens the user's terminal emulator running
-// `lerd update`. Loopback-only. Uses os.Executable() because the spawned
-// `sh -c` doesn't source .bashrc, so ~/.local/bin is off PATH otherwise.
+// handleLerdUpdateTerminal opens the host's terminal emulator running
+// `lerd update`. It requires dashboard-control authority. Uses os.Executable()
+// because the spawned shell does not load the user's interactive PATH.
 func handleLerdUpdateTerminal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -5672,13 +5873,13 @@ func handleAppLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// POST /api/app-logs/{domain}/clear deletes the matched log files to reclaim
-	// disk. Loopback-only since it mutates files on the host.
+	// disk. It requires dashboard-control authority.
 	if len(parts) == 2 && parts[1] == "clear" {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if !isLoopbackRequest(r) {
+		if !hasHostActionAuthority(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -5805,8 +6006,6 @@ func failureMessage(out string) string {
 	return msg
 }
 
-// handleSiteLink links a directory as a site via POST /api/sites/link.
-// It streams command output as SSE events and sends a final "done" event.
 // SiteReorderRequest is the JSON body for POST /api/sites/reorder.
 type SiteReorderRequest struct {
 	Order []string `json:"order"` // site names in the desired display order
@@ -5828,110 +6027,6 @@ func handleSiteReorder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, SiteActionResponse{OK: true})
-}
-
-func handleSiteLink(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.NotFound(w, r)
-		return
-	}
-
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		writeJSON(w, SiteActionResponse{Error: "path parameter required"})
-		return
-	}
-	path = filepath.Clean(path)
-
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
-		writeJSON(w, SiteActionResponse{Error: "not a valid directory: " + path})
-		return
-	}
-
-	self, err := os.Executable()
-	if err != nil {
-		writeJSON(w, SiteActionResponse{Error: "resolving executable: " + err.Error()})
-		return
-	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	// streamCmd runs a command and streams its output as SSE data events.
-	// Returns the combined output and whether the command failed.
-	streamCmd := func(name string, args ...string) (string, bool) {
-		cmd := exec.CommandContext(r.Context(), name, args...)
-		cmd.Dir = path
-
-		pr, pw := io.Pipe()
-		cmd.Stdout = pw
-		cmd.Stderr = pw
-
-		if startErr := cmd.Start(); startErr != nil {
-			msg := startErr.Error()
-			fmt.Fprintf(w, "data: %s\n\n", msg)
-			flusher.Flush()
-			return msg, true
-		}
-
-		go func() {
-			cmd.Wait() //nolint:errcheck
-			pw.Close()
-		}()
-
-		var out strings.Builder
-		scanner := bufio.NewScanner(pr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			out.WriteString(line)
-			out.WriteByte('\n')
-			escaped := strings.ReplaceAll(line, "\\", "\\\\")
-			fmt.Fprintf(w, "data: %s\n\n", escaped)
-			flusher.Flush()
-		}
-		return out.String(), cmd.ProcessState != nil && cmd.ProcessState.ExitCode() != 0
-	}
-
-	// Run lerd link.
-	fmt.Fprintf(w, "data: → Linking site...\n\n")
-	flusher.Flush()
-	// --yes: clicking Link in the UI is the explicit consent the host-proxy
-	// confirmation prompt would otherwise ask for at the (non-interactive) CLI.
-	out, failed := streamCmd(self, "link", "--yes")
-	if failed {
-		fmt.Fprintf(w, "event: done\ndata: %s\n\n", mustJSON(map[string]any{"ok": false, "error": "link failed: " + out}))
-		flusher.Flush()
-		return
-	}
-
-	// Refresh URL/domain-scoped keys only — connection settings (DB_*, REDIS_*,
-	// MAIL_*, credentials) are left as the developer wrote them. The user can
-	// run `lerd env` from a terminal afterwards to wire DB/redis/mail to lerd's
-	// managed services when that's actually wanted. A failure here is a warning
-	// rather than an error, but it still has to reach the modal.
-	fmt.Fprintf(w, "data: → Refreshing URL/domain in .env (connection settings preserved)...\n\n")
-	flusher.Flush()
-	envOut, envFailed := streamCmd(self, "env", "--domain-only")
-
-	done := map[string]any{"ok": true}
-	if envFailed {
-		done["warning"] = "environment setup failed: " + failureMessage(envOut)
-	}
-	// Find the newly linked site to return its domain.
-	if site, err := config.FindSiteByPath(path); err == nil {
-		done["domain"] = site.PrimaryDomain()
-	}
-	fmt.Fprintf(w, "event: done\ndata: %s\n\n", mustJSON(done))
-	flusher.Flush()
 }
 
 type labeledOption struct {

@@ -28,6 +28,7 @@ func NewWorktreeCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newWorktreeAddCmd())
 	cmd.AddCommand(newWorktreeRemoveCmd())
+	cmd.AddCommand(newWorktreeWaitCmd())
 	return cmd
 }
 
@@ -305,18 +306,65 @@ func newestWorktree(sitePath string) (string, string, error) {
 // worktree add` invokes RunFrontendBuild explicitly after installs succeed.
 func WaitForWorktreeReady(worktreePath string, deadline time.Duration) error {
 	end := time.Now().Add(deadline)
+	envFile := worktreeEnvFile(worktreePath)
 	hasComposer := fileExistsAt(filepath.Join(worktreePath, "composer.json"))
 	hasJS := fileExistsAt(filepath.Join(worktreePath, "package.json"))
 	for time.Now().Before(end) {
-		envOk := fileExistsAt(filepath.Join(worktreePath, ".env"))
-		composerOk := !hasComposer || fileExistsAt(filepath.Join(worktreePath, "vendor", "autoload.php"))
-		jsOk := !hasJS || fileExistsAt(filepath.Join(worktreePath, "node_modules"))
-		if envOk && composerOk && jsOk {
+		if worktreeArtifactsPresent(worktreePath, envFile, hasComposer, hasJS) && !installInFlight(worktreePath) {
 			return nil
 		}
 		time.Sleep(2 * time.Second)
 	}
 	return fmt.Errorf("timed out after %s waiting for worktree setup", deadline)
+}
+
+// worktreeEnvFile returns the env file the setup pipeline seeds into this
+// worktree, resolved through the parent's framework definition exactly as the
+// seeding side resolves it. Waiting on a hardcoded .env would never be
+// satisfied for a framework whose env lives anywhere else.
+func worktreeEnvFile(worktreePath string) string {
+	const fallback = ".env"
+	site, ok := config.ParentSiteForWorktreeDir(worktreePath)
+	if !ok {
+		return fallback
+	}
+	fwName, ok := config.DetectFrameworkForDir(site.Path)
+	if !ok {
+		return fallback
+	}
+	fw, ok := config.GetFrameworkForDir(fwName, site.Path)
+	if !ok {
+		return fallback
+	}
+	file, _ := fw.Env.ResolveWrite(site.Path)
+	if file == "" || !filepath.IsLocal(file) {
+		return fallback
+	}
+	return file
+}
+
+// worktreeArtifactsPresent reports whether the pipeline's outputs are on disk.
+// Necessary but not sufficient on its own: node_modules exists as soon as the
+// first package is extracted, so a live npm ci already satisfies it.
+func worktreeArtifactsPresent(worktreePath, envFile string, hasComposer, hasJS bool) bool {
+	if !fileExistsAt(filepath.Join(worktreePath, envFile)) {
+		return false
+	}
+	if hasComposer && !fileExistsAt(filepath.Join(worktreePath, "vendor", "autoload.php")) {
+		return false
+	}
+	if hasJS && !fileExistsAt(filepath.Join(worktreePath, "node_modules")) {
+		return false
+	}
+	return true
+}
+
+// installInFlight reports whether an installer holds the worktree's install
+// lock. A probe that fails outright counts as idle so an unreadable lock dir
+// degrades to the old artifact-only behaviour instead of waiting forever.
+func installInFlight(worktreePath string) bool {
+	held, err := gitpkg.InstallInFlight(worktreePath)
+	return err == nil && held
 }
 
 func fileExistsAt(path string) bool {

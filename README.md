@@ -17,7 +17,7 @@
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Flerd-ff2d20?logo=reddit)](https://reddit.com/r/lerd)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/5JK54s7xCC)
 
-[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.31.0-blue)](https://github.com/lerd-env/lerd)
+[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.33.1-blue)](https://github.com/lerd-env/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
 [![PHP](https://img.shields.io/badge/PHP-5.6%20%E2%80%93%208.5-777BB4)]()
 
@@ -35,6 +35,84 @@
 - [Diagnóstico](#diagnóstico) · [Dashboard](docs/dashboard.md) · [Comandos](#lista-de-comandos-úteis)
 
 ---
+
+### Sites, domains and TLS
+
+- 🌐 **Automatic `.test` domains.** One command gives a project a hostname and TLS that reissues before it expires, with no dnsmasq, no system resolver tweak and no sudo for the DNS bits. You can [opt out of lerd-managed DNS](https://lerd.sh/features/dns) for `*.localhost`, or toggle it later with `dns:enable` / `dns:disable` / `dns:repair`.
+
+- 🔗 **Site groups.** Group related sites so a main site owns a base domain and the rest occupy its subdomains, with a shared or separate database per secondary.
+
+- 🧱 **Host-proxy sites.** Run a Node, Python, Go or any non-PHP dev server on the host and have nginx serve it at a `.test` domain with HTTPS, git worktrees included. A wedged dev server can be bounced from the site header without reaching for a terminal.
+
+- 🌳 **First-class git worktrees.** Auto-detected branch domains, per-worktree PHP and Node versions, optional database isolation, wildcard cert SANs and a per-branch Vite worker. A bare `git worktree add` from any tool is provisioned automatically, and `lerd worktree wait` blocks until the tree is ready.
+
+- 🌍 **Share a site.** On your LAN with a stable port and a QR code, or publicly through ngrok, cloudflared, Expose, Pinggy, serveo or localhost.run. Set a base domain once and every share keeps the same URL between runs, through a tunnel service or the reverse proxy you already run.
+
+- 🎨 **Dev servers on the site's own domain.** A running Vite serves its assets and its hot-reload socket under the site's `.test` hostname instead of advertising `localhost:5173`, so a shared, LAN-opened or worktree page arrives styled. Nothing in the project is edited and nothing is declared per framework.
+
+### PHP, Node and runtimes
+
+- 🐘 **Per-project PHP version.** 8.1 to 8.5, plus a frozen 7.4 / 8.0 legacy tier for projects on the old stack, switched with one click. Custom extensions and Alpine packages are declared once and applied to every image lerd builds.
+
+- ⚡ **FrankenPHP runtime.** Per site, as an alternative to shared PHP-FPM, with Laravel Octane and Symfony Runtime worker mode.
+
+- 📦 **Node.js isolation.** Node 22 or 24 per project, through the bundled fnm or an nvm you already have, switchable from the dashboard. Or **bun** as the JS runtime on the host and, opt-in, inside the container.
+
+- 🪄 **No per-framework setup.** Workers, env values and the nginx vhost are configured for you when you link a project. "Env" means whatever file your framework actually reads: a `.env`, WordPress's `wp-config.php`, Magento's `env.php` or Drupal's `settings.php`, written in place.
+
+- 🧩 **Framework store.** Community definitions for Laravel, Symfony, WordPress, Drupal, Magento, CakePHP, CodeIgniter, Statamic and Tempest, with versioned auto-detection back to the majors still on PHP 7.4. One published tomorrow arrives without a new lerd release.
+
+### Services and databases
+
+- 🗄️ **One-click services.** MySQL, PostgreSQL, Redis, Meilisearch, RustFS, Mailpit, Reverb, OpenSearch and more, the default stack built in and every add-on from a store that updates without a lerd release. Create, drop, snapshot, export and import databases from the service page.
+
+- 🔌 **Host tools that reach the container.** `psql`, `mysql`, `pg_dump` and friends run on your host against lerd's engines with no client installed and no port to remember. Point an IDE's phpstan, php-cs-fixer or phpcs at the same shims and they run in the project's PHP container.
+
+- 🧷 **IDE database wiring** for JetBrains. A project gets one data source pointed at its own lerd database on the host port it actually answers on, written on link and refreshed as the project's database changes, leaving every data source lerd doesn't own untouched.
+
+### Debugging and performance
+
+- 🛰️ **Debug window.** Intercepts every `dump()` / `dd()` and streams it to the dashboard, TUI, MCP and `lerd dump tail`, scoped per site and per worktree branch. The same window captures SQL with N+1 and slow-query detection, plus mail, views, events, queued jobs and outgoing HTTP, on Laravel and Symfony.
+
+- 🔥 **[SPX](https://github.com/NoiseByNorthwest/php-spx) profiler** with one-click on/off. Every PHP-FPM request becomes a flame graph viewable in a same-origin Profiler view in the dashboard, with no FPM restart and no code changes, and `lerd profile run` profiles a one-shot artisan or CLI command.
+
+- 📈 **Request timing analytics.** A durable per-site view of typical and p95 response times, throughput, error rate, and the slowest routes ranked by recent p95 with one-click profiling. Agents get the same signal over MCP with `route_timing` and `optimize_route`.
+
+- 🧪 **Tinker tab.** An in-browser PHP REPL per site with project-aware autocomplete, hover and diagnostics powered by [phpantom_lsp](https://github.com/PHPantom-dev/phpantom_lsp), so your models and Builder chains resolve as you type. Works on Laravel, Symfony and any composer project.
+
+### Interfaces
+
+- 🖥️ **Built-in Web UI.** Sites and services dashboards, live widgets, a global Cmd+K command palette, and install/remove of PHP and Node versions, in fourteen languages. Reachable from another machine behind credentials, with the actions that touch the host staying local until you grant them.
+
+- ✨ **Start a project from the dashboard.** The `+` in Sites scaffolds a project from the framework store or links one you already have, asks what `lerd init` asks, then runs composer and the JS build in the modal. Close the tab mid-install and it picks back up.
+
+- 📚 **The documentation, offline.** Every page ships inside the binary, searchable and rendered in the dashboard, so the one moment you most need the docs, a machine with no internet, is not the moment they stop working. `lerd man` reads the same pages in the terminal.
+
+- 💻 **Terminal dashboard** (`lerd tui`). A btop-style TUI with live status, site detail pane, inline domain and version editing, shell drop-in, log tailing, and filter/sort, the same operations surface as the web UI, for tmux and SSH workflows.
+
+- ✏️ **Edit config in the browser.** Per-site and global nginx, `php.ini` with the version's own file and the shared scope side by side, `.env` files, and database/service runtime tuning, each validated (`nginx -t` where it applies), with timestamped backups and one-click restore.
+
+- 📋 **Live logs** for PHP-FPM, Queue, Schedule and Reverb, per site, rendered in the colour the tool actually emits (artisan, composer, vite, pest) and with a button that hands any log to a real terminal so a long tail survives closing the tab.
+
+- 🔔 **Notifications** for the things worth interrupting you, delivered to open dashboards, to subscribed browsers over Web Push, or to your desktop's native notification daemon. Every one also lands in the dashboard's sidebar bell, which keeps the last 50 with an unread count across reloads.
+
+- 🤖 **MCP server.** Let AI assistants (Claude Code, Cursor, JetBrains Junie, Codex CLI, Gemini CLI, GitHub Copilot, Google Antigravity, Windsurf) manage your environment directly.
+
+### Health and upkeep
+
+- 🧰 **Environment doctor** (`lerd doctor`). Checks the host lerd itself depends on and repairs what it safely can with `--fix`: missing directories, linger, a missing PHP image, the DNS wiring. Anything needing sudo is printed as a command and never run for you, and `--dry-run` shows it first.
+
+- 🩺 **Site doctor.** Framework-agnostic health checks (env drift, application key, composer and node state, security audits, database presence, PHP version range) plus extra checks for your framework, each with a one-click fix, from the web UI, the TUI, `lerd site:doctor` and MCP.
+
+- ⚒️ **Worker self-heal.** Failed queue, schedule, horizon, reverb and stripe workers are surfaced everywhere (CLI, dashboard banner, TUI, MCP) and recovered with one click or `lerd worker heal`. A worker that keeps failing can be stopped from the same banner rather than restarted into the same wall.
+
+- 💾 **Nothing destructive without a way back.** A `service remove --purge` or a `reinstall --reset-data` snapshots every database first, while the data is still where the engine expects it, so recovery is an ordinary `db:restore -A`. Each engine declares how long it gets to shut down.
+
+- 💤 **Idle-suspend.** Activity-driven suspension of a site's workers (queue, schedule, horizon, reverb, stripe, Vite) after a configurable idle timeout, resumed on the next request, CLI command, MCP call or file save, with per-site pinning.
+
+- 📌 **Pinned host tools.** Composer, fnm and mkcert are pinned behind a published manifest rather than whatever `releases/latest` served that day, so an upstream release cannot break a fresh install overnight, and the System page reports each against its pin and applies the update on the card that flagged it.
+
+- 🔒 **Rootless and daemonless.** Podman-native, no Docker required, dual-stack IPv4 + IPv6.
 
 ## O que muda em relação ao upstream
 
@@ -84,7 +162,7 @@ Esta fork adiciona, por cima de tudo isso:
 | Instalar versão PHP                | só CLI                       | **botão no dashboard + SSE logs ao vivo**                           |
 | Service presets adicionais         | mysql/postgres/redis/…       | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**             |
 | Xdebug por padrão                  | `start_with_request=yes`     | **`=trigger`** (sem spam em CLI sem IDE)                            |
-| Versão                             | `1.31.0`                     | `1.31.0-oracle.0`                                                   |
+| Versão                             | `1.33.1`                     | `1.33.1-oracle.0`                                                   |
 
 ### Extensões PHP nas imagens
 
@@ -199,7 +277,7 @@ O script verifica `podman`/`git`/`mkcert`, baixa o binário para
 NÃO** → sites em `http://meusite.localhost/` (sem sudo, RFC 6761).
 
 ```bash
-lerd about    # confirma "Lerd Oracle Edition" e versão 1.31.0-oracle.0
+lerd about    # confirma "Lerd Oracle Edition" e versão 1.33.1-oracle.0
 ```
 
 > [!TIP]
@@ -210,19 +288,47 @@ lerd about    # confirma "Lerd Oracle Edition" e versão 1.31.0-oracle.0
 
 ## Primeiro uso
 
+The PPA publishes for every Ubuntu release in standard support and for the current development release. On one of those:
+
 ```bash
 cd ~/meu-projeto-laravel
 lerd init     # wizard: PHP, Node, HTTPS, Database, serviços, workers
 lerd open     # abre em http://meu-projeto-laravel.localhost
 ```
 
-No **Database**, além de SQLite/MySQL/PostgreSQL, há **Oracle (externo)** — um
-sub-form pede host, porta (1521), service name/SID, usuário e senha. Os valores
-vão para um bloco `oracle:` no `.lerd.yaml` e o `.env` recebe
-`DB_CONNECTION=oracle` + `DB_HOST`/`DB_PORT`/`DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD`.
-Lerd não sobe container Oracle (é DB externo).
+On any other release the PPA has no packages, and `add-apt-repository` leaves behind a source entry that fails every later `apt update`. Remove it with `sudo add-apt-repository --remove ppa:lerd/lerd` and use the script installer above.
+
+The package finishes setup with no prompt: its maintainer script applies the root-level steps and runs the per-user install, so `.test` DNS and HTTPS come up on their own. Update with `sudo apt upgrade`; a packaged lerd lives under `/usr`, so `lerd update` defers to your package manager instead of fighting it.
 
 ---
+
+<details>
+<summary>Install via dnf instead (Fedora)</summary>
+
+The COPR builds for every Fedora release in standard support and for rawhide:
+
+```bash
+sudo dnf copr enable georged/lerd
+sudo dnf install lerd
+```
+
+The package finishes setup with no prompt, exactly like the apt one: `.test` DNS and HTTPS come up on their own. Update with `sudo dnf upgrade`; a packaged lerd lives under `/usr`, so `lerd update` defers to your package manager instead of fighting it.
+
+</details>
+
+<details>
+<summary>Install via Homebrew instead</summary>
+
+```bash
+brew install lerd-env/lerd/lerd
+lerd install
+```
+
+Podman comes from your distro rather than as a brew dependency, and Homebrew on Linux needs its usual prerequisites (notably a C compiler). Update with `brew upgrade lerd`.
+
+</details>
+
+### macOS
 
 ## Trabalhando com Oracle
 
@@ -354,6 +460,16 @@ se a Containerfile mudou, roda `lerd php:rebuild`.
 ## Desinstalação
 
 ```bash
+cd my-laravel-project
+lerd link
+# → https://my-laravel-project.test
+lerd open           # the site in your browser
+lerd code           # the project in your editor
+```
+
+Starting from nothing, `lerd new` asks which framework and which major from the store, scaffolds it, and links the result, so you land on a served site rather than on three commands to type.
+
+`lerd install` already starts everything for you on first run, so you can `lerd link` immediately. Day-to-day:
 lerd-installer --uninstall   # remove binários, units systemd e ~/.config|cache|share/lerd
 ```
 
@@ -453,6 +569,14 @@ dashboard em **System → Debug & Troubleshoot**.
 
 Lista completa: `lerd --help`.
 
+- [phpantom_lsp](https://github.com/PHPantom-dev/phpantom_lsp) - the PHP language server behind tinker autocomplete, diagnostics and semantic highlighting
+- [Monaco](https://github.com/microsoft/monaco-editor) - the editor engine for every in-browser editing surface
+- [php-spx](https://github.com/NoiseByNorthwest/php-spx) - the profiler behind the SPX flame graphs
+- [mkcert](https://github.com/FiloSottile/mkcert) - the local CA that backs `.test` HTTPS
+- [fnm](https://github.com/Schniz/fnm) - the per-project Node version manager
+- [Composer](https://getcomposer.org) - fetched on the host for dependency operations
+- [Starship](https://starship.rs) - the prompt in the container shell drop-in
+- [Simple Icons](https://simpleicons.org) - the service marks in the dashboard, CC0
 ---
 
 ## Compilando do código

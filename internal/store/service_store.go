@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/origin"
@@ -35,6 +36,7 @@ type ServiceIndexEntry struct {
 	DefaultVersion string                 `json:"default_version,omitempty"`
 	Category       string                 `json:"category,omitempty"`
 	Icon           string                 `json:"icon,omitempty"`
+	Color          string                 `json:"color,omitempty"`
 	AdminFor       []string               `json:"admin_for,omitempty"`
 }
 
@@ -81,7 +83,60 @@ func (c *Client) FetchServicePreset(name string) ([]byte, error) {
 	if err := config.SaveStorePreset(name, data); err != nil {
 		return nil, fmt.Errorf("saving service preset %q: %w", name, err)
 	}
+	c.fetchServiceIcon(name)
 	return data, nil
+}
+
+// fetchServiceIcon caches the preset's mark, services/<name>.svg, next to the
+// YAML it belongs to. Most presets ship no icon and the ones that do must not
+// fail an install over it, so the whole thing is best effort: a missing file, an
+// unreachable store, or markup the sanitizer refuses all leave the preset served
+// with the built-in glyph its YAML names.
+func (c *Client) fetchServiceIcon(name string) {
+	data, err := c.fetch(name + ".svg")
+	if err != nil {
+		return
+	}
+	_ = config.SaveStorePresetIcon(name, data)
+}
+
+// RefreshServiceIcons caches the mark of every preset the store publishes, not
+// just the ones installed here, so the discovery grid draws a service's own logo
+// before you have ever run it. Only missing marks are fetched, so a repeat sweep
+// costs one request per preset that publishes none. Best effort throughout: this
+// is decoration, and a store that cannot be reached simply leaves the presets on
+// the glyphs their YAML names. Returns how many marks it added.
+func (c *Client) RefreshServiceIcons() int {
+	idx, err := c.FetchServiceIndex()
+	if err != nil {
+		return 0
+	}
+	var added int
+	for _, e := range idx.Services {
+		if _, ok := config.PresetIcon(e.Name); ok {
+			continue
+		}
+		data, err := c.fetch(e.Name + ".svg")
+		if err != nil {
+			continue
+		}
+		if config.SaveStorePresetIcon(e.Name, data) == nil {
+			added++
+		}
+	}
+	return added
+}
+
+// WatchServiceIcons sweeps the store's marks once at startup and then on every
+// interval tick, so a preset published after this binary shipped still shows its
+// logo. Meant to run as a goroutine from the long-running watcher.
+func WatchServiceIcons(interval time.Duration) {
+	NewServiceClient().RefreshServiceIcons()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for range t.C {
+		NewServiceClient().RefreshServiceIcons()
+	}
 }
 
 // SearchServices filters the store index by a case-insensitive substring match

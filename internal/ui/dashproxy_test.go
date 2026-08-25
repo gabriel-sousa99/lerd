@@ -37,9 +37,16 @@ func TestDashProxyEligible(t *testing.T) {
 	if dashProxyEligible(userCustom) {
 		t.Error("user custom service (no preset) must keep the new-tab behavior")
 	}
-	notExternal := &config.CustomService{Name: "rabbitmq", Dashboard: "http://localhost:15672", DashboardExternal: false, Preset: "rabbitmq"}
+	// The preset decides, not the copy saved at install time: a service installed
+	// before its dashboard moved behind the proxy must still be proxied, or the
+	// store change only reaches people who reinstall.
+	preflag := &config.CustomService{Name: "rabbitmq", Dashboard: "http://localhost:15672", DashboardExternal: false, Preset: "rabbitmq"}
+	if !dashProxyEligible(preflag) {
+		t.Error("dashboard_external must be read from the preset so existing installs pick the proxy up")
+	}
+	notExternal := &config.CustomService{Name: "elasticvue", Dashboard: "http://localhost:8083", DashboardExternal: true, Preset: "elasticvue"}
 	if dashProxyEligible(notExternal) {
-		t.Error("service without dashboard_external should not be proxied")
+		t.Error("a preset whose dashboard is not external must not be proxied")
 	}
 	unknownPreset := &config.CustomService{Name: "x", Dashboard: "http://localhost:1", DashboardExternal: true, Preset: "does-not-exist"}
 	if dashProxyEligible(unknownPreset) {
@@ -99,7 +106,7 @@ func TestRewriteLocation(t *testing.T) {
 
 func TestDashProxyModifyResponse(t *testing.T) {
 	target, _ := url.Parse("http://localhost:15672")
-	p := newDashProxy("rabbitmq", target, "")
+	p := newDashProxy("rabbitmq", target, dashProxyTweaks{})
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Set("X-Frame-Options", "DENY")
 	resp.Header.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
@@ -152,7 +159,7 @@ func TestInjectDashboardBootstrap(t *testing.T) {
 
 func TestDashProxyDirector_ForwardsPathAndSetsHost(t *testing.T) {
 	target, _ := url.Parse("http://localhost:15672")
-	p := newDashProxy("rabbitmq", target, "")
+	p := newDashProxy("rabbitmq", target, dashProxyTweaks{})
 	req := httptest.NewRequest("GET", "http://lerd.localhost/_svc/rabbitmq/api/whoami", nil)
 	p.Director(req)
 	if req.URL.Path != "/_svc/rabbitmq/api/whoami" {
@@ -160,6 +167,21 @@ func TestDashProxyDirector_ForwardsPathAndSetsHost(t *testing.T) {
 	}
 	if req.Host != "localhost:15672" {
 		t.Errorf("Host = %q, want localhost:15672", req.Host)
+	}
+}
+
+func TestDashProxyDirector_SendsProxyHeader(t *testing.T) {
+	// pgAdmin learns its mount path from X-Script-Name on every request; without
+	// it the upstream 404s the prefixed path and generates root-absolute URLs.
+	target, _ := url.Parse("http://localhost:8081")
+	p := newDashProxy("pgadmin", target, dashProxyTweaks{headerKey: "X-Script-Name", headerValue: "/_svc/pgadmin"})
+	req := httptest.NewRequest("GET", "http://lerd.localhost/_svc/pgadmin/browser/", nil)
+	// A client-supplied value must not survive: it would move the mount and let a
+	// crafted request drive the upstream to generate URLs pointing off the mount.
+	req.Header.Set("X-Script-Name", "/attacker")
+	p.Director(req)
+	if got := req.Header.Get("X-Script-Name"); got != "/_svc/pgadmin" {
+		t.Errorf("X-Script-Name = %q, want /_svc/pgadmin", got)
 	}
 }
 
@@ -210,7 +232,7 @@ func TestIsLoopbackTarget(t *testing.T) {
 
 func TestDashProxyDirector_RecomputesInjectedForwardedProto(t *testing.T) {
 	target, _ := url.Parse("http://localhost:15672")
-	p := newDashProxy("rabbitmq", target, "")
+	p := newDashProxy("rabbitmq", target, dashProxyTweaks{})
 	req := httptest.NewRequest("GET", "http://lerd.localhost/_svc/rabbitmq/", nil)
 	req.Header.Set("X-Forwarded-Proto", "https\nX-Injected: 1")
 	p.Director(req)

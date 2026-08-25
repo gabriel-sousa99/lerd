@@ -6,6 +6,7 @@
     notificationSeverity,
     type InAppNotification
   } from '$lib/notify';
+  import { wizardBubble } from '$stores/wizard';
   import { m } from '../paraglide/messages.js';
 
   // A failure stays until it is dismissed; anything else is informational and
@@ -37,7 +38,11 @@
 </script>
 
 {#if $inAppNotifications.length > 0}
-  <div class="fixed bottom-3 right-3 z-60 flex w-[min(92vw,380px)] flex-col gap-2">
+  <div
+    class="fixed right-3 z-60 flex w-[min(92vw,380px)] flex-col gap-2 transition-[bottom] duration-200 {$wizardBubble
+      ? 'bottom-16'
+      : 'bottom-3'}"
+  >
     {#each $inAppNotifications as n (n.id)}
       {@const severity = notificationSeverity(n.kind, n.failed)}
       <div

@@ -138,7 +138,7 @@ func SaveStorePreset(name string, data []byte) error {
 		return err
 	}
 	guardRealWrite(filepath.Join(dir, name+".yaml"))
-	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), data, 0o644); err != nil {
+	if err := publishStoreFile(filepath.Join(dir, name+".yaml"), data, 0o644); err != nil {
 		return err
 	}
 	presetCache.Delete(name)
@@ -156,6 +156,9 @@ func RemoveStorePreset(name string) error {
 	}
 	err := os.Remove(filepath.Join(StorePresetsDir(), name+".yaml"))
 	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := removeStorePresetIcon(name); err != nil {
 		return err
 	}
 	presetCache.Delete(name)

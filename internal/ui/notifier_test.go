@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -75,5 +77,42 @@ func TestNativeRequest(t *testing.T) {
 	}
 	if got.Urgency != desktopnotify.UrgencyCritical {
 		t.Errorf("Urgency=%d, want critical", got.Urgency)
+	}
+}
+
+// The desktop sink must reach the package seam rather than the notification
+// daemon itself: a suite that emits for real raises popups on the desktop of
+// whoever is running it, naming the temp directories of the tests that fired.
+func TestDispatchNotification_NativeSinkGoesThroughTheSeam(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfgDir := config.ConfigDir()
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"),
+		[]byte("notifications:\n  target: native\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var got desktopnotify.Request
+	prev := emitDesktopNotification
+	prevSupported := desktopSupported
+	emitDesktopNotification = func(r desktopnotify.Request) (uint32, error) {
+		got = r
+		return 0, nil
+	}
+	// A CI runner has no notification daemon, so the live probe would send this
+	// down the browser branch and the test would pass or fail on the machine
+	// rather than on the code.
+	desktopSupported = func() bool { return true }
+	t.Cleanup(func() {
+		emitDesktopNotification = prev
+		desktopSupported = prevSupported
+	})
+
+	dispatchNotification(push.Notification{Kind: "test", Title: "Create finished: myapp", Body: "Took 0s."})
+
+	if got.Summary != "Create finished: myapp" {
+		t.Errorf("the desktop notification did not go through the seam, got %+v", got)
 	}
 }

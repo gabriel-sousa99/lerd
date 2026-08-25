@@ -2,7 +2,6 @@ package siteops
 
 import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 )
 
@@ -35,7 +34,7 @@ func SyncEnvIfPrimaryChanged(site *config.Site, oldPrimary string) error {
 	var firstErr error
 	for _, wt := range worktrees {
 		newWTDomain := wt.Branch + "." + newPrimary
-		if err := envfile.UpdateAppURL(wt.Path, scheme, newWTDomain); err != nil && firstErr == nil {
+		if err := config.SetSiteURL(wt.Path, scheme, newWTDomain); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

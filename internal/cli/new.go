@@ -25,48 +25,78 @@ var (
 // NewNewCmd returns the new command — scaffold a new PHP project.
 func NewNewCmd() *cobra.Command {
 	var frameworkName string
+	var frameworkVersion string
 
 	cmd := &cobra.Command{
-		Use:   "new <name-or-path>",
-		Short: "Scaffold a new PHP project",
+		Use:   "new [name-or-path]",
+		Short: "Scaffold a new PHP project and take it through link and setup",
 		Long: `Create a new PHP project using the framework's scaffold command.
 
-  lerd new myapp                          # create ./myapp using Laravel (default)
-  lerd new myapp --framework=symfony      # create ./myapp using Symfony
+On a terminal this asks which framework to use, offering what the store
+publishes and which major to scaffold, then carries the project through link
+and setup so it ends up served. Name a framework and that question is skipped;
+run without a terminal and the questions are too, so scripts keep working.
+
+  lerd new                                # ask for the name, framework and version
+  lerd new myapp                          # ask which framework to use
+  lerd new myapp --framework=symfony      # scaffold Symfony, no questions
+  lerd new myapp --framework=laravel --framework-version=11   # scaffold an older major
   lerd new /path/to/myapp                 # create at an absolute path
   lerd new myapp -- --no-interaction      # pass extra args to the scaffold command
 
 Flags anywhere on the line belong to lerd; everything after '--' is handed to
 the scaffold command untouched.
 
-For Laravel this runs:
-  composer create-project --no-install --no-plugins --no-scripts laravel/laravel <target> [extra args]
-
-Other frameworks must define a 'create' field in their YAML definition:
-  create: composer create-project myvendor/myframework
-
-After creation, register the site with:
-  cd <target>
-  lerd link
-  lerd setup`,
-		Args:                  cobra.MinimumNArgs(1),
+Every framework's scaffold command comes from its YAML definition:
+  create: composer create-project myvendor/myframework`,
+		Args:                  cobra.ArbitraryArgs,
 		DisableFlagsInUseLine: true,
 		SilenceUsage:          true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target := args[0]
-			extraArgs := args[1:]
-			return runNew(target, frameworkName, extraArgs)
+			target, extraArgs := newArgs(args, cmd.ArgsLenAtDash())
+			return runNew(target, frameworkName, frameworkVersion, extraArgs)
 		},
 	}
 
-	cmd.Flags().StringVar(&frameworkName, "framework", "laravel", "Framework to use")
+	cmd.Flags().StringVar(&frameworkName, "framework", "",
+		"Framework to scaffold; asked on a terminal when omitted, "+defaultScaffoldFramework+" otherwise")
+	cmd.Flags().StringVar(&frameworkVersion, "framework-version", "",
+		"Major to scaffold; requires --framework, defaults to the latest the store publishes")
 
 	return cmd
 }
 
+// newVersionNeedsFramework reports a version with no framework to apply it to.
+// The wizard would ask which framework and the typed version would be dropped
+// against whatever came back, so the flag pair is refused instead.
+func newVersionNeedsFramework(frameworkName, frameworkVersion string) bool {
+	return frameworkVersion != "" && frameworkName == ""
+}
+
+// newArgs splits the command line into the target and the arguments to hand the
+// scaffold command. dash is cobra's ArgsLenAtDash: the count of arguments before
+// a literal `--`, or -1 when there was none. It is what tells `lerd new -- --x`,
+// which names no project, from `lerd new myapp -- --x`, which names one, since
+// both arrive as a plain list.
+func newArgs(args []string, dash int) (string, []string) {
+	if dash == 0 {
+		return "", args
+	}
+	if len(args) == 0 {
+		return "", nil
+	}
+	return args[0], args[1:]
+}
+
 // newNextStep builds the post-scaffold hint, preserving the path the user
-// typed (filepath.Base would drop the parent dirs of a nested target).
-func newNextStep(typedTarget string) string {
+// typed (filepath.Base would drop the parent dirs of a nested target). A run
+// that already carried the project through link and setup has nothing left to
+// suggest but the one thing the command cannot do, which is move the user's own
+// shell into the new directory.
+func newNextStep(typedTarget string, chained bool) string {
+	if chained {
+		return "cd " + typedTarget
+	}
 	return "cd " + typedTarget + " && lerd link && lerd setup"
 }
 
@@ -165,7 +195,37 @@ func runScaffold(plan scaffold, workDir, version string) error {
 	return cmd.Run()
 }
 
-func runNew(target, frameworkName string, extraArgs []string) error {
+func runNew(target, frameworkName, frameworkVersion string, extraArgs []string) error {
+	interactive := isInteractive()
+
+	if newVersionNeedsFramework(frameworkName, frameworkVersion) {
+		return fmt.Errorf("--framework-version needs a --framework to apply it to")
+	}
+
+	// Ask for what the command was not told. A terminal gets the catalogue and
+	// the majors published for whatever it picks; anything else keeps the
+	// long-standing default so a script never starts blocking on a prompt.
+	if target == "" {
+		if !interactive {
+			return fmt.Errorf("give the project a name: lerd new <name-or-path>")
+		}
+		answer, err := askProjectName()
+		if err != nil {
+			return err
+		}
+		target = answer
+	}
+	if newShouldAskFramework(interactive, frameworkName != "") {
+		name, version, err := askScaffoldFramework(scaffoldCatalogue())
+		if err != nil {
+			return err
+		}
+		frameworkName, frameworkVersion = name, version
+	}
+	if frameworkName == "" {
+		frameworkName = defaultScaffoldFramework
+	}
+
 	// Preserve the path as typed for the "Next" hint before resolving it.
 	typedTarget := target
 
@@ -178,10 +238,10 @@ func runNew(target, frameworkName string, extraArgs []string) error {
 		target = filepath.Join(cwd, target)
 	}
 
-	// Look up the framework, fetching from the store if it's published but not
-	// installed here yet — starting a project you've never built is exactly when
-	// the definition won't be local.
-	fw, ok := config.GetFrameworkOrFetch(frameworkName)
+	// Look up the framework in the store, so a new project starts from the
+	// published definition rather than whichever snapshot of it this binary was
+	// built with. Falls back to the local definition when the store is unreachable.
+	fw, ok := config.GetFrameworkForScaffold(frameworkName, frameworkVersion)
 	if !ok {
 		return fmt.Errorf("unknown framework %q — run 'lerd framework list' to see available frameworks", frameworkName)
 	}
@@ -214,9 +274,39 @@ func runNew(target, frameworkName string, extraArgs []string) error {
 	}
 
 	feedback.Success("created "+filepath.Base(target), time.Since(start))
+
+	// Take the project the rest of the way. The link routes a project with no
+	// .lerd.yaml through the init wizard (PHP version, HTTPS, services) and
+	// offers setup at the end, so scaffolding lands on a served site rather than
+	// three commands the user has to know about.
+	chained := false
+	if interactive {
+		chained = true
+		if err := inDir(target, func() error { return runLinkOrInit(nil) }); err != nil {
+			feedback.Warn("link: %v", err)
+		}
+	}
+
 	feedback.NewSummary().
 		Row("Path", target).
-		Row("Next", newNextStep(typedTarget)).
+		Row("Next", newNextStep(typedTarget, chained)).
 		Print()
 	return nil
+}
+
+// inDir runs fn with the process working directory moved to dir, restoring it
+// afterwards. The chained steps each resolve the project from os.Getwd, and this
+// is the one caller that has to point them somewhere other than where the user
+// ran the command, so it moves once here rather than threading a directory
+// through link, init and setup.
+func inDir(dir string, fn func() error) error {
+	prev, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := os.Chdir(dir); err != nil {
+		return err
+	}
+	defer func() { _ = os.Chdir(prev) }()
+	return fn()
 }

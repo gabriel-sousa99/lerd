@@ -68,6 +68,16 @@ describe('InstalledServiceTile', () => {
     expect(container.querySelector('.w-9.h-9')?.className).toContain('indigo');
   });
 
+  // The dashboard widget renders the same tile in a much narrower column, so
+  // it asks for the shell's compact variant instead of restyling the tile.
+  it('wears the compact shell and icon when asked', () => {
+    const { container } = render(InstalledServiceTile, { props: { svc: svc(), compact: true } });
+    const card = container.firstElementChild as HTMLElement;
+    expect(card.className).toContain('rounded-lg');
+    expect(card.className).toContain('p-2.5');
+    expect(container.querySelector('.w-8.h-8')).toBeTruthy();
+  });
+
   // The navigating button and the dashboard icon must be siblings: a button
   // cannot be nested inside another button.
   it('keeps the dashboard icon outside the navigating button', () => {

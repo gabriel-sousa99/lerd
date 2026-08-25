@@ -70,6 +70,21 @@ func realPrefetchImage(image string, emit func(PhaseEvent)) error {
 	return nil
 }
 
+// ReinstallOptions controls what a reinstall does with the service's data.
+type ReinstallOptions struct {
+	// ResetData renames the data dir aside and reprovisions linked sites'
+	// databases and buckets on the fresh service.
+	ResetData bool
+
+	// SkipSnapshot suppresses the safety snapshot ResetData otherwise takes
+	// of every database on the service.
+	SkipSnapshot bool
+}
+
+// reinstallSnapshotLabel names the safety snapshot a data-resetting reinstall
+// leaves behind, so it is distinguishable from a plain removal's.
+const reinstallSnapshotLabel = "pre-reset-data"
+
 // ReinstallService stops, removes, and reinstalls a service, optionally wiping
 // its data and reprovisioning per-site state (databases, buckets) on the
 // fresh service.
@@ -83,10 +98,11 @@ func realPrefetchImage(image string, emit func(PhaseEvent)) error {
 // fail with the on-disk state intact rather than after the service config
 // has already been deleted.
 //
-// When resetData is true the data dir is renamed-aside (recoverable as
-// .pre-remove-<ts>) and ReprovisionLinkedSites is invoked after the install
-// completes so dependent sites' DBs/buckets exist on the fresh service.
-func ReinstallService(name string, resetData bool, emit func(PhaseEvent)) error {
+// When opts.ResetData is true every database on the service is snapshotted
+// first, the data dir is renamed-aside (recoverable as .pre-remove-<ts>), and
+// ReprovisionLinkedSites is invoked after the install completes so dependent
+// sites' DBs/buckets exist on the fresh service.
+func ReinstallService(name string, opts ReinstallOptions, emit func(PhaseEvent)) error {
 	if emit == nil {
 		emit = func(PhaseEvent) {}
 	}
@@ -107,7 +123,13 @@ func ReinstallService(name string, resetData bool, emit func(PhaseEvent)) error 
 
 	// Suppress regen-during-remove; we drive it ourselves below to
 	// eliminate the launchctl bootout/bootstrap race on macOS.
-	if err := RemoveService(name, RemoveOptions{RemoveData: resetData, SkipFamilyRegen: true}, emit); err != nil {
+	removeOpts := RemoveOptions{
+		RemoveData:      opts.ResetData,
+		SkipSnapshot:    opts.SkipSnapshot,
+		SnapshotLabel:   reinstallSnapshotLabel,
+		SkipFamilyRegen: true,
+	}
+	if err := RemoveService(name, removeOpts, emit); err != nil {
 		return fmt.Errorf("reinstall: remove step: %w", err)
 	}
 
@@ -124,7 +146,7 @@ func ReinstallService(name string, resetData bool, emit func(PhaseEvent)) error 
 		reinstallFamilyRegenFn(name)
 	}
 
-	if resetData {
+	if opts.ResetData {
 		if err := reinstallReprovFn(name, emit); err != nil {
 			return fmt.Errorf("reinstall: reprovision step: %w", err)
 		}

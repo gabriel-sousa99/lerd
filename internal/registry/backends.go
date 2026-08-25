@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // httpClient is overridable from tests; production uses a 10s-timeout client.
@@ -38,11 +40,7 @@ func cacheDir() string {
 	if d := os.Getenv("LERD_REGISTRY_CACHE_DIR"); d != "" {
 		return d
 	}
-	if d := os.Getenv("XDG_CACHE_HOME"); d != "" {
-		return filepath.Join(d, "lerd", "registry-tags")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache", "lerd", "registry-tags")
+	return filepath.Join(config.CacheDir(), "registry-tags")
 }
 
 // AuthRequiredErr is returned when the registry needs credentials we don't

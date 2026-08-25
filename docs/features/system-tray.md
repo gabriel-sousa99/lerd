@@ -42,6 +42,7 @@ PHP 8.5        ▸   ✔ 8.5           ← current default
 
 Settings       ▸   Autostart at login: ✔ On   ← enables/disables every lerd unit
                    Expose to LAN: Off         ← Linux only
+                   Managed service LAN access: Off ← explicit database/cache port access
                    Debug bridge: Off          ← `lerd dump on/off`
                    Notifications: ✔ On        ← `lerd notify on/off`
                    High-contrast icon: Off    ← `lerd tray icon default/high-contrast`
@@ -51,7 +52,7 @@ The menu refreshes every 30 seconds, and again right after any click so it redra
 
 The **Debug bridge** item shells out to `lerd dump on` / `lerd dump off`, see [Dumps](dumps.md). The **Notifications** item shells out to `lerd notify on` / `lerd notify off`, see [Notifications](notifications.md). Both are global toggles, persisted to `config.yaml`.
 
-The **Services** submenu shows only core services (MySQL, Redis, PostgreSQL, etc.), and its parent row hides itself when none are installed. If you ever install more than the menu has room for, the last row reports how many are not shown rather than dropping them quietly.
+The **Services** submenu shows only core services (MySQL, Redis, PostgreSQL, etc.), and its parent row hides itself when none are installed, which means installed and none, never a poll that failed to read them. If you ever install more than the menu has room for, the last row reports how many are not shown rather than dropping them quietly.
 
 The **workers line** summarises the per-site workers (queue, schedule, Horizon, Reverb, Stripe, and any framework-declared worker) without listing them, since their number grows with your sites. It shows the running count in green, or a red warning naming the site when one has actually broken. A worker stopped because its site is paused or idle-suspended is not a fault, so it never raises the warning, and the line hides itself entirely when nothing is running and nothing is wrong. Workers are still started and stopped from the web UI or their CLI commands.
 

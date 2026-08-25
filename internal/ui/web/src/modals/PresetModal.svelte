@@ -3,6 +3,7 @@
   import Modal from '$components/Modal.svelte';
   import Dropdown from '$components/Dropdown.svelte';
   import DetailButton from '$components/DetailButton.svelte';
+  import ServiceIcon from '$components/ServiceIcon.svelte';
   import { closeModal } from '$stores/modals';
   import {
     presets,
@@ -60,6 +61,15 @@
       {#each filtered as p (p.name)}
         <div class="border border-gray-100 dark:border-lerd-border rounded-lg p-3 mb-2 last:mb-0">
           <div class="flex items-center gap-3">
+            <span class="self-start">
+              <ServiceIcon
+                name={p.name}
+                category={p.category}
+                icon={p.icon}
+                color={p.color}
+                compact
+              />
+            </span>
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2">
                 <span class="text-sm font-semibold text-gray-900 dark:text-white">{p.name}</span>

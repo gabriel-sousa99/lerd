@@ -32,6 +32,7 @@ type menuState struct {
 	mSettings      *systray.MenuItem
 	mAutostart     *systray.MenuItem
 	mLAN           *systray.MenuItem
+	mLANServices   *systray.MenuItem
 	mDumps         *systray.MenuItem
 	mNotifications *systray.MenuItem
 	mDebugGuide    *systray.MenuItem
@@ -74,6 +75,7 @@ func buildMenu(mono bool) *menuState {
 	if runtime.GOOS != "darwin" {
 		m.mLAN = m.mSettings.AddSubMenuItem("Expose to LAN: Off", "Toggle whether lerd is reachable from other devices on the local network")
 	}
+	m.mLANServices = m.mSettings.AddSubMenuItem("Managed service LAN access: Off", "Allow remote access to managed service ports on trusted networks")
 	m.mDumps = m.mSettings.AddSubMenuItem("Debug bridge: Off", "Capture dump() / dd() into the lerd dashboard")
 	m.mNotifications = m.mSettings.AddSubMenuItem("Notifications: On", "Globally enable or disable lerd notifications")
 	m.mDebugGuide = m.mSettings.AddSubMenuItem("Debug & Oracle help…", "Abre os guias de troubleshoot da fork Oracle Edition no navegador")
@@ -108,6 +110,17 @@ func serviceRows(snap *Snapshot) []row {
 		})
 	}
 	return rows
+}
+
+// serviceSection returns the rows the Services section should show and whether
+// it should be touched at all. A poll whose services call did not come back has
+// read nothing, and drawing that as an empty section takes the whole submenu
+// off the menu until the next poll.
+func serviceSection(snap *Snapshot) ([]row, bool) {
+	if !snap.ServicesKnown {
+		return nil, false
+	}
+	return serviceRows(snap), true
 }
 
 // phpRows renders the installed PHP versions, ticking the current default.
@@ -184,6 +197,16 @@ func toggleTitle(label string, on bool) string {
 	return label + ": Off"
 }
 
+func managedServiceLANTitle(snap *Snapshot) string {
+	if !snap.LANServicesExposed {
+		return "Managed service LAN access: Off"
+	}
+	if !snap.LANExposed {
+		return "Managed service LAN access: Armed (LAN exposure off)"
+	}
+	return "Managed service LAN access: ✔ On"
+}
+
 // apply updates menu titles and visibility from a Snapshot.
 func (m *menuState) apply(snap *Snapshot) {
 	if snap == nil {
@@ -209,18 +232,24 @@ func (m *menuState) apply(snap *Snapshot) {
 		m.mDNS.SetTitle(fmt.Sprintf("  %s dns", statusDot(snap.DNSOK)))
 	}
 
-	if title, show := workersTitle(snap); show {
-		m.mWorkers.SetTitle(title)
-		m.mWorkers.Show()
-	} else {
-		m.mWorkers.Hide()
+	// The worker count comes from the services call too, so both lines wait for
+	// a poll that actually read it rather than redrawing from a blank.
+	if snap.ServicesKnown {
+		if title, show := workersTitle(snap); show {
+			m.mWorkers.SetTitle(title)
+			m.mWorkers.Show()
+		} else {
+			m.mWorkers.Hide()
+		}
 	}
 
-	if m.svcs.set(serviceRows(snap)) == 0 {
-		m.mSvcs.Hide()
-	} else {
-		m.mSvcs.SetTitle(servicesTitle(snap))
-		m.mSvcs.Show()
+	if rows, redraw := serviceSection(snap); redraw {
+		if m.svcs.set(rows) == 0 {
+			m.mSvcs.Hide()
+		} else {
+			m.mSvcs.SetTitle(servicesTitle(snap))
+			m.mSvcs.Show()
+		}
 	}
 
 	if m.php.set(phpRows(snap)) == 0 {
@@ -234,6 +263,7 @@ func (m *menuState) apply(snap *Snapshot) {
 	if m.mLAN != nil {
 		m.mLAN.SetTitle(toggleTitle("Expose to LAN", snap.LANExposed))
 	}
+	m.mLANServices.SetTitle(managedServiceLANTitle(snap))
 	m.mDumps.SetTitle(toggleTitle("Debug bridge", snap.DumpsEnabled))
 	m.mNotifications.SetTitle(toggleTitle("Notifications", snap.NotificationsEnabled))
 	if m.mIconStyle != nil {

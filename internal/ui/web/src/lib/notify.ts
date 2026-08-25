@@ -341,7 +341,10 @@ async function fireNotification(evt: NotificationEvent) {
   if (!isTest) {
     const entry = { kind: evt.kind, title, body, url: evt.url ?? '', failed };
     record(entry);
-    if (failed || windowFocused()) {
+    // A downed worker already has a surface of its own, the health banner, which
+    // outlives this event and carries the actions. A toast beside it is the same
+    // sentence twice, so the toast stack sits this kind out.
+    if ((failed || windowFocused()) && evt.kind !== 'worker_failed') {
       pushInApp(entry);
     }
     if (windowFocused()) return;

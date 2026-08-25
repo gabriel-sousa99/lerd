@@ -132,6 +132,16 @@ type GlobalConfig struct {
 		// host's ngrok configuration, so the published image needs this to
 		// run at all. Set via "lerd share:token".
 		NgrokToken string `yaml:"ngrok_token,omitempty" mapstructure:"ngrok_token"`
+		// PinggyToken authenticates Pinggy for a stable subdomain. Optional:
+		// without it a Pinggy share gets an ephemeral free-tier URL. Set via
+		// "lerd share:token pinggy".
+		PinggyToken string `yaml:"pinggy_token,omitempty" mapstructure:"pinggy_token"`
+		// PublicBaseDomain is the domain a "public" share is served under, as
+		// "<site>.<base>". A public share is a reverse-proxy share: lerd runs a
+		// Host-rewriting proxy on a stable port and the user points their own
+		// proxy (netbird, nginx, ...) at "<site>.<base>" → that port. A domain
+		// the user controls, never a bare TLD. Set via the dashboard's share menu.
+		PublicBaseDomain string `yaml:"public_base_domain,omitempty" mapstructure:"public_base_domain"`
 	} `yaml:"share,omitempty" mapstructure:"share"`
 	Nginx struct {
 		HTTPPort  int `yaml:"http_port"  mapstructure:"http_port"`
@@ -155,21 +165,18 @@ type GlobalConfig struct {
 		Upstream []string `yaml:"upstream,omitempty" mapstructure:"upstream"`
 	} `yaml:"dns" mapstructure:"dns"`
 	LAN struct {
-		// Exposed controls whether lerd's services are reachable from
-		// other devices on the local network. When false (the default,
-		// safe-on-coffee-shop-wifi state) every container PublishPort is
-		// rewritten to bind 127.0.0.1, lerd-ui binds 127.0.0.1:7073, and
-		// the lerd-dns-forwarder is stopped. When true, container ports
-		// bind 0.0.0.0, lerd-ui binds 0.0.0.0:7073, dnsmasq is rewritten
-		// to answer .test queries with the host's LAN IP, and the
-		// userspace lerd-dns-forwarder runs to bridge LAN-IP:5300 to the
-		// loopback-only DNS container.
+		// Exposed controls whether lerd sites are reachable from other devices
+		// on the local network. When false (the safe default), container ports
+		// and lerd-ui bind to loopback and the DNS forwarder is stopped. When
+		// true, nginx, DNS, and the dashboard bind to the LAN.
 		//
-		// Toggled via `lerd lan:expose on/off`. The previous standalone
-		// `dns:expose` flag was folded in here because there is no
-		// meaningful state where the DNS resolver answers the LAN but
-		// the actual services don't.
-		Exposed bool `yaml:"exposed,omitempty" mapstructure:"exposed"`
+		// ServicesExposed separately controls host access to lerd-managed
+		// databases, caches, and other services. It has no effect unless
+		// Exposed is also true. Keeping this opt-in separate preserves the safe
+		// default while allowing trusted development machines to publish
+		// services without per-port configuration.
+		Exposed         bool `yaml:"exposed,omitempty"          mapstructure:"exposed"`
+		ServicesExposed bool `yaml:"services_exposed,omitempty" mapstructure:"services_exposed"`
 	} `yaml:"lan,omitempty" mapstructure:"lan"`
 	Autostart struct {
 		// Disabled controls whether lerd boots itself at login. The
@@ -191,6 +198,16 @@ type GlobalConfig struct {
 		// see no change.
 		Disabled bool `yaml:"disabled,omitempty" mapstructure:"disabled"`
 	} `yaml:"autostart,omitempty" mapstructure:"autostart"`
+	Shims struct {
+		// PathDisabled stops lerd from writing its bin dir (the php/composer/
+		// node shims) onto the shell PATH, for users who prefer typing
+		// `lerd php` explicitly. Only the rc PATH entry is affected: the shim
+		// scripts are still written and every internal code path keeps
+		// injecting the dir for its own child processes. Inverted so the YAML
+		// zero value keeps the historical shims-on-PATH behaviour. Toggled via
+		// `lerd path:disable / path:enable`.
+		PathDisabled bool `yaml:"path_disabled,omitempty" mapstructure:"path_disabled"`
+	} `yaml:"shims,omitempty" mapstructure:"shims"`
 	UI struct {
 		// RemoteControl gates non-loopback access to the lerd dashboard.
 		// Empty PasswordHash = disabled = LAN clients get 403. With a hash
@@ -198,6 +215,17 @@ type GlobalConfig struct {
 		// (127.0.0.1, ::1) always bypasses both checks.
 		Username     string `yaml:"username,omitempty" mapstructure:"username"`
 		PasswordHash string `yaml:"password_hash,omitempty" mapstructure:"password_hash"`
+
+		// RemoteFullAccess opts authenticated remote sessions into the host
+		// actions that are otherwise reserved for the local dashboard: raw
+		// .env reads, filesystem browsing, database drops, terminals and
+		// command execution. Off by default, so a leaked or guessed password
+		// alone never reaches them. It widens which routes an authenticated
+		// session may use; it never substitutes for authentication.
+		//
+		// Toggled via `lerd remote-control full-access on/off`, which only
+		// the local dashboard or a local shell can do.
+		RemoteFullAccess bool `yaml:"remote_full_access,omitempty" mapstructure:"remote_full_access"`
 	} `yaml:"ui,omitempty" mapstructure:"ui"`
 	Workers struct {
 		// ExecMode controls how framework workers (queue, schedule, horizon,
@@ -497,6 +525,17 @@ func mappingContainerPort(mapping string) int {
 	return n
 }
 
+// ServiceEntryOrphaned reports whether the global-config entry for name has no
+// service behind it any more. `service remove` deletes a custom service's
+// definition YAML and quadlet but keeps its entry, so a reinstall lands back on
+// the same published port; until then the entry describes nothing, and the ports
+// it records must stay out of the reservation math. Default presets are never
+// orphaned: defaultConfig seeds an entry for every one of them, installed or not,
+// and a phantom preset deliberately holds its default port.
+func ServiceEntryOrphaned(name string) bool {
+	return !IsDefaultPreset(name) && !CustomServiceExists(name)
+}
+
 // ReservedHostPorts returns every host port a lerd service may bind: each
 // configured service entry's effective ports (HostPorts), every bundled preset's
 // default ports (including optional presets not in the default set), and every
@@ -514,30 +553,11 @@ func ReservedHostPorts() map[int]bool {
 			reserved[n] = true
 		}
 	}
-	// reserveDefaults reserves a service's default mappings, resolving each through
-	// the service's recorded published override so a moved primary or secondary port
-	// reserves its NEW port and frees the default, instead of pinning the vacated
-	// default reserved forever (which would keep the guard and the host-proxy
-	// allocator from ever reusing it). Matches HostPorts()'s freed-default contract.
-	reserveDefaults := func(name string, mappings []string) {
-		var svc ServiceConfig
-		configured := false
-		if cfg != nil {
-			svc, configured = cfg.Services[name]
-		}
-		for i, m := range mappings {
-			host := MappingHostPort(m)
-			if host <= 0 {
+	if cfg != nil {
+		for name, svc := range cfg.Services {
+			if ServiceEntryOrphaned(name) {
 				continue
 			}
-			if configured {
-				host = svc.HostPortFor(mappingContainerPort(m), host, i == 0)
-			}
-			add(host)
-		}
-	}
-	if cfg != nil {
-		for _, svc := range cfg.Services {
 			for _, p := range svc.HostPorts() {
 				add(p)
 			}
@@ -551,16 +571,75 @@ func ReservedHostPorts() map[int]bool {
 	if presets, err := ListPresets(); err == nil {
 		for _, meta := range presets {
 			if p, err := LoadPreset(meta.Name); err == nil {
-				reserveDefaults(meta.Name, p.Ports)
+				for _, port := range resolveMappingPorts(cfg, meta.Name, p.Ports) {
+					add(port)
+				}
 			}
 		}
 	}
 	if customs, err := ListCustomServices(); err == nil {
 		for _, svc := range customs {
-			reserveDefaults(svc.Name, svc.Ports)
+			for _, port := range resolveMappingPorts(cfg, svc.Name, svc.Ports) {
+				add(port)
+			}
 		}
 	}
 	return reserved
+}
+
+// resolveMappingPorts resolves a service's declared port mappings to the host
+// ports it actually publishes, applying the service's recorded published-port
+// override (if any) so a moved primary or secondary port resolves to its NEW
+// port rather than the vacated default. Shared by ReservedHostPorts (which
+// wants every port a service might ever hold) and HostPortsFor (which wants
+// one installed service's current ports). An orphaned entry's override is
+// ignored: a preset a removed service was materialised from resolves back to its
+// catalog default rather than to the port that removed service was moved to.
+func resolveMappingPorts(cfg *GlobalConfig, name string, mappings []string) []int {
+	var svc ServiceConfig
+	configured := false
+	if cfg != nil && !ServiceEntryOrphaned(name) {
+		svc, configured = cfg.Services[name]
+	}
+	var ports []int
+	for i, m := range mappings {
+		host := MappingHostPort(m)
+		if host <= 0 {
+			continue
+		}
+		if configured {
+			host = svc.HostPortFor(mappingContainerPort(m), host, i == 0)
+		}
+		ports = append(ports, host)
+	}
+	return ports
+}
+
+// HostPortsFor returns the host ports the named installed service actually
+// publishes right now: a custom service's (including an installed preset's)
+// resolved Ports, or a default-preset's configured ServiceConfig ports. Nil
+// when name matches neither. Used by the client-tool shim to recognise an
+// explicit loopback host/port as one of lerd's own services rather than a
+// truly external database — unlike ReservedHostPorts, which reserves every
+// bundled preset's potential ports whether installed or not, this reports
+// only the ports a specific installed service is actually bound to.
+func HostPortsFor(name string) []int {
+	cfg, _ := LoadGlobal()
+	// Dispatch the way loadServiceDef (internal/shims) does: a default preset's
+	// ports live in its ServiceConfig entry, always populated by defaultConfig();
+	// anything else resolves through its own installed CustomService YAML, the
+	// ground truth for what a non-default instance actually publishes.
+	if !IsDefaultPreset(name) {
+		if svc, err := LoadCustomService(name); err == nil && svc != nil {
+			return resolveMappingPorts(cfg, name, svc.Ports)
+		}
+	}
+	if cfg != nil {
+		if svc, ok := cfg.Services[name]; ok {
+			return svc.HostPorts()
+		}
+	}
+	return nil
 }
 
 // FPMPortsFor returns the extra published port mappings recorded for a PHP

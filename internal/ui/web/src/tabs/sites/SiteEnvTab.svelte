@@ -11,10 +11,17 @@
     type SiteEnvBackup,
     type EnvProposeEntry
   } from '$stores/sites';
-  import { openEnvSaveModal, openEnvRestoreModal, openEnvProposeModal } from '$stores/modals';
+  import {
+    openEnvSaveModal,
+    openEnvRestoreModal,
+    openEnvProposeModal,
+    openEnvDuplicatesModal,
+    pendingEnvDuplicates
+  } from '$stores/modals';
   import { status } from '$stores/status';
   import { addedLineNumbers } from '$lib/diff';
   import { homeShorten } from '$lib/path';
+  import { findDuplicates, keepOnlyEach } from '$lib/envDuplicates';
   import { m } from '../../paraglide/messages.js';
 
   interface Props {
@@ -56,6 +63,32 @@
   const envPathLabel = $derived(homeShorten(envPath, $status.home));
 
   const dirty = $derived(text !== original);
+  // Duplicates are read from the buffer, not from disk, so resolving one and
+  // then changing your mind updates the banner immediately.
+  const duplicates = $derived(loading || error ? [] : findDuplicates(text));
+
+  // Resolving in the modal drops the other occurrences from the buffer. That
+  // leaves an ordinary unsaved change the user reviews and saves with the normal
+  // button, the same way a staged missing key does. Every choice carries a line
+  // number read from the same buffer, so they are resolved in one pass: removing
+  // one key's extra lines renumbers the ones below, and applying the choices one
+  // after another would drop lines the user asked to keep.
+  function applyDuplicateChoices(choices: { key: string; line: number }[]) {
+    text = keepOnlyEach(text, choices);
+  }
+
+  function reviewDuplicates() {
+    openEnvDuplicatesModal({ file, duplicates, onResolve: applyDuplicateChoices });
+  }
+
+  // The doctor sends the user here with the resolver already asked for; open it
+  // once the file has actually loaded, and clear the request either way so it
+  // never fires twice.
+  $effect(() => {
+    if (!$pendingEnvDuplicates || loading) return;
+    pendingEnvDuplicates.set(false);
+    if (duplicates.length > 0) reviewDuplicates();
+  });
   const latestBackup = $derived(backups[0]);
   // Which editor lines are unsaved insertions, recomputed live from the diff
   // against the on-disk content so the green markers track edits (a line the
@@ -345,6 +378,25 @@
       </div>
     </div>
   </div>
+
+  {#if duplicates.length > 0}
+    <div
+      class="flex items-center justify-between gap-3 px-3 py-1.5 bg-amber-50 dark:bg-amber-900/15 border-b border-amber-200 dark:border-amber-900/40"
+    >
+      <span class="text-xs text-amber-700 dark:text-amber-300">
+        {m.envEditor_duplicateBanner({ n: duplicates.length })}
+      </span>
+      <div class="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          onclick={reviewDuplicates}
+          class="text-xs px-2 py-1 rounded-sm border border-amber-300 dark:border-amber-900/50 text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/25 whitespace-nowrap"
+        >
+          {m.envEditor_duplicateReview()}
+        </button>
+      </div>
+    </div>
+  {/if}
 
   {#if canPropose}
     <div class="flex items-center justify-between gap-3 px-3 py-1.5 bg-amber-50 dark:bg-amber-900/15 border-b border-amber-200 dark:border-amber-900/40">

@@ -1,6 +1,7 @@
 import { writable, derived } from 'svelte/store';
 import { apiJson, apiFetch, apiUrl } from '$lib/api';
 import { loadServices } from './services';
+import { loadServiceIcons } from './serviceIcons';
 import { goToTab } from './route';
 import { m } from '../paraglide/messages.js';
 
@@ -15,10 +16,11 @@ export interface Preset {
   image?: string;
   dashboard?: string;
   depends_on?: string[];
-  // Declared by the preset YAML: discovery category, icon-set key, and the
-  // services this preset's admin UI administers.
+  // Declared by the preset YAML: discovery category, icon-set key, brand
+  // colour, and the services this preset's admin UI administers.
   category?: string;
   icon?: string;
+  color?: string;
   admin_for?: string[];
   missing_deps?: string[];
   installed?: boolean;
@@ -224,6 +226,9 @@ export async function installPresetAndOpen(
   if (r.ok && r.name) {
     await loadServices();
     await loadPresets();
+    // The install is what pulled the preset from the store, so its mark is only
+    // in the cache now.
+    void loadServiceIcons();
     opts.onSuccess?.(r.name);
     goToTab('services', r.name);
   } else {

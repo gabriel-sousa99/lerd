@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+
+	"github.com/spf13/cobra"
 )
 
 func TestServiceReinstallCmd_HasResetDataFlag(t *testing.T) {
@@ -44,6 +46,27 @@ func TestServiceRemoveCmd_HasPurgeFlag(t *testing.T) {
 	}
 	if flag.DefValue != "false" {
 		t.Errorf("--purge default = %q, want false", flag.DefValue)
+	}
+}
+
+// Both data-wiping commands snapshot the databases first, so both need the
+// same escape hatch for an engine that cannot be brought up to dump from.
+func TestDataWipingCommandsHaveNoSnapshotFlag(t *testing.T) {
+	for _, tc := range []struct {
+		use string
+		cmd func() *cobra.Command
+	}{
+		{"service remove", newServiceRemoveCmd},
+		{"service reinstall", newServiceReinstallCmd},
+	} {
+		flag := tc.cmd().Flags().Lookup("no-snapshot")
+		if flag == nil {
+			t.Errorf("--no-snapshot flag missing on `%s`", tc.use)
+			continue
+		}
+		if flag.DefValue != "false" {
+			t.Errorf("`%s` --no-snapshot default = %q, want false", tc.use, flag.DefValue)
+		}
 	}
 }
 

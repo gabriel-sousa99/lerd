@@ -5,8 +5,9 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
 )
 
-// syncEnvFn is injectable for tests. Production wires to envfile.SyncPrimaryDomain.
-var syncEnvFn = envfile.SyncPrimaryDomain
+// syncEnvFn is injectable for tests. Production resolves the framework's URL
+// target before updating the project file.
+var syncEnvFn = config.SyncSiteURL
 
 // Frontend env-sync hooks, injectable for tests.
 var (

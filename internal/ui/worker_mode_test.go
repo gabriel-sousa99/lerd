@@ -17,6 +17,7 @@ import (
 func TestHandleSettingsWorkerMode_UpdatesConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	isolateLaunchAgents(t)
 
 	body, _ := json.Marshal(map[string]string{"mode": config.WorkerExecModeContainer})
 	req := httptest.NewRequest(http.MethodPost, "/api/settings/worker-mode", bytes.NewReader(body))
@@ -39,6 +40,7 @@ func TestHandleSettingsWorkerMode_UpdatesConfig(t *testing.T) {
 func TestHandleSettingsWorkerMode_RejectsUnknownMode(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	isolateLaunchAgents(t)
 
 	body, _ := json.Marshal(map[string]string{"mode": "unknown"})
 	req := httptest.NewRequest(http.MethodPost, "/api/settings/worker-mode", bytes.NewReader(body))

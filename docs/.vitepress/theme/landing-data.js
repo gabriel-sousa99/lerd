@@ -4,7 +4,9 @@
    Install commands use the canonical lerd.sh endpoints.
    =========================================================== */
 
-/* ---- Brand glyphs: lettered tiles (no fake brand logos) ---- */
+import { MARKS } from './landing-marks.js'
+
+/* ---- Brand glyphs: the store mark where one exists, a lettered tile otherwise ---- */
 export const LOGOS = {
   laravel:  { ch: 'L', c: '#ff2d20' },
   symfony:  { ch: 'S', c: '#cbd5e1' },
@@ -14,7 +16,7 @@ export const LOGOS = {
   magento:  { ch: 'M', c: '#f46f25' },
   statamic: { ch: 'S', c: '#a78bfa' },
   codeigniter: { ch: 'C', c: '#f97316' },
-  tempest:  { ch: 'T', c: '#22d3ee' },
+  tempest:  { ch: 'T', c: '#29ABE2' },
   claude:   { ch: 'C', c: '#ff8a65' },
   cursor:   { ch: '⌘', c: '#e5e7eb' },
   codex:    { ch: '{', c: '#34d399' },
@@ -33,13 +35,27 @@ export const LOGOS = {
   antigravity: { ch: 'A', c: '#60a5fa' },
 }
 
-export function glyph(name, size) {
+// `bare` drops the tile and fills the box with the mark itself, for places that
+// carry their own spacing (the framework strip) rather than needing a chip.
+export function glyph(name, size, opts = {}) {
   const l = LOGOS[name] || { ch: '?', c: '#888' }
   const s = size || 100
+  const m = MARKS[name]
+  const inset = opts.bare ? 0.04 : 0.19
+  const face = m
+    ? `<svg x="${s * inset}" y="${s * inset}" width="${s * (1 - inset * 2)}" height="${s * (1 - inset * 2)}"
+        viewBox="${m.vb}" fill="${l.c}">${m.d}</svg>`
+    : `<text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+        font-family="JetBrains Mono, monospace" font-weight="600"
+        font-size="${s * (opts.bare ? 0.86 : 0.5)}" fill="${l.c}">${l.ch}</text>`
+  // No stroke: the rect fills the viewBox, so a stroke on it is half-clipped on
+  // every edge. The tint alone carries the plate.
+  const tile = opts.bare
+    ? ''
+    : `<rect width="${s}" height="${s}" rx="${s * 0.26}" fill="${l.c}" fill-opacity="0.15"/>`
   return `<svg viewBox="0 0 ${s} ${s}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%">
-      <rect width="${s}" height="${s}" rx="${s * 0.26}" fill="${l.c}" fill-opacity="0.13" stroke="${l.c}" stroke-opacity="0.4"/>
-      <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
-        font-family="JetBrains Mono, monospace" font-weight="600" font-size="${s * 0.5}" fill="${l.c}">${l.ch}</text>
+      ${tile}
+      ${face}
     </svg>`
 }
 

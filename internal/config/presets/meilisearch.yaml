@@ -17,3 +17,4 @@ env_vars:
   - MEILISEARCH_HOST=http://lerd-meilisearch:7700
 category: search
 icon: search
+color: "#ff5caa"

@@ -1,6 +1,7 @@
 name: postgres-pgvector
 description: PostgreSQL with pgvector (vector embeddings, no PostGIS)
 family: postgres
+stop_timeout: 60
 default_version: "18"
 versions:
   - tag: "18"

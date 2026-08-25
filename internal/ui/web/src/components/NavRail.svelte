@@ -6,6 +6,7 @@
   import RailLogo from './RailLogo.svelte';
   import ThemeSwitcher from './ThemeSwitcher.svelte';
   import NotificationCenter from './NotificationCenter.svelte';
+  import ServiceIcon from './ServiceIcon.svelte';
   import VersionLabel from './VersionLabel.svelte';
   import {
     dashboardServices,
@@ -29,9 +30,9 @@
     void loadProfilerStatus();
   });
 
-  // The profiler and service dashboards are loopback-only localhost web UIs, so
-  // their launch icons are dead from a remote (LAN) dashboard. Hide them there.
-  const remote = $derived(!$accessMode.loopback);
+  // Hide host-local launchers only when dashboard-control authority is
+  // unavailable. Authenticated remote dashboards receive authority.
+  const remote = $derived(!$accessMode.localControl);
 
   const labels = $derived<Record<TabId, string>>({
     dashboard: m.nav_dashboard(),
@@ -92,9 +93,16 @@
           active={$dashboardOpen?.name === svc.name}
           onclick={() => openDashboard(svc)}
         >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            {@html dashboardIconSvg(svc.name, svc.icon)}
-          </svg>
+          <ServiceIcon
+            name={svc.name}
+            category={svc.category}
+            icon={svc.icon}
+            color={svc.color}
+            preset={svc.preset}
+            bare
+            compact
+            tint={false}
+          />
         </IconButton>
       {/each}
     </div>

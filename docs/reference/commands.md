@@ -8,14 +8,16 @@
 | `lerd start` | Start DNS, nginx, PHP-FPM containers, and all installed services; warns about port conflicts and builds or pulls any missing images first |
 | `lerd stop` | Stop nginx, PHP-FPM containers, and all running services; leaves the `lerd-dns` forwarder running as install-level plumbing so `.test` keeps resolving |
 | `lerd quit` | Stop all Lerd processes and containers including the UI, watcher, tray, and the `lerd-dns` forwarder; on macOS also stops the Podman Machine VM |
-| `lerd update` | Check for updates and update after confirmation |
+| `lerd update` | Check for updates and update after confirmation; a package-managed install (apt, dnf, Homebrew) is deferred to that package manager |
 | `lerd update --beta` | Update to the latest pre-release build |
 | `lerd update --rollback` | Revert to the previously installed version |
 | `lerd whatsnew` | Show what changed between the installed version and the latest release |
-| `lerd uninstall` | Stop all containers and remove Lerd |
+| `lerd uninstall` | Stop all containers and remove Lerd; a package-installed binary is left for apt/dnf/brew to remove |
 | `lerd uninstall --force` | Same, skipping all confirmation prompts |
 | `lerd autostart enable` | Start Lerd automatically on every login |
 | `lerd autostart disable` | Disable autostart on login |
+| `lerd path:disable` | Take lerd's shims (`php`, `composer`, `node`…) off your shell PATH; `lerd php` etc. keep working, and installs/updates stop re-adding the entry |
+| `lerd path:enable` | Put lerd's shims back on your shell PATH (the default) |
 | `lerd tray` | Launch the system tray applet (detaches from terminal) |
 | `lerd tray icon [default\|high-contrast]` | Choose the running-icon style; high-contrast shows an always-visible green icon for mixed themes like KDE Breeze Twilight; no argument prints the current style |
 | `lerd dns:check` | Walk the DNS chain (container, dnsmasq config, port 5300, dig at 5300, resolver hookup, interface routing, system lookup) and print the layered status with a remediation hint per failure |
@@ -26,7 +28,7 @@
 | `lerd tui` | Open a btop-style terminal dashboard with live site / service / worker status, per-site detail pane, inline domain and version editing, shell drop-in, log tailing, filter + sort, and global settings |
 | `lerd check` | Validate `.lerd.yaml` syntax, services, and PHP version before setup |
 | `lerd doctor` | Full environment diagnostic: podman, systemd, DNS, ports, PHP images, config validity; also reports how much podman disk is reclaimable. Add `--fix` to apply the safe automatic repairs (confirming each; `--yes` to skip prompts, `--dry-run` to preview); privileged and external-state findings are left for you to run. `--json` emits the findings, each tagged with a fix tier, for tooling |
-| `lerd site:doctor [domain]` | App-level health checks for a single site (env file, env drift, application key, a configured SQLite database that is missing or empty, composer/node dependency install + lock, `composer audit`/`npm audit`, PHP version range, routes running well above the site's typical response time, plus the framework's own checks). A broken database suppresses the framework migration check so the remedy isn't repeated. Defaults to the site in the current directory; pass a domain to target another. Add `--json` for machine-readable output |
+| `lerd site:doctor [domain]` | App-level health checks for a single site (env file, services the site declares that this machine has never installed, which `--fix` and the dashboard's *Install the missing services* button install, ones that are installed but stopped, which the *Start the stopped services* button starts, services picked in `.lerd.yaml` that the site's env file does not point at, a key the env file sets more than once, env drift, application key, a configured database that is missing (a SQLite file that is absent or empty, or a MySQL/Postgres schema that does not exist on the service), composer/node dependency install + lock, `composer audit`/`npm audit`, PHP version range, an nginx vhost that no longer matches what lerd would write for the site, routes running well above the site's typical response time, plus the framework's own checks). A broken database suppresses the framework migration check so the remedy isn't repeated. Defaults to the site in the current directory; pass a domain to target another. Add `--json` for machine-readable output, or `--fix` to apply the findings lerd can resolve on its own and re-check |
 | `lerd cleanup` | Reclaim podman disk from orphaned lerd images (old PHP build and base images a rebuild left behind), unused service images no installed service references any more (e.g. an old `mysql:8.0` after upgrading, keeping each service's current image and its one-back rollback target), and dangling untagged images. Previews the list and confirms before removing. Never touches a tagged image in use, your databases, or volumes |
 | `lerd cleanup --dry-run` | Show what would be reclaimed and the approximate size, remove nothing |
 | `lerd cleanup --safe` | Only reclaim images provably built by lerd, leave unused service and dangling images alone |
@@ -41,8 +43,10 @@
 
 | Command | Description |
 |---|---|
-| `lerd new <name-or-path>` | Scaffold a new PHP project using the framework's create command (default: Laravel) |
-| `lerd new <name> --framework=<name>` | Scaffold using a specific framework |
+| `lerd new` | Ask for the project name, framework and version, then scaffold, link and set it up |
+| `lerd new <name-or-path>` | Ask which framework to scaffold, then take the project through link and setup |
+| `lerd new <name> --framework=<name>` | Scaffold a specific framework, skipping the question |
+| `lerd new <name> --framework=<name> --framework-version=<major>` | Scaffold an older major instead of the latest |
 | `lerd new <name> -- <extra args>` | Pass extra args to the scaffold command |
 
 ## Project setup
@@ -54,6 +58,8 @@
 | `lerd setup` | Bootstrap a project: runs the lerd init wizard first, then a checkbox list of steps |
 | `lerd setup --all` | Run init (or apply saved `.lerd.yaml`) and all steps without prompting (useful in CI) |
 | `lerd setup --skip-open` | Same as above but don't open the browser at the end |
+| `lerd setup --list-steps` | Print the steps this directory would run as JSON, without configuring or running anything |
+| `lerd setup --step "<label>"` | Run only the named step; repeatable, and it skips the configure phase |
 
 Setup steps include common tasks (composer install, npm install, lerd env) plus framework-specific commands defined in the framework's `setup` field (e.g. migrations, storage links). See [Framework definitions](/usage/framework-definitions) for how to define custom setup commands.
 
@@ -65,14 +71,15 @@ Setup steps include common tasks (composer install, npm install, lerd env) plus 
 | `lerd unpark [dir]` | Remove a parked directory and unlink all its sites |
 | `lerd link [name]` | Register the current directory as a site. On a fresh project with no `.lerd.yaml`, an interactive terminal routes through the `lerd init` wizard first (PHP version, HTTPS, services) before linking; prompts to import data when `laravel/sail` is detected in `composer.json`. **Non-PHP projects** (Node.js, Python, Go, etc.) must have `Containerfile.lerd` and `.lerd.yaml` with `container: {port: N}` already written before calling this, see [Custom Containers](../usage/custom-containers.md) |
 | `lerd link [name] --domain foo.test` | Register with a custom domain |
-| `lerd unlink [name]` | Stop serving the site |
+| `lerd unlink [name]` | Stop serving the site; defaults to the site in the current directory, and naming one is the way to unlink a site whose directory has moved or been deleted |
 | `lerd sites` | Table view of all registered sites |
 | `lerd open [name]` | Open the site in the default browser |
-| `lerd share [name]` | Expose the site publicly via ngrok, cloudflared, or Expose (auto-detected) |
+| `lerd code [name]` | Open the site's directory in your editor: the `editor` command from `~/.config/lerd/config.yaml` if set, otherwise the first known GUI editor found on PATH. Run from inside a git worktree it opens the worktree itself |
+| `lerd share [name]` | Expose the site publicly via ngrok, cloudflared, or Expose (auto-detected); `--serveo`, `--localhost-run` and `--pinggy` pick the SSH tunnels that need no signup |
 | `lerd share --domain <hostname>` | Expose the site on your own Cloudflare-managed hostname via a named tunnel (implies Cloudflare Tunnel) |
 | `lerd share:tool [tool]` | Show or set the default tunnel tool for `lerd share` (`auto` restores auto-detection) |
 | `lerd share:domain [domain]` | Show or set the base domain a Cloudflare share is served under, as `<site>.<domain>` (`none` forgets it) |
-| `lerd share:token [token]` | Show whether an ngrok auth token is stored, or set one so ngrok can run as a container without being installed (`none` forgets it) |
+| `lerd share:token [provider] [token]` | Show whether auth tokens are stored, or set one (`none` forgets it). A bare token means ngrok, which can then run as a container without being installed; `pinggy <token>` gives Pinggy shares a stable subdomain |
 | `lerd secure [name]` | Issue a mkcert TLS cert and enable HTTPS, updates `APP_URL` in `.env` |
 | `lerd secure --renew [name]` | Reissue a secured site's TLS cert on demand, resetting its expiry |
 | `lerd unsecure [name]` | Remove TLS and switch back to HTTP, updates `APP_URL` in `.env` |
@@ -85,7 +92,7 @@ Setup steps include common tasks (composer install, npm install, lerd env) plus 
 | `lerd group db <share\|separate>` | Switch the current secondary between sharing the main's database and keeping its own |
 | `lerd group remove` | Ungroup the current secondary, restoring a standalone domain |
 | `lerd group list` | List all site groups and their members |
-| `lerd workspace add <name>` | Create an empty workspace, a display-only grouping of sites. See [Workspaces](../usage/sites.md#workspaces) |
+| `lerd workspace add <name>` | Create an empty workspace, a display-only grouping of sites. See [Workspaces](../usage/workspaces.md) |
 | `lerd workspace rename <old> <new>` | Rename a workspace, keeping its sites |
 | `lerd workspace rm <name>` | Delete a workspace; its sites stay linked and become ungrouped |
 | `lerd workspace assign <site> <workspace\|none>` | Move a site into a workspace, or out of one with `none`; assign a group main, not a secondary |
@@ -109,13 +116,24 @@ The proxy runs inside the lerd daemon (`lerd-ui`), no external tool needed and n
 
 `lerd share` (without `lan:`) is different: it wraps an external tunnel tool (ngrok/cloudflared/Expose/SSH) to expose the site to the **public internet**.
 
-### Full LAN exposure (all sites, DNS-based)
+### Full LAN exposure (DNS-based)
 
 | Command | Description |
 |---|---|
-| `lerd lan:expose` | Expose all lerd services to the LAN: binds nginx to `0.0.0.0`, starts the DNS forwarder |
-| `lerd lan:unexpose` | Restrict everything back to `127.0.0.1` |
-| `lerd lan:status` | Show whether lerd is currently exposed to the local network |
+| `lerd lan:expose` | Expose sites, DNS, and the dashboard listener to the LAN |
+| `lerd lan:unexpose` | Restrict all Lerd endpoints to loopback |
+| `lerd lan:status` | Show site and managed-service LAN exposure state |
+| `lerd lan:services on` | Explicitly include managed databases, caches, and services |
+| `lerd lan:services off` | Return managed services to loopback without hiding sites |
+| `lerd lan:services status` | Show the persisted managed-service setting |
+| `lerd remote-control full-access on` | Let authenticated remote sessions run host actions |
+| `lerd remote-control full-access off` | Keep host actions local-only (the default) |
+| `lerd remote-control full-access status` | Show the persisted host-action setting |
+
+The dashboard **System** tab and terminal UI expose the same independent
+settings. Host actions such as reading a site's `.env`, browsing the
+filesystem, dropping databases or opening a terminal stay local-only until
+`lerd remote-control full-access on`, which only the lerd host can set.
 
 See [Remote / LAN Development](/usage/remote-development) for the full walkthrough.
 
@@ -128,7 +146,7 @@ Supported PHP versions: **8.5**, **8.4**, **8.3**, **8.2**, **8.1**, and the fro
 | `lerd use <version>` | Set the global PHP version and build the FPM image if needed |
 | `lerd isolate <version>` | Pin PHP version for cwd: writes `.php-version` and updates `.lerd.yaml` if present, then re-links |
 | `lerd php:list` | List all installed PHP-FPM versions |
-| `lerd php:rebuild [--local]` | Force-rebuild all installed PHP-FPM images (pulls pre-built base by default; `--local` builds from source) |
+| `lerd php:rebuild [version] [--local]` | Force-rebuild PHP-FPM images, or install a version this machine does not have (pulls pre-built base by default; `--local` builds from source) |
 | `lerd fetch [version...] [--local]` | Pull pre-built PHP FPM base images from ghcr.io for the given (or all supported) versions; `--local` builds from source instead |
 | `lerd xdebug on [version] [--mode MODE] [--on-demand]` | Enable Xdebug for a PHP version. `--mode` defaults to `debug`; accepts `coverage`, `develop`, `profile`, `trace`, `gcstats`, or comma combos like `debug,coverage`. `--on-demand` sets `start_with_request=trigger` so nothing auto-connects |
 | `lerd xdebug off [version]` | Disable Xdebug |
@@ -215,8 +233,8 @@ Switch the PHP runtime for the current site between shared PHP-FPM and per-site 
 | `lerd service add [file.yaml]` | Register a new custom service (from a YAML file or flags) |
 | `lerd service preset [name]` | List presets, or install one (use `--version` for multi-version presets); a store-only preset is fetched on demand |
 | `lerd service search [query]` | Browse the external service-preset store; filter by name, description, or family |
-| `lerd service remove <name> [--purge]` | Stop and remove a service (custom or default). With `--purge`, also rename the data dir aside (recoverable as `<name>.pre-remove-<ts>`) |
-| `lerd service reinstall <name> [--reset-data]` | Stop, remove, and reinstall at the current version. With `--reset-data`, rename the data dir aside and recreate linked sites' databases or buckets on the fresh service |
+| `lerd service remove <name> [--purge] [--no-snapshot]` | Stop and remove a service (custom or default). With `--purge`, snapshot every database on it, then rename the data dir aside (recoverable as `<name>.pre-remove-<ts>`). `--no-snapshot` skips the snapshot |
+| `lerd service reinstall <name> [--reset-data] [--no-snapshot]` | Stop, remove, and reinstall at the current version. With `--reset-data`, snapshot every database on it, rename the data dir aside, and recreate linked sites' databases or buckets on the fresh service. `--no-snapshot` skips the snapshot |
 | `lerd minio:migrate` | Migrate existing MinIO data to RustFS |
 
 ## Database

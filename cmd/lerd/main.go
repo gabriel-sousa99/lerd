@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"bytes"
@@ -32,6 +37,10 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/ui"
 	"github.com/gabriel-sousa99/lerd/internal/version"
 	"github.com/gabriel-sousa99/lerd/internal/watcher"
+
+	"github.com/gabriel-sousa99/lerd/internal/daemon"
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
+
 	"github.com/spf13/cobra"
 )
 
@@ -83,6 +92,10 @@ func main() {
 		// this runs for every command.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
+			// A package manager that upgraded lerd swapped the binary and ran
+			// nothing else, so the environment step `lerd update` performs for a
+			// self-updating install happens here instead. No-op otherwise.
+			cli.ApplyPendingUpgrade(cmd)
 			return nil
 		},
 		// After any command that rebuilt a PHP image, reclaim the now-orphaned
@@ -97,6 +110,7 @@ func main() {
 	// Register all subcommands
 	root.AddCommand(cli.NewInstallCmd())
 	root.AddCommand(cli.NewBootstrapCmd())
+	root.AddCommand(cli.NewPostUpgradeCmd())
 	root.AddCommand(cli.NewStartCmd())
 	root.AddCommand(cli.NewStopCmd())
 	root.AddCommand(cli.NewQuitCmd())
@@ -162,6 +176,7 @@ func main() {
 	root.AddCommand(cli.NewBugReportCmd())
 	root.AddCommand(cli.NewLogsCmd())
 	root.AddCommand(cli.NewOpenCmd())
+	root.AddCommand(cli.NewCodeCmd())
 	root.AddCommand(cli.NewDashboardCmd())
 	root.AddCommand(cli.NewQueueCmd())
 	root.AddCommand(cli.NewQueueStartCmd())
@@ -198,6 +213,8 @@ func main() {
 	root.AddCommand(cli.NewDbExtensionCmd())
 	root.AddCommand(cli.NewClientExecCmd())
 	root.AddCommand(cli.NewShimsCmd())
+	root.AddCommand(cli.NewPathEnableCmd())
+	root.AddCommand(cli.NewPathDisableCmd())
 	root.AddCommand(cli.NewXdebugCmd())
 	root.AddCommand(cli.NewDumpCmd())
 	root.AddCommand(cli.NewIdleCmd())
@@ -242,11 +259,13 @@ func main() {
 	root.AddCommand(cli.NewLANStatusCmd())
 	root.AddCommand(cli.NewLANShareCmd())
 	root.AddCommand(cli.NewLANUnshareCmd())
+	root.AddCommand(cli.NewLANServicesCmd())
 	root.AddCommand(cli.NewRemoteSetupCmd())
 	root.AddCommand(cli.NewRemoteControlCmd())
 	root.AddCommand(cli.NewRemoteControlOnCmd())
 	root.AddCommand(cli.NewRemoteControlOffCmd())
 	root.AddCommand(cli.NewRemoteControlStatusCmd())
+	root.AddCommand(cli.NewRemoteControlFullAccessCmd())
 	root.AddCommand(newWatchCmd())
 	root.AddCommand(newServeUICmd())
 
@@ -312,6 +331,7 @@ func newServeUICmd() *cobra.Command {
 		Short:  "Start the Lerd UI dashboard server",
 		Hidden: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			daemon.TuneRuntime()
 			return ui.Start(version.Version)
 		},
 	}
@@ -376,6 +396,51 @@ func printDNSDiagnostic(w io.Writer, diag dns.Diagnostic) {
 	}
 }
 
+// shutdownOnSignal blocks until a termination signal arrives, runs the teardown,
+// then cancels the watch loop so the process exits normally rather than being
+// killed with containers still writing. Signals after the first are ignored;
+// the teardown is already under way.
+//
+// A signal alone does not mean the machine is going away. `lerd install`,
+// `lerd update` and `lerd quit` all stop the watcher too, and both launchd and
+// systemd deliver those as the same SIGTERM a logout does. Tearing the whole
+// environment down there would stop the containers and the Podman Machine VM in
+// the middle of an install, so lerd marks its own stops and we exit quietly.
+//
+// Only SIGTERM is read as a logout. launchd and systemd never signal a shutdown
+// with SIGINT, so the only thing that sends one is a person who ran `lerd watch`
+// in a terminal and pressed Ctrl-C, who wants their shell back and not their
+// containers and Podman Machine stopped.
+//
+// A nil quit means this platform has nothing a logout can cost it, so the
+// watcher just exits. See lifecycle.TeardownOnLogout.
+func shutdownOnSignal(sigs <-chan os.Signal, quit func() error, cancel context.CancelFunc) {
+	sig, ok := <-sigs
+	if !ok {
+		return
+	}
+	if sig == syscall.SIGINT {
+		fmt.Printf("lerd watcher: received %s from a terminal, exiting without teardown\n", sig)
+		cancel()
+		return
+	}
+	if quit == nil {
+		fmt.Printf("lerd watcher: received %s, exiting\n", sig)
+		cancel()
+		return
+	}
+	if config.ConsumeWatcherManagedStop() {
+		fmt.Printf("lerd watcher: received %s from lerd itself, exiting without teardown\n", sig)
+		cancel()
+		return
+	}
+	fmt.Printf("lerd watcher: received %s, stopping lerd\n", sig)
+	if err := quit(); err != nil {
+		feedback.Warn("shutdown: %v", err)
+	}
+	cancel()
+}
+
 // newWatchCmd returns the watch command (used by the watcher systemd service).
 func newWatchCmd() *cobra.Command {
 	return &cobra.Command{
@@ -383,6 +448,22 @@ func newWatchCmd() *cobra.Command {
 		Short:  "Watch parked directories for new projects (daemon)",
 		Hidden: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			daemon.TuneRuntime()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			sigChan := make(chan os.Signal, 1)
+			signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+			defer signal.Stop(sigChan)
+			var quit func() error
+			if lifecycle.TeardownOnLogout {
+				quit = func() error {
+					return lifecycle.ShutdownForLogout(lifecycle.SimpleRunner)
+				}
+			}
+			go shutdownOnSignal(sigChan, quit, cancel)
+
 			if os.Getenv("LERD_DEBUG") != "" {
 				watcher.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 					Level: slog.LevelDebug,
@@ -401,47 +482,11 @@ func newWatchCmd() *cobra.Command {
 				fmt.Printf("[WARN] default vhost: %v\n", err)
 			}
 
-			// Initial scan: register new projects.
-			reloadNeeded := false
-			for _, dir := range cfg.ParkedDirectories {
-				entries, err := os.ReadDir(dir)
-				if err != nil {
-					continue
-				}
-				for _, entry := range entries {
-					if !entry.IsDir() {
-						continue
-					}
-					registered, err := cli.RegisterProject(filepath.Join(dir, entry.Name()), cfg)
-					if err != nil {
-						fmt.Printf("[WARN] %s: %v\n", entry.Name(), err)
-					} else if registered {
-						reloadNeeded = true
-					}
-				}
-			}
-
-			// Remove stale sites (deleted while we were offline or during the scan above).
-			if removeStale(cfg) {
-				reloadNeeded = true
-			}
-
-			// Startup scan: generate vhosts for any existing worktrees.
-			if scanWorktrees() {
-				reloadNeeded = true
-			}
-
-			if reloadNeeded {
-				if err := nginx.Reload(); err != nil {
-					fmt.Printf("[WARN] nginx reload: %v\n", err)
-				}
-			}
-
 			// Periodically catch deletions that happen while the watcher is busy.
 			go func() {
 				for range time.Tick(30 * time.Second) {
 					if removeStale(cfg) {
-						if err := nginx.Reload(); err != nil {
+						if err := siteops.FinishSiteRemoval(); err != nil {
 							fmt.Printf("[WARN] nginx reload: %v\n", err)
 						}
 						// Tell the UI and anyone else subscribed that the
@@ -456,6 +501,19 @@ func newWatchCmd() *cobra.Command {
 			go func() {
 				for range time.Tick(60 * time.Second) {
 					rescanWorktreeInstalls()
+				}
+			}()
+
+			// Deleting a checkout directly leaves git's worktrees/ entry in place,
+			// so the watcher below never hears about it and its worker units keep
+			// retrying against a directory that has gone. Reconcile on the same
+			// cadence instead, so an agent that removes its own worktree costs a
+			// restart loop that lasts a minute rather than one that lasts forever.
+			go func() {
+				for range time.Tick(60 * time.Second) {
+					if n := cli.PruneOrphanedWorkers(); n > 0 {
+						fmt.Printf("[INFO] pruned %d orphaned worker unit(s) whose worktree was removed\n", n)
+					}
 				}
 			}()
 
@@ -552,6 +610,10 @@ func newWatchCmd() *cobra.Command {
 			// Keep the cached framework store index fresh so offline detection and
 			// listing resolve the full catalogue without a network round trip.
 			go store.WatchIndex(6 * time.Hour)
+
+			// Cache the mark of every preset the service store publishes, so the
+			// discovery grid draws a service's own logo before it is installed.
+			go store.WatchServiceIcons(6 * time.Hour)
 
 			// Idle-suspend: suspends/resumes workers by activity. The whole session,
 			// including the source-file watcher passed here, only runs while the
@@ -667,12 +729,12 @@ func newWatchCmd() *cobra.Command {
 				}
 			}()
 
-			// Initial setup and goroutines are live; tell systemd we're
-			// ready so Type=notify unit starts unblock for any dependent
-			// startup sequence (lerd-ui, lerd-tray, test harnesses).
-			lerdSystemd.NotifyReady()
+			// Goroutines are live; tell systemd we're ready so Type=notify
+			// unit starts unblock for any dependent startup sequence
+			// (lerd-ui, lerd-tray, test harnesses), then reconcile.
+			notifyReadyThenScan(lerdSystemd.NotifyReady, func() { bootScan(cfg) })
 
-			return watcher.Watch(cfg.ParkedDirectories, func(projectPath string) {
+			return watcher.Watch(ctx, cfg.ParkedDirectories, func(projectPath string) {
 				fmt.Printf("New project detected: %s\n", projectPath)
 				registered, err := cli.RegisterProject(projectPath, cfg)
 				if err != nil {
@@ -729,14 +791,128 @@ func mainRepoSitePaths() []string {
 	return paths
 }
 
-// scanWorktrees generates vhosts for all existing worktrees across all main-repo sites.
-// Returns true if any vhosts were generated.
-func scanWorktrees() bool {
+// notifyReadyThenScan signals watcher readiness and then runs the boot scan in
+// the background. The order matters: the scan provisions worktrees, composer
+// install included, and that has no duration worth guessing at, while `lerd
+// watch` runs under a Type=notify unit with a start timeout. Signalling first
+// leaves a slow install as a slow install, instead of a SIGTERM before
+// readiness and a restart that begins the same install from scratch.
+func notifyReadyThenScan(notifyReady, scan func()) {
+	notifyReady()
+	go scan()
+}
+
+// bootScan is the watcher's one-shot reconciliation: register projects parked
+// while it was down, drop sites whose directory has gone, and provision the
+// worktrees found on disk. Nothing here is a precondition for serving, so it
+// runs off the startup path; the periodic passes cover whatever it misses.
+func bootScan(cfg *config.GlobalConfig) {
+	reloadNeeded := false
+	for _, dir := range cfg.ParkedDirectories {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			registered, err := cli.RegisterProject(filepath.Join(dir, entry.Name()), cfg)
+			if err != nil {
+				fmt.Printf("[WARN] %s: %v\n", entry.Name(), err)
+			} else if registered {
+				reloadNeeded = true
+			}
+		}
+	}
+
+	// Remove stale sites (deleted while we were offline or during the scan above).
+	if removeStale(cfg) {
+		if err := siteops.FinishSiteRemoval(); err != nil {
+			fmt.Printf("[WARN] nginx reload: %v\n", err)
+		}
+	}
+
+	// Generate vhosts for any existing worktrees. The heavy per-worktree work
+	// comes back as deferred jobs so the reload below, and with it every
+	// worktree subdomain, does not queue behind the first composer install.
+	provision, generated := scanWorktrees()
+	if generated {
+		reloadNeeded = true
+	}
+
+	if reloadNeeded {
+		if err := nginx.Reload(); err != nil {
+			fmt.Printf("[WARN] nginx reload: %v\n", err)
+		}
+	}
+
+	gitpkg.ResetJSInstallFailures()
+	runProvisioning(provision, worktreeProvisionLimit())
+}
+
+// maxProvisionSlots caps how many worktrees are provisioned at once however
+// many cores the machine has. Past a handful the wait is the network and the
+// package caches rather than the CPU, so more installs only compete.
+const maxProvisionSlots = 4
+
+// provisionSlots is how many worktrees a machine with numCPU cores provisions
+// at once. A composer install and a JS install each saturate a core, and this
+// runs unattended at daemon start, so two cores are left for the rest of the
+// machine: the daemons, the containers serving every other site, and whatever
+// the user is in the middle of. A machine too small to spare them runs one.
+func provisionSlots(numCPU int) int {
+	return max(1, min(numCPU-2, maxProvisionSlots))
+}
+
+func worktreeProvisionLimit() int {
+	return provisionSlots(runtime.NumCPU())
+}
+
+// runProvisioning runs the deferred half of the boot scan, at most limit jobs
+// at a time. Worktrees are independent of one another, so the scan that used to
+// take one install after another now takes as long as the slowest few.
+func runProvisioning(jobs []func(), limit int) {
+	if limit < 1 {
+		limit = 1
+	}
+	slots := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for _, job := range jobs {
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			job()
+		}()
+	}
+	wg.Wait()
+}
+
+// scanWorktrees generates vhosts for all existing worktrees across all
+// main-repo sites, and returns the provisioning each one still needs alongside
+// whether any vhost was generated. Writing every vhost first is what keeps a
+// repo's last worktree from 404ing for as long as all the earlier installs
+// take: routing needs nothing but the vhost, so nothing that serving does not
+// depend on runs before the whole set is written.
+func scanWorktrees() ([]func(), bool) {
 	reg, err := config.LoadSites()
 	if err != nil {
-		return false
+		return nil, false
 	}
+	// Per-worktree worker units whose checkout is gone, once for the whole
+	// install rather than per site, since one detection pass covers every unit.
+	// The watcher's onRemoved hook only fires when git's own worktrees/ entry
+	// disappears, so a checkout deleted directly leaves a unit that restart-loops
+	// on a missing WorkingDirectory until something reconciles it. This is that
+	// something, which is also what recovers an install already stuck that way.
+	if n := cli.PruneOrphanedWorkers(); n > 0 {
+		fmt.Printf("[INFO] pruned %d orphaned worker unit(s) whose worktree was removed\n", n)
+	}
+
 	generated := false
+	var provision []func()
 	for _, s := range reg.Sites {
 		if s.Ignored || s.Paused {
 			continue
@@ -778,52 +954,66 @@ func scanWorktrees() bool {
 			}
 		}
 		for _, wt := range worktrees {
-			// Skip the install when the UI/CLI holds the cross-process lock:
-			// it is running composer/npm install with streamed output and
-			// would race the watcher's vendor seed otherwise.
-			if release, ok, _ := gitpkg.TryLockInstall(wt.Path); ok {
-				gitpkg.EnsureWorktreeDeps(s.Path, wt.Path, wt.Domain, s.Secured, nil)
-				release()
-			}
-			// Provision the isolated DB for a worktree that committed
-			// db_isolated: true but was never run through `lerd worktree add`
-			// (e.g. linked with the worktree already present). No-op otherwise.
-			if created, err := cli.EnsureWorktreeIsolatedDB(&site, wt.Branch, wt.Path); err != nil {
-				fmt.Printf("[WARN] isolated DB for worktree %s: %v\n", wt.Branch, err)
-			} else if created {
-				fmt.Printf("Worktree DB: created isolated database for %s\n", wt.Branch)
-			}
 			// Host-proxy sites mirror the parent dev command on a per-worktree
 			// port behind the worktree domain; no PHP vhost or framework workers.
 			if site.IsHostProxy() {
-				if err := cli.SetupHostProxyWorktree(site, wt.Path, wt.Domain); err != nil {
+				if err := cli.GenerateHostProxyWorktreeVhost(site, wt.Path, wt.Domain); err != nil {
 					fmt.Printf("[WARN] worktree host-proxy for %s: %v\n", wt.Domain, err)
 					continue
 				}
 				fmt.Printf("Worktree vhost: %s -> %s (host proxy)\n", wt.Branch, wt.Domain)
-				generated = true
-				continue
+			} else {
+				// Inheritance is intentionally NOT run on the boot rescan: it only
+				// fires on genuine creation (the "added" watcher event in
+				// syncWorktree). Re-seeding here would resurrect an override the
+				// user deliberately reset, on every daemon restart.
+				// A worktree can pin its own PHP version, and the vhost has to
+				// name that version's FPM container or the branch is served by
+				// the parent's PHP.
+				effectivePHP := config.WorktreePHPVersion(wt.Path, s.PHPVersion)
+				if err := nginx.GenerateWorktreeVhostFor(wt.Domain, wt.Path, effectivePHP, s.PrimaryDomain(), s.Name, wt.Branch, s.Secured); err != nil {
+					fmt.Printf("[WARN] worktree vhost for %s: %v\n", wt.Domain, err)
+					continue
+				}
+				fmt.Printf("Worktree vhost: %s -> %s\n", wt.Branch, wt.Domain)
 			}
-			vhostErr := nginx.GenerateWorktreeVhostFor(wt.Domain, wt.Path, s.PHPVersion, s.PrimaryDomain(), s.Name, wt.Branch, s.Secured)
-			if vhostErr != nil {
-				fmt.Printf("[WARN] worktree vhost for %s: %v\n", wt.Domain, vhostErr)
-				continue
-			}
-			// Inheritance is intentionally NOT run on the boot rescan: it only
-			// fires on genuine creation (the "added" watcher event in
-			// syncWorktree). Re-seeding here would resurrect an override the
-			// user deliberately reset, on every daemon restart.
-			fmt.Printf("Worktree vhost: %s -> %s\n", wt.Branch, wt.Domain)
 			generated = true
-
-			// Per-worktree host workers (e.g. vite) need to be (re)started
-			// at daemon boot too, not just when fsnotify fires onAdded.
-			// Without this, units stopped during downtime never come back.
-			effectivePHP := config.WorktreePHPVersion(wt.Path, s.PHPVersion)
-			cli.AutoStartOptedInWorktreeWorkers(&site, wt.Path, effectivePHP)
+			provision = append(provision, func() { provisionWorktree(site, wt) })
 		}
 	}
-	return generated
+	return provision, generated
+}
+
+// provisionWorktree is the part of a worktree's boot reconcile that its vhost
+// does not wait on: the dependency install, the isolated database, and the
+// workers, in that order because each one needs what the previous put in place.
+// The vhost is already written and reloaded by the time this runs.
+func provisionWorktree(site config.Site, wt gitpkg.Worktree) {
+	// Skip the install when the UI/CLI holds the cross-process lock: it is
+	// running composer/npm install with streamed output and would race the
+	// watcher's vendor seed otherwise.
+	if release, ok, _ := gitpkg.TryLockInstall(wt.Path); ok {
+		gitpkg.EnsureWorktreeDeps(site.Path, wt.Path, wt.Domain, site.Secured, nil)
+		release()
+	}
+	// Provision the isolated DB for a worktree that committed db_isolated: true
+	// but was never run through `lerd worktree add` (e.g. linked with the
+	// worktree already present). No-op otherwise.
+	if created, err := cli.EnsureWorktreeIsolatedDB(&site, wt.Branch, wt.Path); err != nil {
+		fmt.Printf("[WARN] isolated DB for worktree %s: %v\n", wt.Branch, err)
+	} else if created {
+		fmt.Printf("Worktree DB: created isolated database for %s\n", wt.Branch)
+	}
+	if site.IsHostProxy() {
+		if err := cli.StartHostProxyWorktreeServer(site, wt.Path); err != nil {
+			fmt.Printf("[WARN] worktree dev server for %s: %v\n", wt.Domain, err)
+		}
+		return
+	}
+	// Per-worktree host workers (e.g. vite) need to be (re)started at daemon
+	// boot too, not just when fsnotify fires onAdded. Without this, units
+	// stopped during downtime never come back.
+	cli.AutoStartOptedInWorktreeWorkers(&site, wt.Path, config.WorktreePHPVersion(wt.Path, site.PHPVersion))
 }
 
 // rescanWorktreeInstalls re-runs EnsureWorktreeDeps for any worktree whose
@@ -836,6 +1026,10 @@ func rescanWorktreeInstalls() {
 	if err != nil {
 		return
 	}
+	// Each pass gets a clean slate: a lockfile the user has fixed since the last
+	// one, or one whose install only failed on an unreachable registry, is due
+	// another attempt.
+	gitpkg.ResetJSInstallFailures()
 	for _, s := range reg.Sites {
 		if s.Ignored || s.Paused || !gitpkg.IsMainRepo(s.Path) {
 			continue
@@ -969,7 +1163,7 @@ func shouldInheritNginxOnSync(action string) bool {
 // domain, then re-generates for worktrees still on disk. Survivors keep their
 // .env; deps and APP_URL are handled by syncWorktree on add/rename, not here.
 func cleanupWorktreeVhosts(site *config.Site) bool {
-	removed := removeWorktreeVhosts(site)
+	removed := siteops.RemoveWorktreeVhosts(site.PrimaryDomain())
 	worktrees, _ := gitpkg.DetectWorktrees(site.Path, site.PrimaryDomain())
 	// Drop the custom nginx override + backups for worktrees that are truly
 	// gone. removeWorktreeVhosts wipes every worktree vhost, so a survivor is
@@ -1043,32 +1237,6 @@ func removeStaleWorktreeVhosts(site *config.Site, worktrees []gitpkg.Worktree) b
 	return changed
 }
 
-// removeWorktreeVhosts removes every worktree subdomain vhost for the site and
-// returns the domains it removed (each vhost filename minus ".conf").
-func removeWorktreeVhosts(site *config.Site) []string {
-	confD := config.NginxConfD()
-	entries, err := os.ReadDir(confD)
-	if err != nil {
-		return nil
-	}
-	suffix := "." + site.PrimaryDomain() + ".conf"
-	var removed []string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), suffix) {
-			// A conf whose domain belongs to a separately-registered site (e.g. a
-			// group secondary at <label>.<primary>) is not a worktree vhost; never
-			// delete it, or the secondary stops being served.
-			domain := strings.TrimSuffix(e.Name(), ".conf")
-			if _, err := config.FindSiteByDomain(domain); err == nil {
-				continue
-			}
-			_ = os.Remove(filepath.Join(confD, e.Name()))
-			removed = append(removed, domain)
-		}
-	}
-	return removed
-}
-
 // removeStale removes registered sites whose paths no longer exist on disk.
 // Covers both parked-dir projects (caught by the fast fsnotify path when it
 // fires) and manually site_link'd projects outside any park. Returns true if
@@ -1089,26 +1257,11 @@ func removeStale(_ *config.GlobalConfig) bool {
 		if _, statErr := os.Stat(site.Path); os.IsNotExist(statErr) {
 			fmt.Printf("Removing stale site: %s (%s)\n", site.Name, site.Path)
 			s := site
-			// Tear down the site's workers and any per-site container before
-			// dropping the vhost and registry entry. Without this a host-proxy
-			// site's always-restart dev server (and a custom-container/FrankenPHP
-			// container) keeps running after the project directory is gone. The
-			// nginx reload is batched by the caller.
-			if siteops.StopSiteWorkers != nil {
-				siteops.StopSiteWorkers(&s)
-			}
-			if s.IsCustomContainer() {
-				_ = podman.StopUnit(podman.CustomContainerName(s.Name))
-				podman.RemoveCustomContainer(s.Name)
-				_ = podman.RemoveCustomContainerQuadlet(s.Name)
-			}
-			if s.IsFrankenPHP() {
-				_ = podman.StopUnit(podman.FrankenPHPContainerName(s.Name))
-				_ = podman.RemoveFrankenPHPQuadlet(s.Name)
-			}
-			_ = nginx.RemoveVhost(s.PrimaryDomain())
-			_ = config.RemoveSite(s.Name)
-			_ = config.RemoveSiteFromWorkspaces(s.Name)
+			// Same teardown an explicit unlink performs, so a deleted project
+			// leaves nothing behind: its workers, per-site container, certs,
+			// shares and recorded state all go with the registry entry. The
+			// install-wide tail is batched by the caller.
+			siteops.TeardownSite(&s, nil)
 			removed = true
 		}
 	}

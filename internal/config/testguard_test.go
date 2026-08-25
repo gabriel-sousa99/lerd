@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,48 @@ func TestGuardRealWrite(t *testing.T) {
 		}()
 		guardRealWrite(filepath.Join(t.TempDir(), "lerd", "sites.yaml"))
 	})
+}
+
+// The macOS unit dir follows HOME, not any XDG var, so a test that isolated only
+// the XDG vars still wrote real launchd units and left a developer without an
+// nginx. The guard has to know that dir the way it knows the Linux ones.
+func TestGuardRealWrite_coversTheLaunchAgentsDir(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		if LaunchAgentsDir() != "" {
+			t.Errorf("launchd units are a macOS path, got %q", LaunchAgentsDir())
+		}
+		t.Skip("no launchd on this platform")
+	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("writing a real launchd unit from a test must panic, not silently land")
+		}
+		msg, _ := r.(string)
+		if !strings.Contains(msg, "real lerd state") {
+			t.Errorf("panic should name the problem, got %v", r)
+		}
+		// The XDG advice is useless here, so the hint has to name the var that
+		// actually moves this dir.
+		if !strings.Contains(msg, `t.Setenv("HOME"`) {
+			t.Errorf("panic should point at HOME for a launchd unit, got %v", r)
+		}
+	}()
+	guardRealWrite(filepath.Join(LaunchAgentsDir(), "lerd-nginx.plist"))
+}
+
+// An isolated HOME is what a well-behaved test sets, and it must stay allowed.
+func TestGuardRealWrite_allowsAnIsolatedLaunchAgentsDir(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("no launchd on this platform")
+	}
+	t.Setenv("HOME", t.TempDir())
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("a relocated HOME must not trip the guard, got %v", r)
+		}
+	}()
+	guardRealWrite(filepath.Join(LaunchAgentsDir(), "lerd-nginx.plist"))
 }
 
 // The dirs are captured at process start, because a test relocates XDG_DATA_HOME

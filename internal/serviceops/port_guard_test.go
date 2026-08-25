@@ -26,9 +26,15 @@ func TestLerdReservedPorts_includesPresetPort(t *testing.T) {
 	// A stopped service pinned to its preset default port, with NO PublishedPort
 	// override. Nothing is listening, so freeport.Bindable() would call it free — only
 	// the reserved set keeps the auto-picker off it and prevents a boot-time collision.
+	// The YAML goes with it: that is the install-state signal, and an entry with no
+	// service behind it reserves nothing.
 	cfg.Services["mariadb-11"] = config.ServiceConfig{Enabled: true, Port: 13399}
 	if err := config.SaveGlobal(cfg); err != nil {
 		t.Fatalf("SaveGlobal: %v", err)
+	}
+	svc := &config.CustomService{Name: "mariadb-11", Image: "example/mariadb:11", Ports: []string{"13399:3306"}}
+	if err := config.SaveCustomService(svc); err != nil {
+		t.Fatalf("SaveCustomService: %v", err)
 	}
 
 	reserved := lerdReservedPorts()

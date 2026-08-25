@@ -10,10 +10,13 @@ package cleanup
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // lerdLabelPrefix is stamped (as a hash label) on every image lerd builds. Its
@@ -26,10 +29,17 @@ const lerdLabelPrefix = "dev.lerd."
 // base images use) is the ownership signal.
 var baseImageRe = regexp.MustCompile(`/lerd-php\d+-fpm-base:`)
 
+// Target kinds. An image target is removed through podman, a files target is a
+// directory on disk lerd rendered and no longer has an owner for.
+const (
+	KindImage = "image"
+	KindFiles = "files"
+)
+
 // Target is one reclaimable resource.
 type Target struct {
-	Kind  string // "image"
-	ID    string // short image ID
+	Kind  string // KindImage or KindFiles
+	ID    string // short image ID, or the directory path for KindFiles
 	Desc  string // human description for the plan output
 	Bytes int64
 }
@@ -172,7 +182,7 @@ func Inspect(scope Scope) (Plan, error) {
 
 	var p Plan
 	add := func(id, desc string, bytes int64) {
-		p.Targets = append(p.Targets, Target{Kind: "image", ID: id, Desc: desc, Bytes: bytes})
+		p.Targets = append(p.Targets, Target{Kind: KindImage, ID: id, Desc: desc, Bytes: bytes})
 	}
 	var baseCandidates []image
 	for _, img := range imgs {
@@ -224,10 +234,56 @@ func Inspect(scope Scope) (Plan, error) {
 			p.Targets = append(p.Targets, deepTargets(imgs, repos, prot, canonPulled(), reapAllDangling)...)
 		}
 	}
+	p.Targets = append(p.Targets, staleServiceFiles()...)
 	// podman lists a multi-tag image once per tag, so dedupe by ref/ID to avoid
 	// counting or trying to remove the same target twice.
 	p.Targets = dedupTargets(p.Targets)
 	return p, nil
+}
+
+// staleServiceFiles lists the rendered preset config of services that are gone.
+// Removal clears these now, so what remains was left by a lerd that did not, and
+// nothing else reaps it. A directory is only claimed when no definition, no
+// default preset and no installed quadlet still answers for the name.
+func staleServiceFiles() []Target {
+	entries, err := os.ReadDir(config.ServiceFilesRoot())
+	if err != nil {
+		return nil
+	}
+	var out []Target
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || config.IsDefaultPreset(name) || config.CustomServiceExists(name) {
+			continue
+		}
+		if podman.QuadletInstalled("lerd-" + name) {
+			continue
+		}
+		dir := config.ServiceFilesDir(name)
+		out = append(out, Target{
+			Kind:  KindFiles,
+			ID:    dir,
+			Desc:  "rendered config left by removed service " + name,
+			Bytes: dirBytes(dir),
+		})
+	}
+	return out
+}
+
+// dirBytes sums the files directly inside dir; rendered config is a flat set of
+// small files, so an unreadable entry just contributes nothing.
+func dirBytes(dir string) int64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
 }
 
 // dedupTargets drops repeated targets, keeping the first of each ID/ref.
@@ -307,6 +363,14 @@ func podmanRemoveImage(id string) error {
 	return podman.RunSilent("image", "rm", id)
 }
 
+// removeTarget deletes one target, whichever kind it is.
+func removeTarget(t Target) error {
+	if t.Kind == KindFiles {
+		return os.RemoveAll(t.ID)
+	}
+	return removeImage(t.ID)
+}
+
 // Apply removes every target in the plan and returns how many images were
 // actually removed and the disk reclaimed (a skipped target counts toward
 // neither). It sweeps in repeated passes, retrying targets that failed until a full pass
@@ -320,7 +384,7 @@ func Apply(p Plan) (removed int, reclaimed int64) {
 		var stuck []Target
 		progress := false
 		for _, t := range remaining {
-			if err := removeImage(t.ID); err != nil {
+			if err := removeTarget(t); err != nil {
 				stuck = append(stuck, t)
 				continue
 			}

@@ -52,6 +52,16 @@ func nativeRequest(n push.Notification) desktopnotify.Request {
 // Drops everything when the global notifier toggle is off (lerd notify off /
 // tray). The target setting then picks the browser sink (WebSocket + Web Push,
 // per-device prefs applying downstream) or the native desktop sink.
+// emitDesktopNotification is the seam the test main replaces, so no test can
+// raise a real notification on the desktop of whoever is running the suite.
+// desktopSupported goes with it: the probe answers for the machine running the
+// tests, so leaving it live would make which branch a test exercises depend on
+// whether that machine has a notification daemon at all.
+var (
+	emitDesktopNotification = desktopnotify.Emit
+	desktopSupported        = desktopnotify.Supported
+)
+
 func dispatchNotification(n push.Notification) {
 	cfg, err := config.LoadGlobal()
 	if err != nil {
@@ -63,7 +73,7 @@ func dispatchNotification(n push.Notification) {
 	// notification is the exception: its whole job is to prove the desktop path
 	// works, and it is always sent from the settings panel, which has focus.
 	focused := uiWindowFocused() && n.Kind != "test"
-	switch notifySink(cfg, desktopnotify.Supported) {
+	switch notifySink(cfg, desktopSupported) {
 	case sinkOff:
 		return
 	case sinkNative:
@@ -81,7 +91,7 @@ func dispatchNotification(n push.Notification) {
 		if n.Kind != "test" && !cfg.NativeKindEnabled(n.Kind) {
 			return
 		}
-		if _, err := desktopnotify.Emit(nativeRequest(n)); err != nil {
+		if _, err := emitDesktopNotification(nativeRequest(n)); err != nil {
 			fmt.Printf("[notifier] native notify failed: %v\n", err)
 		}
 	default:

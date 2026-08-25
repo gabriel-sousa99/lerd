@@ -42,11 +42,22 @@ and test against, but the pull request goes to **lerd-env/frameworks**.
      destructive
    - `tinker`, `logs`, `console`, `composer`, `npm`
 
-3. **Update `frameworks/index.json`** if the store requires it (check how the
+3. **Give it its mark and its colour.** `color:` is the framework's brand tint, a
+   plain hex literal (`#ff2d20`) and nothing else, repeated in every version file
+   since that is the only YAML a framework has. The mark itself is per family, so
+   it goes beside the versioned directory as `frameworks/<name>.svg`, one file
+   every version shares. That file is **monochrome**: a single silhouette of
+   filled paths with no `fill`, `stroke`, `style` or `class` of its own, in a bare
+   `<svg viewBox="...">`, since lerd strips everything but the geometry on the way
+   in and paints it in the declared colour. Not a full colour logo and not a
+   wordmark. This is not the `icon:` a command declares, which names a built-in
+   glyph for a dashboard button.
+
+4. **Update `frameworks/index.json`** if the store requires it (check how the
    existing entries are registered), and the README table in the
    lerd-env/frameworks `README.md`.
 
-4. **Validate end-to-end** against a real project:
+5. **Validate end-to-end** against a real project:
    ```bash
    lerd link           # in a project of that framework — detection must fire
    lerd site:doctor    # the declared checks must run

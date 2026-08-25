@@ -5,13 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
@@ -49,6 +46,10 @@ type dbEntryResponse struct {
 	Snapshots []serviceops.Snapshot `json:"snapshots"`
 }
 
+// testingDBSuffix names the paired testing database lerd creates alongside every
+// project database.
+const testingDBSuffix = "_testing"
+
 // dbOwner is the site a database belongs to: the parent site's domain, plus the
 // worktree branch when the database is that branch's isolated one. The branch is
 // what turns "astrolov_staging" into staging.astrolov.test in the UI.
@@ -57,25 +58,40 @@ type dbOwner struct {
 	branch string
 }
 
-// databaseSiteIndex maps each database name in the given engine to the site that
-// owns it, read from sites' .env DB_DATABASE and from the isolated databases
-// worktrees have registered. A "<db>_testing" database maps to the same owner as
-// "<db>", so both link to the same place. When a group shares one database across
-// a main site and its secondaries, the database belongs to the group main, so a
-// secondary that merely shares it never wins over the main.
-func databaseSiteIndex(service string) map[string]dbOwner {
+// databaseSiteIndexes maps each engine to the databases owned in it, keyed by
+// database name, resolved through each site's framework declaration and from
+// the isolated databases worktrees have registered. A "<db>_testing" database
+// maps to the same owner as "<db>", so both link to the same place. When a group
+// shares one database across a main site and its secondaries, the database
+// belongs to the group main, so a secondary that merely shares it never wins
+// over the main.
+//
+// Every engine is answered from one pass over the sites: resolving a site's
+// targets detects its framework, which is far too much work to repeat per
+// engine on every poll of the Databases tab.
+func databaseSiteIndexes() map[string]map[string]dbOwner {
 	reg, err := config.LoadSites()
 	if err != nil {
 		return nil
 	}
-	idx := map[string]dbOwner{}
+	byService := map[string]map[string]dbOwner{}
+	idxFor := func(service string) map[string]dbOwner {
+		if byService[service] == nil {
+			byService[service] = map[string]dbOwner{}
+		}
+		return byService[service]
+	}
 	// authoritative[db] is true once db is claimed by a site that owns it rather
 	// than a secondary sharing the group's database.
-	authoritative := map[string]bool{}
-	claim := func(db string, owner dbOwner, owns bool) {
-		if _, seen := idx[db]; !seen || (!authoritative[db] && owns) {
+	authoritative := map[string]map[string]bool{}
+	claim := func(service, db string, owner dbOwner, owns bool) {
+		idx := idxFor(service)
+		if authoritative[service] == nil {
+			authoritative[service] = map[string]bool{}
+		}
+		if _, seen := idx[db]; !seen || (!authoritative[service][db] && owns) {
 			idx[db] = owner
-			authoritative[db] = owns
+			authoritative[service][db] = owns
 		}
 	}
 	domains := map[string]string{}
@@ -84,72 +100,30 @@ func databaseSiteIndex(service string) map[string]dbOwner {
 			continue
 		}
 		domains[s.Name] = s.PrimaryDomain()
-		vals := envfile.ReadValues(filepath.Join(s.Path, ".env"))
-		db := ""
-		if strings.TrimPrefix(strings.TrimSpace(vals["DB_HOST"]), "lerd-") == service {
-			db = strings.TrimSpace(vals["DB_DATABASE"])
-		} else {
-			db = dsnDatabaseFor(vals, service)
-		}
-		if db == "" {
-			continue
-		}
 		owns := !(s.IsGroupSecondary() && s.GroupSharedDB)
 		owner := dbOwner{domain: s.PrimaryDomain()}
-		claim(db, owner, owns)
-		claim(db+"_testing", owner, owns)
+		for _, t := range config.DBTargetsFor(s.Path) {
+			if t.Database == "" {
+				continue
+			}
+			claim(t.Service, t.Database, owner, owns)
+			claim(t.Service, t.Database+testingDBSuffix, owner, owns)
+		}
 	}
 	entries, err := config.LoadWorktreeDBRegistry()
 	if err != nil {
-		return idx
+		return byService
 	}
 	for _, e := range entries {
 		domain := domains[e.Site]
-		if e.Service != service || e.DBName == "" || domain == "" {
+		if e.DBName == "" || domain == "" {
 			continue
 		}
 		owner := dbOwner{domain: domain, branch: e.Branch}
-		claim(e.DBName, owner, true)
-		claim(e.DBName+"_testing", owner, true)
+		claim(e.Service, e.DBName, owner, true)
+		claim(e.Service, e.DBName+testingDBSuffix, owner, true)
 	}
-	return idx
-}
-
-// dsnDatabaseFor picks the database a project's env points at on the given
-// service through a DSN. Engines wired through a single connection string
-// (mongodb://…@lerd-mongo:27017/mydb) carry no DB_HOST. Keys are visited in
-// sorted order: a project with more than one DSN against the same engine would
-// otherwise be attributed to a different database on every snapshot, since Go
-// randomises map iteration.
-func dsnDatabaseFor(vals map[string]string, service string) string {
-	keys := make([]string, 0, len(vals))
-	for k := range vals {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if db := dsnDatabase(vals[k], service); db != "" {
-			return db
-		}
-	}
-	return ""
-}
-
-// dsnDatabase returns the database a DSN-style env value targets on the given
-// service, or empty when the value is not a URL pointed at lerd-<service>.
-func dsnDatabase(value, service string) string {
-	if !strings.Contains(value, "lerd-"+service) {
-		return ""
-	}
-	u, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || u.Hostname() != "lerd-"+service {
-		return ""
-	}
-	db := strings.TrimPrefix(u.Path, "/")
-	if strings.Contains(db, "/") {
-		return ""
-	}
-	return db
+	return byService
 }
 
 // isDatabaseEngine reports whether a service belongs on the Databases surface: a
@@ -191,7 +165,7 @@ func installedDBEngines() []string {
 
 // databaseEngine builds one engine's response, introspecting its databases and
 // snapshots only when the container is running.
-func databaseEngine(name string) dbEngineResponse {
+func databaseEngine(name string, siteIndex map[string]dbOwner) dbEngineResponse {
 	base := buildServiceResponse(name)
 	family := config.FamilyOfName(name)
 	snapOps := serviceops.SnapshotSupported(name, false)
@@ -222,7 +196,6 @@ func databaseEngine(name string) dbEngineResponse {
 		eng.Error = err.Error()
 		return eng
 	}
-	siteIndex := databaseSiteIndex(name)
 	for _, db := range dbs {
 		owner := siteIndex[db.Name]
 		entry := dbEntryResponse{
@@ -247,9 +220,10 @@ func databaseEngine(name string) dbEngineResponse {
 // handleDatabases lists every installed database engine and its databases.
 func handleDatabases(w http.ResponseWriter, _ *http.Request) {
 	names := installedDBEngines()
+	indexes := databaseSiteIndexes()
 	engines := make([]dbEngineResponse, 0, len(names))
 	for _, name := range names {
-		engines = append(engines, databaseEngine(name))
+		engines = append(engines, databaseEngine(name, indexes[name]))
 	}
 	writeJSON(w, engines)
 }
@@ -271,7 +245,7 @@ func handleDatabaseAction(w http.ResponseWriter, r *http.Request) {
 	// GET /api/databases/<service> returns just that engine, for its detail tab.
 	if len(parts) == 1 {
 		if r.Method == http.MethodGet {
-			writeJSON(w, databaseEngine(service))
+			writeJSON(w, databaseEngine(service, databaseSiteIndexes()[service]))
 			return
 		}
 		http.Error(w, "not found", http.StatusNotFound)
@@ -347,6 +321,29 @@ func decodeDBBody(r *http.Request) (database, name string, ok bool) {
 	return strings.TrimSpace(body.Database), strings.TrimSpace(body.Name), true
 }
 
+// decodeDropBody reads the drop body, which carries the choice to take the
+// paired testing database along with the database named.
+func decodeDropBody(r *http.Request) (name string, withTesting, ok bool) {
+	var body struct {
+		Name    string `json:"name"`
+		Testing bool   `json:"testing"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return "", false, false
+	}
+	return strings.TrimSpace(body.Name), body.Testing, true
+}
+
+// dropTargets is what one drop request removes: the database named, plus the
+// testing database it is paired with when the request asks for it. A database
+// that is itself the testing half has no pair of its own.
+func dropTargets(name string, withTesting bool) []string {
+	if !withTesting || strings.HasSuffix(name, testingDBSuffix) {
+		return []string{name}
+	}
+	return []string{name, name + testingDBSuffix}
+}
+
 // requireDatabaseName rejects a database name that could escape its snapshot
 // path or its SQL quoting, so nothing unvalidated reaches serviceops.
 func requireDatabaseName(w http.ResponseWriter, database string) bool {
@@ -381,17 +378,27 @@ func handleDatabaseCreate(w http.ResponseWriter, r *http.Request, service string
 }
 
 func handleDatabaseDrop(w http.ResponseWriter, r *http.Request, service string) {
-	_, name, ok := decodeDBBody(r)
-	if !ok || !requireDatabaseName(w, name) {
+	name, withTesting, ok := decodeDropBody(r)
+	if !ok {
 		return
+	}
+	// Both halves are validated before either is touched, so a sibling the
+	// suffix pushes past the length limit never costs the database it tests.
+	targets := dropTargets(name, withTesting)
+	for _, target := range targets {
+		if !requireDatabaseName(w, target) {
+			return
+		}
 	}
 	if !serviceops.DatabaseActionDeclared(service, "drop") {
 		writeDBError(w, fmt.Sprintf("%s does not support dropping databases", service))
 		return
 	}
-	if _, err := serviceops.DropDatabase(service, name); err != nil {
-		writeDBError(w, err.Error())
-		return
+	for _, target := range targets {
+		if _, err := serviceops.DropDatabase(service, target); err != nil {
+			writeDBError(w, fmt.Sprintf("dropping %s: %v", target, err))
+			return
+		}
 	}
 	writeDBOK(w)
 }

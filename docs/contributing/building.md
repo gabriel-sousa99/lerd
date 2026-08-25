@@ -23,6 +23,8 @@ make clean       # remove ./build/ and internal/ui/web/dist/
 
 Tests must isolate lerd's state before they touch it, with `t.Setenv("XDG_CONFIG_HOME", t.TempDir())` and `t.Setenv("XDG_DATA_HOME", t.TempDir())`. Anything writing or deleting a real config file, systemd unit or quadlet panics with the path it tried to touch, because a test that skipped this once removed a developer's lerd-dns quadlet and left the container running under a unit systemd no longer knew about.
 
+On macOS the launchd units in `~/Library/LaunchAgents` follow `HOME` instead, so a test that writes or removes one needs `t.Setenv("HOME", t.TempDir())` on top of the XDG pair, guarded by `runtime.GOOS == "darwin"`. Moving `HOME` on Linux would relocate podman's container storage into the temp dir, which the test then cannot clean up. The guard names whichever var applies when it fires.
+
 ## Cross-compile for arm64
 
 Without tray (no CGO required):

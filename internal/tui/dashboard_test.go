@@ -62,8 +62,13 @@ func TestResourcesCard_ShowsStatsWhenAvailable(t *testing.T) {
 		},
 	}
 	joined := stripANSI(strings.Join(m.dashResourcesCard(60).lines, "\n"))
-	if !strings.Contains(joined, "12.5%") {
-		t.Errorf("expected '12.5%%' total CPU:\n%s", joined)
+	// Two decimals on both the total and the rows: CPU reads as a share of the
+	// whole machine now, so a single decimal rounds most rows away to 0.0.
+	if !strings.Contains(joined, "12.50%") {
+		t.Errorf("expected '12.50%%' total CPU:\n%s", joined)
+	}
+	if !strings.Contains(joined, "5.50%") {
+		t.Errorf("expected a row printed to two decimals:\n%s", joined)
 	}
 	if !strings.Contains(joined, "lerd-mysql") {
 		t.Errorf("expected top container 'lerd-mysql':\n%s", joined)

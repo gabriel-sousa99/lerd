@@ -1,6 +1,7 @@
 name: opensearch
 image: docker.io/opensearchproject/opensearch:2.19.5
 description: OpenSearch single-node search and analytics engine
+stop_timeout: 30
 # Container listens on 9200; published on 9201 so it coexists with the
 # elasticsearch preset (also 9200) on the host.
 ports:

@@ -69,6 +69,7 @@
   import { loadDoctor, type DoctorCheck, type DoctorReport } from '$stores/doctor';
   import { loadCommands, launchCommand, runSettled, executeDoctorFix, type Command } from '$stores/commands';
   import { goToTab } from '$stores/route';
+  import { pendingEnvDuplicates } from '$stores/modals';
   import { activeWorktreeDomain, type Site } from '$stores/sites';
   import { m } from '../../paraglide/messages.js';
 
@@ -120,23 +121,37 @@
     wasOpen = open;
   });
 
-  // Universal package-manager fixes run through the doctor fix endpoint rather
-  // than a framework command. The key matches sitedoctor's fix constants.
+  // Universal fixes run through the doctor fix endpoint rather than a framework
+  // command: the package-manager ones in the site's container, the vhost one on
+  // the host. The keys match sitedoctor's fix constants and the values are the
+  // labels their runs are shown under.
   const DOCTOR_FIX: Record<string, string> = {
-    composer_install: 'composer install',
-    composer_update: 'composer update',
-    npm_install: 'npm install',
-    npm_audit_fix: 'npm audit fix'
+    composer_install: 'Run composer install',
+    composer_update: 'Run composer update',
+    npm_install: 'Run npm install',
+    npm_audit_fix: 'Run npm audit fix',
+    env_sync: 'Run lerd env (writes the connection and repoints the app)',
+    vhost_regenerate: 'Regenerate nginx vhost',
+    services_install: 'Install the missing services',
+    services_start: 'Start the stopped services'
   };
 
   async function runFix(check: DoctorCheck) {
     if (!check.fix || fixing) return;
+    // Duplicate keys are resolved by the user, not by lerd: only the project
+    // knows which value it meant. Send them to the editor with its resolver
+    // open rather than running anything.
+    if (check.fix === ENV_DUPLICATES_FIX) {
+      pendingEnvDuplicates.set(true);
+      openEnv();
+      return;
+    }
     fixing = check.name;
     try {
       // Both paths drive the global CommandRunModal so the user sees streamed
       // output; once the run finishes we re-check.
       if (check.fix in DOCTOR_FIX) {
-        await executeDoctorFix(site.domain, check.fix, 'Run ' + DOCTOR_FIX[check.fix], branch);
+        await executeDoctorFix(site.domain, check.fix, DOCTOR_FIX[check.fix], branch);
       } else {
         const cmd = commands.find((c) => c.name === check.fix);
         if (!cmd) return;
@@ -192,8 +207,14 @@
   const allClear = $derived(Boolean(report) && report!.failures === 0 && report!.warnings === 0);
   const okCount = $derived(report ? report.checks.filter((c) => c.status === 'ok').length : 0);
 
+  // A fix lerd carries out itself, versus one the user resolves in the editor.
+  const ENV_DUPLICATES_FIX = 'env_duplicates_resolve';
+
   const canFix = (check: DoctorCheck): boolean =>
-    Boolean(check.fix) && (check.fix! in DOCTOR_FIX || commands.some((c) => c.name === check.fix));
+    Boolean(check.fix) &&
+    (check.fix === ENV_DUPLICATES_FIX ||
+      check.fix! in DOCTOR_FIX ||
+      commands.some((c) => c.name === check.fix));
 
   // Env drift has no automated fix; offer a pencil that jumps to the Env tab so
   // the user can reconcile .env by hand. Only when there's actually a warning.

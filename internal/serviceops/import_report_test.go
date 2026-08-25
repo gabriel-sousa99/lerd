@@ -9,7 +9,7 @@ import (
 )
 
 func TestParseImportOutputClean(t *testing.T) {
-	rep := parseImportOutput("SET\nCREATE TABLE\nCOPY 12\n")
+	rep := parseImportOutput("SET\nCREATE TABLE\nCOPY 12\n", nil)
 	if rep.Errors != 0 || len(rep.Issues) != 0 {
 		t.Fatalf("clean load reported %d errors: %+v", rep.Errors, rep.Issues)
 	}
@@ -25,7 +25,7 @@ invalid command \N
 invalid command \N
 invalid command \N
 `
-	rep := parseImportOutput(out)
+	rep := parseImportOutput(out, nil)
 	if rep.Errors != 6 {
 		t.Fatalf("errors = %d, want 6", rep.Errors)
 	}
@@ -44,7 +44,7 @@ invalid command \N
 }
 
 func TestParseImportOutputCountsMySQLErrors(t *testing.T) {
-	rep := parseImportOutput("ERROR 1049 (42000): Unknown database 'nope'\n")
+	rep := parseImportOutput("ERROR 1049 (42000): Unknown database 'nope'\n", nil)
 	if rep.Errors != 1 || rep.Issues[0].Count != 1 {
 		t.Fatalf("report = %+v", rep)
 	}
@@ -52,7 +52,7 @@ func TestParseImportOutputCountsMySQLErrors(t *testing.T) {
 
 func TestParseImportOutputStripsPsqlLinePrefix(t *testing.T) {
 	const want = `ERROR:  relation "public.audit_log" does not exist`
-	rep := parseImportOutput("psql:<stdin>:412: " + want + "\npsql:<stdin>:998: " + want + "\n")
+	rep := parseImportOutput("psql:<stdin>:412: "+want+"\npsql:<stdin>:998: "+want+"\n", nil)
 	if rep.Errors != 2 {
 		t.Fatalf("errors = %d, want 2", rep.Errors)
 	}
@@ -110,7 +110,7 @@ func distinctErrors(n int) string {
 }
 
 func TestParseImportOutputCapsIssues(t *testing.T) {
-	rep := parseImportOutput(distinctErrors(maxImportIssues + 3))
+	rep := parseImportOutput(distinctErrors(maxImportIssues+3), nil)
 	// Nothing is held back when the output carries no COPY cascade to hold it for.
 	if len(rep.Issues) != maxImportIssues {
 		t.Fatalf("issues = %d, want %d", len(rep.Issues), maxImportIssues)
@@ -126,7 +126,7 @@ func TestParseImportOutputCapsIssues(t *testing.T) {
 // A dump replayed over a populated schema complains once per object. Every one
 // of those has to reach the report, or the modal listing them cannot show them.
 func TestParseImportOutputKeepsEveryIssueOfARealDump(t *testing.T) {
-	rep := parseImportOutput(distinctErrors(243))
+	rep := parseImportOutput(distinctErrors(243), nil)
 	if len(rep.Issues) != 243 {
 		t.Fatalf("issues = %d, want 243", len(rep.Issues))
 	}
@@ -139,7 +139,7 @@ func TestParseImportOutputKeepsEveryIssueOfARealDump(t *testing.T) {
 // out the failure that caused it.
 func TestParseImportOutputReservesNoiseSlot(t *testing.T) {
 	out := distinctErrors(maxImportIssues+1) + "invalid command \\N\ninvalid command \\N\n"
-	rep := parseImportOutput(out)
+	rep := parseImportOutput(out, nil)
 	if len(rep.Issues) != maxImportIssues {
 		t.Fatalf("issues = %d, want %d", len(rep.Issues), maxImportIssues)
 	}
@@ -155,7 +155,7 @@ func TestParseImportOutputReservesNoiseSlot(t *testing.T) {
 // The CLI prints one line, so it spells out the first few and folds the rest
 // into the same tail the cap uses.
 func TestSummaryTrimsToAHandful(t *testing.T) {
-	rep := parseImportOutput(distinctErrors(20))
+	rep := parseImportOutput(distinctErrors(20), nil)
 	got := rep.Summary()
 	if !strings.Contains(got, "the engine reported 20 errors") {
 		t.Fatalf("summary = %q", got)
@@ -198,7 +198,7 @@ backslash commands are restricted; only \unrestrict is allowed
 backslash commands are restricted; only \unrestrict is allowed
 ERROR:  syntax error at or near "1"
 `
-	rep := parseImportOutput(out)
+	rep := parseImportOutput(out, nil)
 	if rep.Errors != 6 {
 		t.Fatalf("errors = %d, want 6", rep.Errors)
 	}
@@ -222,7 +222,7 @@ func TestParseImportOutputFoldsEitherCascadePhrasing(t *testing.T) {
 	out := "invalid command \\N\ninvalid command \\N\n" +
 		"backslash commands are restricted; only \\unrestrict is allowed\n" +
 		"ERROR:  relation \"t\" does not exist\n"
-	rep := parseImportOutput(out)
+	rep := parseImportOutput(out, nil)
 	noise := 0
 	for _, i := range rep.Issues {
 		if strings.HasPrefix(i.Message, "invalid command") || strings.HasPrefix(i.Message, "backslash commands") {

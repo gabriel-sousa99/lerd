@@ -18,6 +18,7 @@ func setupCustomContainerEnv(t *testing.T) (projectDir, confD string) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmp)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	isolateLaunchAgents(t)
 
 	// Stub out functions that call podman/systemd.
 	origWriteUnit := podman.WriteContainerUnitFn

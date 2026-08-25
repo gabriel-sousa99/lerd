@@ -290,6 +290,10 @@ func TestDetectExtensions_NoExtRequires(t *testing.T) {
 // ── ClampToRange ─────────────────────────────────────────────────────────────
 
 func TestClampToRange(t *testing.T) {
+	// Stage an empty installed set so every case lands on the boundary fallback
+	// rather than on whatever the developer happens to have installed, which is
+	// the branch that decides which version a caller is offered.
+	installedPHP(t)
 	tests := []struct {
 		version, min, max, want string
 	}{
@@ -304,14 +308,18 @@ func TestClampToRange(t *testing.T) {
 		// Below min — clamps (falls back to min if no installed version).
 		{"8.1", "8.2", "8.4", "8.2"},
 		{"7.4", "8.2", "8.5", "8.2"},
-		// Above max — clamps.
+		// Above max — clamps to the ceiling, the newest the framework supports.
 		{"8.5", "8.2", "8.4", "8.4"},
+		{"8.5", "8.1", "8.4", "8.4"},
+		{"8.5", "8.2", "8.2", "8.2"},
+		// Above a range with no ceiling — nothing to clamp against, keep the floor.
+		{"8.5", "8.2", "", "8.5"},
 	}
 	for _, tt := range tests {
 		got := ClampToRange(tt.version, tt.min, tt.max)
-		// ClampToRange may pick a different installed version within range,
-		// but when no installed version matches it falls back to min/max boundary.
-		// We check that the result is within the stated range.
+		if got != tt.want {
+			t.Errorf("ClampToRange(%q, %q, %q) = %q, want %q", tt.version, tt.min, tt.max, got, tt.want)
+		}
 		if tt.min != "" {
 			gMaj, gMin := parseMajorMinor(got)
 			mMaj, mMin := parseMajorMinor(tt.min)

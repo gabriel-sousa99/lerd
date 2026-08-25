@@ -2,14 +2,23 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
+
+	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"github.com/gabriel-sousa99/lerd/internal/reqstats"
 )
 
 func isolateConfig(t *testing.T) {
@@ -31,7 +40,7 @@ func isolateConfig(t *testing.T) {
 
 // A deleted host-proxy site must have its dev-server worker torn down, not just
 // its registry entry removed, or the always-restart unit leaks. removeStale
-// routes through siteops.UnlinkSiteCore, which calls the StopSiteWorkers hook.
+// routes through siteops.TeardownSite, which calls the StopSiteWorkers hook.
 func TestRemoveStale_tearsDownStaleHostProxyWorkers(t *testing.T) {
 	isolateConfig(t)
 
@@ -56,6 +65,72 @@ func TestRemoveStale_tearsDownStaleHostProxyWorkers(t *testing.T) {
 	}
 	if after, _ := config.LoadSites(); len(after.Sites) != 0 {
 		t.Errorf("stale site should be removed from the registry; got %d sites", len(after.Sites))
+	}
+}
+
+// A site whose directory is gone gets the same teardown an explicit unlink
+// gives it. The sweep used to reimplement a subset of it, so a secured site
+// left its cert pair behind, a custom-FPM site kept its quadlet, an open share
+// stayed up and the recorded request timings outlived the site.
+func TestRemoveStale_appliesTheFullUnlinkTeardown(t *testing.T) {
+	isolateConfig(t)
+
+	prevWorkers, prevShares := siteops.StopSiteWorkers, siteops.StopSiteShares
+	var sharesStopped []string
+	siteops.StopSiteWorkers = func(*config.Site) {}
+	siteops.StopSiteShares = func(name string) { sharesStopped = append(sharesStopped, name) }
+	t.Cleanup(func() {
+		siteops.StopSiteWorkers = prevWorkers
+		siteops.StopSiteShares = prevShares
+	})
+
+	siteCerts := filepath.Join(config.CertsDir(), "sites")
+	for _, d := range []string{siteCerts, config.QuadletDir()} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leftovers := []string{
+		filepath.Join(siteCerts, "ghost.test.crt"),
+		filepath.Join(siteCerts, "ghost.test.key"),
+		filepath.Join(config.QuadletDir(), podman.CustomFPMContainerName("ghost")+".container"),
+	}
+	for _, f := range leftovers {
+		if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := reqstats.SaveSnapshot([]reqstats.SiteStats{{Site: "ghost"}, {Site: "live"}}, config.RequestStatsFile()); err != nil {
+		t.Fatal(err)
+	}
+
+	liveDir := t.TempDir()
+	reg := &config.SiteRegistry{Sites: []config.Site{
+		{Name: "ghost", Domains: []string{"ghost.test"}, Path: filepath.Join(t.TempDir(), "ghost"), Secured: true, Runtime: "fpm-custom"},
+		{Name: "live", Domains: []string{"live.test"}, Path: liveDir},
+	}}
+	if err := config.SaveSites(reg); err != nil {
+		t.Fatal(err)
+	}
+
+	if !removeStale(&config.GlobalConfig{}) {
+		t.Fatal("expected removeStale to report a removal")
+	}
+
+	for _, f := range leftovers {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("%s survived the sweep", filepath.Base(f))
+		}
+	}
+	if len(sharesStopped) != 1 || sharesStopped[0] != "ghost" {
+		t.Errorf("the sweep must close the deleted site's shares; stopped=%v", sharesStopped)
+	}
+	if _, ok := reqstats.LoadSite(config.RequestStatsFile(), "ghost"); ok {
+		t.Error("the stats file still carries the deleted site")
+	}
+	if _, ok := reqstats.LoadSite(config.RequestStatsFile(), "live"); !ok {
+		t.Error("the sweep dropped an unrelated site's stats")
 	}
 }
 
@@ -292,6 +367,201 @@ func TestShouldInheritNginxOnSync(t *testing.T) {
 	}
 }
 
+// The boot scan provisions worktrees, and a composer install there can take
+// longer than the Type=notify unit's start timeout. Readiness must be signalled
+// without waiting for it, or systemd terminates the process before it is ever
+// ready and the restart begins the same install again, forever.
+func TestNotifyReadyThenScan_readinessDoesNotWaitOnTheScan(t *testing.T) {
+	release := make(chan struct{})
+	// A scan run synchronously would block on release forever, so it is let go
+	// on a timer as well and the assertions below report the ordering.
+	releaseScan := sync.OnceFunc(func() { close(release) })
+	time.AfterFunc(5*time.Second, releaseScan)
+
+	var ready atomic.Bool
+	scanDone := make(chan struct{})
+	notifyReadyThenScan(
+		func() { ready.Store(true) },
+		func() { <-release; close(scanDone) },
+	)
+
+	if !ready.Load() {
+		t.Error("readiness was not signalled before the watcher moved on")
+	}
+	select {
+	case <-scanDone:
+		t.Error("readiness waited for the boot scan to finish")
+	default:
+	}
+
+	releaseScan()
+	<-scanDone
+}
+
+// A worktree's subdomain only needs its vhost, so the boot scan must write
+// every one of them before it starts installing anything. Serving behind the
+// installs meant the last worktree of a large repo kept 404ing for as long as
+// all the earlier composer/npm runs took.
+func TestScanWorktrees_writesVhostBeforeTheDependencyInstall(t *testing.T) {
+	isolateConfig(t)
+
+	mainRepo := filepath.Join(t.TempDir(), "myapp")
+	worktree := filepath.Join(t.TempDir(), "myapp-feat")
+	wtMeta := filepath.Join(mainRepo, ".git", "worktrees", "feat")
+	for _, d := range []string{wtMeta, worktree} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(mainRepo, ".env"), []byte("APP_URL=http://myapp.test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtMeta, "HEAD"), []byte("ref: refs/heads/feat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtMeta, "gitdir"), []byte(filepath.Join(worktree, ".git")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.AddSite(config.Site{
+		Name: "myapp", Domains: []string{"myapp.test"}, Path: mainRepo, PHPVersion: "8.3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	provision, generated := scanWorktrees()
+
+	if !generated {
+		t.Fatal("expected the scan to report a generated vhost")
+	}
+	vhost := filepath.Join(config.NginxConfD(), "feat.myapp.test.conf")
+	if _, err := os.Stat(vhost); err != nil {
+		t.Errorf("worktree vhost must exist as soon as the scan returns: %v", err)
+	}
+	wtEnv := filepath.Join(worktree, ".env")
+	if _, err := os.Stat(wtEnv); !os.IsNotExist(err) {
+		t.Error("the dependency seed must be deferred, not run before the vhost is written")
+	}
+	if len(provision) != 1 {
+		t.Fatalf("expected one deferred provisioning job, got %d", len(provision))
+	}
+
+	runProvisioning(provision, 1)
+
+	if _, err := os.Stat(wtEnv); err != nil {
+		t.Errorf("deferred provisioning must still seed the worktree: %v", err)
+	}
+}
+
+// A worktree that pins its own PHP version in .lerd.yaml must be served by that
+// version's FPM container. The boot scan wrote the parent's instead, so every
+// watcher restart pointed such a worktree at the wrong container until some
+// later pass corrected it.
+func TestScanWorktrees_vhostHonoursTheWorktreePHPPin(t *testing.T) {
+	isolateConfig(t)
+
+	mainRepo := filepath.Join(t.TempDir(), "myapp")
+	worktree := filepath.Join(t.TempDir(), "myapp-feat")
+	wtMeta := filepath.Join(mainRepo, ".git", "worktrees", "feat")
+	for _, d := range []string{wtMeta, worktree} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(wtMeta, "HEAD"), []byte("ref: refs/heads/feat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtMeta, "gitdir"), []byte(filepath.Join(worktree, ".git")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The branch is on 8.3 while the parent site stays on 8.4.
+	if err := config.SetWorktreePHPVersion(worktree, "8.3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.AddSite(config.Site{
+		Name: "myapp", Domains: []string{"myapp.test"}, Path: mainRepo, PHPVersion: "8.4",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scanWorktrees()
+
+	vhost, err := os.ReadFile(filepath.Join(config.NginxConfD(), "feat.myapp.test.conf"))
+	if err != nil {
+		t.Fatalf("reading the generated worktree vhost: %v", err)
+	}
+	if !strings.Contains(string(vhost), "lerd-php83-fpm") {
+		t.Errorf("worktree vhost must route to the pinned 8.3 container, got:\n%s", vhost)
+	}
+	if strings.Contains(string(vhost), "lerd-php84-fpm") {
+		t.Error("worktree vhost fell back to the parent site's PHP container")
+	}
+}
+
+// The boot scan runs unattended while the machine is being used for something
+// else, so it never claims every core: two are left for the daemons, the
+// containers serving the other sites, and the user's own work.
+func TestProvisionSlots(t *testing.T) {
+	cases := map[int]int{1: 1, 2: 1, 3: 1, 4: 2, 5: 3, 6: 4, 8: 4, 16: 4, 64: 4}
+	for numCPU, want := range cases {
+		if got := provisionSlots(numCPU); got != want {
+			t.Errorf("provisionSlots(%d) = %d, want %d", numCPU, got, want)
+		}
+	}
+	if got := provisionSlots(0); got != 1 {
+		t.Errorf("provisionSlots must never return less than one slot, got %d", got)
+	}
+}
+
+// Worktrees are independent of each other, so the deferred half of the boot
+// scan runs them concurrently — bounded, since each one is a composer and a
+// JS install and a repo with dozens of worktrees would otherwise fork all of
+// them at once.
+func TestRunProvisioning_runsEveryJobWithinTheConcurrencyLimit(t *testing.T) {
+	const jobs, limit = 12, 3
+
+	var live, peak, done atomic.Int64
+	entered := make(chan struct{}, jobs)
+	release := make(chan struct{})
+	work := make([]func(), 0, jobs)
+	for range jobs {
+		work = append(work, func() {
+			n := live.Add(1)
+			for p := peak.Load(); n > p; p = peak.Load() {
+				if peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			entered <- struct{}{}
+			// Hold every slot open until the limit is reached, so it is the
+			// limit that caps the count and not jobs finishing before their
+			// peers have started.
+			<-release
+			live.Add(-1)
+			done.Add(1)
+		})
+	}
+
+	finished := make(chan struct{})
+	go func() { runProvisioning(work, limit); close(finished) }()
+
+	for range limit {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d slots ever filled", peak.Load(), limit)
+		}
+	}
+	close(release)
+	<-finished
+
+	if got := peak.Load(); got > limit {
+		t.Errorf("ran %d jobs at once, limit is %d", got, limit)
+	}
+	if got := done.Load(); got != jobs {
+		t.Errorf("ran %d of %d jobs", got, jobs)
+	}
+}
+
 func TestShouldAutoStartWorkersOnSync(t *testing.T) {
 	cases := map[string]bool{
 		"added":   true,
@@ -375,5 +645,196 @@ func TestPrintDNSDiagnostic_OKStepHasNoHintLine(t *testing.T) {
 	out := buf.String()
 	if strings.Contains(out, "hint:") {
 		t.Errorf("OK step should not print a hint line, got:\n%s", out)
+	}
+}
+
+// TestShutdownOnSignal_TearsDownThenUnblocksWatch pins the logout path: the
+// signal runs the teardown, and only then cancels the watch loop so the
+// process exits on its own instead of being killed mid-shutdown.
+func TestShutdownOnSignal_TearsDownThenUnblocksWatch(t *testing.T) {
+	isolateConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigs := make(chan os.Signal, 1)
+	quitDone := make(chan struct{})
+	quit := func() error {
+		select {
+		case <-ctx.Done():
+			t.Error("watch loop was cancelled before the teardown finished")
+		default:
+		}
+		close(quitDone)
+		return nil
+	}
+
+	sigs <- syscall.SIGTERM
+	shutdownOnSignal(sigs, quit, cancel)
+
+	select {
+	case <-quitDone:
+	default:
+		t.Fatal("teardown never ran")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Error("watch loop was never cancelled, the watcher would hang until SIGKILL")
+	}
+}
+
+// TestShutdownOnSignal_NoTeardownPlatformJustExits pins the platform gate. Where
+// nothing outlives the session there is nothing to protect, and running the
+// teardown would turn an ordinary `systemctl --user stop lerd-watcher` into a
+// stop of every container, lerd-ui and lerd-dns.
+func TestShutdownOnSignal_NoTeardownPlatformJustExits(t *testing.T) {
+	isolateConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigs := make(chan os.Signal, 1)
+	sigs <- syscall.SIGTERM
+	shutdownOnSignal(sigs, nil, cancel)
+
+	select {
+	case <-ctx.Done():
+	default:
+		t.Error("the watcher must still exit when the platform runs no teardown")
+	}
+}
+
+// TestShutdownOnSignal_NoTeardownPlatformKeepsTheMarker pins that the early exit
+// does not eat a marker it never earned, exactly as the Ctrl-C exit does not.
+func TestShutdownOnSignal_NoTeardownPlatformKeepsTheMarker(t *testing.T) {
+	isolateConfig(t)
+	if err := config.MarkWatcherManagedStop(); err != nil {
+		t.Fatalf("MarkWatcherManagedStop: %v", err)
+	}
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigs := make(chan os.Signal, 1)
+	sigs <- syscall.SIGTERM
+	shutdownOnSignal(sigs, nil, cancel)
+
+	if !config.ConsumeWatcherManagedStop() {
+		t.Error("an exit with no teardown must leave the marker for the real stop")
+	}
+}
+
+// TestShutdownOnSignal_QuitErrorStillExits pins that a failed teardown does not
+// leave the watcher blocked: launchd would SIGKILL it after the exit timeout.
+func TestShutdownOnSignal_QuitErrorStillExits(t *testing.T) {
+	isolateConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigs := make(chan os.Signal, 1)
+	sigs <- syscall.SIGTERM
+	shutdownOnSignal(sigs, func() error { return errors.New("boom") }, cancel)
+
+	select {
+	case <-ctx.Done():
+	default:
+		t.Error("watch loop must be cancelled even when the teardown fails")
+	}
+}
+
+// TestShutdownOnSignal_ManagedStopSkipsTeardown pins the guard that keeps
+// `lerd install`, `lerd update` and `lerd quit` from tearing the environment
+// down. They all stop the watcher, and launchd delivers that as the same
+// SIGTERM a logout does; without the marker an install would stop every
+// container and the Podman Machine VM halfway through.
+func TestShutdownOnSignal_ManagedStopSkipsTeardown(t *testing.T) {
+	isolateConfig(t)
+	if err := config.MarkWatcherManagedStop(); err != nil {
+		t.Fatalf("MarkWatcherManagedStop: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigs := make(chan os.Signal, 1)
+	sigs <- syscall.SIGTERM
+	tore := false
+	shutdownOnSignal(sigs, func() error { tore = true; return nil }, cancel)
+
+	if tore {
+		t.Error("a lerd-managed stop must not run the shutdown teardown")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Error("the watcher must still exit on a managed stop")
+	}
+}
+
+// TestShutdownOnSignal_ManagedStopIsConsumedOnce pins that the marker does not
+// linger: a managed restart followed by a real logout must still tear down.
+func TestShutdownOnSignal_ManagedStopIsConsumedOnce(t *testing.T) {
+	isolateConfig(t)
+	if err := config.MarkWatcherManagedStop(); err != nil {
+		t.Fatalf("MarkWatcherManagedStop: %v", err)
+	}
+
+	_, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	first := make(chan os.Signal, 1)
+	first <- syscall.SIGTERM
+	shutdownOnSignal(first, func() error { return nil }, cancel1)
+
+	_, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	second := make(chan os.Signal, 1)
+	second <- syscall.SIGTERM
+	tore := false
+	shutdownOnSignal(second, func() error { tore = true; return nil }, cancel2)
+
+	if !tore {
+		t.Error("a stale marker suppressed a real logout teardown")
+	}
+}
+
+// TestShutdownOnSignal_InterruptSkipsTeardown pins that Ctrl-C on a hand-run
+// `lerd watch` does not tear the environment down. launchd and systemd only
+// ever signal a shutdown with SIGTERM, so a SIGINT means a person at a
+// terminal who wants their shell back, not their containers stopped.
+func TestShutdownOnSignal_InterruptSkipsTeardown(t *testing.T) {
+	isolateConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigs := make(chan os.Signal, 1)
+	sigs <- syscall.SIGINT
+	tore := false
+	shutdownOnSignal(sigs, func() error { tore = true; return nil }, cancel)
+
+	if tore {
+		t.Error("Ctrl-C must not stop every container and the Podman Machine VM")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Error("the watcher must still exit on Ctrl-C")
+	}
+}
+
+// TestShutdownOnSignal_InterruptLeavesTheMarkerAlone pins that the SIGINT exit
+// does not consume a managed-stop marker it never earned. Eating one here would
+// leave the SIGTERM that follows reading as a logout mid-install.
+func TestShutdownOnSignal_InterruptLeavesTheMarkerAlone(t *testing.T) {
+	isolateConfig(t)
+	if err := config.MarkWatcherManagedStop(); err != nil {
+		t.Fatalf("MarkWatcherManagedStop: %v", err)
+	}
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigs := make(chan os.Signal, 1)
+	sigs <- syscall.SIGINT
+	shutdownOnSignal(sigs, func() error { return nil }, cancel)
+
+	if !config.ConsumeWatcherManagedStop() {
+		t.Error("a SIGINT exit must leave the managed-stop marker for the real stop")
 	}
 }

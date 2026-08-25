@@ -5,6 +5,7 @@
   import LoadingRow from '$components/LoadingRow.svelte';
   import DashboardHeader from '$components/DashboardHeader.svelte';
   import DashboardSection from '$components/DashboardSection.svelte';
+  import FrameworkMark from '$components/FrameworkMark.svelte';
   import SiteTile from './SiteTile.svelte';
   import { sites, sitesLoaded, siteWorkerFailing, type Site } from '$stores/sites';
   import { accessMode } from '$stores/accessMode';
@@ -24,20 +25,24 @@
   // Groups keep their first-seen order; unknown frameworks fold into a trailing
   // "Other" bucket. This is the overview's original grouping, kept for as long
   // as the user has no workspace to organise by.
-  function byFramework(): Array<{ label: string; sites: Site[] }> {
+  function byFramework(): Array<{ label: string; framework?: string; sites: Site[] }> {
     const order: string[] = [];
     const byLabel = new Map<string, Site[]>();
+    // The heading carries the framework's mark, so the group remembers which
+    // name produced its label rather than only the label itself.
+    const nameOf = new Map<string, string | undefined>();
     for (const s of active) {
       const label = s.framework_label || m.sites_dash_otherFramework();
       if (!byLabel.has(label)) {
         byLabel.set(label, []);
+        nameOf.set(label, s.framework);
         order.push(label);
       }
       byLabel.get(label)!.push(s);
     }
     const other = m.sites_dash_otherFramework();
     order.sort((a, b) => (a === other ? 1 : b === other ? -1 : 0));
-    return order.map((label) => ({ label, sites: byLabel.get(label)! }));
+    return order.map((label) => ({ label, framework: nameOf.get(label), sites: byLabel.get(label)! }));
   }
 
   // Active sites grouped by workspace, in the order the config lists them. An
@@ -71,6 +76,9 @@
     {:else}
       {#each groups as group (group.label)}
         <DashboardSection label={group.label}>
+          {#snippet icon()}
+            <FrameworkMark name={group.framework} />
+          {/snippet}
           {#each group.sites as site (site.domain)}
             <SiteTile {site} />
           {/each}
@@ -94,7 +102,7 @@
       {/if}
     {/if}
 
-    {#if $accessMode.loopback && $sitesLoaded && total > 0}
+    {#if $accessMode.localControl && $sitesLoaded && total > 0}
       <button
         onclick={openLinkModal}
         class="inline-flex items-center gap-1 text-xs font-medium text-lerd-red hover:text-lerd-redhov"

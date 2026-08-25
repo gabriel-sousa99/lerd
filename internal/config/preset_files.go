@@ -19,9 +19,9 @@ var presetFileGenerators = map[string]func(*CustomService) (string, error){
 }
 
 // DashboardProxyPrefix is the lerd-ui mount under which bundled admin
-// dashboards (rabbitmq, redisinsight) are served same-origin so their cookies
-// stay first-party in the iframe overlay. Shared by the lerd-ui proxy and the
-// quadlet generator, which configures each upstream to serve its UI there.
+// dashboards are served same-origin so their cookies stay first-party in the
+// iframe overlay. Shared by the lerd-ui proxy and the quadlet generator, which
+// configures each upstream to serve its UI there.
 const DashboardProxyPrefix = "/_svc/"
 
 // DashboardProxyPath is the same-origin mount path for a proxied dashboard.
@@ -29,20 +29,70 @@ func DashboardProxyPath(name string) string {
 	return DashboardProxyPrefix + name + "/"
 }
 
+// DashboardProxied reports whether svc's dashboard is served through lerd-ui's
+// same-origin proxy rather than opened at its own origin. Only a bundled preset
+// (Preset set and still resolvable) that asked for it qualifies; a user-defined
+// custom service with dashboard_external keeps the new-tab behavior.
+//
+// Either flag asks for the proxy. They differ in what an older binary does with
+// them, which is why a preset picks one deliberately: see Preset.DashboardProxy.
+//
+// The flag is read from the preset rather than the copy saved when the service
+// was installed, so a store definition that moves a dashboard behind the proxy
+// reaches services installed before it, the way file mounts do.
+//
+// Everything that puts a service behind the proxy has to agree with this, or
+// the two halves land apart: telling an upstream to serve under the mount while
+// the dashboard still opens at its own root leaves the app answering nowhere the
+// UI looks.
+func DashboardProxied(svc *CustomService) bool {
+	if svc == nil || svc.Dashboard == "" || svc.Preset == "" {
+		return false
+	}
+	p, err := LoadPreset(svc.Preset)
+	return err == nil && (p.DashboardProxy || p.DashboardExternal)
+}
+
 // PresetProxyEnv returns the container env that makes a bundled upstream serve
 // its UI under the same /_svc/<name> path the lerd-ui proxy mounts it at, so
 // the dashboard embeds same-origin. It is injected at quadlet generation (not
 // stored in the service YAML) so existing installs pick it up on the next
-// start without a reinstall, mirroring how PresetFiles are re-sourced. Returns
-// ok=false for presets that configure the prefix another way: rabbitmq uses a
-// management.path_prefix conf mount (see presetFiles).
+// start without a reinstall, mirroring how PresetFiles are re-sourced. Keeping
+// it out of the YAML also matters for compatibility: both values move the app
+// off "/", and a binary that predates the proxy still opens the dashboard
+// there. Returns ok=false for presets that configure the prefix another way:
+// rabbitmq uses a management.path_prefix conf mount and phpmyadmin an apache
+// Alias (see presetFiles), pgadmin reads a per-request header (see
+// PresetProxyHeader).
 func PresetProxyEnv(svc *CustomService) (key, value string, ok bool) {
-	if svc == nil {
+	if !DashboardProxied(svc) {
 		return "", "", false
 	}
 	switch svc.Preset {
 	case "redisinsight":
 		return "RI_PROXY_PATH", strings.TrimSuffix(DashboardProxyPath(svc.Name), "/"), true
+	case "mongo-express":
+		// Its router is mounted at site.baseUrl, which the config expects with
+		// both slashes.
+		return "ME_CONFIG_SITE_BASEURL", DashboardProxyPath(svc.Name), true
+	}
+	return "", "", false
+}
+
+// PresetProxyHeader returns a request header the lerd-ui proxy must add so a
+// bundled upstream serves its UI under the /_svc/<name> mount. It is the same
+// job as PresetProxyEnv for apps that take the prefix per request rather than
+// at boot, which is the better half of the deal: the prefix applies without
+// restarting the container, and the app keeps answering at "/" alongside it.
+// pgAdmin's ReverseProxied middleware reads X-Script-Name, strips it from the
+// path and prefixes every URL it generates.
+func PresetProxyHeader(svc *CustomService) (key, value string, ok bool) {
+	if !DashboardProxied(svc) {
+		return "", "", false
+	}
+	switch svc.Preset {
+	case "pgadmin":
+		return "X-Script-Name", strings.TrimSuffix(DashboardProxyPath(svc.Name), "/"), true
 	}
 	return "", "", false
 }

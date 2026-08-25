@@ -8,13 +8,16 @@
   import {
     remoteControl,
     loadRemoteControl,
-    disableRemoteControl
+    disableRemoteControl,
+    setRemoteFullAccess
   } from '$stores/remoteControl';
   import { openRemoteControlModal, openLANProgressModal, type LANAction } from '$stores/modals';
   import { autostartEnabled, loadAutostart, toggleAutostart } from '$stores/autostart';
   import { idleEnabled, idleTimeoutMinutes, loadIdle, saveIdle } from '$stores/idle';
   import Toggle from '$components/Toggle.svelte';
+  import StatusPill from '$components/StatusPill.svelte';
   import SettingsCard from '$components/SettingsCard.svelte';
+  import LANServicesSetting from './LANServicesSetting.svelte';
   import LanguageSwitcher from '$components/LanguageSwitcher.svelte';
   import { apiFetch, apiBase } from '$lib/api';
   import { escapeHtml } from '$lib/html';
@@ -83,6 +86,19 @@
 
   let updateTerminalLoading = $state(false);
   let updateTerminalError = $state('');
+
+  // There is no remote session to widen while lerd is loopback-only, so the
+  // setting stays out of the way. An already enabled setting keeps showing, so
+  // that re-exposing does not silently hand host access back out.
+  const fullAccessHidden = $derived(!$lan.exposed && !$remoteControl.fullAccess);
+
+  // Dashboard credentials are equally inert while lerd is loopback-only, so the
+  // card goes too. Configured credentials keep it visible so they can be
+  // rotated or cleared, and disabled-DNS mode keeps it as its only route to
+  // LAN exposure at all.
+  const remoteCardHidden = $derived(
+    !$lan.exposed && !$remoteControl.enabled && $status.dns?.enabled !== false
+  );
   async function openUpdateTerminal() {
     updateTerminalLoading = true;
     updateTerminalError = '';
@@ -137,7 +153,7 @@
           <p class="text-xs text-gray-500 dark:text-gray-400">
             {@html m.system_lerd_updateHint({ cmd: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">lerd update</code>' })}
           </p>
-          {#if $accessMode.loopback}
+          {#if $accessMode.localControl}
             <button
               onclick={openUpdateTerminal}
               disabled={updateTerminalLoading}
@@ -196,12 +212,20 @@
     <SettingsCard>
       <div class="flex items-center justify-between gap-3 mb-2">
         <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">{m.system_autostart_title()}</span>
-        <Toggle
-          on={$autostartEnabled}
-          loading={autostartBusy}
-          onclick={onToggleAutostart}
-          title={$autostartEnabled ? m.system_autostart_toggleOff() : m.system_autostart_toggleOn()}
-        />
+        {#if $accessMode.localControl}
+          <Toggle
+            on={$autostartEnabled}
+            loading={autostartBusy}
+            onclick={onToggleAutostart}
+            title={$autostartEnabled ? m.system_autostart_toggleOff() : m.system_autostart_toggleOn()}
+          />
+        {:else}
+          <StatusPill
+            size="sm"
+            tone={$autostartEnabled ? 'ok' : 'muted'}
+            label={$autostartEnabled ? m.common_enabled() : m.common_disabled()}
+          />
+        {/if}
       </div>
       <p class="text-xs text-gray-500 dark:text-gray-400">{m.system_autostart_description()}</p>
     </SettingsCard>
@@ -209,28 +233,40 @@
     <SettingsCard>
       <div class="flex items-center justify-between gap-3 mb-2">
         <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">{m.system_idle_title()}</span>
-        <Toggle
-          on={$idleEnabled}
-          loading={idleBusy}
-          onclick={onToggleIdle}
-          title={$idleEnabled ? m.system_idle_toggleOff() : m.system_idle_toggleOn()}
-        />
+        {#if $accessMode.localControl}
+          <Toggle
+            on={$idleEnabled}
+            loading={idleBusy}
+            onclick={onToggleIdle}
+            title={$idleEnabled ? m.system_idle_toggleOff() : m.system_idle_toggleOn()}
+          />
+        {:else}
+          <StatusPill
+            size="sm"
+            tone={$idleEnabled ? 'ok' : 'muted'}
+            label={$idleEnabled ? m.common_enabled() : m.common_disabled()}
+          />
+        {/if}
       </div>
       <p class="text-xs text-gray-500 dark:text-gray-400">{m.system_idle_description()}</p>
       <div class="flex items-center justify-between gap-4 mt-3">
         <p class="text-xs text-gray-500 dark:text-gray-400">{m.system_idle_timeoutLabel()}</p>
-        <div class="flex items-center gap-2">
-          <input
-            type="number"
-            min="1"
-            bind:value={idleMinutesInput}
-            onblur={onSaveIdleTimeout}
-            onkeydown={(e) => e.key === 'Enter' && onSaveIdleTimeout()}
-            disabled={idleBusy}
-            class="text-sm bg-white dark:bg-lerd-card border border-gray-200 dark:border-lerd-border rounded-lg px-3 py-1.5 w-20 text-gray-700 dark:text-gray-200 focus:outline-hidden focus:border-lerd-red/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          />
-          <span class="text-xs text-gray-500 dark:text-gray-400">{m.system_idle_minutes()}</span>
-        </div>
+        {#if $accessMode.localControl}
+          <div class="flex items-center gap-2">
+            <input
+              type="number"
+              min="1"
+              bind:value={idleMinutesInput}
+              onblur={onSaveIdleTimeout}
+              onkeydown={(e) => e.key === 'Enter' && onSaveIdleTimeout()}
+              disabled={idleBusy}
+              class="text-sm bg-white dark:bg-lerd-card border border-gray-200 dark:border-lerd-border rounded-lg px-3 py-1.5 w-20 text-gray-700 dark:text-gray-200 focus:outline-hidden focus:border-lerd-red/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <span class="text-xs text-gray-500 dark:text-gray-400">{m.system_idle_minutes()}</span>
+          </div>
+        {:else}
+          <span class="text-xs text-gray-500 dark:text-gray-400">{idleMinutesInput} {m.system_idle_minutes()}</span>
+        {/if}
       </div>
     </SettingsCard>
     </div>
@@ -239,18 +275,17 @@
     <SettingsCard>
       <div class="flex items-center justify-between mb-2">
         <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">{m.system_lan_title()}</span>
-        <span class="inline-flex items-center gap-1.5 text-[10px] font-medium px-2 py-0.5 rounded-full {$lan.exposed ? 'bg-emerald-100 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' : 'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400'}">
-          <span class="w-1.5 h-1.5 rounded-full {$lan.exposed ? 'bg-emerald-500' : 'bg-gray-400'}"></span>
-          {$lan.exposed ? m.system_lan_exposed() : m.system_lan_loopback()}
-        </span>
+        <StatusPill
+          size="sm"
+          tone={$lan.exposed ? 'ok' : 'muted'}
+          label={$lan.exposed ? m.system_lan_exposed() : m.system_lan_loopback()}
+        />
       </div>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
         {#if $lan.exposed}
           {@html m.system_lan_exposedDescription({
             ip: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + escapeHtml($lan.lanIP) + '</code>',
-            pattern: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">*.test</code>',
-            loop4: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">127.0.0.1</code>',
-            loop6: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">::1</code>'
+            pattern: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">*.test</code>'
           })}
         {:else}
           {@html m.system_lan_loopbackDescription({
@@ -266,7 +301,7 @@
         </p>
       {/if}
 
-      {#if $accessMode.loopback}
+      {#if $accessMode.localControl}
         <div class="flex items-center gap-2">
           {#if !$lan.exposed}
             <button
@@ -286,7 +321,7 @@
 
       {#if $lan.error}<p class="text-xs text-red-500 mt-2">{$lan.error}</p>{/if}
 
-      {#if $lan.exposed && $accessMode.loopback}
+      {#if $lan.exposed && $accessMode.localControl}
         <div class="mt-3 space-y-3">
           <div class="text-xs text-gray-600 dark:text-gray-400 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg p-3 space-y-1">
             <p>{@html m.system_lan_postExpose_resolver({ addr: '<code class="bg-white/60 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">' + escapeHtml($lan.lanIP) + ':5300</code>', unit: '<code class="bg-white/60 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">lerd-dns-forwarder.service</code>' })}</p>
@@ -354,26 +389,25 @@
           </div>
         </div>
       {/if}
+      <LANServicesSetting nested />
     </SettingsCard>
+    {:else}
+    <LANServicesSetting />
     {/if}
 
+    {#if !remoteCardHidden}
     <SettingsCard>
       <div class="flex items-center justify-between mb-2">
         <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">{m.system_remote_title()}</span>
-        <span
-          class="inline-flex items-center gap-1.5 text-[10px] font-medium px-2 py-0.5 rounded-full {$remoteControl.enabled && $lan.exposed
-            ? 'bg-emerald-100 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
-            : $remoteControl.enabled && !$lan.exposed
-              ? 'bg-amber-100 dark:bg-amber-500/15 text-amber-700 dark:text-amber-400'
-              : 'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400'}"
-        >
-          <span class="w-1.5 h-1.5 rounded-full {$remoteControl.enabled && $lan.exposed
-            ? 'bg-emerald-500'
-            : $remoteControl.enabled && !$lan.exposed
-              ? 'bg-amber-500'
-              : 'bg-gray-400'}"></span>
-          {$remoteControl.enabled && $lan.exposed ? m.system_remote_status_active() : $remoteControl.enabled && !$lan.exposed ? m.system_remote_status_inert() : m.system_remote_status_disabled()}
-        </span>
+        <StatusPill
+          size="sm"
+          tone={$remoteControl.enabled ? ($lan.exposed ? 'ok' : 'warn') : 'muted'}
+          label={$remoteControl.enabled
+            ? $lan.exposed
+              ? m.system_remote_status_active()
+              : m.system_remote_status_inert()
+            : m.system_remote_status_disabled()}
+        />
       </div>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
         {#if $status.dns?.enabled === false}
@@ -386,6 +420,7 @@
         {/if}
       </p>
 
+      {#if $accessMode.localControl}
       {#if $remoteControl.enabled}
         <div class="space-y-2">
           {#if $lan.exposed}
@@ -404,6 +439,26 @@
             <p class="text-xs text-amber-600 dark:text-amber-400">
               {@html m.system_remote_inertWarning({ cmd: '<code class="font-mono">lerd lan:expose</code>', btn: '<em>' + m.system_lan_expose() + '</em>' })}
             </p>
+          {/if}
+          {#if !fullAccessHidden}
+          <div class="pt-1">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-xs font-semibold text-gray-700 dark:text-gray-300">{m.system_remote_fullAccess_title()}</span>
+              <Toggle
+                on={$remoteControl.fullAccess}
+                tone="amber"
+                loading={$remoteControl.fullAccessLoading}
+                title={m.system_remote_fullAccess_title()}
+                onclick={() => setRemoteFullAccess(!$remoteControl.fullAccess)}
+              />
+            </div>
+            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">{m.system_remote_fullAccess_description()}</p>
+            {#if $remoteControl.fullAccess}
+              <p class="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg px-3 py-2 mt-2">
+                {m.system_remote_fullAccess_warning()}
+              </p>
+            {/if}
+          </div>
           {/if}
           <div class="flex flex-wrap gap-2">
             <button
@@ -439,7 +494,9 @@
           {/if}
         </div>
       {/if}
+      {/if}
       {#if $remoteControl.error}<p class="text-xs text-red-500 mt-2">{$remoteControl.error}</p>{/if}
     </SettingsCard>
+    {/if}
   </div>
 </div>

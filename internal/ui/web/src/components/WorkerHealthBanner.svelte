@@ -6,6 +6,8 @@
     healDoneCount,
     healTotalCount,
     healAll,
+    stopLoading,
+    stopAllUnhealthy,
     loadWorkerHealth
   } from '$stores/workerHealth';
   import { m } from '../paraglide/messages.js';
@@ -42,6 +44,12 @@
     if (!r.ok && r.error) {
       console.error('[lerd] heal failed:', r.error);
     }
+  }
+
+  async function onStop() {
+    const r = await stopAllUnhealthy();
+    await loadWorkerHealth();
+    if (!r.ok && r.error) console.error('[lerd] stopping workers failed:', r.error);
   }
 
   function onDismiss() {
@@ -91,8 +99,20 @@
         {/if}
       </div>
       <button
+        onclick={onStop}
+        disabled={$healLoading || $stopLoading}
+        title={m.workers_health_banner_stopHint()}
+        class="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-amber-900/80 dark:text-amber-200/80 hover:text-amber-900 dark:hover:text-amber-100 border border-amber-500/40 hover:border-amber-500/70 rounded-sm px-2.5 py-1.5 transition-colors disabled:opacity-50"
+      >
+        {#if $stopLoading}
+          {m.workers_health_banner_stopping()}
+        {:else}
+          {m.workers_health_banner_stop()}
+        {/if}
+      </button>
+      <button
         onclick={onHeal}
-        disabled={$healLoading}
+        disabled={$healLoading || $stopLoading}
         class="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium bg-amber-600 hover:bg-amber-700 text-white rounded-sm px-3 py-1.5 transition-colors disabled:opacity-50"
       >
         {#if $healLoading}

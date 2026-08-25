@@ -43,6 +43,15 @@ type Site struct {
 	// header rewritten. LAN devices can reach the site at <lanIP>:LANPort
 	// without any DNS configuration.
 	LANPort int `yaml:"lan_port,omitempty"`
+	// PublicPort, when non-zero, means a public share is (or should be) running:
+	// a host-level Host-rewriting proxy on 0.0.0.0:PublicPort that the user's own
+	// reverse proxy points "<site>.<base>" at. Same mechanism as LANPort, but
+	// reached through the user's proxy rather than by LAN IP. Stable so the
+	// user's proxy config stays valid.
+	PublicPort int `yaml:"public_port,omitempty"`
+	// WorktreePublicPorts pins each worktree's public-share port, keyed by branch,
+	// the worktree twin of PublicPort.
+	WorktreePublicPorts map[string]int `yaml:"worktree_public_ports,omitempty"`
 	// DevServerPort, when non-zero, is the host port the site's dev server is
 	// pinned to. It has to be stable and known ahead of time, because the
 	// site's vhost proxies to it and the tool would otherwise drift to the
@@ -211,6 +220,8 @@ type siteYAML struct {
 	PublicDir             string              `yaml:"public_dir,omitempty"`
 	AppURL                string              `yaml:"app_url,omitempty"`
 	LANPort               int                 `yaml:"lan_port,omitempty"`
+	PublicPort            int                 `yaml:"public_port,omitempty"`
+	WorktreePublicPorts   map[string]int      `yaml:"worktree_public_ports,omitempty"`
 	DevServerPort         int                 `yaml:"dev_server_port,omitempty"`
 	WorktreeDevPorts      map[string]int      `yaml:"worktree_dev_server_ports,omitempty"`
 	ContainerPort         int                 `yaml:"container_port,omitempty"`
@@ -245,6 +256,8 @@ func (s Site) toYAML() siteYAML {
 		PublicDir:             s.PublicDir,
 		AppURL:                s.AppURL,
 		LANPort:               s.LANPort,
+		PublicPort:            s.PublicPort,
+		WorktreePublicPorts:   s.WorktreePublicPorts,
 		DevServerPort:         s.DevServerPort,
 		WorktreeDevPorts:      s.WorktreeDevPorts,
 		ContainerPort:         s.ContainerPort,
@@ -284,6 +297,8 @@ func (sy siteYAML) toSite() Site {
 		PublicDir:             sy.PublicDir,
 		AppURL:                sy.AppURL,
 		LANPort:               sy.LANPort,
+		PublicPort:            sy.PublicPort,
+		WorktreePublicPorts:   sy.WorktreePublicPorts,
 		DevServerPort:         sy.DevServerPort,
 		WorktreeDevPorts:      sy.WorktreeDevPorts,
 		ContainerPort:         sy.ContainerPort,
@@ -399,6 +414,12 @@ func cloneSiteRegistry(in *SiteRegistry) *SiteRegistry {
 			cp.WorktreeIdleSuspended = make(map[string][]string, len(s.WorktreeIdleSuspended))
 			for k, v := range s.WorktreeIdleSuspended {
 				cp.WorktreeIdleSuspended[k] = append([]string(nil), v...)
+			}
+		}
+		if s.WorktreePublicPorts != nil {
+			cp.WorktreePublicPorts = make(map[string]int, len(s.WorktreePublicPorts))
+			for k, v := range s.WorktreePublicPorts {
+				cp.WorktreePublicPorts[k] = v
 			}
 		}
 		out.Sites[i] = cp
@@ -758,14 +779,34 @@ func FindSiteByPath(path string) (*Site, error) {
 		return nil, err
 	}
 
-	target := CanonicalPath(path)
 	for _, s := range reg.Sites {
-		if CanonicalPath(s.Path) == target {
+		if SamePath(s.Path, path) {
 			s := s
 			return &s, nil
 		}
 	}
 	return nil, fmt.Errorf("site with path %q not found", path)
+}
+
+// SamePath reports whether two paths name the same directory. Identity is asked
+// of the filesystem rather than derived from the strings, because resolving
+// symlinks only folds together the spellings that go through a link: a
+// case-insensitive volume, which is the macOS default, spells one directory many
+// ways and CanonicalPath keeps each of them. Comparing those as strings is what
+// let one project register as two sites.
+//
+// Falls back to the canonical strings when either path cannot be stat'd, so a
+// registry entry whose directory has since been deleted still matches itself.
+func SamePath(a, b string) bool {
+	if a == "" || b == "" {
+		return a == b
+	}
+	if fa, err := os.Stat(a); err == nil {
+		if fb, err := os.Stat(b); err == nil {
+			return os.SameFile(fa, fb)
+		}
+	}
+	return CanonicalPath(a) == CanonicalPath(b)
 }
 
 // CanonicalPath resolves symlinks in p so two spellings of the same directory

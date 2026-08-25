@@ -14,7 +14,7 @@ Plain `git worktree add` from any tool (CLI, IDE, GitLens) is enough to get a us
 
 ## `lerd worktree add` and `lerd worktree remove`
 
-The wrapper commands mirror `git worktree`'s subcommand layout, every flag passes straight through to git, and add an interactive setup pipeline on top.
+The wrapper commands mirror `git worktree`'s subcommand layout, every flag passes straight through to git, and add an interactive setup pipeline on top. `lerd worktree wait` is the non-interactive companion for scripts and tools that use plain git, see [waiting for the pipeline](#waiting-for-the-pipeline).
 
 ### `lerd worktree add <git args>`
 
@@ -28,7 +28,7 @@ lerd worktree add --track -b feat-x origin/feat    # tracking branch
 
 After git completes, the wrapper:
 
-1. Polls until the watcher has installed dependencies (`composer install` + `npm ci`) and synced the worktree's `.env`. The `.env` is set up *before* installs so `npm` build steps that read `VITE_*` env vars compile against the right values.
+1. Polls until the watcher has installed dependencies (`composer install` + `npm ci`) and synced the worktree's env file. Which file that is comes from the framework definition's `env.file`, so it follows the framework rather than assuming `.env`: Symfony settles on `.env.local` and Magento on `app/etc/env.php`, while Laravel and CodeIgniter use `.env`. The env file is set up *before* installs so `npm` build steps that read `VITE_*` env vars compile against the right values.
 2. Prompts what should serve the worktree's frontend assets. The select lists every framework worker eligible to replace the build (asset workers with `replaces_build: true` and a passing `check`, e.g. `vite`), every production-build script declared in `package.json` (`build`, `prod`, `build:prod`, `build-prod`, `production`), and a Skip option. The default is the first asset worker that's already opted into the parent's `.lerd.yaml workers:`, then the first npm script, then skip. Picking an asset worker starts it as a per-worktree unit (with `persist=false`, so it doesn't get added to `workers:`); picking an npm script runs it once.
 3. Prompts how to set up the worktree's database, see [Per-worktree database](#per-worktree-database) below.
 4. If you pick "isolated empty", asks whether to run `php artisan migrate --force` against the new schema right away.
@@ -76,6 +76,25 @@ Frontend build (`npm run build`) is **not** part of the watcher pipeline, it's h
 ::: info Why not symlink?
 Earlier lerd versions symlinked `vendor/` to save disk. PHP resolves `__DIR__` through symlinks to the real path, so Composer's `ClassLoader` would initialise against the main repo and silently load stale classes. Real copies (or reflinks) avoid the problem at no meaningful disk cost on modern filesystems.
 :::
+
+### Waiting for the pipeline
+
+A tool that creates a worktree and then wants to act on it, run tests, run a composer script, seed config, has to let the pipeline finish first, or the two write the same tree at once. `lerd worktree wait` blocks until it settles:
+
+```bash
+git worktree add ../myapp-feature feature/auth
+lerd worktree wait ../myapp-feature --timeout 10m
+```
+
+Without a path it waits on the current directory. Nothing is printed on success, the exit status is the contract:
+
+| Status | Meaning |
+|---|---|
+| `0` | Provisioned, and no install is running. |
+| `1` | The timeout elapsed first. |
+| `3` | This path is not a worktree lerd manages, so nothing will ever provision it. |
+
+Do not try to infer this from the tree's contents. Composer's extraction phase fills *existing* `vendor/<org>/` directories, so neither an entry count nor a shallow mtime moves during the longest part of an install, and `node_modules/` exists from the first extracted package. The command watches the pipeline's outputs and its install lock together, which is why it can tell a finished install from one still running. `lerd worktree add` uses the same wait internally.
 
 ---
 
@@ -131,7 +150,7 @@ Picking a branch re-scopes the rest of the detail view to that worktree:
 - The site title and the **Open** / **Terminal** buttons target the worktree's domain and checkout path.
 - The **App logs** tab tails `storage/logs` from the worktree's directory rather than main's.
 - The **Tinker** tab REPL runs inside the worktree's PHP context (its own `.env`, its own vendor).
-- The **Request timing** panel shows the branch's own traffic: requests to the worktree's subdomain are recorded against it, and its slow routes open and profile on that subdomain. The parent's timing stays separate, though a worktree's requests still count toward the site when the sites list is ordered by traffic. See [Request timing](../usage/sites.md#request-timing).
+- The **Request timing** panel shows the branch's own traffic: requests to the worktree's subdomain are recorded against it, and its slow routes open and profile on that subdomain. The parent's timing stays separate, though a worktree's requests still count toward the site when the sites list is ordered by traffic. See [Request timing](./request-timing.md).
 - The **PHP** and **Node** version selectors show the worktree's effective version. A dashed violet border indicates "Inherits from main"; changing the value persists a worktree-only override.
 - Worker toggles (queue, schedule, Horizon, Reverb, custom workers) collapse into a "Workers run from main" pill, those run against main's checkout regardless of which worktree is active. Switch to main to start or stop them.
 - The domain-edit pencil disappears (worktree domains are derived from the parent's primary).
@@ -159,7 +178,7 @@ php_version: "8.4"
 node_version: "24"
 ```
 
-The override is honoured wherever lerd materialises worktree state on disk: vhost generation on add, rename, pause/unpause, and `lerd secure`/`lerd unsecure`. The commands that run PHP in a container follow it too, so `lerd php` and `lerd composer` from inside the checkout use the worktree's version rather than the parent's, whether the worktree sits beside the project or inside it. Switching a worktree's version writes the target version's FPM quadlet the same way a site switch does, so the vhost it generates always has a container behind it. Worktrees with no override inherit the parent's pinned version (not the highest-installed satisfier of `composer.json`/`package.json` constraints, that detection only kicks in for unregistered directories).
+The override is honoured wherever lerd materialises worktree state on disk: vhost generation on add, rename, pause/unpause, the watcher's startup sweep, and `lerd secure`/`lerd unsecure`. The commands that run PHP in a container follow it too, so `lerd php` and `lerd composer` from inside the checkout use the worktree's version rather than the parent's, whether the worktree sits beside the project or inside it. Switching a worktree's version writes the target version's FPM quadlet the same way a site switch does, so the vhost it generates always has a container behind it. Worktrees with no override inherit the parent's pinned version (not the highest-installed satisfier of `composer.json`/`package.json` constraints, that detection only kicks in for unregistered directories).
 
 Site-level resources stay shared and cannot be overridden per worktree: domain (derived from the parent), TLS certificate (parent's wildcard cert), LAN share port (worktree-scoped LAN share is a separate toggle), workers, and any custom container settings.
 
@@ -192,7 +211,7 @@ LAN share has a separate toggle that's worktree-aware: when a worktree is active
 
 Public tunnels are worktree-scoped too. `lerd share` run from inside a checkout tunnels `<branch>.<site>.test`, and the dashboard's share menu acts on whichever branch tab is active. A worktree's tunnel is a process of its own: it can run alongside the parent site's, each with its own public URL, and stopping one does not touch the other. Under `--domain`, the Cloudflare named tunnel is keyed to the branch as well, so routing a hostname to a worktree never takes over the one the parent site is using.
 
-Commands that act on a directory resolve a worktree to its parent site automatically. `lerd share`, `lerd open`, `lerd domain`, `lerd env`, `lerd worker`, `lerd runtime` and the rest run from inside a checkout without linking it as a site of its own.
+Commands that act on a directory resolve a worktree to its parent site automatically. `lerd share`, `lerd open`, `lerd domain`, `lerd env`, `lerd worker`, `lerd runtime` and the rest run from inside a checkout without linking it as a site of its own. `lerd code` opens the checkout you are standing in rather than the parent, since that is the copy of the files you are working on.
 
 ---
 
@@ -206,6 +225,20 @@ When a worktree is removed (via `git worktree remove` directly or `lerd worktree
 4. Isolated database, *only* via `lerd worktree remove`'s explicit prompt or the daemon's `scanWorktrees` startup sweep. Plain `git worktree remove` leaves the DB and its registry entry alone, so the user can recover by re-adding the worktree without losing migrations or seed data.
 
 The startup sweep also catches any registry entries whose worktree directory disappeared while the watcher was offline, restarting `lerd-watcher` reconciles state.
+
+The sweep runs in the background, after the watcher has reported itself ready. It provisions worktrees it finds unprovisioned, which can mean a full `composer install`, and that has no duration worth waiting on: the watcher is up and watching from the first moment either way, so a long install shows up as a worktree that finishes setting itself up a few minutes in, not as a daemon that refuses to start. Use [`lerd worktree wait`](#waiting-for-the-pipeline) when you need to block until a specific worktree is actually ready.
+
+Within the sweep, every worktree vhost is written and nginx reloaded before any dependency install starts, so a repo's subdomains all resolve within seconds of the watcher coming up rather than one at a time behind the installs ahead of them. The installs then run several worktrees at a time, since a worktree's install has nothing to do with its neighbours'. How many depends on the machine: two cores are always left for the daemons, the containers serving your other sites, and whatever you are in the middle of, and the count is capped at four beyond which the wait is the network rather than the CPU. A four-core laptop runs two installs at a time, a small VM runs one. What a subdomain serves in the meantime is a checkout whose dependencies are still landing, which is the same state the pipeline leaves it in for the first minute after `git worktree add`.
+
+A lockfile the JS package manager refuses is the same lockfile in every worktree seeded from that repo, and it fails identically in each. The sweep pays that failure once per pass: after the first `npm ci` rejects a given lockfile, the remaining worktrees carrying it are logged as skipped instead of spending seconds each reaching the same conclusion. Fix the lockfile, or wait for the next pass, and it is tried again.
+
+### A checkout deleted without git
+
+That ordering hangs off git's own `.git/worktrees/` entry disappearing, which is what `git worktree remove` deletes. Deleting the checkout directory on its own leaves that entry behind, so the watcher never hears about it and the worker units keep retrying against a working directory that has gone, failing before the command runs and restarting on the supervisor's own interval indefinitely. This is no longer unusual: coding agents create and destroy their own worktrees, and they have no reason to know lerd exists.
+
+Such a unit is reported as **orphaned** rather than failing, and is never offered a heal, because starting it again cannot do anything except fail in the same place. It is removed instead, on the daemon's reconciliation pass and again at startup, so an install already stuck this way recovers on its own. Nothing is preserved because there is nothing left to preserve; re-adding the worktree recreates the unit from scratch. Orphans also stay out of the failing-worker notifications, since they name a problem that resolves itself.
+
+Deciding this needs the directory the unit is pinned to. On Linux that is the unit's own `WorkingDirectory=`. launchd has no equivalent to read back, so on macOS it comes from the guard script lerd writes alongside every worker plist, which is where a host-mode worker's `cd` and an exec-mode worker's `podman exec -w` already record it. The two files are written and removed together, so a unit that still exists still has one.
 
 ---
 

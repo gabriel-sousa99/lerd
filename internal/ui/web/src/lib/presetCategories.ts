@@ -53,8 +53,25 @@ const ICON_TINT: Record<CategoryKey, string> = {
   other: 'bg-gray-100 text-gray-500 dark:bg-white/5 dark:text-gray-400'
 };
 
+// The same tones without the tinted plate, for a mark that stands on its own.
+const INK_TINT: Record<CategoryKey, string> = {
+  databases: 'text-indigo-600 dark:text-indigo-400',
+  cache: 'text-amber-600 dark:text-amber-400',
+  messaging: 'text-violet-600 dark:text-violet-400',
+  search: 'text-sky-600 dark:text-sky-400',
+  mail: 'text-rose-600 dark:text-rose-400',
+  admin: 'text-emerald-600 dark:text-emerald-400',
+  storage: 'text-cyan-600 dark:text-cyan-400',
+  testing: 'text-fuchsia-600 dark:text-fuchsia-400',
+  other: 'text-gray-500 dark:text-gray-400'
+};
+
 export function tintFor(category: CategoryKey): string {
   return ICON_TINT[category];
+}
+
+export function inkTintFor(category: CategoryKey): string {
+  return INK_TINT[category];
 }
 
 // A category the preset YAML doesn't declare, or declares as something this

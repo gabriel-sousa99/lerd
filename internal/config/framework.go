@@ -45,6 +45,11 @@ type Framework struct {
 	// Laravel 10 definition); callers must not clamp PHP to its range.
 	VersionGuessed bool `yaml:"-"`
 	// PHP defines the supported PHP version range for this framework version.
+	// Color is the brand tint the dashboard paints the framework mark and label
+	// with, a plain hex literal; anything else is dropped rather than reaching
+	// the page as CSS. Declared per version file since that is the only YAML a
+	// framework has, but it describes the family, so every version repeats it.
+	Color     string          `yaml:"color,omitempty"`
 	PHP       FrameworkPHP    `yaml:"php,omitempty"`
 	Detect    []FrameworkRule `yaml:"detect,omitempty"`
 	PublicDir string          `yaml:"public_dir"`
@@ -63,6 +68,15 @@ type Framework struct {
 	// dropdown. See FrameworkCommand for the schema. Projects extend or
 	// override this list in .lerd.yaml; use ResolveCommands to merge.
 	Commands []FrameworkCommand `yaml:"commands,omitempty"`
+	// CacheCommand is the console subcommand that clears the framework's
+	// compiled caches, run through Console the way key generation is. lerd runs it after rewriting a project's connection: a
+	// framework caches the container definitions built from that configuration,
+	// and one built against the old database survives the swap and answers every
+	// request with an error about an entity type it can no longer find. A
+	// framework declaring none is left alone.
+	CacheCommand string `yaml:"cache_command,omitempty"`
+	// Notifications turns off warnings that cannot apply to this framework.
+	Notifications *FrameworkNotifications `yaml:"notifications,omitempty"`
 	// Console is the console command to run (without 'php' prefix).
 	// Example: "artisan", "bin/console"
 	Console string `yaml:"console,omitempty"`
@@ -191,15 +205,22 @@ type FrameworkWorker struct {
 	TuneCommand string `yaml:"tune_command,omitempty"`
 	// RestartCommand gracefully restarts the queue worker in-container (e.g.
 	// Laravel's "php artisan queue:restart"). Empty means no graceful restart.
-	RestartCommand string         `yaml:"restart_command,omitempty"`
-	Restart        string         `yaml:"restart,omitempty"`        // always | on-failure (default: always)
-	Schedule       string         `yaml:"schedule,omitempty"`       // systemd OnCalendar expression (e.g. "minutely"); when set, the worker is run as a Type=oneshot service triggered by a .timer rather than a long-running daemon. Use this for Laravel <=10 schedule:run, cron-style cleanup tasks, etc.
-	Check          *FrameworkRule `yaml:"check,omitempty"`          // only show when check passes (file exists or composer package installed)
-	ExcludeCheck   *FrameworkRule `yaml:"exclude_check,omitempty"`  // only show when check FAILS (e.g. queue is hidden when laravel/horizon is installed because horizon supersedes it)
-	ConflictsWith  []string       `yaml:"conflicts_with,omitempty"` // workers to stop before starting this one (e.g. horizon conflicts_with queue)
-	Proxy          *WorkerProxy   `yaml:"proxy,omitempty"`          // WebSocket/HTTP proxy config for nginx
-	Health         *WorkerHealth  `yaml:"health,omitempty"`         // reachability probe: process alive but server not accepting = unhealthy
-	Host           bool           `yaml:"host,omitempty"`           // run on the host via fnm instead of inside the PHP-FPM container
+	RestartCommand string `yaml:"restart_command,omitempty"`
+	// Icon names how the dashboard draws this worker: either one of the
+	// built-in glyphs (queue, clock) or a mark the store ships beside the
+	// definitions under workers/<icon>.svg. Color is the tone it is inked in;
+	// a worker that declares none takes its framework's, which is what tells a
+	// Laravel queue apart from a Symfony one at a glance.
+	Icon          string         `yaml:"icon,omitempty"`
+	Color         string         `yaml:"color,omitempty"`
+	Restart       string         `yaml:"restart,omitempty"`        // always | on-failure (default: always)
+	Schedule      string         `yaml:"schedule,omitempty"`       // systemd OnCalendar expression (e.g. "minutely"); when set, the worker is run as a Type=oneshot service triggered by a .timer rather than a long-running daemon. Use this for Laravel <=10 schedule:run, cron-style cleanup tasks, etc.
+	Check         *FrameworkRule `yaml:"check,omitempty"`          // only show when check passes (file exists or composer package installed)
+	ExcludeCheck  *FrameworkRule `yaml:"exclude_check,omitempty"`  // only show when check FAILS (e.g. queue is hidden when laravel/horizon is installed because horizon supersedes it)
+	ConflictsWith []string       `yaml:"conflicts_with,omitempty"` // workers to stop before starting this one (e.g. horizon conflicts_with queue)
+	Proxy         *WorkerProxy   `yaml:"proxy,omitempty"`          // WebSocket/HTTP proxy config for nginx
+	Health        *WorkerHealth  `yaml:"health,omitempty"`         // reachability probe: process alive but server not accepting = unhealthy
+	Host          bool           `yaml:"host,omitempty"`           // run on the host via fnm instead of inside the PHP-FPM container
 	// PerWorktree opts the worker into running independently per git worktree
 	// (lerd-<wname>-<site>-<wt>). Defaults to false; set true on workers that
 	// need a separate process per checkout (e.g. dev servers like vite).
@@ -403,6 +424,7 @@ func ValidatePHPIni(ini map[string]string) error {
 // Any matching rule is sufficient to identify the framework.
 type FrameworkRule struct {
 	File             string   `yaml:"file,omitempty" json:"file,omitempty"`                           // file must exist in project root
+	MissingFile      string   `yaml:"missing_file,omitempty" json:"missing_file,omitempty"`           // file must NOT exist in project root, for a step that bootstraps a project
 	Composer         string   `yaml:"composer,omitempty" json:"composer,omitempty"`                   // package must be in composer.json require/require-dev
 	ComposerSections []string `yaml:"composer_sections,omitempty" json:"composer_sections,omitempty"` // extra composer.json keys to search (e.g. flex-require)
 	VersionKey       string   `yaml:"version_key,omitempty" json:"version_key,omitempty"`             // dot-path to version in composer.json (e.g. extra.symfony.require)
@@ -417,6 +439,20 @@ type FrameworkEnvConf struct {
 	Format         string `yaml:"format,omitempty"`          // dotenv | php-const (default: dotenv)
 	FallbackFile   string `yaml:"fallback_file,omitempty"`   // used when File doesn't exist
 	FallbackFormat string `yaml:"fallback_format,omitempty"` // format for FallbackFile
+
+	// AppFile is the file the application itself reads, for a framework whose
+	// configuration is not the dotenv file the older fields could describe:
+	// Drupal's database lives in a $databases array its installer writes into
+	// settings.php, and nothing lerd puts anywhere else reaches it.
+	//
+	// It is deliberately a new pair rather than a change to File and Format. The
+	// store reaches every install within a day, whatever binary it runs, so a
+	// definition that renamed the existing fields to a format an older release
+	// cannot parse would break those installs. An unknown field is ignored
+	// instead, leaving an older binary doing exactly what it does today while a
+	// current one writes the file the application actually reads.
+	AppFile   string `yaml:"app_file,omitempty"`
+	AppFormat string `yaml:"app_format,omitempty"`
 
 	// URLKey is the env key that holds the application URL (default: APP_URL).
 	URLKey string `yaml:"url_key,omitempty"`
@@ -441,6 +477,16 @@ type FrameworkEnvConf struct {
 	// Keys match the built-in service names: mysql, postgres, redis, meilisearch, rustfs, mailpit.
 	Services map[string]FrameworkServiceDef `yaml:"services,omitempty"`
 
+	// SQLite declares how a framework is wired to a file database: its detect
+	// rules say a project is already on one, its vars point it at one.
+	//
+	// It sits beside Services rather than among them because it is not a
+	// service. Nothing installs it, starts it or draws a card for it, and an
+	// older binary reading it as a service entry would announce it and then try
+	// to start a container that does not exist. An unknown field is ignored
+	// instead, for the same reason AppFile above is a new field.
+	SQLite *FrameworkServiceDef `yaml:"sqlite,omitempty"`
+
 	// KeyGeneration describes how to generate an application key if missing.
 	KeyGeneration *EnvKeyGeneration `yaml:"key_generation,omitempty"`
 }
@@ -453,7 +499,30 @@ func (f *Framework) HasEnvConfig() bool {
 		return false
 	}
 	e := f.Env
-	return e.File != "" || e.FallbackFile != "" || e.ExampleFile != "" || e.KeyGeneration != nil || len(e.Services) > 0
+	return e.File != "" || e.FallbackFile != "" || e.ExampleFile != "" || e.KeyGeneration != nil ||
+		len(e.Services) > 0 || e.SQLite != nil
+}
+
+// FrameworkNotifications lets a definition decline a warning that says nothing
+// useful about sites built on it.
+type FrameworkNotifications struct {
+	// NPlusOne, set false, stops the repeated-query warning for this
+	// framework's sites. It is for the frameworks whose own request pipeline
+	// does the querying: on a content management system the entity, config and
+	// cache layers issue the repeats, so the warning names a loop inside the
+	// framework that nobody using it can change. Where the queries come from
+	// the code a developer writes, which is most application frameworks, it
+	// stays on.
+	NPlusOne *bool `yaml:"nplusone,omitempty"`
+}
+
+// WarnsNPlusOne reports whether repeated-query warnings apply to a framework's
+// sites, which they do unless the definition says otherwise.
+func (f *Framework) WarnsNPlusOne() bool {
+	if f == nil || f.Notifications == nil || f.Notifications.NPlusOne == nil {
+		return true
+	}
+	return *f.Notifications.NPlusOne
 }
 
 // EnvKeyGeneration describes how to generate an application encryption key.
@@ -468,6 +537,12 @@ type EnvKeyGeneration struct {
 // framework gets. Keeping it declarative means new frameworks need no Go change.
 type FrameworkDoctor struct {
 	Checks []DoctorCheck `yaml:"checks,omitempty"`
+	// MigrateCommand names the command from the framework's own command set that
+	// applies the schema, so the universal database checks can offer it as their
+	// fix. Every framework spells it differently (Laravel "migrate", Symfony
+	// "doctrine:migrations:migrate", Drupal "updb"), and a framework with no such
+	// command simply declares none and its findings carry no fix.
+	MigrateCommand string `yaml:"migrate_command,omitempty"`
 }
 
 // DoctorCheck is one declarative health check; Type selects the evaluator
@@ -526,10 +601,44 @@ type FrameworkServiceDetect struct {
 	ValuePrefix string `yaml:"value_prefix,omitempty"`
 }
 
-// Resolve returns the env file path and format to use for the given project directory.
-// It returns the primary file if it exists, otherwise the fallback.
-// Defaults to ".env" with "dotenv" format if nothing is configured.
+// ResolveWrite returns the env file lerd writes for a project, and its format.
+// A definition that names a primary file means that file is lerd's to write,
+// whether or not it exists yet, and any fallback is a read source for detecting
+// an already-configured project: Drupal keeps its database in a $databases
+// array its own installer writes into settings.php, and lerd writing there
+// appends constants Drupal never reads while the .env its install command
+// sources is never created. A definition naming no primary at all has only its
+// fallback, and that fallback is the configuration itself, which is WordPress's
+// wp-config.php and is written as normal.
+func (e FrameworkEnvConf) ResolveWrite(projectDir string) (file, format string) {
+	if e.AppFile != "" {
+		return e.AppFile, e.appFormat()
+	}
+	if e.File == "" {
+		return e.Resolve(projectDir)
+	}
+	format = e.Format
+	if format == "" {
+		format = "dotenv"
+	}
+	return e.File, format
+}
+
+// Resolve returns the env file path and format to read for the given project
+// directory. It returns the primary file if it exists, otherwise the fallback.
+// Defaults to ".env" with "dotenv" format if nothing is configured. Writers
+// want ResolveWrite, which never answers with a fallback a framework only
+// publishes so an existing project can be read.
 func (e FrameworkEnvConf) Resolve(projectDir string) (file, format string) {
+	// The application's own configuration file, where a framework declares one,
+	// is what lerd reads as well as writes: it is the file the running site is
+	// configured by, and detection asking anything else would answer about a
+	// file nothing reads.
+	if e.AppFile != "" {
+		if _, err := os.Stat(filepath.Join(projectDir, e.AppFile)); err == nil {
+			return e.AppFile, e.appFormat()
+		}
+	}
 	primary := e.File
 	if primary == "" {
 		primary = ".env"
@@ -558,6 +667,15 @@ func (e FrameworkEnvConf) Resolve(projectDir string) (file, format string) {
 
 	// Return primary regardless (env.go will handle the missing file)
 	return primary, primaryFmt
+}
+
+// appFormat is the declared format of the application's own file, defaulting to
+// dotenv the way every other format field does.
+func (e FrameworkEnvConf) appFormat() string {
+	if e.AppFormat == "" {
+		return "dotenv"
+	}
+	return e.AppFormat
 }
 
 // laravelFramework is the built-in Laravel adapter, the default shipped stack.
@@ -873,22 +991,51 @@ func GetFramework(name string) (*Framework, bool) {
 	return mergeBuiltinTinker(mergeBuiltinFrankenPHP(mergeUserOverlay(base))), true
 }
 
-// GetFrameworkOrFetch is like GetFramework but, when the framework is not
-// installed locally, fetches its latest definition from the store and saves it,
-// the way linking pulls a definition for a project whose framework isn't
-// installed yet. It returns false only when the store doesn't publish the name
-// either. Scaffolding a project you've never built before lands here.
-func GetFrameworkOrFetch(name string) (*Framework, bool) {
-	if fw, ok := GetFramework(name); ok {
-		return fw, true
-	}
-	if frameworkFetchHook == nil {
+// GetFrameworkForScaffold returns the definition to scaffold a new project with.
+// Unlike GetFramework it asks the store first, even for a name that is built in:
+// the create command compiled into the binary is a snapshot of a published one,
+// so a just-installed machine would otherwise scaffold from a definition every
+// established install has already replaced. A copy installed here inside the
+// store's refresh window counts as current, so a repeat scaffold and an offline
+// one don't wait on the network. Falls back to what is installed, then to the
+// built-in, and reports false only when nothing knows the name.
+// version pins the major to scaffold, for a caller offering the choice; empty
+// takes whatever the store publishes as its latest.
+func GetFrameworkForScaffold(name, version string) (*Framework, bool) {
+	if name == "" {
 		return nil, false
 	}
-	if _, err := frameworkFetchHook(name, ""); err != nil {
-		return nil, false
+
+	installed := storeFrameworkPath(name)
+	if version != "" {
+		installed = filepath.Join(StoreFrameworksDir(), name+"@"+version+".yaml")
 	}
-	return GetFramework(name)
+
+	var base *Framework
+	if !olderThan(installed, storeRefreshWindow) {
+		base = loadFrameworkYAML(installed)
+	}
+	if base == nil && frameworkFetchHook != nil {
+		if fetched, err := frameworkFetchHook(name, version); err == nil {
+			base = fetched
+		}
+	}
+	if base == nil {
+		base = loadFrameworkYAML(installed)
+	}
+	// A pinned major nothing here or upstream serves resolves as if none had been
+	// asked for, rather than reporting a framework lerd does not know.
+	if base == nil && version != "" {
+		return GetFrameworkForScaffold(name, "")
+	}
+	// A definition that cannot scaffold is no reason to lose one that can. The
+	// store owns the create command and is free to publish a framework without
+	// one, and that reaches every binary within the day, with nothing gating it
+	// per version. So a name whose built-in can still scaffold keeps it.
+	if base == nil || (base.Create == "" && builtinFramework(name) != nil) {
+		return GetFramework(name)
+	}
+	return mergeBuiltinTinker(mergeBuiltinFrankenPHP(mergeUserOverlay(base))), true
 }
 
 // loadBaseFramework returns the base definition for a framework:
@@ -904,6 +1051,20 @@ func loadBaseFramework(name string) *Framework {
 		return fw
 	}
 	return loadBestVersionedFramework(name, "")
+}
+
+// storeFrameworkPath returns the path of the store-installed definition for a
+// framework: the unversioned file if it exists (backwards compatible), otherwise
+// the highest version installed. Empty when the store has installed none.
+func storeFrameworkPath(name string) string {
+	unversioned := filepath.Join(StoreFrameworksDir(), name+".yaml")
+	if _, err := os.Stat(unversioned); err == nil {
+		return unversioned
+	}
+	if paths := versionedFrameworkPaths(name); len(paths) > 0 {
+		return paths[0]
+	}
+	return ""
 }
 
 // copyBuiltin returns a deep-enough copy of a built-in framework so callers
@@ -1049,13 +1210,13 @@ func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 	}
 
 	// 3. Auto-fetch from the store: either the file is missing, or it's older
-	//    than 24 hours and may have been updated upstream.
-	if version != "" && frameworkFetchHook != nil {
+	//    than 24 hours and may have been updated upstream. A version the cached
+	//    index says the store does not publish is never asked for, since that
+	//    request can only 404; the nearest published definition is resolved below.
+	if version != "" && frameworkFetchHook != nil && frameworkVersionPublished(name, version) {
 		shouldFetch := base == nil
 		if !shouldFetch && versionedPath != "" {
-			if info, err := os.Stat(versionedPath); err == nil {
-				shouldFetch = time.Since(info.ModTime()) > 24*time.Hour
-			}
+			shouldFetch = olderThan(versionedPath, storeRefreshWindow)
 		}
 		if shouldFetch {
 			if fetched, err := frameworkFetchHook(name, version); err == nil && fetched != nil {
@@ -1068,7 +1229,6 @@ func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 	//     lowest one (not the latest) and mark it guessed, so callers relax PHP
 	//     clamping (a Laravel 6 project must still allow PHP 7.4).
 	guessed := false
-	guessedVersion := ""
 	if base == nil && version != "" {
 		if clamped := clampFrameworkVersion(name, version); clamped != "" {
 			clampedPath := filepath.Join(StoreFrameworksDir(), name+"@"+clamped+".yaml")
@@ -1080,7 +1240,6 @@ func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 			}
 			if base != nil {
 				guessed = true
-				guessedVersion = version
 			}
 		}
 	}
@@ -1093,10 +1252,31 @@ func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 		base = loadBestVersionedFramework(name, "")
 	}
 
+	// 4b. Nothing on disk and no definition for the project's own version:
+	//     fetch the newest one the store publishes, the same definition the
+	//     on-disk fallback above would have served. A WordPress 7 project is
+	//     still a WordPress project, and without this it resolves nothing at all
+	//     on a machine that has never installed the framework.
+	if base == nil && frameworkFetchHook != nil {
+		if latest := latestPublishedFrameworkVersion(name); latest != "" {
+			if fetched, err := frameworkFetchHook(name, latest); err == nil && fetched != nil {
+				base = fetched
+			}
+		}
+	}
+
 	if base != nil {
+		// A project served by a definition of another version reports its own,
+		// whichever direction it was borrowed from: a WordPress 7 site read
+		// "WordPress 6" because only the legacy clamp recorded it. VersionGuessed
+		// stays the narrower claim, that the borrowed definition's PHP range must
+		// not constrain the project, which is true when it predates every
+		// definition and not when it postdates them all.
 		if guessed {
 			base.VersionGuessed = true
-			base.DetectedVersion = guessedVersion
+		}
+		if version != "" && version != base.Version {
+			base.DetectedVersion = version
 		}
 		base = mergeUserOverlay(base)
 		base = mergeBuiltinFrankenPHP(base)
@@ -1257,19 +1437,103 @@ func cloneFrameworkMutable(in *Framework) *Framework {
 // store definition (<name>@<version>.yaml) exists locally, sorted ascending.
 // Only numeric versions are considered, since clamping compares them as ints.
 func availableFrameworkVersions(name string) []int {
+	seen := map[int]bool{}
+	var vers []int
+	add := func(v string) {
+		n, err := strconv.Atoi(v)
+		if err != nil || seen[n] {
+			return
+		}
+		seen[n] = true
+		vers = append(vers, n)
+	}
+
 	pattern := filepath.Join(StoreFrameworksDir(), name+"@*.yaml")
 	matches, _ := filepath.Glob(pattern)
 	prefix := name + "@"
-	var vers []int
 	for _, p := range matches {
-		base := strings.TrimSuffix(filepath.Base(p), ".yaml")
-		v := strings.TrimPrefix(base, prefix)
-		if n, err := strconv.Atoi(v); err == nil {
-			vers = append(vers, n)
+		add(strings.TrimPrefix(strings.TrimSuffix(filepath.Base(p), ".yaml"), prefix))
+	}
+	// The published list too, so a machine that has installed nothing for this
+	// framework can still tell where a project's version sits against what
+	// exists, and clamp to a definition it has yet to fetch.
+	if e := cachedStoreEntryByName(name); e != nil {
+		for _, v := range e.Versions {
+			add(v)
 		}
 	}
+
 	sort.Ints(vers)
 	return vers
+}
+
+// frameworkVersionPublished reports whether the store's cached index lists a
+// version, so a request that could only 404 is never made. An index that is
+// absent (a machine that has never reached the store) or that doesn't know the
+// framework rules nothing out, and the version is asked for.
+func frameworkVersionPublished(name, version string) bool {
+	e := cachedStoreEntryByName(name)
+	if e == nil || len(e.Versions) == 0 {
+		return true
+	}
+	for _, v := range e.Versions {
+		if v == version {
+			return true
+		}
+	}
+	// The index is a cache the store refreshes on its own schedule, and this
+	// answers from it without refreshing anything. While it is current, a version
+	// missing from it really is unpublished and asking would only 404. Once it is
+	// older than the store's own refresh window it is no longer evidence: the day
+	// a new major lands, every machine still holding yesterday's copy would
+	// otherwise skip the fetch and quietly serve the project the previous major's
+	// definition, with that major's PHP clamp, workers and doctor checks.
+	return staleStoreIndex()
+}
+
+// storeRefreshWindow is how long a copy of store data stays current. Younger
+// than this, what is on disk is taken as what the store publishes; older, it is
+// re-fetched and what it does not say proves nothing.
+const storeRefreshWindow = 24 * time.Hour
+
+// staleStoreIndex reports whether the cached store index is older than the
+// window definitions themselves are refreshed on, i.e. old enough that what it
+// does not list proves nothing.
+func staleStoreIndex() bool {
+	return olderThan(StoreIndexFile(), storeRefreshWindow)
+}
+
+// olderThan reports whether a file was last written further back than d. A file
+// that cannot be stat'ed counts as older, so the caller re-fetches it.
+func olderThan(path string, d time.Duration) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return true
+	}
+	return time.Since(info.ModTime()) > d
+}
+
+// latestPublishedFrameworkVersion returns the newest version the cached index
+// publishes for a framework, preferring the index's own latest over the highest
+// it lists. Empty when there is no cached index to read.
+func latestPublishedFrameworkVersion(name string) string {
+	e := cachedStoreEntryByName(name)
+	if e == nil {
+		return ""
+	}
+	if e.Latest != "" {
+		return e.Latest
+	}
+	highest := 0
+	for _, v := range e.Versions {
+		if n, err := strconv.Atoi(v); err == nil && n > highest {
+			highest = n
+		}
+	}
+	if highest == 0 {
+		return ""
+	}
+	return strconv.Itoa(highest)
 }
 
 // clampFrameworkVersion returns the lowest available definition version for a
@@ -1290,23 +1554,31 @@ func clampFrameworkVersion(name, detected string) string {
 	return ""
 }
 
-// loadBestVersionedFramework scans StoreFrameworksDir for <name>@<version>.yaml files.
-// If preferVersion is set, it tries that first. Otherwise picks the first match
-// alphabetically (which for numeric versions gives the latest).
+// versionedFrameworkPaths returns the store's <name>@<version>.yaml paths for a
+// framework, highest version first. The order is numeric on purpose: sorting the
+// file names as strings ranks @9 above @12, which hands a caller asking for the
+// newest definition the older one on any machine holding both.
+func versionedFrameworkPaths(name string) []string {
+	matches, _ := filepath.Glob(filepath.Join(StoreFrameworksDir(), name+"@*.yaml"))
+	prefix := name + "@"
+	version := func(path string) int {
+		n, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimSuffix(filepath.Base(path), ".yaml"), prefix))
+		return n
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return version(matches[i]) > version(matches[j]) })
+	return matches
+}
+
+// loadBestVersionedFramework scans StoreFrameworksDir for <name>@<version>.yaml
+// files. If preferVersion is set, it tries that first. Otherwise it takes the
+// highest version that parses.
 func loadBestVersionedFramework(name, preferVersion string) *Framework {
 	if preferVersion != "" {
 		if fw := loadFrameworkYAML(filepath.Join(StoreFrameworksDir(), name+"@"+preferVersion+".yaml")); fw != nil {
 			return fw
 		}
 	}
-	pattern := filepath.Join(StoreFrameworksDir(), name+"@*.yaml")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) == 0 {
-		return nil
-	}
-	// Reverse sort so highest version comes first (e.g. @7 before @6).
-	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
-	for _, path := range matches {
+	for _, path := range versionedFrameworkPaths(name) {
 		if fw := loadFrameworkYAML(path); fw != nil {
 			return fw
 		}
@@ -1775,6 +2047,13 @@ func ValidFrameworkVersion(s string) bool {
 // SaveStoreFramework writes a store-installed framework definition to StoreFrameworksDir().
 // If the framework has a Version field, the file is named <name>@<version>.yaml.
 // Otherwise it is named <name>.yaml (backwards compatible).
+//
+// The write is atomic because the store has several writers and more readers:
+// the fetch hook fires from any GetFrameworkForDir, which the watcher, the
+// dashboard poll and the vhost renderer all reach, and the CLI hits it from
+// link and framework add. A definition cut above the workers key still parses,
+// so a torn read hands back a valid looking framework with nothing to run
+// rather than the error that would fall through to the fallback.
 func SaveStoreFramework(fw *Framework) error {
 	if !ValidFrameworkName(fw.Name) {
 		return fmt.Errorf("invalid framework name %q", fw.Name)
@@ -1801,7 +2080,7 @@ func SaveStoreFramework(fw *Framework) error {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return fmt.Errorf("refusing to write framework outside store dir: %q", filename)
 	}
-	return os.WriteFile(dest, data, 0644)
+	return publishStoreFile(dest, data, 0644)
 }
 
 // RemoveUserFramework silently removes a user-defined framework YAML if it exists.
@@ -2047,6 +2326,14 @@ func MatchesRule(dir string, rule FrameworkRule) bool {
 			return true
 		}
 	}
+	if rule.MissingFile != "" {
+		// Only a file that is genuinely not there counts as absent: an unreadable
+		// path says nothing about whether the project was bootstrapped, and a step
+		// gated this way is better left hidden than offered on a live project.
+		if _, err := os.Stat(filepath.Join(dir, rule.MissingFile)); os.IsNotExist(err) {
+			return true
+		}
+	}
 	if rule.Composer != "" {
 		if ComposerHasPackage(dir, rule.Composer, rule.ComposerSections...) {
 			return true
@@ -2256,33 +2543,81 @@ func extractMajorFromConstraint(constraint string) string {
 	return ""
 }
 
-// ComposerHasPackage reports whether the composer.json in dir lists pkg
-// in require or require-dev.
-// ComposerHasPackage reports whether the composer.json in dir lists pkg
-// in require, require-dev, or any of the extra sections specified.
-func ComposerHasPackage(dir, pkg string, extraSections ...string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "composer.json"))
+// composerCacheEntry is one parsed composer.json: every top-level section that
+// decodes as a package map, keyed by section name then package name, together
+// with the file identity the parse was made from.
+type composerCacheEntry struct {
+	modTime  time.Time
+	size     int64
+	sections map[string]map[string]bool
+}
+
+var (
+	composerCacheMu sync.Mutex
+	composerCache   = map[string]composerCacheEntry{}
+
+	// composerReadFile is swappable so a test can count reads.
+	composerReadFile = os.ReadFile
+)
+
+// composerSections returns the package sections of dir's composer.json, reusing
+// the previous parse while the file's mtime and size are both unchanged.
+//
+// Worker detection asks ComposerHasPackage once per rule per site, and the
+// dashboard re-runs that on every snapshot rebuild, so an uncached read meant
+// re-reading and re-decoding the same file dozens of times per refresh. A stat
+// is a fraction of that, and an edit still lands: the site-file watcher already
+// treats composer.json as a change trigger.
+func composerSections(dir string) map[string]map[string]bool {
+	path := filepath.Join(dir, "composer.json")
+	st, err := os.Stat(path)
 	if err != nil {
-		return false
+		return nil
 	}
 
+	composerCacheMu.Lock()
+	defer composerCacheMu.Unlock()
+	if e, ok := composerCache[path]; ok && e.modTime.Equal(st.ModTime()) && e.size == st.Size() {
+		return e.sections
+	}
+
+	data, err := composerReadFile(path)
+	if err != nil {
+		return nil
+	}
 	// Parse into a generic map so we can look up arbitrary top-level keys.
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(data, &raw) != nil {
-		return false
+		return nil
 	}
-
-	sections := append([]string{"require", "require-dev"}, extraSections...)
-	for _, section := range sections {
-		chunk, ok := raw[section]
-		if !ok {
-			continue
-		}
+	sections := make(map[string]map[string]bool, len(raw))
+	for name, chunk := range raw {
 		var m map[string]string
 		if json.Unmarshal(chunk, &m) != nil {
-			continue
+			continue // not a package map (autoload, scripts, ...)
 		}
-		if _, found := m[pkg]; found {
+		pkgs := make(map[string]bool, len(m))
+		for p := range m {
+			pkgs[p] = true
+		}
+		sections[name] = pkgs
+	}
+	composerCache[path] = composerCacheEntry{modTime: st.ModTime(), size: st.Size(), sections: sections}
+	return sections
+}
+
+// ComposerHasPackage reports whether the composer.json in dir lists pkg
+// in require, require-dev, or any of the extra sections specified.
+func ComposerHasPackage(dir, pkg string, extraSections ...string) bool {
+	sections := composerSections(dir)
+	if sections == nil {
+		return false
+	}
+	if sections["require"][pkg] || sections["require-dev"][pkg] {
+		return true
+	}
+	for _, name := range extraSections {
+		if sections[name][pkg] {
 			return true
 		}
 	}

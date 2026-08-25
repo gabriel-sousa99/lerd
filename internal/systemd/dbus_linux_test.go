@@ -2,7 +2,13 @@
 
 package systemd
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+
+	godbus "github.com/godbus/dbus/v5"
+)
 
 // withServiceSuffix is the gate every DBus unit op passes through. A bug here
 // breaks Start/Stop/Restart/Enable/Disable/IsEnabled for every caller, so the
@@ -157,4 +163,32 @@ func TestRunUnitOpWithRetry(t *testing.T) {
 			t.Fatalf("calls = %d, want 1 (clamped)", calls)
 		}
 	})
+}
+
+// A stop aimed at a unit systemd has never loaded is already satisfied: there
+// is nothing running to stop. `lerd stop` enumerates workers a site declares,
+// which on a machine that never installed one names a unit systemd does not
+// know, so a clean shutdown reported a screen of failures for workers that were
+// never up.
+func TestUnitNotLoaded(t *testing.T) {
+	missing := godbus.Error{
+		Name: "org.freedesktop.systemd1.NoSuchUnit",
+		Body: []any{"Unit lerd-queue-acme.service not loaded."},
+	}
+	if !unitNotLoaded(fmt.Errorf("stop lerd-queue-acme failed: %w", missing)) {
+		t.Error("a NoSuchUnit error must read as already stopped")
+	}
+
+	// A unit that exists and genuinely failed to stop must still be an error, or
+	// a stop that left a container running would report success.
+	realFailure := godbus.Error{
+		Name: "org.freedesktop.systemd1.JobFailed",
+		Body: []any{"Job for lerd-mysql.service failed."},
+	}
+	if unitNotLoaded(fmt.Errorf("stop lerd-mysql failed: %w", realFailure)) {
+		t.Error("a genuine stop failure was swallowed")
+	}
+	if unitNotLoaded(errors.New("stop lerd-mysql timed out after 30s")) {
+		t.Error("a timeout was swallowed")
+	}
 }

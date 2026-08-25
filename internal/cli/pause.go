@@ -15,6 +15,9 @@ import (
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
+
+	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
+
 	"github.com/spf13/cobra"
 )
 
@@ -90,9 +93,10 @@ func PauseSite(name string) error {
 		_ = podman.DaemonReloadFn()
 	}
 
-	// Release the LAN share port while paused. The site's stored LANPort is
-	// preserved so unpause restores the same address.
+	// Release the share ports while paused. The stored ports are preserved so
+	// unpause restores the same addresses.
 	LANShareStopServer(site.Name)
+	PublicShareStopServer(site.Name)
 
 	if err := writePausedHTML(site); err != nil {
 		return fmt.Errorf("writing paused page: %w", err)
@@ -209,10 +213,7 @@ func UnpauseSite(name string) error {
 			if err := nginx.GenerateCustomSSLVhost(*site); err != nil {
 				return fmt.Errorf("generating custom SSL vhost: %w", err)
 			}
-			sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-			mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-			_ = os.Remove(mainConf)
-			if err := os.Rename(sslConf, mainConf); err != nil {
+			if err := nginx.InstallSSLVhost(site.PrimaryDomain()); err != nil {
 				return fmt.Errorf("installing SSL vhost: %w", err)
 			}
 		} else {
@@ -227,10 +228,7 @@ func UnpauseSite(name string) error {
 			if err := nginx.GenerateHostProxySSLVhost(*site); err != nil {
 				return fmt.Errorf("generating host-proxy SSL vhost: %w", err)
 			}
-			sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-			mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-			_ = os.Remove(mainConf)
-			if err := os.Rename(sslConf, mainConf); err != nil {
+			if err := nginx.InstallSSLVhost(site.PrimaryDomain()); err != nil {
 				return fmt.Errorf("installing host-proxy SSL vhost: %w", err)
 			}
 		} else {
@@ -248,10 +246,7 @@ func UnpauseSite(name string) error {
 			if err := nginx.GenerateFrankenPHPSSLVhost(*site); err != nil {
 				return fmt.Errorf("generating FrankenPHP SSL vhost: %w", err)
 			}
-			sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-			mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-			_ = os.Remove(mainConf)
-			if err := os.Rename(sslConf, mainConf); err != nil {
+			if err := nginx.InstallSSLVhost(site.PrimaryDomain()); err != nil {
 				return fmt.Errorf("installing SSL vhost: %w", err)
 			}
 		} else {
@@ -277,10 +272,7 @@ func UnpauseSite(name string) error {
 			if err := nginx.GenerateSSLVhost(*site, phpVersion); err != nil {
 				return fmt.Errorf("generating SSL vhost: %w", err)
 			}
-			sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-			mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-			_ = os.Remove(mainConf)
-			if err := os.Rename(sslConf, mainConf); err != nil {
+			if err := nginx.InstallSSLVhost(site.PrimaryDomain()); err != nil {
 				return fmt.Errorf("installing SSL vhost: %w", err)
 			}
 		} else {
@@ -322,6 +314,11 @@ func UnpauseSite(name string) error {
 			feedback.Warn("restoring LAN share: %v", err)
 		}
 	}
+	if site.PublicPort != 0 {
+		if _, err := PublicShareStart(site.Name); err != nil {
+			feedback.Warn("restoring public share: %v", err)
+		}
+	}
 
 	// The shared paused.html is left in place for other paused sites.
 
@@ -354,7 +351,8 @@ func startServicesForSite(sitePath string) {
 // notice (using siteName) only when at least one service actually needs starting.
 // Pass an empty siteName to suppress the header.
 func startServicesForSiteNoticed(sitePath, siteName string) {
-	envData, err := os.ReadFile(filepath.Join(sitePath, ".env"))
+	envFile, _ := config.EnvFileFor(sitePath)
+	envData, err := os.ReadFile(filepath.Join(sitePath, envFile))
 	if err != nil {
 		return
 	}
@@ -405,11 +403,12 @@ func collectRunningWorkers(site *config.Site) []string {
 			names = append(names, wName)
 		}
 		sort.Strings(names)
+		states := siteinfo.AllUnitStates()
 		for _, wName := range names {
 			unit := "lerd-" + wName + "-" + site.Name
 			// Scheduled workers' .service sits at inactive between timer firings.
 			if unitIsActiveOrActivating(unit) ||
-				lerdSystemd.IsTimerActive(unit) {
+				timerIsActive(states, unit) {
 				active = append(active, wName)
 			}
 		}
@@ -463,13 +462,27 @@ func collectRunningWorktreeWorkersByBase(site *config.Site, wtBase string) []str
 	sort.Strings(names)
 
 	var active []string
+	states := siteinfo.AllUnitStates()
 	for _, wName := range names {
 		unit := "lerd-" + wName + "-" + site.Name + "-" + wtBase
-		if unitIsActiveOrActivating(unit) || lerdSystemd.IsTimerActive(unit) {
+		if unitIsActiveOrActivating(unit) || timerIsActive(states, unit) {
 			active = append(active, wName)
 		}
 	}
 	return active
+}
+
+// timerIsActive reports whether a worker's sibling .timer is active, answered
+// from the batched unit snapshot instead of a per-unit DBus round trip.
+//
+// systemd.IsTimerActive fetches the unit's entire property dictionary to read
+// one field. The idle engine calls this for every worker of every site it
+// believes suspended, every tick, which on a box with a dozen suspended sites
+// made that pass the daemon's largest remaining source of idle wakeups.
+// AllUnitStates answers from the one cached systemctl enumeration the dashboard
+// already populates, and it keeps the .timer suffix for exactly this lookup.
+func timerIsActive(states map[string]string, unit string) bool {
+	return states[unit+".timer"] == "active"
 }
 
 // unitIsActiveOrActivating routes through podman.UnitStatus so the check

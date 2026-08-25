@@ -2,9 +2,14 @@ package dns
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gabriel-sousa99/lerd/pkg/distro"
 )
 
 // fakeProbes builds a probeFns where every rung is overridable but defaults
@@ -12,16 +17,81 @@ import (
 // failure paths.
 func fakeProbes() probeFns {
 	return probeFns{
-		containerRunning: func() bool { return true },
-		dnsmasqConfigOK:  func(string) (bool, string) { return true, "ok" },
-		portOpen:         func(string, int) bool { return true },
-		dnsmasqAnswer:    func(string) (string, error) { return "127.0.0.1", nil },
-		resolverHookup:   func() (string, bool, string) { return "drop-in", true, "/etc/x" },
-		interfaceRouting: func(string) (string, bool, bool, error) { return "eth0", true, true, nil },
-		dummyLinkRouting: func(string) (bool, bool) { return true, true },
-		systemLookup:     func(string) ([]string, error) { return []string{"127.0.0.1"}, nil },
-		vpnActive:        func() bool { return false },
-		lanExposedIP:     func() string { return "" },
+		containerRunning:   func() bool { return true },
+		dnsmasqConfigOK:    func(string) (bool, string) { return true, "ok" },
+		portOpen:           func(string, int) bool { return true },
+		dnsmasqAnswer:      func(string) (string, error) { return "127.0.0.1", nil },
+		resolverHookup:     func() (string, bool, string) { return "drop-in", true, "/etc/x" },
+		interfaceRouting:   func(string) (string, bool, bool, error) { return "eth0", true, true, nil },
+		dummyLinkRouting:   func(string) (bool, bool) { return true, true },
+		systemLookup:       func(string) ([]string, error) { return []string{"127.0.0.1"}, nil },
+		vpnActive:          func() bool { return false },
+		lanExposedIP:       func() string { return "" },
+		hostDnsmasqPresent: func() bool { return true },
+		hostOwnsResolver:   func() bool { return false },
+	}
+}
+
+// nixosProbes is a NixOS host: no lerd hookup file, because lerd deliberately
+// writes none there, with .test still resolving through the ~test route the
+// user's configuration.nix installs.
+func nixosProbes() probeFns {
+	p := fakeProbes()
+	p.hostOwnsResolver = func() bool { return true }
+	p.resolverHookup = func() (string, bool, string) { return "", false, "" }
+	return p
+}
+
+func TestDiagnose_nixosHookupIsNotAFailure(t *testing.T) {
+	d := diagnose("test", nixosProbes())
+	if d.FirstFailure != -1 {
+		t.Errorf("FirstFailure = %d, want -1: a missing hookup is expected on NixOS", d.FirstFailure)
+	}
+	hookup := findStep(d, "resolver hookup")
+	if hookup == nil || hookup.Status != StepSkip {
+		t.Fatalf("resolver hookup = %+v, want a skip", hookup)
+	}
+	if !strings.Contains(hookup.Detail, "NixOS") {
+		t.Errorf("detail = %q, want it to name NixOS", hookup.Detail)
+	}
+	if findStep(d, "system DNS lookup") == nil {
+		t.Error("the chain must go on to the system lookup, which is the real proof on NixOS")
+	}
+}
+
+// The interface and lerd0 rungs probe files lerd no longer writes on NixOS, so
+// running them there reports a broken machine that resolves .test perfectly.
+func TestDiagnose_nixosSkipsLerdOwnedRungs(t *testing.T) {
+	p := nixosProbes()
+	p.interfaceRouting = func(string) (string, bool, bool, error) { return "eth0", false, false, nil }
+	p.dummyLinkRouting = func(string) (bool, bool) { return false, false }
+
+	d := diagnose("test", p)
+	if d.FirstFailure != -1 {
+		t.Errorf("FirstFailure = %d, want -1", d.FirstFailure)
+	}
+	if s := findStep(d, "interface routes"); s != nil {
+		t.Errorf("interface rung ran on NixOS: %+v", s)
+	}
+	if s := findStep(d, "offline ."); s != nil {
+		t.Errorf("offline route rung ran on NixOS: %+v", s)
+	}
+}
+
+// A NixOS user who never added the ~test route gets the failure at the system
+// lookup, where the hint has to point at configuration.nix rather than at the
+// `lerd install` that will now deliberately do nothing.
+func TestDiagnose_nixosLookupFailureHintsAtConfigurationNix(t *testing.T) {
+	p := nixosProbes()
+	p.systemLookup = func(string) ([]string, error) { return nil, errors.New("no such host") }
+
+	d := diagnose("test", p)
+	s := findStep(d, "system DNS lookup")
+	if s == nil || s.Status != StepFail {
+		t.Fatalf("system DNS lookup = %+v, want a failure", s)
+	}
+	if !strings.Contains(s.Hint, "configuration.nix") {
+		t.Errorf("hint = %q, want it to point at configuration.nix", s.Hint)
 	}
 }
 
@@ -216,6 +286,62 @@ func TestDiagnose_resolverHookupMissingHintsInstall(t *testing.T) {
 	}
 	if !strings.Contains(d.Steps[4].Hint, "lerd install") {
 		t.Errorf("hint %q should suggest lerd install", d.Steps[4].Hint)
+	}
+}
+
+func TestDiagnose_nmDnsmasqBinaryMissingReportsFail(t *testing.T) {
+	p := fakeProbes()
+	p.resolverHookup = func() (string, bool, string) {
+		return nmDnsmasqKind, true, "/etc/NetworkManager/dnsmasq.d/lerd.conf"
+	}
+	p.hostDnsmasqPresent = func() bool { return false }
+	d := diagnose("test", p)
+	step := findStep(d, "resolver hookup")
+	if step == nil || step.Status != StepFail {
+		t.Fatalf("resolver hookup step = %+v, want fail", step)
+	}
+	if !strings.Contains(step.Hint, "dnsmasq") {
+		t.Errorf("hint %q should mention installing dnsmasq", step.Hint)
+	}
+}
+
+func TestDiagnose_nmDnsmasqBinaryPresentReportsOK(t *testing.T) {
+	p := fakeProbes()
+	p.resolverHookup = func() (string, bool, string) {
+		return nmDnsmasqKind, true, "/etc/NetworkManager/dnsmasq.d/lerd.conf"
+	}
+	p.hostDnsmasqPresent = func() bool { return true }
+	d := diagnose("test", p)
+	step := findStep(d, "resolver hookup")
+	if step == nil || step.Status != StepOK {
+		t.Errorf("resolver hookup step = %+v, want ok", step)
+	}
+}
+
+func TestDnsmasqFound_onPath(t *testing.T) {
+	ok := dnsmasqFound(func(string) (string, error) { return "/usr/bin/dnsmasq", nil }, nil)
+	if !ok {
+		t.Error("dnsmasqFound = false, want true when LookPath succeeds")
+	}
+}
+
+func TestDnsmasqFound_sbinFallback(t *testing.T) {
+	// Debian puts dnsmasq in /usr/sbin, which a normal user's PATH omits;
+	// the guard must still see it there.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "dnsmasq")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	notFound := func(string) (string, error) { return "", exec.ErrNotFound }
+	if !dnsmasqFound(notFound, []string{filepath.Join(dir, "missing"), bin}) {
+		t.Error("dnsmasqFound = false, want true via sbin fallback stat")
+	}
+	if dnsmasqFound(notFound, []string{filepath.Join(dir, "missing")}) {
+		t.Error("dnsmasqFound = true, want false when PATH and fallbacks all miss")
+	}
+	if dnsmasqFound(notFound, []string{dir}) {
+		t.Error("dnsmasqFound = true, want false for a directory at the fallback path")
 	}
 }
 
@@ -511,5 +637,72 @@ func TestParseDummyLinkRouting_matchesTheDomainAsAWholeToken(t *testing.T) {
 	}
 	if _, routed := parseDummyLinkRouting(withServer+"        DNS Domain: ~test\n", "test"); !routed {
 		t.Error("~test must satisfy the ~test route")
+	}
+}
+
+// The full dnsmasq package on the debian family starts its own resolver on :53,
+// which collides with the NetworkManager plugin the hint is trying to feed. Only
+// dnsmasq-base ships the binary alone, which is what install.sh queues too.
+func TestDnsmasqInstallHintPerFamily(t *testing.T) {
+	orig := detectDistro
+	t.Cleanup(func() { detectDistro = orig })
+
+	cases := []struct {
+		name string
+		d    *distro.Distro
+		want string
+	}{
+		{"ubuntu", &distro.Distro{ID: "ubuntu"}, "sudo apt install dnsmasq-base"},
+		{"mint via ID_LIKE", &distro.Distro{ID: "linuxmint", IDLike: "ubuntu debian"}, "sudo apt install dnsmasq-base"},
+		{"fedora", &distro.Distro{ID: "fedora"}, "sudo dnf install dnsmasq"},
+		{"cachyos via ID_LIKE", &distro.Distro{ID: "cachyos", IDLike: "arch"}, "sudo pacman -S dnsmasq"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detectDistro = func() (*distro.Distro, error) { return tc.d, nil }
+			if got := dnsmasqInstallHint(); got != tc.want {
+				t.Errorf("dnsmasqInstallHint() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// An unrecognised host still gets a usable hint, and it must never name the
+// debian package that breaks .test resolution.
+func TestDnsmasqInstallHintFallsBackToEveryFamily(t *testing.T) {
+	orig := detectDistro
+	t.Cleanup(func() { detectDistro = orig })
+	detectDistro = func() (*distro.Distro, error) { return nil, errors.New("no os-release") }
+
+	got := dnsmasqInstallHint()
+	if !strings.Contains(got, "dnsmasq-base") || strings.Contains(got, "apt install dnsmasq ") {
+		t.Errorf("dnsmasqInstallHint() = %q, want the debian entry to name dnsmasq-base", got)
+	}
+	for _, mgr := range []string{"apt", "dnf", "pacman"} {
+		if !strings.Contains(got, mgr) {
+			t.Errorf("dnsmasqInstallHint() = %q, want it to cover %s", got, mgr)
+		}
+	}
+}
+
+// On the NetworkManager dnsmasq path, resolution never goes through
+// systemd-resolved, so resolvectl has nothing to say and is usually masked.
+// Probing it there turns a healthy install into a warning that reads like a
+// raw command failure.
+func TestDiagnose_SkipsResolvedRoutingOnNMDnsmasq(t *testing.T) {
+	p := fakeProbes()
+	p.resolverHookup = func() (string, bool, string) {
+		return nmDnsmasqKind, true, "/etc/NetworkManager/dnsmasq.d/lerd.conf"
+	}
+	p.interfaceRouting = func(string) (string, bool, bool, error) {
+		return "", false, false, errors.New("exit status 1")
+	}
+
+	d := diagnose("test", p)
+	if step := findStep(d, "interface routes"); step != nil {
+		t.Errorf("resolved routing was probed on the NM dnsmasq path: %+v", *step)
+	}
+	if hook := findStep(d, "resolver hookup"); hook == nil || hook.Status != StepOK {
+		t.Errorf("resolver hookup should still pass: %+v", hook)
 	}
 }

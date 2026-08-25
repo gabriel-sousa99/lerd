@@ -1,6 +1,7 @@
 name: mongo
 image: docker.io/library/mongo:7
 description: MongoDB document database
+stop_timeout: 60
 ports:
   - "27017:27017"
 environment:

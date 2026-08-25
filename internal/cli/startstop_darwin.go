@@ -38,7 +38,8 @@ func migrateExecWorkerPlists() {
 			name := strings.TrimSuffix(filepath.Base(p), ".plist")
 			domain := fmt.Sprintf("gui/%d", os.Getuid())
 			exec.Command("launchctl", "bootout", domain+"/com.lerd."+name).Run() //nolint:errcheck
-			os.Remove(p)                                                         //nolint:errcheck
+			config.GuardRealWrite(p)
+			os.Remove(p) //nolint:errcheck
 		}
 	}
 }
@@ -391,54 +392,4 @@ func startPodmanMachineWithRetry() error {
 	feedback.Note("The Podman Machine VM would not boot. On new macOS releases this is often a vfkit issue that leaves a stale SSH port behind.")
 	feedback.Note("Try: podman machine stop && podman machine start. If it keeps failing, run `lerd machine reset` to recreate the VM, then `lerd install` again.")
 	return fmt.Errorf("podman machine start: %w", err)
-}
-
-// stopPodmanMachine stops the running Podman Machine VM. Called by runQuit so
-// the VM is cleanly shut down when the user quits Lerd entirely.
-func stopPodmanMachine() {
-	out, err := podman.Cmd("machine", "list", "--format", "{{.Name}}\t{{.Running}}").Output()
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 || fields[1] != "true" {
-			continue
-		}
-		name := strings.TrimSuffix(fields[0], "*")
-		feedback.Line(fmt.Sprintf("Stopping Podman Machine (%s)…", name))
-		cmd := podman.Cmd("machine", "stop", name)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			feedback.Warn("podman machine stop: %v", err)
-		}
-	}
-}
-
-// batchStopContainers stops all running lerd-* containers in two podman calls
-// (stop then rm) so the Podman Machine socket isn't flooded by N individual
-// stop requests from RunParallel. After this returns the individual Stop()
-// calls find no containers and go straight to launchctl bootout.
-func batchStopContainers(_ []string) {
-	// Query only running containers with name prefix "lerd-" to avoid passing
-	// non-existent names (native services like lerd-dns have no container).
-	out, err := podman.Run("ps", "--format", "{{.Names}}", "--filter", "name=^lerd-")
-	if err != nil || strings.TrimSpace(out) == "" {
-		return
-	}
-	var names []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if n := strings.TrimSpace(line); n != "" {
-			names = append(names, n)
-		}
-	}
-	if len(names) == 0 {
-		return
-	}
-	podman.RunSilent(append([]string{"stop", "-t", "5"}, names...)...) //nolint:errcheck
-	podman.RunSilent(append([]string{"rm", "-f"}, names...)...)        //nolint:errcheck
 }

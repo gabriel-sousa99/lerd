@@ -41,6 +41,12 @@
   let showDrop = $state(false);
   let dropBusy = $state(false);
   let dropError = $state('');
+  // The pair the drop can take along, offered only when the card is pointing at
+  // the database being tested; the testing half is nobody's pair.
+  const dropTesting = $derived(target === 'app' ? testing : undefined);
+  // Ticked to match how the pair was created, since dropping one half and
+  // leaving the other is almost never what was meant.
+  let dropPaired = $state(true);
   let fileInput = $state<HTMLInputElement | null>(null);
   // The dump being imported, from the first byte uploaded to the confirmation
   // or the engine's error; null whenever no import has run on this card.
@@ -155,10 +161,16 @@
     }, 4000);
   }
 
+  function openDrop() {
+    dropError = '';
+    dropPaired = true;
+    showDrop = true;
+  }
+
   async function confirmDrop() {
     dropBusy = true;
     dropError = '';
-    const res = await dropDatabase(engine.service, active.name);
+    const res = await dropDatabase(engine.service, active.name, Boolean(dropTesting) && dropPaired);
     dropBusy = false;
     if (!res.ok) {
       dropError = res.error || m.common_failed();
@@ -272,7 +284,7 @@
         type="button"
         use:tooltip={m.databases_drop()}
         aria-label={m.databases_drop()}
-        onclick={() => (showDrop = true)}
+        onclick={openDrop}
         class="ml-auto flex items-center justify-center w-7 h-7 rounded-md text-gray-400 dark:text-gray-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
       >
         <Icon name="trash" class="w-3.5 h-3.5" />
@@ -343,6 +355,12 @@
   <Modal open title={m.databases_dropTitle({ name: active.name })} onclose={() => !dropBusy && (showDrop = false)} size="sm">
     <div class="px-5 py-4 space-y-2">
       <p class="text-sm text-gray-700 dark:text-gray-300">{m.databases_dropBody()}</p>
+      {#if dropTesting}
+        <label class="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+          <input type="checkbox" bind:checked={dropPaired} class="mt-0.5 accent-lerd-red" />
+          <span>{m.databases_dropTesting({ name: dropTesting.name })}</span>
+        </label>
+      {/if}
       {#if dropError}
         <p class="text-xs text-red-500">{dropError}</p>
       {/if}

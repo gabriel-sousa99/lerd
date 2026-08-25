@@ -486,11 +486,11 @@
 <body>
 
 <header class="brandbar">
-  <a class="brand" href="https://github.com/geodro/lerd">
+  <a class="brand" href="https://github.com/gabriel-sousa99/lerd">
     <span class="brand-mark">L</span>
     <span><span class="brand-name">lerd</span> <span class="brand-path">geodro/<b>lerd</b></span></span>
   </a>
-  <a class="gh-link" href="https://github.com/geodro/lerd/compare/v1.25.0...v1.26.0">v1.25.0…v1.26.0 ↗</a>
+  <a class="gh-link" href="https://github.com/gabriel-sousa99/lerd/compare/v1.25.0...v1.26.0">v1.25.0…v1.26.0 ↗</a>
 </header>
 
 <nav class="pillnav">
@@ -582,9 +582,9 @@
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Cross-platform install.sh <a class="pr" href="https://github.com/geodro/lerd/pull/549">#549</a></h4><p>darwin + arm64 detection, the <code>darwin_&lt;arch&gt;</code> asset, brew-installed prereqs without sudo.</p><span class="file">install.sh</span></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Self-update on macOS <a class="pr" href="https://github.com/geodro/lerd/pull/549">#549</a></h4><p><code>lerd update</code> pulls the darwin archive and reloads launchd agents, deferring to <code>brew upgrade</code> for a Cellar binary.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Clean uninstall <a class="pr" href="https://github.com/geodro/lerd/pull/549">#549</a></h4><p>Boots out the launchd agents by their real <code>com.lerd.*</code> Label and removes detached <code>lerd-*</code> containers, BSD-sed safe.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Cross-platform install.sh <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/549">#549</a></h4><p>darwin + arm64 detection, the <code>darwin_&lt;arch&gt;</code> asset, brew-installed prereqs without sudo.</p><span class="file">install.sh</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Self-update on macOS <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/549">#549</a></h4><p><code>lerd update</code> pulls the darwin archive and reloads launchd agents, deferring to <code>brew upgrade</code> for a Cellar binary.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Clean uninstall <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/549">#549</a></h4><p>Boots out the launchd agents by their real <code>com.lerd.*</code> Label and removes detached <code>lerd-*</code> containers, BSD-sed safe.</p></div>
   </div>
 </div></section>
 
@@ -623,9 +623,9 @@ User::query()<span class="k">-&gt;</span>where(<span class="s">'active'</span>, 
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Editors → Monaco <a class="pr" href="https://github.com/geodro/lerd/pull/552">#552</a></h4><p>One lazy-loaded Monaco wrapper across every editor, Monarch grammars for nginx, ini and dotenv. CodeMirror dropped entirely.</p><span class="file">ui · MonacoEditor</span></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>phpantom_lsp <a class="pr" href="https://github.com/geodro/lerd/pull/552">#552</a></h4><p>A Rust PHP language server lerd manages on the host beside fnm and mkcert, bridged per connection over a websocket.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Quick fixes &amp; inline SQL <a class="pr" href="https://github.com/geodro/lerd/pull/554">#554</a></h4><p>Code-action imports, format on paste, per-line result badges, and every Laravel query as a full-width card.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Editors → Monaco <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/552">#552</a></h4><p>One lazy-loaded Monaco wrapper across every editor, Monarch grammars for nginx, ini and dotenv. CodeMirror dropped entirely.</p><span class="file">ui · MonacoEditor</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>phpantom_lsp <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/552">#552</a></h4><p>A Rust PHP language server lerd manages on the host beside fnm and mkcert, bridged per connection over a websocket.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Quick fixes &amp; inline SQL <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/554">#554</a></h4><p>Code-action imports, format on paste, per-line result badges, and every Laravel query as a full-width card.</p></div>
   </div>
 </div></section>
 
@@ -664,9 +664,9 @@ User::query()<span class="k">-&gt;</span>where(<span class="s">'active'</span>, 
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Tabbed screens <a class="pr" href="https://github.com/geodro/lerd/pull/574">#574</a></h4><p>Three clickable top tabs replace the old combined layout, with the version on the far right of the tab row.</p><span class="file">internal/tui</span></div>
-    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>Mouse throughout <a class="pr" href="https://github.com/geodro/lerd/pull/574">#574</a></h4><p>Clickable rows, tab strips and Debug lenses; wheel scrolls the hovered pane; keyboard selection follows once per move.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>Brand-red accent <a class="pr" href="https://github.com/geodro/lerd/pull/574">#574</a></h4><p>The interactive accent becomes the lerd/Laravel red across both the TUI and the new CLI feedback layer.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Tabbed screens <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/574">#574</a></h4><p>Three clickable top tabs replace the old combined layout, with the version on the far right of the tab row.</p><span class="file">internal/tui</span></div>
+    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>Mouse throughout <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/574">#574</a></h4><p>Clickable rows, tab strips and Debug lenses; wheel scrolls the hovered pane; keyboard selection follows once per move.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>Brand-red accent <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/574">#574</a></h4><p>The interactive accent becomes the lerd/Laravel red across both the TUI and the new CLI feedback layer.</p></div>
   </div>
 </div></section>
 
@@ -705,10 +705,10 @@ User::query()<span class="k">-&gt;</span>where(<span class="s">'active'</span>, 
   </div>
 
   <div class="cards">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Feedback package <a class="pr" href="https://github.com/geodro/lerd/pull/568">#568</a></h4><p>The shared palette and progress primitives, with plain-text degradation and several piped-ANSI leaks fixed.</p><span class="file">internal/feedback</span></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Responsive tables <a class="pr" href="https://github.com/geodro/lerd/pull/610">#610</a></h4><p>List views render as tables, and error output is unified across commands.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>install · start <a class="pr" href="https://github.com/geodro/lerd/pull/604">#604</a></h4><p>The install and start flows speak the same feedback vocabulary.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>service-stop · uninstall <a class="pr" href="https://github.com/geodro/lerd/pull/608">#608</a> <a class="pr" href="https://github.com/geodro/lerd/pull/612">#612</a></h4><p>Stopping services and the uninstall path come onto the layer too.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Feedback package <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/568">#568</a></h4><p>The shared palette and progress primitives, with plain-text degradation and several piped-ANSI leaks fixed.</p><span class="file">internal/feedback</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Responsive tables <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/610">#610</a></h4><p>List views render as tables, and error output is unified across commands.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>install · start <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/604">#604</a></h4><p>The install and start flows speak the same feedback vocabulary.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>service-stop · uninstall <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/608">#608</a> <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/612">#612</a></h4><p>Stopping services and the uninstall path come onto the layer too.</p></div>
   </div>
 </div></section>
 
@@ -734,12 +734,12 @@ User::query()<span class="k">-&gt;</span>where(<span class="s">'active'</span>, 
   </div>
 
   <div class="cards">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Offer to link <a class="pr" href="https://github.com/geodro/lerd/pull/558">#558</a></h4><p>An unlinked project is offered the wizard instead of dead-ending; <code>ensureSiteForCwd</code> resolves and links the same directory.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>link → init wizard <a class="pr" href="https://github.com/geodro/lerd/pull/562">#562</a></h4><p><code>lerd link</code> runs the init wizard and handles non-PHP projects.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Pin upstream DNS <a class="pr" href="https://github.com/geodro/lerd/pull/583">#583</a></h4><p>Choose the upstream servers lerd-dns forwards to rather than only the detected resolvers.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Heal on LAN change <a class="pr" href="https://github.com/geodro/lerd/pull/553">#553</a></h4><p>A stale <code>lan:expose</code> mapping is repaired when the host LAN IP changes, with a macOS PF_ROUTE watcher.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>timescaledb &amp; mariadb <a class="pr" href="https://github.com/geodro/lerd/pull/572">#572</a> <a class="pr" href="https://github.com/geodro/lerd/pull/551">#551</a></h4><p>postgres-timescaledb joins the presets; the MariaDB image list is refreshed, keeping the bare <code>11</code> tag.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ref">docs</span></div><h4>The site lives at lerd.sh <a class="pr" href="https://github.com/geodro/lerd/pull/564">#564</a></h4><p>A rebuilt landing page with a live demo on the custom domain, refreshed social and SEO. <a class="pr" href="https://github.com/geodro/lerd/pull/559">#559</a> <a class="pr" href="https://github.com/geodro/lerd/pull/587">#587</a></p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Offer to link <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/558">#558</a></h4><p>An unlinked project is offered the wizard instead of dead-ending; <code>ensureSiteForCwd</code> resolves and links the same directory.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>link → init wizard <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/562">#562</a></h4><p><code>lerd link</code> runs the init wizard and handles non-PHP projects.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Pin upstream DNS <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/583">#583</a></h4><p>Choose the upstream servers lerd-dns forwards to rather than only the detected resolvers.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Heal on LAN change <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/553">#553</a></h4><p>A stale <code>lan:expose</code> mapping is repaired when the host LAN IP changes, with a macOS PF_ROUTE watcher.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>timescaledb &amp; mariadb <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/572">#572</a> <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/551">#551</a></h4><p>postgres-timescaledb joins the presets; the MariaDB image list is refreshed, keeping the bare <code>11</code> tag.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ref">docs</span></div><h4>The site lives at lerd.sh <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/564">#564</a></h4><p>A rebuilt landing page with a live demo on the custom domain, refreshed social and SEO. <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/559">#559</a> <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/587">#587</a></p></div>
   </div>
 </div></section>
 
@@ -757,19 +757,19 @@ User::query()<span class="k">-&gt;</span>where(<span class="s">'active'</span>, 
   <div class="flow-wrap">
     <div class="flow-title"><span>SECURITY PASS</span><span>#613 · three vectors</span></div>
     <div class="pipe">
-      <div class="pipe-step hot"><div class="pipe-n">1</div><div class="pipe-b"><h5>Name injection</h5><p>Site and worktree-branch names flowed into <code>site_init</code> shell commands and <code>CREATE DATABASE</code> identifiers. <code>SiteSlug</code> now maps every character outside <code>[a-z0-9_]</code> to an underscore, and database create/drop escape the identifiers as a second layer. <a class="pr" href="https://github.com/geodro/lerd/pull/613">#613</a></p></div></div>
-      <div class="pipe-step hot"><div class="pipe-n">2</div><div class="pipe-b"><h5>Root-write via symlink</h5><p>The NetworkManager dispatcher rewrote each user's <code>lerd.conf</code> as root, so a symlink could redirect that write onto a root-owned file. The rewrite now runs through <code>runuser</code> as the owning user, with the upstream list filtered to IP/port tokens first. <a class="pr" href="https://github.com/geodro/lerd/pull/613">#613</a></p></div></div>
-      <div class="pipe-step hot"><div class="pipe-n">3</div><div class="pipe-b"><h5>Websocket DNS-rebinding</h5><p>The dashboard handshake accepted any Origin whose host matched Host, which a rebinding page controls. The same-origin fallback now also requires an IP literal or a reserved local TLD, so a public domain rebound to loopback is rejected; loopback, LAN, and <code>.test</code> are unchanged. <a class="pr" href="https://github.com/geodro/lerd/pull/613">#613</a></p></div></div>
+      <div class="pipe-step hot"><div class="pipe-n">1</div><div class="pipe-b"><h5>Name injection</h5><p>Site and worktree-branch names flowed into <code>site_init</code> shell commands and <code>CREATE DATABASE</code> identifiers. <code>SiteSlug</code> now maps every character outside <code>[a-z0-9_]</code> to an underscore, and database create/drop escape the identifiers as a second layer. <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/613">#613</a></p></div></div>
+      <div class="pipe-step hot"><div class="pipe-n">2</div><div class="pipe-b"><h5>Root-write via symlink</h5><p>The NetworkManager dispatcher rewrote each user's <code>lerd.conf</code> as root, so a symlink could redirect that write onto a root-owned file. The rewrite now runs through <code>runuser</code> as the owning user, with the upstream list filtered to IP/port tokens first. <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/613">#613</a></p></div></div>
+      <div class="pipe-step hot"><div class="pipe-n">3</div><div class="pipe-b"><h5>Websocket DNS-rebinding</h5><p>The dashboard handshake accepted any Origin whose host matched Host, which a rebinding page controls. The same-origin fallback now also requires an IP literal or a reserved local TLD, so a public domain rebound to loopback is rejected; loopback, LAN, and <code>.test</code> are unchanged. <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/613">#613</a></p></div></div>
     </div>
   </div>
 
   <div class="cards">
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Atomic cert swap <a class="pr" href="https://github.com/geodro/lerd/pull/607">#607</a></h4><p>TLS certs are swapped atomically so an nginx reload never sees a missing cert; worktree DBs are provisioned and realigned on link and env. <a class="pr" href="https://github.com/geodro/lerd/pull/608">#608</a></p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Podman start retry <a class="pr" href="https://github.com/geodro/lerd/pull/606">#606</a></h4><p>The machine start is retried once before failing the install, and versioned DB alternates no longer leak the bare canonical service. <a class="pr" href="https://github.com/geodro/lerd/pull/605">#605</a></p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>MCP output visible <a class="pr" href="https://github.com/geodro/lerd/pull/550">#550</a></h4><p>Worktree, diagnose, service env and check-updates results route through content blocks so the host actually sees them.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Agent env &amp; tray <a class="pr" href="https://github.com/geodro/lerd/pull/555">#555</a> <a class="pr" href="https://github.com/geodro/lerd/pull/585">#585</a></h4><p>AI agent detection is forwarded into the container, and the tray uses a dark icon on light desktop panels.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Legacy frameworks <a class="pr" href="https://github.com/geodro/lerd/pull/582">#582</a></h4><p>Legacy framework versions resolve to the lowest available definition instead of failing.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill sec">SEC</span></div><h4>Dependency advisories <a class="pr" href="https://github.com/geodro/lerd/pull/566">#566</a></h4><p>vite and dompurify bumped to clear open Dependabot alerts.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Atomic cert swap <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/607">#607</a></h4><p>TLS certs are swapped atomically so an nginx reload never sees a missing cert; worktree DBs are provisioned and realigned on link and env. <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/608">#608</a></p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Podman start retry <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/606">#606</a></h4><p>The machine start is retried once before failing the install, and versioned DB alternates no longer leak the bare canonical service. <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/605">#605</a></p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>MCP output visible <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/550">#550</a></h4><p>Worktree, diagnose, service env and check-updates results route through content blocks so the host actually sees them.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Agent env &amp; tray <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/555">#555</a> <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/585">#585</a></h4><p>AI agent detection is forwarded into the container, and the tray uses a dark icon on light desktop panels.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Legacy frameworks <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/582">#582</a></h4><p>Legacy framework versions resolve to the lowest available definition instead of failing.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill sec">SEC</span></div><h4>Dependency advisories <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/566">#566</a></h4><p>vite and dompurify bumped to clear open Dependabot alerts.</p></div>
   </div>
 </div></section>
 
@@ -794,7 +794,7 @@ User::query()<span class="k">-&gt;</span>where(<span class="s">'active'</span>, 
   </div>
   <div class="foot-end">
     <span>lerd v1.26.0 · 2026-06-24 · <a href="/digest/v1.25.0.html">← v1.25.0 digest</a></span>
-    <span><a href="https://github.com/geodro/lerd/compare/v1.25.0...v1.26.0">v1.25.0…v1.26.0</a> · <a href="https://lerd.sh/">docs</a> · <a href="https://github.com/geodro/lerd">github</a></span>
+    <span><a href="https://github.com/gabriel-sousa99/lerd/compare/v1.25.0...v1.26.0">v1.25.0…v1.26.0</a> · <a href="https://lerd.sh/">docs</a> · <a href="https://github.com/gabriel-sousa99/lerd">github</a></span>
   </div>
 </footer>
 

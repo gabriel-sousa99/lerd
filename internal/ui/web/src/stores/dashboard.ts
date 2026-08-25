@@ -1,6 +1,7 @@
 import { writable, derived, get } from 'svelte/store';
 import { services, serviceAction, type Service } from './services';
 import { adminServiceFor } from './presetSuggestions';
+import { DEFAULT_DOCS_ROUTE, parseDocsHash } from './docs';
 
 export interface DashboardRef {
   name: string;
@@ -17,10 +18,12 @@ export interface DashboardRef {
 // The currently-open dashboard, either a real service or the synthetic 'docs' ref.
 export const dashboardOpen = writable<DashboardRef | null>(null);
 
+// The documentation renders in place of the iframe, from the pages embedded in
+// the binary; `dashboard` is only the lerd.sh twin the header links out to.
 const DOCS_REF: DashboardRef = {
   name: 'docs',
   label: 'Documentation',
-  dashboard: 'https://lerd.sh/getting-started/requirements'
+  dashboard: 'https://lerd.sh'
 };
 
 // PROFILER_REF is the synthetic entry for the SPX profiler. The UI is proxied
@@ -130,7 +133,7 @@ export function openDocs() {
     return;
   }
   dashboardOpen.set(DOCS_REF);
-  location.hash = 'docs';
+  location.hash = 'docs/' + DEFAULT_DOCS_ROUTE;
 }
 
 export function openProfiler() {
@@ -156,7 +159,7 @@ export const dashboardServices = derived(services, ($s) =>
 
 function refFromHash(): DashboardRef | null {
   const h = location.hash.slice(1);
-  if (h === 'docs') return DOCS_REF;
+  if (parseDocsHash(h)) return DOCS_REF;
   if (h === 'profiler') return PROFILER_REF;
   if (h.startsWith('service/')) {
     const rest = h.slice('service/'.length);
@@ -204,7 +207,7 @@ export function initDashboardRoute() {
   // Re-hydrate when services load so a #service/<name> deep-link resolves.
   services.subscribe(() => {
     const h = location.hash.slice(1);
-    if (h.startsWith('service/') || h === 'docs') {
+    if (h.startsWith('service/')) {
       dashboardOpen.set(refFromHash());
     }
   });

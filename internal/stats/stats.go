@@ -52,9 +52,11 @@ var numCPU = runtime.NumCPU
 
 const readTimeout = 6 * time.Second
 
-// CacheTTL is how often Cached pays for a refresh. Read streams
-// `podman stats --interval 1` and costs ~2s, so every surface polling this
-// package must tick faster than the TTL or it misses the cache every time.
+// CacheTTL is how often Cached pays for a refresh. It also sets the window each
+// row's CPU is averaged over, since the rate is measured between refreshes. The
+// cgroup read costs milliseconds, but the podman fallback still streams for ~2s,
+// so every surface polling this package must tick faster than the TTL or it
+// misses the cache every time.
 const CacheTTL = 10 * time.Second
 
 // Read returns a fresh snapshot. Callers that need caching go through Cached,
@@ -65,34 +67,30 @@ func Read() Snapshot {
 		UpdatedAt:  time.Now(),
 	}
 
-	// Containers (podman, ~3s stream) and host processes (systemd accounting,
-	// ~1s sample) are read concurrently so the host read hides under the longer
-	// podman one and adds no wall time.
-	var containers, hosts []ContainerStat
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); containers, _ = readerFn() }()
-	go func() { defer wg.Done(); hosts, _ = hostReaderFn() }()
-	wg.Wait()
-
-	rows := containers
-	// A container's quadlet unit (lerd-mysql.service, …) also surfaces in the
-	// host list; drop it so podman's measurement wins and it isn't counted twice.
-	isContainer := make(map[string]bool, len(containers))
-	for _, c := range containers {
-		isContainer[c.Name] = true
-	}
-	for _, h := range hosts {
-		if !isContainer[h.Name] {
-			rows = append(rows, h)
-		}
+	// Every lerd container runs as a quadlet unit, so one pass over the units'
+	// cgroups measures the containers and lerd's own daemons the same way, in a
+	// handful of file reads. `podman stats` is the fallback for a platform with no
+	// user units (macOS), where it is the only source: streaming it per refresh
+	// cost more CPU than everything it was measuring, and charged that cost to
+	// lerd-ui, which spawns it.
+	rows, _ := hostReaderFn()
+	if len(rows) == 0 {
+		rows, _ = readerFn()
 	}
 	if len(rows) == 0 {
 		return out
 	}
 	out.Available = true
 	out.Containers = rows
-	for _, r := range rows {
+	// Both sources report CPU per core. The list reads as a share of the whole
+	// host instead, so a row pegging one core of a 32-thread box is 3%, not 100%,
+	// and the rows add up to the headline rather than to something larger than it.
+	cores := float64(numCPU())
+	for i := range out.Containers {
+		if cores > 1 {
+			out.Containers[i].CPUPercent /= cores
+		}
+		r := out.Containers[i]
 		out.TotalCPUPercent += r.CPUPercent
 		out.TotalMemBytes += r.MemBytes
 		if r.MemLimit > out.HostMemBytes {
@@ -121,15 +119,6 @@ func Read() Snapshot {
 		}
 		return out.Containers[i].MemBytes > out.Containers[j].MemBytes
 	})
-	// Each row's CPU% is normalized to a single core (podman stats and the host
-	// systemd-accounting reader both report per-core), so the raw sum is per-core
-	// and on a multi-core box can far exceed 100%. The headline frames it as a
-	// share of the whole host (like the memory total), so divide by the core count
-	// to turn the per-core sum into a true host fraction. Per-row CPU% stays
-	// per-core, the intuitive "this process is pegging one core" reading.
-	if cores := numCPU(); cores > 1 {
-		out.TotalCPUPercent /= float64(cores)
-	}
 	return out
 }
 

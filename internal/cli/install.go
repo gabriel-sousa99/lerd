@@ -25,6 +25,11 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/gabriel-sousa99/lerd/internal/tray"
+
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
+	"github.com/gabriel-sousa99/lerd/internal/store"
+	"github.com/gabriel-sousa99/lerd/internal/version"
+
 	"github.com/spf13/cobra"
 )
 
@@ -353,6 +358,21 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 	ok()
 
+	// 3b. Framework store index, before the vhost pass below, which resolves a
+	// definition per site. A fresh machine has no index, and the only thing that
+	// refreshes it is the long-running watcher on a six-hour cadence, so until
+	// that first tick the only frameworks lerd can detect are the two compiled
+	// into the binary. The definitions it lists are fetched later in the run, once
+	// the containers that serve them are up. Best effort: an install with no
+	// network keeps working on the built-ins and picks the index up next time.
+	step("Fetching framework store index")
+	storeIndex, indexErr := store.NewClient().RefreshIndex()
+	if indexErr != nil {
+		feedback.Warn("could not reach the framework store, framework detection uses the built-in definitions until the next refresh")
+	} else {
+		ok()
+	}
+
 	// Ask before RunParallel steals stdin. Only offer the Laravel installer
 	// when at least one PHP version is already installed — composer needs a
 	// PHP runtime, and asking the question on a fresh install (where no
@@ -522,10 +542,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
 						continue
 					}
-					sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-					mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-					os.Remove(mainConf)          //nolint:errcheck
-					os.Rename(sslConf, mainConf) //nolint:errcheck
+					nginx.InstallSSLVhost(site.PrimaryDomain()) //nolint:errcheck
 				} else {
 					if err := nginx.GenerateHostProxyVhost(site); err != nil {
 						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
@@ -537,10 +554,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
 						continue
 					}
-					sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-					mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-					os.Remove(mainConf)          //nolint:errcheck
-					os.Rename(sslConf, mainConf) //nolint:errcheck
+					nginx.InstallSSLVhost(site.PrimaryDomain()) //nolint:errcheck
 				} else {
 					if err := nginx.GenerateCustomVhost(site); err != nil {
 						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
@@ -552,10 +566,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
 						continue
 					}
-					sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-					mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-					os.Remove(mainConf)          //nolint:errcheck
-					os.Rename(sslConf, mainConf) //nolint:errcheck
+					nginx.InstallSSLVhost(site.PrimaryDomain()) //nolint:errcheck
 				} else {
 					if err := nginx.GenerateFrankenPHPVhost(site); err != nil {
 						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
@@ -571,10 +582,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
 						continue
 					}
-					sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-					mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-					os.Remove(mainConf)          //nolint:errcheck
-					os.Rename(sslConf, mainConf) //nolint:errcheck
+					nginx.InstallSSLVhost(site.PrimaryDomain()) //nolint:errcheck
 				} else {
 					if err := nginx.GenerateVhost(site, phpVer); err != nil {
 						fmt.Printf("\n    WARN %s: %v", site.PrimaryDomain(), err)
@@ -585,15 +593,11 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 	ok()
 
-	// Note: WriteQuadlet centrally applies podman.BindForLAN based on
-	// cfg.LAN.Exposed, so containers default to binding 127.0.0.1 unless
-	// the user has run `lerd lan:expose on`. We use WriteQuadletDiff
-	// (which reports whether the on-disk file actually changed) so we
-	// can restart only the units whose binds shifted — important during
-	// the upgrade from a pre-LAN-toggle release where nginx was bound to
-	// 0.0.0.0 by default. Without the restart the running container
-	// would silently keep its old LAN-exposed bind even though the
-	// quadlet on disk now says 127.0.0.1.
+	// WriteQuadlet centrally applies the unit-aware LAN policy. Nginx follows
+	// cfg.LAN.Exposed; managed services also require cfg.LAN.ServicesExposed.
+	// WriteQuadletDiff lets this install restart only units whose binds changed.
+	// This also repairs drift from older releases without starting inactive
+	// services.
 	changedQuadlets := []string{}
 	extraVolumes := podman.ExtraVolumePaths()
 	// rewriteEmbedded handles the remaining embedded-template quadlets:
@@ -712,7 +716,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 					path := filepath.Join(config.QuadletDir(), "lerd-"+svc.Name+".container")
 					before, _ := os.ReadFile(path)
 					if svc.Custom != nil {
-						ensureCustomServiceQuadlet(svc.Custom) //nolint:errcheck
+						ensureCustomServiceQuadlet(installedServiceDefinition(svc.Name, svc.Custom)) //nolint:errcheck
 					} else {
 						ensureServiceQuadlet(svc.Name) //nolint:errcheck
 					}
@@ -744,6 +748,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		}
 		if err := podman.EnsureDevtoolsAssets(); err != nil {
 			fmt.Printf("  WARN: writing devtools assets: %v\n", err)
+		}
+		if err := podman.EnsureMailAssets(); err != nil {
+			fmt.Printf("  WARN: writing mail assets: %v\n", err)
 		}
 	}
 
@@ -798,6 +805,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		ok()
 
 		feedback.Line("configuring DNS resolver")
+		dns.NoteNixOSOwnsResolver()
 		if err := dns.ConfigureResolver(); err != nil {
 			fmt.Printf("    WARN: %v\n", err)
 		}
@@ -868,6 +876,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		ok()
 
 		feedback.Line("configuring DNS resolver")
+		dns.NoteNixOSOwnsResolver()
 		if err := dns.ConfigureResolver(); err != nil {
 			fmt.Printf("    WARN: %v\n", err)
 		}
@@ -1028,6 +1037,16 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		startPerSiteContainers()
 	}
 
+	// Pull the current preset for every installed service and re-render what it
+	// changed. A store preset that adds a file mount or moves a dashboard behind
+	// the lerd-ui proxy reaches a running container only through this pass, and
+	// the surfaces that read the preset itself switch over the moment it lands,
+	// so a service left on its old unit answers nowhere the dashboard looks.
+	// After the start above, not before: the family-discovery pass that follows a
+	// start rewrites a consumer's unit too, and a reconcile that ran first would
+	// have its restart undone by a unit written after it.
+	refreshPresetsThenReconcile()
+
 	if wantLaravelInstaller {
 		step("installing Laravel installer")
 		if err := installLaravelInstaller(); err != nil {
@@ -1073,10 +1092,13 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		regenerateHostWorkers()
 	}
 
-	refreshStoreFrameworks()
-	refreshStorePresets()
+	refreshStoreFrameworks(storeIndex)
 	refreshGlobalMCPSkills()
 	refreshProjectMCPSkills()
+
+	// Record which version this environment is set up for, so a binary a
+	// package manager swaps underneath it is recognised on the next command.
+	writeInstalledVersion(version.Version)
 
 	feedback.Begin()
 	feedback.Done("lerd installation complete")
@@ -1108,7 +1130,7 @@ func writeUserServiceWithReload(name, content string) error {
 // FrankenPHP runtimes. startRestoredServices only covers global services, so
 // without this, uninstall+reinstall leaves these quadlets stopped on disk.
 func startPerSiteContainers() {
-	units := installedCustomContainerUnits()
+	units := lifecycle.InstalledCustomContainerUnits()
 	if len(units) == 0 {
 		return
 	}
@@ -1705,18 +1727,24 @@ func readLine(r io.Reader) string {
 	return b.String()
 }
 
+// shimPreamble opens a shim with the lerd binary it should run: the path
+// recorded when the shim was written, or plain `lerd` from PATH when that path
+// has gone. A package manager that moves the binary under lerd's feet (a
+// Homebrew upgrade retires the previous version's keg) would otherwise leave
+// every shim pointing at a file that is no longer there.
+func shimPreamble(lerdBin string) string {
+	return fmt.Sprintf("#!/bin/sh\nLERD=%q\n[ -x \"$LERD\" ] || LERD=lerd\n", lerdBin)
+}
+
 func addShellShims(manageNode bool) error {
 	home, _ := os.UserHomeDir()
 	binDir := config.BinDir()
 	// Use the running binary so shims work regardless of install method
-	// (Homebrew at /opt/homebrew/bin/lerd, manual at ~/.local/bin/lerd, etc.).
-	lerdBin, _ := os.Executable()
-	if lerdBin == "" {
-		lerdBin = filepath.Join(home, ".local", "bin", "lerd")
-	}
+	// (Homebrew at /opt/homebrew/opt/lerd/bin/lerd, manual at ~/.local/bin/lerd).
+	lerdBin := config.LerdBinary()
 
 	// Write php shim
-	phpShim := fmt.Sprintf("#!/bin/sh\nexec %s php \"$@\"\n", lerdBin)
+	phpShim := shimPreamble(lerdBin) + "exec \"$LERD\" php \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(binDir, "php"), []byte(phpShim), 0755); err != nil {
 		return fmt.Errorf("writing php shim: %w", err)
 	}
@@ -1725,7 +1753,7 @@ func addShellShims(manageNode bool) error {
 	// land in lerd's bin dir as wrappers (mirroring the npm flow), falling
 	// back to a direct `lerd php composer.phar` invocation when the lerd
 	// binary is not reachable (containers where the glibc binary can't run).
-	composerShim := fmt.Sprintf("#!/bin/sh\nLERD=%q\nif [ -x \"$LERD\" ]; then\n  exec \"$LERD\" composer \"$@\"\nfi\nexec %s php %s/.local/share/lerd/bin/composer.phar \"$@\"\n", lerdBin, lerdBin, home)
+	composerShim := shimPreamble(lerdBin) + fmt.Sprintf("if [ -x \"$LERD\" ]; then\n  exec \"$LERD\" composer \"$@\"\nfi\nexec \"$LERD\" php %s/.local/share/lerd/bin/composer.phar \"$@\"\n", home)
 	if err := os.WriteFile(filepath.Join(binDir, "composer"), []byte(composerShim), 0755); err != nil {
 		return fmt.Errorf("writing composer shim: %w", err)
 	}
@@ -1739,7 +1767,7 @@ func addShellShims(manageNode bool) error {
 		}
 		composerHome = filepath.Join(xdgConfig, "composer")
 	}
-	laravelShim := fmt.Sprintf("#!/bin/sh\nexec %s php %s/vendor/bin/laravel \"$@\"\n", lerdBin, composerHome)
+	laravelShim := shimPreamble(lerdBin) + fmt.Sprintf("exec \"$LERD\" php %s/vendor/bin/laravel \"$@\"\n", composerHome)
 	if err := os.WriteFile(filepath.Join(binDir, "laravel"), []byte(laravelShim), 0755); err != nil {
 		return fmt.Errorf("writing laravel shim: %w", err)
 	}
@@ -1768,40 +1796,97 @@ func addShellShims(manageNode bool) error {
 		}
 	}
 
-	shell := os.Getenv("SHELL")
+	if pathShimDisabled() {
+		removeShellPathEntry(home)
+	} else if err := writeShellPathEntry(home, binDir); err != nil {
+		return err
+	}
+	installShellCompletions(home, lerdBin)
+	return nil
+}
 
+// pathShimDisabled reports whether the user opted out of the shell PATH entry
+// (`lerd path:disable`). Best-effort: an unreadable config keeps the default.
+func pathShimDisabled() bool {
+	cfg, err := config.LoadGlobal()
+	return err == nil && cfg != nil && cfg.Shims.PathDisabled
+}
+
+// writeShellPathEntry puts lerd's bin dir on the PATH of the user's shell:
+// an rc export for bash/zsh, a dedicated conf.d file for fish.
+func writeShellPathEntry(home, binDir string) error {
+	shell := os.Getenv("SHELL")
 	switch {
 	case isShell(shell, "fish"):
 		fishConfigDir := filepath.Join(home, ".config", "fish", "conf.d")
 		if err := os.MkdirAll(fishConfigDir, 0755); err != nil {
 			return err
 		}
-		fishConf := filepath.Join(fishConfigDir, "lerd.fish")
 		content := fmt.Sprintf("set -gx PATH %s $PATH\n", binDir)
-		if err := os.WriteFile(fishConf, []byte(content), 0644); err != nil {
-			return err
-		}
-		installCompletion(lerdBin, "fish", filepath.Join(home, ".config", "fish", "completions"), "lerd.fish")
-		return nil
+		return os.WriteFile(filepath.Join(fishConfigDir, "lerd.fish"), []byte(content), 0644)
 	case isShell(shell, "zsh"):
-		if err := appendShellRC(filepath.Join(home, ".zshrc"), binDir); err != nil {
-			return err
+		return appendShellRC(filepath.Join(home, ".zshrc"), binDir)
+	default:
+		return appendShellRC(bashRCPath(home), binDir)
+	}
+}
+
+// removeShellPathEntry removes the PATH entry writeShellPathEntry wrote, in
+// every shell's location so a shell switch leaves nothing behind: the "# Lerd"
+// block in bash/zsh rc files and the PATH line in fish's conf.d/lerd.fish
+// (deleting the file when nothing else remains). The installer's "# Added by
+// Lerd installer" block is left alone — it puts the lerd binary itself on
+// PATH, not the shims.
+func removeShellPathEntry(home string) {
+	for _, rc := range []string{
+		filepath.Join(home, ".bashrc"),
+		filepath.Join(home, ".bash_profile"),
+		filepath.Join(home, ".zshrc"),
+	} {
+		removeMarkedBlock(rc, "# Lerd", 1)
+	}
+	fishConf := filepath.Join(home, ".config", "fish", "conf.d", "lerd.fish")
+	data, err := os.ReadFile(fishConf)
+	if err != nil {
+		return
+	}
+	var kept []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "set -gx PATH ") &&
+			strings.Contains(line, config.BinDir()) {
+			continue
 		}
+		kept = append(kept, line)
+	}
+	rest := strings.Join(kept, "\n")
+	if strings.TrimSpace(rest) == "" {
+		os.Remove(fishConf) //nolint:errcheck
+		return
+	}
+	if rest != string(data) {
+		os.WriteFile(fishConf, []byte(rest), 0644) //nolint:errcheck
+	}
+}
+
+// installShellCompletions installs the completion script for the user's shell.
+// Kept separate from the PATH entry so completions for `lerd` itself survive
+// path:disable.
+func installShellCompletions(home, lerdBin string) {
+	shell := os.Getenv("SHELL")
+	switch {
+	case isShell(shell, "fish"):
+		installCompletion(lerdBin, "fish", filepath.Join(home, ".config", "fish", "completions"), "lerd.fish")
+	case isShell(shell, "zsh"):
 		zshFunctionsDir := filepath.Join(home, ".local", "share", "zsh", "site-functions")
 		if err := os.MkdirAll(zshFunctionsDir, 0755); err == nil {
 			installCompletion(lerdBin, "zsh", zshFunctionsDir, "_lerd")
 			ensureZshFpath(filepath.Join(home, ".zshrc"), zshFunctionsDir)
 		}
-		return nil
 	default:
-		if err := appendShellRC(bashRCPath(home), binDir); err != nil {
-			return err
-		}
 		bashCompDir := filepath.Join(home, ".local", "share", "bash-completion", "completions")
 		if err := os.MkdirAll(bashCompDir, 0755); err == nil {
 			installCompletion(lerdBin, "bash", bashCompDir, "lerd")
 		}
-		return nil
 	}
 }
 

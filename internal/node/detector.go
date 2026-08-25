@@ -38,28 +38,43 @@ func SafeVersion(v string) string {
 //  5. global config default
 func DetectVersion(dir string) (string, error) {
 	// 1. .lerd.yaml — explicit lerd override takes top priority
-	lerdYaml := filepath.Join(dir, ".lerd.yaml")
-	if data, err := os.ReadFile(lerdYaml); err == nil {
-		var lerdCfg struct {
-			NodeVersion string `yaml:"node_version"`
-		}
-		// Unlike .nvmrc and .node-version below, this value is not reduced to a
-		// numeric major, so a full pin survives. It still has to be version
-		// shaped: it is repository content and ends up on a command line.
-		if yaml.Unmarshal(data, &lerdCfg) == nil {
-			if v := SafeVersion(lerdCfg.NodeVersion); v != "" {
-				return v, nil
-			}
-		}
+	if v := pinnedVersion(dir); v != "" {
+		return v, nil
 	}
+	v, _ := UnpinnedVersion(dir)
+	return v, nil
+}
 
+// pinnedVersion returns the .lerd.yaml node_version override for dir, empty
+// when there is none. Unlike .nvmrc and .node-version it is not reduced to a
+// numeric major, so a full pin survives. It still has to be version shaped: it
+// is repository content and ends up on a command line.
+func pinnedVersion(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, ".lerd.yaml"))
+	if err != nil {
+		return ""
+	}
+	var lerdCfg struct {
+		NodeVersion string `yaml:"node_version"`
+	}
+	if yaml.Unmarshal(data, &lerdCfg) != nil {
+		return ""
+	}
+	return SafeVersion(lerdCfg.NodeVersion)
+}
+
+// UnpinnedVersion resolves the version dir gets while .lerd.yaml carries no
+// node_version, and names where that answer came from. The setup wizard writes
+// that pin, so the version an unanswered field accepts has to be resolved with
+// the pin left out of the order.
+func UnpinnedVersion(dir string) (version, source string) {
 	// 2. .nvmrc
 	nvmrc := filepath.Join(dir, ".nvmrc")
 	if data, err := os.ReadFile(nvmrc); err == nil {
 		v := strings.TrimSpace(string(data))
 		v = strings.TrimPrefix(v, "v")
 		if major := extractMajor(v); isNumericVersion(major) {
-			return major, nil
+			return major, ".nvmrc"
 		}
 	}
 
@@ -69,7 +84,7 @@ func DetectVersion(dir string) (string, error) {
 		v := strings.TrimSpace(string(data))
 		v = strings.TrimPrefix(v, "v")
 		if major := extractMajor(v); isNumericVersion(major) {
-			return major, nil
+			return major, ".node-version"
 		}
 	}
 
@@ -77,7 +92,7 @@ func DetectVersion(dir string) (string, error) {
 	// before package.json constraints would otherwise let any installed
 	// version satisfying engines.node win.
 	if site, ok := config.ParentSiteForWorktreeDir(dir); ok && site.NodeVersion != "" {
-		return site.NodeVersion, nil
+		return site.NodeVersion, "the parent checkout"
 	}
 
 	// 3. package.json engines.node
@@ -90,7 +105,7 @@ func DetectVersion(dir string) (string, error) {
 		}
 		if json.Unmarshal(data, &pkg) == nil && pkg.Engines.Node != "" {
 			if v := parseNodeConstraint(pkg.Engines.Node); v != "" {
-				return v, nil
+				return v, "package.json"
 			}
 		}
 	}
@@ -98,9 +113,9 @@ func DetectVersion(dir string) (string, error) {
 	// 4. global config default
 	cfg, err := config.LoadGlobal()
 	if err != nil {
-		return "22", nil
+		return "22", "the lerd default"
 	}
-	return cfg.Node.DefaultVersion, nil
+	return cfg.Node.DefaultVersion, "the lerd default"
 }
 
 // extractMajor returns the major version number from a semver-like string.

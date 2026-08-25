@@ -43,6 +43,7 @@ func TestDemoteFrankenPHPToFPM_stopsContainerAndRecreatesWorkers(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmp)
 	t.Setenv("XDG_CONFIG_HOME", tmp)
+	isolateLaunchAgents(t)
 	fakePodmanOnPath(t)
 
 	rec := &recordingLifecycle{}

@@ -6,17 +6,19 @@ import (
 )
 
 // The full PHP version (e.g. "8.5.1") is not something status can read cheaply:
-// it lives inside the image. We probe it once per image build with a throwaway
-// container and cache it, keyed on the image's containerfile hash so a rebuild
-// re-probes. buildStatus reads the cache only — the probe runs in the
+// it lives inside the image. We probe it once per image with a throwaway
+// container and cache it, keyed on the image ID so every rebuild re-probes —
+// including a base-image update, which ships a new PHP patch without touching
+// the containerfile. buildStatus reads the cache only — the probe runs in the
 // background — so the status hot path never blocks on podman.
 var (
-	phpVerMu       sync.Mutex
-	phpVerCache    = map[string]phpVerEntry{}
-	phpVerInflight = map[string]bool{}
+	phpVerMu     sync.Mutex
+	phpVerCache  = map[string]phpVerEntry{}
+	phpVerProbes = map[string]*sync.Mutex{}
+	imageIDFn    = FPMImageID
 )
 
-type phpVerEntry struct{ hash, patch string }
+type phpVerEntry struct{ imageID, patch string }
 
 // FPMPHPVersion returns the cached full PHP version for a version's FPM image,
 // or "" when it has not been probed yet or the image is not built. It never
@@ -30,31 +32,50 @@ func FPMPHPVersion(version string) string {
 	return patch
 }
 
-// refreshPHPVersion probes the image's PHP version and caches it, unless the
-// cache is already fresh for the current image hash. Safe to call concurrently:
-// one probe per version runs at a time.
+// RefreshFPMPHPVersion probes synchronously, waiting for a probe already in
+// flight rather than skipping it. A caller that has just rebuilt the image uses
+// it to get the new patch into the cache before it reports the build done, so
+// the status that follows carries the number rather than nothing.
+func RefreshFPMPHPVersion(version string) {
+	mu := phpVerProbeMu(version)
+	mu.Lock()
+	defer mu.Unlock()
+	probePHPVersion(version)
+}
+
+// refreshPHPVersion is the background path: it gives up when another probe for
+// the version is running, since that one fills the same cache entry.
 func refreshPHPVersion(version string) {
-	phpVerMu.Lock()
-	if phpVerInflight[version] {
-		phpVerMu.Unlock()
+	mu := phpVerProbeMu(version)
+	if !mu.TryLock() {
 		return
 	}
-	phpVerInflight[version] = true
-	phpVerMu.Unlock()
-	defer func() {
-		phpVerMu.Lock()
-		phpVerInflight[version] = false
-		phpVerMu.Unlock()
-	}()
+	defer mu.Unlock()
+	probePHPVersion(version)
+}
 
-	hash := imageLabelFn(FPMImageName(version), fpmContainerfileHashLabel)
-	if hash == "" {
-		return // image not built (or predates the label)
+func phpVerProbeMu(version string) *sync.Mutex {
+	phpVerMu.Lock()
+	defer phpVerMu.Unlock()
+	mu, ok := phpVerProbes[version]
+	if !ok {
+		mu = &sync.Mutex{}
+		phpVerProbes[version] = mu
+	}
+	return mu
+}
+
+// probePHPVersion reads the PHP version out of the image and caches it, unless
+// the cache already holds it for the image that is there now.
+func probePHPVersion(version string) {
+	id := imageIDFn(version)
+	if id == "" {
+		return // image not built
 	}
 	phpVerMu.Lock()
 	cur, ok := phpVerCache[version]
 	phpVerMu.Unlock()
-	if ok && cur.hash == hash {
+	if ok && cur.imageID == id {
 		return // already fresh for this image
 	}
 
@@ -67,6 +88,6 @@ func refreshPHPVersion(version string) {
 		return
 	}
 	phpVerMu.Lock()
-	phpVerCache[version] = phpVerEntry{hash: hash, patch: patch}
+	phpVerCache[version] = phpVerEntry{imageID: id, patch: patch}
 	phpVerMu.Unlock()
 }

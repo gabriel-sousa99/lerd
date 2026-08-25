@@ -58,7 +58,7 @@ func MigrateService(name, targetImage string, emit func(PhaseEvent)) error {
 	if err := os.MkdirAll(config.BackupsDir(), 0700); err != nil {
 		return fmt.Errorf("creating backups dir: %w", err)
 	}
-	if err := startEngineForMigrate(name, fam, emit); err != nil {
+	if err := startEngineForDump(name, fam, emit); err != nil {
 		return err
 	}
 	return fn(name, targetImage, emit)
@@ -76,10 +76,11 @@ func migrateProbe(family string) string {
 	return ""
 }
 
-// startEngineForMigrate brings the engine up before the dump. A service that no
-// site uses is auto-stopped, and the dump execs into its container, so migrating
-// one in that state failed on "no such container" before anything had run.
-func startEngineForMigrate(name, family string, emit func(PhaseEvent)) error {
+// startEngineForDump brings the engine up before a dump. A service that no site
+// uses is auto-stopped, and the dump execs into its container, so dumping one in
+// that state failed on "no such container" before anything had run. Families
+// with no dump-time probe of their own wait on the generic readiness check.
+func startEngineForDump(name, family string, emit func(PhaseEvent)) error {
 	unit := "lerd-" + name
 	if status, _ := podman.UnitStatus(unit); status == "active" {
 		return nil
@@ -88,7 +89,11 @@ func startEngineForMigrate(name, family string, emit func(PhaseEvent)) error {
 	if err := podman.StartUnit(unit); err != nil {
 		return fmt.Errorf("starting %s to dump from: %w", unit, err)
 	}
-	return waitContainerReady(unit, migrateProbe(family), snapshotEnv(family), 90*time.Second)
+	probe := migrateProbe(family)
+	if probe == "" {
+		return podman.WaitReady(name, 90*time.Second)
+	}
+	return waitContainerReady(unit, probe, snapshotEnv(family), 90*time.Second)
 }
 
 // familyOf returns the service family for a default preset or installed
@@ -203,8 +208,10 @@ func runStreaming(cmd *exec.Cmd, out *os.File) error {
 	return nil
 }
 
-// restoreFromHost streams a host file into a container command's stdin.
-func restoreFromHost(container, shellCmd string, envPairs []string, hostPath string, timeout time.Duration) (ImportReport, error) {
+// restoreFromHost streams a host file into a container command's stdin. The
+// expected complaints are the ones the load's declared import says it always
+// makes, which the report then leaves out of its error count.
+func restoreFromHost(container, shellCmd string, envPairs []string, hostPath string, timeout time.Duration, expected []string) (ImportReport, error) {
 	in, err := os.Open(hostPath)
 	if err != nil {
 		return ImportReport{}, fmt.Errorf("opening dump file %s: %w", hostPath, err)
@@ -223,7 +230,7 @@ func restoreFromHost(container, shellCmd string, envPairs []string, hostPath str
 	if err != nil {
 		return ImportReport{}, fmt.Errorf("restore command failed: %w\n%s", err, string(out))
 	}
-	return parseImportOutput(string(out)), nil
+	return parseImportOutput(string(out), expected), nil
 }
 
 // swapDataDirAside moves the current data dir to a timestamped backup name so
@@ -436,7 +443,7 @@ func migrateMysql(name, targetImage string, emit func(PhaseEvent)) error {
 	}
 
 	emit(PhaseEvent{Phase: "restoring_data", Message: dump})
-	rep, err := restoreFromHost(unit, mysqlMigrateRestoreCommand(), rootEnv, dump, dumpRestoreTimeout)
+	rep, err := restoreFromHost(unit, mysqlMigrateRestoreCommand(), rootEnv, dump, dumpRestoreTimeout, ExpectedImportErrors(name, true))
 	if err != nil {
 		return fmt.Errorf("restore: %w. Dump preserved at %s; old data dir at %s", err, dump, backup)
 	}
@@ -501,7 +508,7 @@ func migratePostgres(name, targetImage string, emit func(PhaseEvent)) error {
 
 	emit(PhaseEvent{Phase: "restoring_data", Message: dump})
 	restoreCmd := "psql -h 127.0.0.1 -U postgres -d postgres 2>&1"
-	rep, err := restoreFromHost(unit, restoreCmd, pgEnv, dump, dumpRestoreTimeout)
+	rep, err := restoreFromHost(unit, restoreCmd, pgEnv, dump, dumpRestoreTimeout, ExpectedImportErrors(name, true))
 	if err != nil {
 		return fmt.Errorf("restore: %w. Dump preserved at %s; old data dir at %s", err, dump, backup)
 	}

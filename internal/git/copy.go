@@ -1,6 +1,8 @@
 package git
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
@@ -112,12 +116,21 @@ func InstallDependencies(projectPath string, out io.Writer) error {
 		composer := filepath.Join(config.BinDir(), "composer")
 		if err := runIn(projectPath, out, composer, "install", "--no-interaction", "--no-progress"); err != nil {
 			errs = append(errs, fmt.Errorf("composer install: %w", err))
+		} else {
+			stampInstallMarker(filepath.Join(projectPath, "vendor", "composer", "installed.json"))
 		}
 	}
 
 	if jsNeedsInstall(projectPath) {
-		if err := runJSInstall(projectPath, out); err != nil {
+		marker, ref := jsInstallPaths(projectPath)
+		digest := fileDigest(ref)
+		if jsInstallAlreadyFailed(digest) {
+			errs = append(errs, fmt.Errorf("js install: skipped, %s already failed to install earlier in this pass", filepath.Base(ref)))
+		} else if err := jsInstaller(projectPath, out); err != nil {
+			recordJSInstallFailure(digest)
 			errs = append(errs, err)
+		} else {
+			stampInstallMarker(marker)
 		}
 	}
 
@@ -223,6 +236,29 @@ func jsInstallPaths(projectPath string) (marker, ref string) {
 // the reference file. A missing reference (lockfile/manifest) is treated
 // as "no signal" and the marker is trusted: in that pathological case we
 // avoid spurious reinstalls.
+// stampInstallMarker moves an install marker's mtime to now, after the install
+// that owns it has succeeded.
+//
+// Composer and npm only rewrite these files when the package set actually
+// changes, so an install against a tree that is already correct exits with
+// "nothing to install" and leaves the marker's mtime where it was. When that
+// mtime predates the lockfile, every later staleness check says an install is
+// needed and the install is run again, forever. A worktree is the normal way to
+// get there: it is seeded with a copy of the main repo's vendor/, whose marker
+// carries the main repo's older timestamp, while its lockfile is freshly checked
+// out. The watcher's rescan then re-ran composer install on that worktree once a
+// minute for the life of the daemon.
+//
+// A missing marker is left alone: nothing was installed, so there is nothing to
+// vouch for, and the check should keep asking.
+func stampInstallMarker(marker string) {
+	if _, err := os.Stat(marker); err != nil {
+		return
+	}
+	now := time.Now()
+	_ = os.Chtimes(marker, now, now)
+}
+
 func markerStale(marker, ref string) bool {
 	refInfo, err := os.Stat(ref)
 	if err != nil {
@@ -255,6 +291,61 @@ func jsPackageManager(projectPath string) (name string, args []string) {
 	default:
 		return "npm", []string{"install", "--no-progress"}
 	}
+}
+
+// jsInstaller is the JS install step, indirected so tests can observe how
+// often it is actually reached.
+var jsInstaller = runJSInstall
+
+// jsInstallFailed remembers the lockfile digests whose JS install has already
+// failed during the current reconcile pass. A worktree is seeded from its main
+// repo, so a lockfile npm refuses is the same lockfile in every worktree of
+// that repo and fails identically in each, for seconds at a time. Keying on the
+// lockfile rather than the path pays that failure once: a branch carrying a
+// different lockfile still gets its own attempt.
+var (
+	jsInstallFailedMu sync.Mutex
+	jsInstallFailed   = map[string]bool{}
+)
+
+// ResetJSInstallFailures clears the memo. The watcher calls it at the start of
+// each reconcile pass, so a lockfile the user has since fixed, or one whose
+// install only failed because the registry was unreachable, is tried again.
+func ResetJSInstallFailures() {
+	jsInstallFailedMu.Lock()
+	defer jsInstallFailedMu.Unlock()
+	clear(jsInstallFailed)
+}
+
+// jsInstallAlreadyFailed reports whether this lockfile has failed in this pass.
+// An empty digest (unreadable lockfile) is never memoised, so nothing is
+// skipped on the strength of a reference we could not read.
+func jsInstallAlreadyFailed(digest string) bool {
+	if digest == "" {
+		return false
+	}
+	jsInstallFailedMu.Lock()
+	defer jsInstallFailedMu.Unlock()
+	return jsInstallFailed[digest]
+}
+
+func recordJSInstallFailure(digest string) {
+	if digest == "" {
+		return
+	}
+	jsInstallFailedMu.Lock()
+	defer jsInstallFailedMu.Unlock()
+	jsInstallFailed[digest] = true
+}
+
+// fileDigest returns a content hash of path, or "" when it cannot be read.
+func fileDigest(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // runJSInstall resolves the chosen package manager's binary and runs the

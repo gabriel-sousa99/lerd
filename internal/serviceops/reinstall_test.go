@@ -76,7 +76,7 @@ func TestReinstallService_FailsIfNotInstalled(t *testing.T) {
 	stubPodmanRemove(t)
 	stubReinstallSeams(t)
 
-	err := ReinstallService("unknown-svc", false, func(PhaseEvent) {})
+	err := ReinstallService("unknown-svc", ReinstallOptions{}, func(PhaseEvent) {})
 	if err == nil {
 		t.Fatal("expected error reinstalling a service that was never installed")
 	}
@@ -94,7 +94,7 @@ func TestReinstallService_PreservesVersionFromCustomServiceYAML(t *testing.T) {
 
 	saveCustomServiceForReinstall(t, "myservice", "1.2.3")
 
-	if err := ReinstallService("myservice", false, func(PhaseEvent) {}); err != nil {
+	if err := ReinstallService("myservice", ReinstallOptions{}, func(PhaseEvent) {}); err != nil {
 		t.Fatalf("ReinstallService: %v", err)
 	}
 	if len(rec.installCalls) != 1 {
@@ -116,7 +116,7 @@ func TestReinstallService_NoResetData_SkipsReprovision(t *testing.T) {
 	rec := stubReinstallSeams(t)
 	saveCustomServiceForReinstall(t, "mariadb", "11.4")
 
-	if err := ReinstallService("mariadb", false, func(PhaseEvent) {}); err != nil {
+	if err := ReinstallService("mariadb", ReinstallOptions{}, func(PhaseEvent) {}); err != nil {
 		t.Fatalf("ReinstallService: %v", err)
 	}
 	if len(rec.reprovCalls) != 0 {
@@ -132,7 +132,7 @@ func TestReinstallService_ResetData_CallsReprovision(t *testing.T) {
 	rec := stubReinstallSeams(t)
 	saveCustomServiceForReinstall(t, "postgres", "16")
 
-	if err := ReinstallService("postgres", true, func(PhaseEvent) {}); err != nil {
+	if err := ReinstallService("postgres", ReinstallOptions{ResetData: true}, func(PhaseEvent) {}); err != nil {
 		t.Fatalf("ReinstallService: %v", err)
 	}
 	if len(rec.reprovCalls) != 1 || rec.reprovCalls[0] != "postgres" {
@@ -149,7 +149,7 @@ func TestReinstallService_EmitsReinstallStartingPhase(t *testing.T) {
 	saveCustomServiceForReinstall(t, "mariadb", "11.4")
 
 	var events []PhaseEvent
-	if err := ReinstallService("mariadb", false, func(e PhaseEvent) { events = append(events, e) }); err != nil {
+	if err := ReinstallService("mariadb", ReinstallOptions{}, func(e PhaseEvent) { events = append(events, e) }); err != nil {
 		t.Fatalf("ReinstallService: %v", err)
 	}
 	if len(events) == 0 || events[0].Phase != "reinstall_starting" {

@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
@@ -18,7 +19,8 @@ var frameworkSignals = map[string]bool{
 // Watch monitors the given directories for new and deleted project subdirectories.
 // onNew is called when a framework signal file appears in a direct subdirectory of a parked dir.
 // onRemoved is called when a watched subdirectory is deleted.
-func Watch(dirs []string, onNew func(path string), onRemoved func(path string)) error {
+// It returns when ctx is canceled, so a shutdown unblocks it instead of killing the process.
+func Watch(ctx context.Context, dirs []string, onNew func(path string), onRemoved func(path string)) error {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -52,6 +54,8 @@ func Watch(dirs []string, onNew func(path string), onRemoved func(path string)) 
 
 	for {
 		select {
+		case <-ctx.Done():
+			return nil
 		case event, ok := <-w.Events:
 			if !ok {
 				return nil

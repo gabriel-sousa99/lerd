@@ -3,12 +3,13 @@
 
   interface Props {
     tone: BadgeTone;
+    brand?: string;
     dot?: boolean;
     title?: string;
     onclick?: (e: MouseEvent) => void;
     label: string;
   }
-  let { tone, dot, title, onclick, label }: Props = $props();
+  let { tone, brand, dot, title, onclick, label }: Props = $props();
 </script>
 
-<Badge {tone} {dot} {title} {onclick}>{label}</Badge>
+<Badge {tone} {brand} {dot} {title} {onclick}>{label}</Badge>

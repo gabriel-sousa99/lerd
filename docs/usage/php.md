@@ -7,7 +7,7 @@
 | `lerd use <version>` | Set the global PHP version and build the FPM image if needed |
 | `lerd isolate <version>` | Pin PHP version for cwd: writes `.php-version` and updates `.lerd.yaml` if it exists, then re-links |
 | `lerd php:list` | List all installed PHP-FPM versions |
-| `lerd php:rebuild [--local]` | Force-rebuild all installed PHP-FPM images; `--local` builds from source instead of pulling a base |
+| `lerd php:rebuild [version] [--local]` | Force-rebuild PHP-FPM images, or add a version this machine does not have yet; `--local` builds from source instead of pulling a base |
 | `lerd fetch [version...] [--local]` | Pull pre-built PHP FPM base images from ghcr.io; `--local` builds from source instead |
 | `lerd xdebug on [version] [--mode MODE] [--on-demand]` | Enable Xdebug for a PHP version with the given mode (default `debug`) and restart the FPM container. `--on-demand` sets `start_with_request=trigger` so nothing auto-connects |
 | `lerd xdebug off [version]` | Disable Xdebug and restart the FPM container |
@@ -56,6 +56,8 @@ composer install
 
 Because the `php` shim runs inside the PHP-FPM container, `php artisan`, `lerd artisan`, and the MCP `exec` tool's `artisan` action are all equivalent; they all execute inside the same container with the same PHP version and extensions. Use whichever form you prefer.
 
+Prefer typing `lerd php` explicitly and keeping `php` pointed at a host install? Run `lerd path:disable`: it removes lerd's shims dir from your shell PATH and keeps installs and updates from re-adding it, while every `lerd …` command works unchanged (child processes lerd spawns still resolve the shims internally). `lerd path:enable` reverses it. One thing to know either way: the shimmed `php` runs inside the container, so a PHP script that `exec()`s host tools sees the container's PATH, not your shell's — with the shim disabled, a host `php` behaves like any other host process.
+
 ### Shortcuts and `vendor/bin` fallback
 
 For common workflows there are a few built-in shortcuts:
@@ -75,6 +77,20 @@ lerd rector process
 These run inside the project's PHP-FPM container with the project's working directory mounted, so configuration files (`pest.xml`, `pint.json`, `phpstan.neon`, etc.) are picked up automatically. Real lerd commands always take precedence; if you have a `vendor/bin/composer`, `lerd composer` still resolves to the built-in command.
 
 The MCP integration exposes the same surface through two tools, `vendor_bins` (list available binaries) and `vendor_run` (execute one), so AI assistants can discover and run project tooling without per-project configuration.
+
+### IDE quality tools
+
+An IDE runs PHPStan, Psalm, PHP CS Fixer, PHP_CodeSniffer and Rector against a copy of the buffer you are editing rather than against the file in the project tree, and it writes that copy into its own temp directory, usually somewhere under `/tmp`. Nothing under an ephemeral system tree is mounted into the PHP container, so a tool pointed at one of those copies would report a file that does not exist.
+
+The `php` shim handles it. Any absolute path passed as an argument to the tool that the container cannot reach is copied into a scratch directory it can, the argument is rewritten to the copy, and the tool's output is rewritten back so every diagnostic still names the path your IDE passed in and lands on the right line of the right file. Tools that fix in place rather than only report, `php-cs-fixer fix` and `phpcbf`, get their changes copied back over the original before the command returns. Nothing needs configuring: point the IDE's PHP interpreter at `~/.local/share/lerd/bin/php` and the quality tools work as they would against a host PHP.
+
+The copy is what makes it work, so there is a ceiling on it. A path larger than 64 MB is refused with a message rather than duplicated, because a data file that size is not IDE scratch and wants a real mount, either by parking the directory it lives in or by listing it under `mounts:` in `~/.config/lerd/config.yaml`.
+
+### Terminal colours
+
+Commands that run in a container get the colour capability of the terminal you started them from. `lerd php`, `lerd composer`, `lerd console`, `lerd shell` and the shell you open from the TUI forward `COLORTERM`, so Symfony Console, laravel/prompts, Pest, the Filament CLI and starship pick the same colour mode inside the container as the same tools do against a host PHP. Without it, podman hands the container a sixteen-colour terminal and anything styled with hex or 256 colours is flattened to the nearest basic colour.
+
+`NO_COLOR` and `FORCE_COLOR` travel with it, so a preference set in your shell holds on both sides of the boundary. `TERM` is deliberately not forwarded: the image only carries terminfo for the xterm family, and a terminal that names itself `foot` or `wezterm` would end up with no colour at all. A terminal that advertises more than sixteen colours gets `TERM=xterm-256color` instead of its own value, which keeps the 256-colour path reachable too. `lerd tinker` is the exception and still runs uncoloured, since its output is captured and rendered by the UI rather than written to your terminal.
 
 ---
 
@@ -141,6 +157,8 @@ Lerd automatically manages which PHP-FPM containers are running based on which v
 **Auto-start**: FPM is started automatically when you link a site (`lerd link`, `lerd park`, `lerd isolate`) or change the global default (`lerd use`). When unpausing a site, lerd also ensures the required FPM container is running before restoring the nginx vhost.
 
 **Build on first use**: when a link lands on a PHP version this machine has never built (an older framework clamps to a version below the ones you have, say), `lerd link` builds that version's image before starting it, so the site serves rather than answering 502. The build streams its progress as a link step. If the build cannot run (an unattended `lerd park` sweep withholds builds) or fails, the site is still registered and lerd names the one command that finishes the job, `lerd php:rebuild <version>`.
+
+**Adding a version by hand**: `lerd php:rebuild <version>` names a version this machine has never installed and installs it, registering the unit before it builds so the version shows up in `lerd php:list` either way. That is the command every surface points at when one is missing, so a pin written ahead of the install (`lerd isolate 8.4` in a directory that is not a site yet) has a way to be satisfied without waiting for a link.
 
 **Manual control**: unused PHP versions (no active sites) can be started and stopped manually from the dashboard (System > PHP > Start / Stop). From the CLI:
 

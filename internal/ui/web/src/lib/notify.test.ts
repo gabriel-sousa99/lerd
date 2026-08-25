@@ -581,6 +581,41 @@ describe('in-app notifications', () => {
     hasFocus.mockRestore();
   });
 
+  it('leaves a downed worker to the health banner instead of a toast', async () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const { initNotify, inAppNotifications, notificationHistory } = await import('./notify');
+    const { wsMessage } = await import('./ws');
+
+    initNotify();
+    wsMessage.set({
+      type: 'notification',
+      notification: { kind: 'worker_failed', title: 'Worker failed', body: 'queue on acme' }
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(get(inAppNotifications)).toHaveLength(0);
+    expect(get(notificationHistory)[0].kind).toBe('worker_failed');
+    hasFocus.mockRestore();
+  });
+
+  it('still shows a downed worker on the desktop when the window is away', async () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { initNotify } = await import('./notify');
+    const { wsMessage } = await import('./ws');
+
+    initNotify();
+    wsMessage.set({
+      type: 'notification',
+      notification: { kind: 'worker_failed', title: 'Worker failed', body: 'queue on acme' }
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(swShows).toHaveLength(1);
+    hasFocus.mockRestore();
+  });
+
   it('reports a failure even with notifications muted', async () => {
     const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
     const { initNotify, setNotifyMaster, inAppNotifications } = await import('./notify');

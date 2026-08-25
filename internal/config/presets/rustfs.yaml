@@ -26,6 +26,7 @@ env_vars:
   - AWS_USE_PATH_STYLE_ENDPOINT=true
 category: storage
 icon: storage
+color: "#0196d0"
 introspect:
   entities:
     - kind: buckets

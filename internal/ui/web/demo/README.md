@@ -12,7 +12,11 @@ How it works:
 - `fixtures/` are real `/api/*` responses captured from a running daemon, then
   sanitized (site names, domains, paths and app names swapped for demo values).
   Regenerate the same way: snapshot the endpoints, scrub identifying fields.
-- The theme is forced to dark to match the landing page.
+- The theme follows the system preference, so a capture of the demo has to pin
+  the browser to dark rather than assume it.
+- Service, framework and worker marks come from `fixtures/*-marks.json` and
+  `fixtures/service-icons.json`, captured off a running daemon the same way
+  every other fixture is. Recapture them when the stores publish new artwork.
 
 Build it:
 

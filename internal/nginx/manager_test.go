@@ -223,6 +223,136 @@ func TestGenerateCustomVhost_honoursProjectRequestTimeout(t *testing.T) {
 	}
 }
 
+// ── proxy path (worker Proxy) ─────────────────────────────────────────────────
+
+// proxySite writes a .lerd.yaml declaring a Laravel project with one custom
+// worker carrying the given Proxy, and returns a config.Site pointing at it.
+// laravel is a builtinFramework, so GetFrameworkForDir resolves it (and merges
+// the custom worker) without needing a real frameworks store checkout.
+func proxySite(t *testing.T, name string, proxy *config.WorkerProxy) config.Site {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".lerd.yaml"), []byte("framework: laravel\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := config.LoadProjectConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadProjectConfig: %v", err)
+	}
+	proj.CustomWorkers = map[string]config.FrameworkWorker{
+		"ws": {Command: "php artisan ws:serve", Proxy: proxy},
+	}
+	if err := config.SaveProjectConfig(dir, proj); err != nil {
+		t.Fatalf("SaveProjectConfig: %v", err)
+	}
+	return config.Site{Name: name, Domains: []string{name + ".test"}, Path: dir, Framework: "laravel"}
+}
+
+// The location block must anchor the proxy path so it only matches that exact
+// path and its subpaths, not another path that merely shares the same prefix
+// (nginx's bare `location /app {` is a prefix match, so it would also catch
+// `/appfoo`, an unrelated route landing on the wrong backend).
+func TestGenerateVhost_proxyPathAnchored(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Path: "/app", DefaultPort: 6001})
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	if !strings.Contains(content, `location ~ ^/app(/|$) {`) {
+		t.Errorf("expected an anchored regex location for /app, got:\n%s", content)
+	}
+}
+
+func TestGenerateSSLVhost_proxyPathAnchored(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Path: "/app", DefaultPort: 6001})
+	if err := GenerateSSLVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateSSLVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test-ssl.conf"))
+	if !strings.Contains(content, `location ~ ^/app(/|$) {`) {
+		t.Errorf("expected an anchored regex location for /app, got:\n%s", content)
+	}
+}
+
+// A framework-declared proxy path reaches the template as a regex, but is
+// meant as a literal path: "/socket.io" is a common one in the wild, and an
+// unescaped "." would also match "/socketXio", an unrelated path lucky enough
+// to share the same shape. detectSiteProxy must regexp.QuoteMeta it.
+func TestGenerateVhost_proxyPathWithRegexMetacharsIsEscaped(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Path: "/socket.io", DefaultPort: 6001})
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	if !strings.Contains(content, `location ~ ^/socket\.io(/|$) {`) {
+		t.Errorf("expected the literal dot in /socket.io to be regex-escaped, got:\n%s", content)
+	}
+}
+
+// A path declared with a trailing slash must anchor the same as one without.
+// `^/app/(/|$)` matches only the literal string "/app/" and nothing else, not
+// "/app" and not anything under it, so the trailing slash must be trimmed
+// before the path reaches the template.
+func TestGenerateVhost_proxyPathTrailingSlashIsTrimmed(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Path: "/app/", DefaultPort: 6001})
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	if !strings.Contains(content, `location ~ ^/app(/|$) {`) {
+		t.Errorf("expected the trailing slash trimmed from /app/, got:\n%s", content)
+	}
+}
+
+// A worker mounted at the site root must proxy the root and everything below
+// it. "/" trims to empty, and restoring it to "/" renders `^/(/|$)`, which
+// matches "/" and "//" and nothing else. Left empty it renders `^(/|$)`, every
+// path the site can serve.
+func TestGenerateVhost_proxyPathRootProxiesEverything(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Path: "/", DefaultPort: 6001})
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	if !strings.Contains(content, `location ~ ^(/|$) {`) {
+		t.Errorf("expected a root proxy matching every path, got:\n%s", content)
+	}
+}
+
+// A path written without its leading slash is the third way to declare one that
+// silently never fires: nginx matches the location against a URI that always
+// starts with "/", so `^app(/|$)` can never match. It means "/app".
+func TestGenerateVhost_proxyPathWithoutLeadingSlashIsNormalised(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Path: "app", DefaultPort: 6001})
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	if !strings.Contains(content, `location ~ ^/app(/|$) {`) {
+		t.Errorf("expected a leading slash added to app, got:\n%s", content)
+	}
+}
+
+// A proxy declaring no path at all names nothing to proxy. It must not fall
+// through to the root and quietly capture the whole site.
+func TestGenerateVhost_proxyWithoutPathIsNotProxied(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{DefaultPort: 6001})
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	if strings.Contains(content, "proxy_pass http://$proxybackend") {
+		t.Errorf("expected no proxy location for a proxy with no path, got:\n%s", content)
+	}
+}
+
 // ── GenerateHostProxyVhost ────────────────────────────────────────────────────
 
 func TestGenerateHostProxyVhost_proxiesToHostPort(t *testing.T) {
@@ -599,6 +729,44 @@ func TestRemoveVhost_noError_whenMissing(t *testing.T) {
 	}
 }
 
+// ── InstallSSLVhost ───────────────────────────────────────────────────────────
+
+// conf.d is a glob, so a generated -ssl.conf that is never installed is loaded
+// as a second server block for the same names, and it sorts ahead of the file
+// every other path rewrites. Installing it is what leaves one file serving the
+// site.
+func TestInstallSSLVhost_leavesOnlyTheServedConf(t *testing.T) {
+	confD := setupConfD(t)
+	os.MkdirAll(confD, 0755)
+	os.WriteFile(filepath.Join(confD, "myapp.test.conf"), []byte("http vhost"), 0644)
+	os.WriteFile(filepath.Join(confD, "myapp.test-ssl.conf"), []byte("ssl vhost"), 0644)
+
+	if err := InstallSSLVhost("myapp.test"); err != nil {
+		t.Fatalf("InstallSSLVhost: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(confD, "myapp.test-ssl.conf")); !os.IsNotExist(err) {
+		t.Error("expected -ssl.conf to be moved, not left beside the served conf")
+	}
+	if got := readConf(t, filepath.Join(confD, "myapp.test.conf")); got != "ssl vhost" {
+		t.Errorf("served conf = %q, want the SSL render", got)
+	}
+}
+
+// Securing a site that was never rendered over plain HTTP has no .conf to
+// displace, and a missing one is not a failure.
+func TestInstallSSLVhost_withoutAnExistingConf(t *testing.T) {
+	confD := setupConfD(t)
+	os.MkdirAll(confD, 0755)
+	os.WriteFile(filepath.Join(confD, "fresh.test-ssl.conf"), []byte("ssl vhost"), 0644)
+
+	if err := InstallSSLVhost("fresh.test"); err != nil {
+		t.Fatalf("InstallSSLVhost: %v", err)
+	}
+	if got := readConf(t, filepath.Join(confD, "fresh.test.conf")); got != "ssl vhost" {
+		t.Errorf("served conf = %q, want the SSL render", got)
+	}
+}
+
 // ── EnsureDefaultVhost ────────────────────────────────────────────────────────
 
 // ── RepairVhosts ─────────────────────────────────────────────────────────────
@@ -664,6 +832,53 @@ server {
 	}
 
 	// Verify site registry was updated.
+	reg, err := config.LoadSites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range reg.Sites {
+		if s.Name == "myapp" && s.Secured {
+			t.Error("expected site.Secured to be false after repair")
+		}
+	}
+}
+
+// A half-installed render leaves <domain>-ssl.conf beside the served vhost.
+// nginx loads it too, so once the certificate goes the sidecar takes every
+// reload down with it, and the repair has to reach the site behind the name.
+func TestRepairVhosts_missingCertRepairsSSLSidecar(t *testing.T) {
+	confD, _ := setupRepairEnv(t, `sites:
+- name: myapp
+  domains:
+    - myapp.test
+  path: /srv/myapp
+  php_version: "8.4"
+  secured: true
+`)
+
+	sslConf := `server {
+    listen 443 ssl;
+    server_name myapp.test *.myapp.test;
+    root /srv/myapp/public;
+    ssl_certificate /etc/nginx/certs/myapp.test.crt;
+    ssl_certificate_key /etc/nginx/certs/myapp.test.key;
+}
+`
+	os.WriteFile(filepath.Join(confD, "myapp.test-ssl.conf"), []byte(sslConf), 0644)
+
+	repairs := RepairVhosts()
+
+	if len(repairs) != 1 || repairs[0].Domain != "myapp.test" || repairs[0].Reason != "missing-cert" {
+		t.Fatalf("expected [{myapp.test missing-cert}], got %v", repairs)
+	}
+	if _, err := os.Stat(filepath.Join(confD, "myapp.test-ssl.conf")); !os.IsNotExist(err) {
+		t.Error("expected the sidecar to be removed, not left for nginx to load")
+	}
+	content := readConf(t, filepath.Join(confD, "myapp.test.conf"))
+	if strings.Contains(content, "ssl_certificate") {
+		t.Error("expected the site to be re-rendered over plain HTTP")
+	}
+
 	reg, err := config.LoadSites()
 	if err != nil {
 		t.Fatal(err)
@@ -1123,6 +1338,12 @@ func TestEnsureLerdVhost_linuxProxiesUnixSocket(t *testing.T) {
 	if !strings.Contains(content, "location ^~ /_svc/") {
 		t.Errorf("expected /_svc/ location in vhost so proxied dashboards load over lerd.localhost:\n%s", content)
 	}
+
+	// The embedded documentation is served from the same origin as the page, so
+	// its pages and screenshots have to reach the daemon through the vhost.
+	if !strings.Contains(content, "location ^~ /docs/") {
+		t.Errorf("expected /docs/ location in vhost so the documentation loads over lerd.localhost:\n%s", content)
+	}
 }
 
 // ── Forwarded headers & custom.d include hook ────────────────────────────────
@@ -1406,5 +1627,162 @@ func TestGenerateProxyVhostSecured(t *testing.T) {
 	}
 	if _, err := os.Stat(confPath); !os.IsNotExist(err) {
 		t.Fatalf("plain vhost should be removed when secured=true")
+	}
+}
+
+// A site pinned to a document root that has nothing to serve answers 403 for
+// every request. The framework definition knows where that framework serves
+// from, so a recorded root with no index.php gives way to one that has it.
+func TestGenerateVhost_rootsAtTheDefinitionWhenTheRecordedRootCannotServe(t *testing.T) {
+	confD := setupConfD(t)
+
+	fwDir := config.StoreFrameworksDir()
+	if err := os.MkdirAll(fwDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	def := "name: drupalish\nlabel: Drupalish\npublic_dir: web\n"
+	if err := os.WriteFile(filepath.Join(fwDir, "drupalish.yaml"), []byte(def), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sitePath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sitePath, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sitePath, "web", "index.php"), []byte("<?php\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	site := config.Site{
+		Name:      "drupal",
+		Domains:   []string{"drupal.test"},
+		Path:      sitePath,
+		Framework: "drupalish",
+		PublicDir: ".",
+	}
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "drupal.test.conf"))
+	if !strings.Contains(content, `root "`+sitePath+`/web"`) {
+		t.Errorf("vhost should root at web/, got:\n%s", content)
+	}
+}
+
+// ── stranded sidecars ─────────────────────────────────────────────────────────
+
+// A sidecar whose certificate is fine was generated and never installed, so
+// nginx sorts it ahead of the served file and answers from it while every other
+// path rewrites the one it ignores.
+func TestRepairVhosts_installsAStrandedSidecar(t *testing.T) {
+	confD, certsDir := setupRepairEnv(t, `sites:
+- name: myapp
+  domains:
+    - myapp.test
+  path: /srv/myapp
+  php_version: "8.4"
+  secured: true
+`)
+
+	os.WriteFile(filepath.Join(confD, "myapp.test.conf"), []byte("# the served render\n"), 0644)
+	os.WriteFile(filepath.Join(confD, "myapp.test-ssl.conf"), []byte(`server {
+    listen 443 ssl;
+    server_name myapp.test *.myapp.test;
+    ssl_certificate /etc/nginx/certs/myapp.test.crt;
+}
+`), 0644)
+	os.WriteFile(filepath.Join(certsDir, "myapp.test.crt"), []byte("cert"), 0644)
+
+	repairs := RepairVhosts()
+
+	if len(repairs) != 1 || repairs[0].Domain != "myapp.test" || repairs[0].Reason != "stranded-ssl" {
+		t.Fatalf("expected [{myapp.test stranded-ssl}], got %v", repairs)
+	}
+	if _, err := os.Stat(filepath.Join(confD, "myapp.test-ssl.conf")); !os.IsNotExist(err) {
+		t.Error("the sidecar should have been installed, not left beside the served file")
+	}
+	if content := readConf(t, filepath.Join(confD, "myapp.test.conf")); !strings.Contains(content, "listen 443 ssl") {
+		t.Errorf("the served file should now be the SSL render, got: %s", content)
+	}
+}
+
+// A paused site is serving its landing page on purpose, so its sidecar waits
+// rather than putting the real vhost back under it.
+func TestRepairVhosts_leavesAPausedSitesSidecarAlone(t *testing.T) {
+	confD, certsDir := setupRepairEnv(t, `sites:
+- name: myapp
+  domains:
+    - myapp.test
+  path: /srv/myapp
+  php_version: "8.4"
+  secured: true
+  paused: true
+`)
+
+	os.WriteFile(filepath.Join(confD, "myapp.test.conf"), []byte("# the landing page\n"), 0644)
+	os.WriteFile(filepath.Join(confD, "myapp.test-ssl.conf"), []byte(`server {
+    listen 443 ssl;
+    ssl_certificate /etc/nginx/certs/myapp.test.crt;
+}
+`), 0644)
+	os.WriteFile(filepath.Join(certsDir, "myapp.test.crt"), []byte("cert"), 0644)
+
+	if repairs := RepairVhosts(); len(repairs) != 0 {
+		t.Fatalf("expected no repairs on a paused site, got %v", repairs)
+	}
+	if content := readConf(t, filepath.Join(confD, "myapp.test.conf")); !strings.Contains(content, "landing page") {
+		t.Errorf("the paused site's own vhost should still be served, got: %s", content)
+	}
+}
+
+// A half-finished unsecure leaves the registry saying plain and the file still
+// asking for a certificate that is gone. The site is registered either way, so
+// its vhost is re-rendered rather than deleted out from under it.
+func TestRepairVhosts_reRendersAnUnsecuredSiteRatherThanDeletingIt(t *testing.T) {
+	confD, _ := setupRepairEnv(t, `sites:
+- name: myapp
+  domains:
+    - myapp.test
+  path: /srv/myapp
+  php_version: "8.4"
+  secured: false
+`)
+
+	os.WriteFile(filepath.Join(confD, "myapp.test.conf"), []byte(`server {
+    listen 443 ssl;
+    server_name myapp.test;
+    ssl_certificate /etc/nginx/certs/myapp.test.crt;
+}
+`), 0644)
+
+	repairs := RepairVhosts()
+
+	if len(repairs) != 1 || repairs[0].Reason != "missing-cert" {
+		t.Fatalf("expected [{myapp.test missing-cert}], got %v", repairs)
+	}
+	content := readConf(t, filepath.Join(confD, "myapp.test.conf"))
+	if strings.Contains(content, "ssl_certificate") {
+		t.Errorf("expected a plain HTTP re-render, got: %s", content)
+	}
+}
+
+// Nobody owns the domain, so there is nothing to re-render and the file is the
+// crash waiting to happen it always was.
+func TestRepairVhosts_stillRemovesAVhostNoSiteOwns(t *testing.T) {
+	confD, _ := setupRepairEnv(t, "sites: []\n")
+
+	os.WriteFile(filepath.Join(confD, "gone.test.conf"), []byte(`server {
+    listen 443 ssl;
+    ssl_certificate /etc/nginx/certs/gone.test.crt;
+}
+`), 0644)
+
+	repairs := RepairVhosts()
+
+	if len(repairs) != 1 || repairs[0].Reason != "orphan-ssl" {
+		t.Fatalf("expected [{gone.test orphan-ssl}], got %v", repairs)
+	}
+	if _, err := os.Stat(filepath.Join(confD, "gone.test.conf")); !os.IsNotExist(err) {
+		t.Error("an unowned SSL vhost with no certificate should be removed")
 	}
 }

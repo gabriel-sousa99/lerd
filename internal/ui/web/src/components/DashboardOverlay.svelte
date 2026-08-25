@@ -1,6 +1,6 @@
 <script lang="ts">
   import { dashboardOpen, closeDashboard } from '$stores/dashboard';
-  import { dashboardIconSvg } from '$lib/dashboardIcons';
+  import ServiceIcon from './ServiceIcon.svelte';
   import {
     profilerEnabled,
     loadProfilerStatus,
@@ -9,6 +9,8 @@
   } from '$stores/profiler';
   import Icon from './Icon.svelte';
   import StatusDot from './StatusDot.svelte';
+  import DocsViewer from './DocsViewer.svelte';
+  import { docsLocation, docsSiteURL } from '$stores/docs';
   import {
     isSpxReportView,
     setSpxConfigHidden,
@@ -28,6 +30,19 @@
   let configHidden = $state(true);
 
   const isProfiler = $derived($dashboardOpen?.name === 'profiler');
+  // The documentation is served by the daemon out of the embedded pages, so it
+  // renders in place of the iframe and only its lerd.sh twin opens in a tab.
+  const isDocs = $derived($dashboardOpen?.name === 'docs');
+  const docsHref = $derived(docsSiteURL($docsLocation?.route ?? ''));
+  // Where the header's links point: the embedded frame's URL, or for the
+  // documentation the same page on lerd.sh.
+  const externalHref = $derived(
+    isDocs
+      ? docsHref
+      : $dashboardOpen
+        ? $dashboardOpen.dashboard + ($dashboardOpen.extraPath ?? '')
+        : ''
+  );
 
   const headerBtnClass =
     'text-xs rounded-sm border border-gray-200 dark:border-lerd-border px-2 py-1 ' +
@@ -151,16 +166,14 @@
             <Icon name="back" />
           </button>
         {/if}
-        <svg class="w-5 h-5 text-gray-500 dark:text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          {@html dashboardIconSvg(d.name, d.icon)}
-        </svg>
+        <ServiceIcon name={d.name} icon={d.icon} bare compact />
         <span class="text-sm font-medium text-gray-900 dark:text-white truncate">{d.label || d.name}</span>
         <a
-          href={iframeSrc}
+          href={externalHref}
           target="_blank"
           rel="noopener"
           class="font-mono text-[10px] text-sky-600 dark:text-sky-400 hover:underline truncate"
-        >{d.dashboard}</a>
+        >{externalHref}</a>
       </div>
       <div class="flex items-center gap-2 shrink-0">
         {#if isProfiler}
@@ -195,16 +208,18 @@
             {busy ? m.profiler_busy() : $profilerEnabled ? m.profiler_disarm() : m.profiler_arm()}
           </button>
         {/if}
-        <button
-          onclick={reloadIframe}
-          title={m.common_refresh()}
-          aria-label={m.common_refresh()}
-          class="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
-        >
-          <Icon name="refresh" />
-        </button>
+        {#if !isDocs}
+          <button
+            onclick={reloadIframe}
+            title={m.common_refresh()}
+            aria-label={m.common_refresh()}
+            class="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
+          >
+            <Icon name="refresh" />
+          </button>
+        {/if}
         <a
-          href={iframeSrc}
+          href={externalHref}
           target="_blank"
           rel="noopener"
           title={m.common_openInNewTab()}
@@ -223,12 +238,23 @@
         </button>
       </div>
     </div>
-    <iframe
-      bind:this={iframeEl}
-      onload={onIframeLoad}
-      src={iframeSrc}
-      class="flex-1 w-full bg-white border-0"
-      title={d.label || d.name}
-    ></iframe>
+    {#if isDocs}
+      <DocsViewer />
+    {:else}
+      <!-- Keyed on the source so switching dashboards tears the frame down and
+           builds a new one. Re-pointing the old frame is a navigation, which
+           runs the embedded app's beforeunload handler; an admin UI that
+           registers one (pgAdmin) then blocks the swap behind a native confirm
+           the overlay has no way to answer. -->
+      {#key iframeSrc}
+        <iframe
+          bind:this={iframeEl}
+          onload={onIframeLoad}
+          src={iframeSrc}
+          class="flex-1 w-full bg-white border-0"
+          title={d.label || d.name}
+        ></iframe>
+      {/key}
+    {/if}
   </div>
 {/if}

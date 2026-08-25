@@ -13,7 +13,9 @@ import (
 
 // RegenerateSiteVhost regenerates the nginx vhost for a site after domain changes.
 // If the primary domain changed, the old vhost file is removed. For secured sites
-// the SSL vhost is generated and renamed to the main .conf path.
+// the SSL vhost is generated and renamed to the main .conf path. Every caller that
+// changes a site's domains comes through here, so it is also where a running dev
+// server is realigned with them.
 func RegenerateSiteVhost(site *config.Site, oldPrimary string) error {
 	newPrimary := site.PrimaryDomain()
 
@@ -29,10 +31,7 @@ func RegenerateSiteVhost(site *config.Site, oldPrimary string) error {
 			if err := nginx.GenerateHostProxySSLVhost(*site); err != nil {
 				return fmt.Errorf("generating host-proxy SSL vhost: %w", err)
 			}
-			sslConf := filepath.Join(config.NginxConfD(), newPrimary+"-ssl.conf")
-			mainConf := filepath.Join(config.NginxConfD(), newPrimary+".conf")
-			_ = os.Remove(mainConf)
-			if err := os.Rename(sslConf, mainConf); err != nil {
+			if err := nginx.InstallSSLVhost(newPrimary); err != nil {
 				return fmt.Errorf("installing host-proxy SSL vhost: %w", err)
 			}
 		} else {
@@ -45,10 +44,7 @@ func RegenerateSiteVhost(site *config.Site, oldPrimary string) error {
 			if err := nginx.GenerateCustomSSLVhost(*site); err != nil {
 				return fmt.Errorf("generating custom SSL vhost: %w", err)
 			}
-			sslConf := filepath.Join(config.NginxConfD(), newPrimary+"-ssl.conf")
-			mainConf := filepath.Join(config.NginxConfD(), newPrimary+".conf")
-			_ = os.Remove(mainConf)
-			if err := os.Rename(sslConf, mainConf); err != nil {
+			if err := nginx.InstallSSLVhost(newPrimary); err != nil {
 				return fmt.Errorf("installing custom SSL vhost: %w", err)
 			}
 		} else {
@@ -60,10 +56,7 @@ func RegenerateSiteVhost(site *config.Site, oldPrimary string) error {
 		if err := nginx.GenerateSSLVhost(*site, site.PHPVersion); err != nil {
 			return fmt.Errorf("generating SSL vhost: %w", err)
 		}
-		sslConf := filepath.Join(config.NginxConfD(), newPrimary+"-ssl.conf")
-		mainConf := filepath.Join(config.NginxConfD(), newPrimary+".conf")
-		_ = os.Remove(mainConf)
-		if err := os.Rename(sslConf, mainConf); err != nil {
+		if err := nginx.InstallSSLVhost(newPrimary); err != nil {
 			return fmt.Errorf("installing SSL vhost: %w", err)
 		}
 	} else {
@@ -71,6 +64,9 @@ func RegenerateSiteVhost(site *config.Site, oldPrimary string) error {
 			return fmt.Errorf("generating vhost: %w", err)
 		}
 	}
+	// A dev server serving under this vhost has the site's domains baked into the
+	// config it was started with, so it follows the vhost that just moved.
+	RefreshDevServers(site)
 	if podman.AfterUnitChange != nil {
 		podman.AfterUnitChange("site:" + site.Name)
 	}

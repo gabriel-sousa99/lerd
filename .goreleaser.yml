@@ -133,6 +133,8 @@ archives:
 brews:
   - name: lerd
     ids:
+      - lerd-amd64
+      - lerd-arm64
       - lerd-darwin-amd64
       - lerd-darwin-arm64
     repository:
@@ -143,11 +145,35 @@ brews:
     description: "Local Laravel development environment for Linux and macOS"
     license: "MIT"
     skip_upload: auto
+    # On macOS podman comes from brew; on Linux the distro's podman is the
+    # one lerd integrates with, so no brew dependency there.
     dependencies:
       - name: podman
+        os: mac
     install: |
       bin.install "lerd"
       bin.install "lerd-tray" if File.exist?("lerd-tray")
+    # brew retires the previous keg on upgrade, so a set-up install is left with
+    # user services and shims naming a binary that is on its way out. Distros
+    # that upgrade brew packages unattended would break with nobody at the
+    # terminal to see it, so the hook repoints them here (#1432). It is a no-op
+    # on a machine where `lerd install` has never run, and never fails the
+    # upgrade.
+    post_install: |
+      # brew runs this inside a read-only mount namespace with HOME pointed at
+      # a throwaway directory, and everything the repair touches lives in the
+      # real home. On Linux the user's own systemd manager runs it outside that
+      # namespace; elsewhere the direct call is all there is to try.
+      if OS.linux?
+        quiet_system "/bin/sh", "-c",
+          "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} systemd-run --user --quiet --collect --wait " \
+          "--unit=lerd-post-upgrade #{bin}/lerd post-upgrade"
+      else
+        require "etc"
+        with_env(HOME: Etc.getpwuid(Process.uid).dir, XDG_CONFIG_HOME: nil, XDG_DATA_HOME: nil) do
+          quiet_system bin/"lerd", "post-upgrade"
+        end
+      end
     caveats: |
       To finish setting up Lerd, run:
         lerd install
@@ -207,6 +233,9 @@ release:
     ```bash
     lerd update
     ```
+
+    Also available through apt (PPA), dnf (COPR) and Homebrew, see the
+    [installation docs](https://lerd.sh/getting-started/installation).
 
     ### Install on macOS
 

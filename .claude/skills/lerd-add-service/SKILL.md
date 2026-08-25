@@ -45,10 +45,20 @@ and test against, but the pull request goes to **lerd-env/services**.
    `lerd` admin password via the exec env, so no inline credentials are needed for
    MySQL/Postgres.
 
-5. **Update the store README table** in the lerd-env/services `README.md` so the
+5. **Give it its mark and its colour.** `category` places it in a discovery
+   section and `color` is its brand tint, a plain hex literal (`#00758f`) and
+   nothing else — a colour function or CSS variable is dropped. For the mark,
+   either name a built-in glyph with `icon:` or ship the service's own as
+   `services/<name>.svg` beside the YAML. That file is **monochrome**: a single
+   silhouette of filled paths with no `fill`, `stroke`, `style` or `class` of its
+   own, in a bare `<svg viewBox="…">`, since lerd strips everything but the
+   geometry on the way in and paints it in the declared colour. Not a full-colour
+   brand mark; it renders beside the built-in glyphs and has to flip themes.
+
+6. **Update the store README table** in the lerd-env/services `README.md` so the
    new service is listed.
 
-6. **Validate end-to-end** with a real lerd install:
+7. **Validate end-to-end** with a real lerd install:
    ```bash
    lerd service search <name>
    lerd service preset <name>

@@ -132,6 +132,34 @@ func ExportSnapshot(service, database, name string, w io.Writer) error {
 	return nil
 }
 
+// verifyDumpHasContent rejects a dump that carries no bytes. A failed dump
+// piped into gzip still writes a valid, empty 20-byte stream, so size alone
+// says nothing: the archive has to be read back to tell it apart from a real
+// one. Restoring an empty dump would replace a live database with nothing.
+func verifyDumpHasContent(path string, compressed bool) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("reading back the dump: %w", err)
+	}
+	defer f.Close()
+
+	var r io.Reader = f
+	if compressed {
+		gz, gzErr := gzip.NewReader(f)
+		if gzErr != nil {
+			return fmt.Errorf("the dump is not a readable archive: %w", gzErr)
+		}
+		defer gz.Close()
+		r = gz
+	}
+
+	var probe [1]byte
+	if _, err := io.ReadFull(r, probe[:]); err != nil {
+		return fmt.Errorf("the dump is empty, the engine wrote nothing")
+	}
+	return nil
+}
+
 // maxImportIssues caps the distinct complaints kept from a load. A dump replayed
 // over a populated schema complains once per object, so the cap is high enough to
 // carry the whole list to the UI and still bounded well under a 27k-line psql
@@ -214,11 +242,34 @@ func (r ImportReport) CreatedSummary() string {
 // the end. It counts psql and mysql error lines, plus psql's "invalid command"
 // lines, which are what a COPY block turns into once its table failed to exist.
 type ImportTally struct {
-	mu      sync.Mutex
-	streams []*tallyStream
-	seen    map[string]int
-	order   []string
-	errors  int
+	mu       sync.Mutex
+	streams  []*tallyStream
+	seen     map[string]int
+	order    []string
+	errors   int
+	expected []string
+}
+
+// Expect declares the complaints this load is known to make whatever the data,
+// which the tally then leaves out of the count. Call it before the output
+// streams past. The patterns come from the preset, not from Go: only the
+// definition that chose the image knows which of its engine's complaints are
+// structural.
+func (t *ImportTally) Expect(patterns []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.expected = patterns
+}
+
+// isExpected reports whether a complaint is one the action declared. The caller
+// holds the tally's lock.
+func (t *ImportTally) isExpected(line string) bool {
+	for _, pat := range t.expected {
+		if pat != "" && strings.Contains(line, pat) {
+			return true
+		}
+	}
+	return false
 }
 
 // maxPartialLine bounds the unterminated tail a stream carries between writes,
@@ -260,7 +311,7 @@ func (s *tallyStream) Write(p []byte) (int, error) {
 // add records one complete line. The caller holds the tally's lock.
 func (t *ImportTally) add(line string) {
 	line = trimImportPrefix(strings.TrimRight(line, "\r "))
-	if !isImportErrorLine(line) {
+	if !isImportErrorLine(line) || t.isExpected(line) {
 		return
 	}
 	if t.seen == nil {
@@ -314,10 +365,39 @@ func (t *ImportTally) Report() ImportReport {
 	return rep
 }
 
-func parseImportOutput(out string) ImportReport {
+func parseImportOutput(out string, expected []string) ImportReport {
 	var tally ImportTally
+	tally.Expect(expected)
 	_, _ = tally.Stream().Write([]byte(out))
 	return tally.Report()
+}
+
+// expectedImportErrors returns the complaints a service's declared import says
+// it always makes. Empty for every engine that declares none, which is every
+// engine until its definition says otherwise.
+func expectedImportErrors(service, action string) []string {
+	act, ok := entityAction(EntityFor(service, "databases"), action)
+	if !ok {
+		return nil
+	}
+	return act.ExpectedErrors
+}
+
+// ExpectedImportErrors returns the complaints the declared import of the given
+// scope says it always makes, for callers that tally an import's output
+// themselves as it streams rather than parsing it once at the end.
+func ExpectedImportErrors(service string, allDatabases bool) []string {
+	return expectedImportErrors(service, importActionName(allDatabases))
+}
+
+// importActionName names the declared import a load of the given scope runs
+// through, so the command and its expected complaints are always read off the
+// same action.
+func importActionName(allDatabases bool) string {
+	if allDatabases {
+		return "import_all"
+	}
+	return "import"
 }
 
 // trimImportPrefix drops psql's "psql:<stdin>:412: " location prefix so the same
@@ -420,7 +500,7 @@ func ImportDatabase(service, database string, r io.Reader, opt ImportOptions) (I
 	if !sqlDump {
 		return ImportReport{}, nil
 	}
-	rep := parseImportOutput(string(out))
+	rep := parseImportOutput(string(out), act.ExpectedErrors)
 	n := notes()
 	rep.Skipped, rep.Created = n.Skipped, n.Created
 	return rep, nil

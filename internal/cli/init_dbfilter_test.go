@@ -16,7 +16,7 @@ func TestBuildDatabaseOptions_coversDefaultPresetsInDBFamilies(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
-	_, nameSet := buildDatabaseOptions()
+	_, nameSet := buildDatabaseOptions(nil)
 
 	for _, name := range config.DefaultPresetNames() {
 		svc, err := config.DefaultPresetMeta(name)
@@ -38,7 +38,7 @@ func TestBuildDatabaseOptions_oracleXeIsADatabaseNotAService(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
-	options, nameSet := buildDatabaseOptions()
+	options, nameSet := buildDatabaseOptions(nil)
 	if !nameSet[("oracle-xe")] {
 		t.Fatal("oracle-xe missing from the DB name set; it would leak into the Services multi-select")
 	}
@@ -59,7 +59,7 @@ func TestServiceOptions_excludeEveryDatabase(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
-	_, dbNameSet := buildDatabaseOptions()
+	_, dbNameSet := buildDatabaseOptions(nil)
 	for _, svc := range knownServices() {
 		if dbNameSet[svc] {
 			continue // correctly filtered

@@ -49,8 +49,8 @@ Each database engine's detail page in the web UI (Services → pick MySQL, Maria
 - **Snapshots** are managed on the card of the database they belong to: take a snapshot, restore one (with a confirmation, since a restore overwrites the current data), delete one (also confirmed), or download one as a plain `.sql` dump. Taking, restoring and deleting all report what they are doing in the snapshots modal and leave a confirmation or the engine's error behind, so a slow restore of a large database is visibly working rather than apparently frozen. A snapshot is keyed on the engine and database it was taken from, never on a site, so it lives with the database rather than on the site page. A named snapshot gets a UTC timestamp appended (`nightly-20260719-135558`), so repeated snapshots of one name never collide; the list shows the parsed time and sorts newest first.
 - **Copy connection string** builds a ready-to-paste DSN for that specific database, which works whether or not an admin UI is installed.
 - **Open in the admin UI** appears on the card when an admin tool is installed for the engine, and opens it straight to this database when the tool supports a per-database URL (phpMyAdmin and Adminer for MySQL/MariaDB, Mongo Express for MongoDB). pgAdmin has no such URL, so it opens at its root.
-- **The linked site**, when a site owns the database, is shown as a link on the card that jumps to that site. A `<name>_testing` database links to the same site as `<name>`. A worktree's isolated database is shown under the branch's own domain (`staging.astrolov.test` for the `staging` branch of `astrolov.test`), so it reads as that branch's data rather than as a stray database of the parent site, and the link still opens the parent site's page.
-- **A `<name>_testing` database shares the card of the `<name>` database it tests**, rather than taking a second card of its own for what is usually an empty database. The card header carries an App/Testing segment, and the name, size, linked site and every action below it act on whichever half is selected, so an export, an import, a snapshot or a drop always applies to the database currently shown. Dropping one half leaves the other in place. A `_testing` database whose matching database does not exist keeps an ordinary card of its own.
+- **The linked site**, when a site owns the database, is shown as a link on the card that jumps to that site. Which database a site owns is read through that site's framework definition: the env file it declares, in the format it declares, at the keys it declares, so a WordPress site is matched on `DB_NAME` in `wp-config.php` and a Magento site on `db.connection.default.dbname` in `app/etc/env.php`, the same as a Laravel site is on `DB_DATABASE` in `.env`. A `<name>_testing` database links to the same site as `<name>`. A worktree's isolated database is shown under the branch's own domain (`staging.astrolov.test` for the `staging` branch of `astrolov.test`), so it reads as that branch's data rather than as a stray database of the parent site, and the link still opens the parent site's page.
+- **A `<name>_testing` database shares the card of the `<name>` database it tests**, rather than taking a second card of its own for what is usually an empty database. The card header carries an App/Testing segment, and the name, size, linked site and every action below it act on whichever half is selected, so an export, an import, a snapshot or a drop always applies to the database currently shown. Dropping the app half offers to take its testing database along, in a checkbox that names that database outright and starts ticked, since the two were created together and the half left behind belongs to nothing and points at nothing. Both go in a single request that either drops the pair or reports which half it could not, rather than two drops fired from the browser. The testing half is offered nothing of its own, being nobody's pair. A `_testing` database whose matching database does not exist keeps an ordinary card of its own.
 
 The same "open in the admin tool" affordance is on the database service card in a site's own overview (a database-icon button), so from a site you can jump straight into that site's database in phpMyAdmin, Adminer or Mongo Express.
 
@@ -68,7 +68,7 @@ Every db command resolves which service to target and which database to use thro
 
 1. **`--service` flag**: explicit override, e.g. `lerd db:shell --service postgres`
 2. **`.lerd.yaml` `db:` block**: declared in the project root, works even on unlinked sites
-3. **Framework definition**: lerd detects the framework and uses its service detection rules against the framework's env file (e.g. `.env.local` for Symfony)
+3. **Framework definition**: lerd detects the framework and reads the env file the definition declares, in the format it declares, at the keys it declares: Symfony's `DATABASE_URL` in `.env.local`, WordPress's `DB_NAME` and `DB_HOST` in `wp-config.php`, Magento's dotted keys in `app/etc/env.php`
 4. **`.env` key inference**: reads `DB_CONNECTION`, `DB_TYPE`, `TYPEORM_CONNECTION`, `DATABASE_URL`, or `DB_PORT` from `.env`
 5. **Error**: with instructions listing all options above
 
@@ -140,6 +140,19 @@ lerd db:restore --service mysql --all-databases nightly
 ```
 
 An all-databases restore drops and recreates every database contained in the snapshot, but leaves databases that aren't in the snapshot untouched.
+
+### Snapshots before a data wipe
+
+`lerd service remove <name> --purge` and `lerd service reinstall <name> --reset-data` rename the data dir aside, and a renamed directory only reads back under the image that wrote it, which after a reinstall on another version is an image you no longer have. So before either wipes anything, lerd snapshots every database on the service, the same all-databases snapshot `db:snapshot -A` takes:
+
+```bash
+lerd db:snapshots --service mysql --all      # pre-remove-<ts> / pre-reset-data-<ts> are listed here
+lerd db:restore --service mysql -A pre-reset-data-20260809-141500
+```
+
+The name says where it came from, so it is still recognisable weeks later. Services that declare no export action, and services with no data dir yet, have nothing to snapshot and are skipped.
+
+The snapshot has to come off a running engine, so lerd starts the service if it is stopped. If the snapshot cannot be taken the operation stops before touching anything, rather than wiping without one. Pass `--no-snapshot` to go ahead anyway, for an engine that will not come up or data you know is disposable.
 
 ### Reserved names
 
@@ -216,6 +229,14 @@ You can change the choice at any time by editing the `services:` list in `.lerd.
 
 ---
 
+## Using a database you run on the host
+
+A project can use the MySQL, MariaDB or PostgreSQL already installed on the machine instead of lerd's container, keeping your existing data and users while lerd manages the rest. The connection values and the `LERD_EXTERNAL_SERVICES` opt-out go in the project's `.env.lerd_override`; the host server also has to accept a connection that does not come from its own loopback, which on Linux means changing what it listens on and who it grants to. See [Using a service you run on the host](services.md#using-a-service-you-run-on-the-host).
+
+Note that the `lerd db:*` commands on this page resolve their target from the service rather than from `DB_HOST`, so they keep talking to lerd's container. Use your own `mysql` or `psql` client against a host-run server.
+
+---
+
 ## Moving sites between services
 
 `lerd service migrate <service> <version>` upgrades one service in place (e.g. `postgres` from 16 to 18): the service keeps its name, so every site on it follows automatically and no `.env` changes. Use that when you want to move everyone off a major version at once. See [Service updates](service-updates.md#migrate-automated-dump-restore).
@@ -284,6 +305,8 @@ mysqldump -h db.example.com -P 25060 -u doadmin -p yourdb > dump.sql
 pg_dump -h db.example.com -p 25060 -U doadmin -d yourdb > dump.sql
 ```
 
+Each shim runs its tool inside a throwaway container, so a loopback host (`127.0.0.1`, `localhost`, `::1`) is not automatically read the same way: if its port matches one your own lerd services actually publish, the shim recognises it and routes to that service internally instead of trying (and failing) to reach the host's own loopback from inside the container. `psql -h 127.0.0.1 -p 5433 mydb`, the natural way to hit the port `lerd service start postgres-timescaledb` printed, works the same way `psql mydb` does. A loopback host whose port matches nothing lerd owns, or any other host, is left untouched.
+
 Each tool runs in a throwaway container spun from the service's image, so nothing touches your running database container. Your home directory is mounted read-write, so the tool can read a CA cert and write its output anywhere under it, whether you use a shell redirect (`> dump.sql`), the tool's own `--result-file`/`-f` flag, or an IDE that fills one in. Output files are owned by you, not root.
 
 Managed databases usually require TLS. Keep the CA file you pass with a flag like `--ssl-ca` somewhere under your home directory so the tool can read it:
@@ -292,7 +315,7 @@ Managed databases usually require TLS. Keep the CA file you pass with a flag lik
 mysqldump -h db.example.com -P 25060 -u doadmin -p --ssl-ca=ca.crt yourdb > dump.sql
 ```
 
-When you give no host, the tool connects to a local lerd database with its admin credentials, so `pg_dump mydb` or `mysqldump mydb` just works. If you run it from a project directory, it targets that project's own database service, read from the project's `DB_HOST`, so a mariadb-backed project routes to your mariadb container rather than the default mysql one. Outside a project, or when the project's database is a different family than the tool, it falls back to the family's default service. Passing `-h` (an external host) turns all of this off and the shim forwards everything untouched. For scripted local dumps `lerd db:export` is still the tidier option; the raw shim is there for external databases and IDEs.
+When you give no host, the tool connects to a local lerd database with its admin credentials, so `pg_dump mydb` or `mysqldump mydb` just works. If you run it from a project directory, it targets that project's own database service, read from the project's `DB_HOST`, so a mariadb-backed project routes to your mariadb container rather than the default mysql one. Outside a project, or when the project's database is a different family than the tool, it falls back to the family's default service. Passing `-h` an external host turns all of this off and the shim forwards everything untouched; passing `-h` a loopback host that names one of lerd's own published ports routes the same way the hostless case does, for the reason above. A connection URI (`postgresql://user@host/db`) or a libpq conninfo string (`host=… dbname=…`) names its host too, so it counts as an explicit target and passes through exactly as written, with lerd's own credentials kept out of it. That holds even when the URI spells a loopback host, since its host and port live inside the string rather than in flags lerd can rewrite: reach a lerd service that way and use the container name, or drop the URI for flags. For scripted local dumps `lerd db:export` is still the tidier option; the raw shim is there for external databases and IDEs.
 
 Run from inside a git worktree, the shim reads that checkout's own env file rather than the parent site's, so a branch with an isolated database dumps from its own schema even when the worktree lives inside the parent's directory. A worktree whose env was never rewritten keeps using the parent site's.
 
@@ -331,10 +354,14 @@ lerd shims add mysqldump      # put it back
 
 The same per-tool toggles are on each database service's Tools tab in the web UI. When two services of the same family are installed (say mysql and mariadb, which both provide `mysqldump`), one owns the shim and runs it; the others show that tool disabled on their Tools tab so it is managed in one place.
 
+Whether a tool reads as installed is answered by the shim dir itself rather than by the choice you made, so a tool counts as on only while its shim is really there. If the name is already taken in `~/.local/share/lerd/bin` by a file lerd did not write, it is left alone and adding the shim fails with that path instead of being recorded as on, both from the command and from the toggle in the web UI. Remove the file and add the shim again.
+
 ## Recovering after a service reinstall
 
 `lerd service reinstall <name> --reset-data` wipes the database server's data dir (rename-aside, recoverable) and then walks every active site that depends on the service to recreate the database it expects via `CREATE DATABASE IF NOT EXISTS`. Database name resolution is the same as `lerd env`: `.lerd.yaml` `db.database` first, then `.env` `DB_DATABASE`, then a name derived from the site name.
 
-The DBs come back empty. The previous data lives next door as `~/.local/share/lerd/data/<name>.pre-remove-<timestamp>`. If you need the old contents, stop the service, rename the aside dir back over the new data dir, and start the service again.
+The DBs come back empty. To get the contents back, restore the snapshot the reinstall took before wiping: `lerd db:restore --service <name> -A pre-reset-data-<timestamp>` (see [snapshots before a data wipe](#snapshots-before-a-data-wipe)).
+
+The previous data also lives next door as `~/.local/share/lerd/data/<name>.pre-remove-<timestamp>`, but that directory is only readable by the image that wrote it. It is the fallback when the reinstall stayed on the same version, or when you passed `--no-snapshot`: stop the service, rename the aside dir back over the new data dir, and start the service again.
 
 If you only want to recreate a single missing database without wiping the whole server, use `lerd db:create` against the live service instead.

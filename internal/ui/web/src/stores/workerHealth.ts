@@ -24,6 +24,7 @@ interface HealEvent {
 
 export const unhealthyWorkers = writable<UnhealthyWorker[]>([]);
 export const healLoading = writable(false);
+export const stopLoading = writable(false);
 export const healProgressUnit = writable<string | null>(null);
 export const healDoneCount = writable(0);
 export const healTotalCount = writable(0);
@@ -123,5 +124,28 @@ export async function healAll(): Promise<{ ok: boolean; healed: number; failed: 
   } finally {
     healLoading.set(false);
     healProgressUnit.set(null);
+  }
+}
+
+// stopAllUnhealthy is the other answer to a worker that keeps failing: put it
+// down instead of starting it again. The server stops and disables each
+// reported unit, which is also what makes the detector leave it alone, so the
+// banner goes quiet for good rather than until the next crash.
+export async function stopAllUnhealthy(): Promise<{
+  ok: boolean;
+  stopped: number;
+  error?: string;
+}> {
+  stopLoading.set(true);
+  try {
+    const res = await apiFetch('/api/workers/stop', { method: 'POST' });
+    if (!res.ok) {
+      return { ok: false, stopped: 0, error: `${res.status} ${res.statusText}` };
+    }
+    return (await res.json()) as { ok: boolean; stopped: number; error?: string };
+  } catch (e) {
+    return { ok: false, stopped: 0, error: e instanceof Error ? e.message : 'request failed' };
+  } finally {
+    stopLoading.set(false);
   }
 }

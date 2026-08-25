@@ -264,6 +264,8 @@ systemctl --user start lerd-watcher   # start it from the terminal
 # or use the Start button in the UI under System > Watcher
 ```
 
+The watcher reports itself ready as soon as its watch loops are live and does its boot reconciliation (registering parked projects, provisioning worktrees) after that, in the background. A worktree install that takes minutes therefore delays only that worktree; it can't hold the unit below its start timeout and put systemd in a restart loop.
+
 To see what the watcher is doing:
 
 ```bash
@@ -291,6 +293,8 @@ The mkcert CA must be installed in your browser's trust store. Ensure `certutil`
 - Fedora: `sudo dnf install nss-tools`
 
 After installing the package, run `lerd install` again to register the CA.
+
+On macOS, this can also show up after a reinstall even though everything worked the first time: a macOS update can drop a certificate's trust settings while leaving the certificate itself in the keychain. `lerd install` asks whether the keychain still trusts the CA now, rather than only whether the certificate is there, and repairs it (with the usual admin authorization prompt) when it finds that drifted state. Just re-run `lerd install`.
 :::
 
 ::: details PHP image build is slow on first run
@@ -344,6 +348,20 @@ The exact command lerd suggests in `lerd doctor` and `lerd start` output is alre
 `lerd doctor` also checks for port conflicts as part of its full diagnostic, and adds a dedicated **[Stopped service ports]** section that flags installed services whose host port is already bound by another process. The same warning is shown next to the inactive status pill in the web UI, so you can spot the conflict without running anything: most often this is a system-installed service (Postgres, MySQL, Redis) listening on the default port. Stop the conflicting process and the warning clears on the next snapshot refresh.
 :::
 
+::: details Uninstall leaves the data directory behind
+Services write their files as a subuid inside the rootless user namespace, so MySQL, Postgres, MongoDB, Redis and RabbitMQ all leave trees under `~/.local/share/lerd` that your own user cannot delete. Both `lerd uninstall` and the installer's `--uninstall` remove them through `podman unshare`, which enters that namespace, so this normally happens without you noticing.
+
+If podman is already gone by then, the uninstall finishes and tells you what survived. Remove it yourself with:
+
+```bash
+podman unshare rm -rf ~/.local/share/lerd
+```
+
+If podman is no longer installed either, `sudo rm -rf ~/.local/share/lerd` is the last resort.
+
+An uninstall also takes `~/.cache/lerd`, the `lerd-tray` binary alongside `lerd`, both PATH entries lerd ever wrote into your shell rc, and the images it built itself (`lerd-php*-fpm`, `lerd-custom-*`, `lerd-dnsmasq`) when you accept the purge. Images it only pulled, your databases and your project files are never touched.
+:::
+
 ::: details Workers missing after reinstall
 If you ran `lerd uninstall` and then reinstalled, worker units and service quadlets are deleted during uninstall. Running `lerd start` after reinstalling automatically restores them from the `workers` list saved in each site's `.lerd.yaml`. If `.lerd.yaml` does not exist or was not committed, you will need to start workers again manually (`lerd queue:start`, etc.).
 
@@ -371,6 +389,22 @@ Common causes:
 - Bad `.env` values, run `lerd env` to reset service connection settings
 
 When you unlink a site, crash-looping workers are automatically detected and stopped.
+:::
+
+::: details Error: could not fetch latest version: unexpected release URL format
+Symptom: `lerd update` fails with `unexpected release URL format: https://github.com/lerd-env/lerd/releases/latest`.
+
+Cause: your binary predates lerd 1.26 and still asks GitHub for releases under the old `geodro/lerd` path. Since the project moved to the `lerd-env` organisation, GitHub answers that path with a rename redirect to the new `/releases/latest` URL instead of the release itself, and older binaries only read the first redirect. The update command is the broken part, so no release can repair it remotely.
+
+Fix: reinstall once. This only replaces the binary; your sites, services, and config are untouched:
+
+```bash
+curl -fsSL https://lerd.sh/install.sh | bash
+```
+
+Everything from 1.26 onwards resolves the organisation move on its own, so this is a one-time step.
+
+On Homebrew, apt, dnf, or if you'd rather not pipe a script anywhere, [Updating from a version before 1.26](getting-started/updating-from-pre-1.26.md) has the route for each.
 :::
 
 ::: details Error: NetworkUpdate is not supported for backend CNI: invalid argument

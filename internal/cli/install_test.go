@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -11,11 +12,31 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+
+	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
 func TestIsShell_fish(t *testing.T) {
 	if !isShell("/usr/bin/fish", "fish") {
 		t.Error("expected /usr/bin/fish to match fish")
+	}
+}
+
+// Interactive install must explain NixOS resolver ownership around
+// ConfigureResolver. The note itself lives in dns.NoteNixOSOwnsResolver so
+// install+start in one process print once; ConfigureResolver stays silent
+// because the watcher calls it on every .test failure.
+func TestInstallNotesNixOSOwnsResolver(t *testing.T) {
+	src, err := os.ReadFile("install.go")
+	if err != nil {
+		t.Fatalf("reading install.go: %v", err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "dns.NoteNixOSOwnsResolver()") {
+		t.Error("install must call NoteNixOSOwnsResolver around ConfigureResolver")
+	}
+	if strings.Count(body, "dns.NoteNixOSOwnsResolver()") < strings.Count(body, "dns.ConfigureResolver()") {
+		t.Error("every ConfigureResolver call on the install path must be paired with NoteNixOSOwnsResolver")
 	}
 }
 
@@ -201,11 +222,52 @@ func TestRefreshUnreferencedCustomQuadlets_RoutesCustomFPM(t *testing.T) {
 	}
 }
 
+// autostartMgr records what installAutostart asks for without reaching the real
+// service manager. Enable bootstraps into the live launchd domain, so driving it
+// here would boot out the developer's own autostart job and replace it with one
+// pointing at the test binary.
+type autostartMgr struct {
+	services.ServiceManager
+	wroteName string
+	wroteBody string
+	enabled   string
+}
+
+func (m *autostartMgr) WriteServiceUnit(name, content string) error {
+	m.wroteName, m.wroteBody = name, content
+	return nil
+}
+
+func (m *autostartMgr) Enable(name string) error {
+	m.enabled = name
+	return nil
+}
+
 func TestInstallAutostart(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("autostart is only installed on macOS")
+	}
+	t.Setenv("HOME", t.TempDir())
+	mgr := &autostartMgr{}
+	orig := services.Mgr
+	services.Mgr = mgr
+	t.Cleanup(func() { services.Mgr = orig })
+
 	installAutostart()
+
+	if mgr.wroteName != "lerd-autostart" {
+		t.Errorf("wrote unit %q, want lerd-autostart", mgr.wroteName)
+	}
+	if !strings.Contains(mgr.wroteBody, "ExecStart=") {
+		t.Errorf("autostart unit carries no ExecStart:\n%s", mgr.wroteBody)
+	}
+	if mgr.enabled != "lerd-autostart" {
+		t.Errorf("enabled %q, want lerd-autostart", mgr.enabled)
+	}
 }
 
 func TestInstallCleanupScript(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	installCleanupScript()
 }
 
@@ -509,6 +571,32 @@ func TestAddShellShims_ComposerShimDelegatesToLerd(t *testing.T) {
 	}
 	if !strings.Contains(shim, "composer.phar") {
 		t.Errorf("composer shim should keep a composer.phar fallback path, got:\n%s", shim)
+	}
+}
+
+// A shim outlives the binary it was written against: `brew upgrade lerd` moves
+// lerd into a new keg and the recorded path stops resolving. The shim has to
+// reach for lerd on PATH rather than fail with no such file.
+func TestShimPreambleFallsBackToLerdOnPath(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "lerd")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"ran $*\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "php")
+	body := shimPreamble("/retired/keg/bin/lerd") + "exec \"$LERD\" php \"$@\"\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "-v")
+	cmd.Env = append(os.Environ(), "PATH="+dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim failed: %v\n%s\n%s", err, out, body)
+	}
+	if strings.TrimSpace(string(out)) != "ran php -v" {
+		t.Errorf("shim did not fall back to lerd on PATH, got: %q", out)
 	}
 }
 

@@ -7,6 +7,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/gabriel-sousa99/lerd/internal/man"
+
+	"github.com/gabriel-sousa99/lerd/internal/docs"
+
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -33,7 +36,7 @@ func runMan(_ *cobra.Command, args []string) error {
 	// would otherwise block until a key press.
 	glamStyle := glamourStyle()
 
-	pages := man.BuildRegistry()
+	pages := docs.BuildRegistry()
 	m := man.NewModel(pages, args, glamStyle)
 	p := tea.NewProgram(m)
 	_, err := p.Run()
@@ -50,7 +53,7 @@ func glamourStyle() string {
 }
 
 func runManPlain(args []string) error {
-	pages := man.BuildRegistry()
+	pages := docs.BuildRegistry()
 
 	if len(args) > 0 {
 		query := args[0]
@@ -70,7 +73,7 @@ func runManPlain(args []string) error {
 	for _, p := range pages {
 		if p.Section != lastSection {
 			lastSection = p.Section
-			fmt.Printf("\n%s\n", man.SectionLabel(p.Section))
+			fmt.Printf("\n%s\n", docs.SectionLabel(p.Section))
 		}
 		fmt.Printf("  %-32s  lerd man %s\n", p.Title, p.Slug)
 	}

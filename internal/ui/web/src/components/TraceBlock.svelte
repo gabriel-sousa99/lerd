@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { openInEditor } from '$lib/editor';
   import type { QueryFrame } from '$lib/dumpsStream';
+  import SourcePath from './SourcePath.svelte';
   import { m } from '../paraglide/messages.js';
 
   interface Props {
@@ -21,12 +21,7 @@
 {#if primary}
   <div class="text-gray-700 dark:text-gray-200">
     {#if primary.func}<span class="font-semibold">{primary.func}</span> · {/if}
-    <button
-      type="button"
-      class="font-mono text-lerd-red hover:underline break-all"
-      onclick={() => openInEditor(primary.file, primary.line)}
-      title={m.queries_openInEditor()}
-    >{primary.file}:{primary.line}</button>
+    <SourcePath file={primary.file} line={primary.line} />
   </div>
 {/if}
 {#if trace.length > 1}
@@ -42,12 +37,7 @@
           {@const app = !frame.file.includes('/vendor/')}
           <li class={app ? 'text-gray-700 dark:text-gray-200' : 'text-gray-400 dark:text-gray-500'}>
             <span class={app ? 'font-semibold' : ''}>{frame.func}</span> ·
-            <button
-              type="button"
-              class="hover:underline break-all {app ? 'text-lerd-red' : ''}"
-              onclick={() => openInEditor(frame.file, frame.line)}
-              title={m.queries_openInEditor()}
-            >{frame.file}:{frame.line}</button>
+            <SourcePath file={frame.file} line={frame.line} muted={!app} />
           </li>
         {/each}
       </ol>

@@ -23,8 +23,12 @@
           : 'max-w-lg'
   );
 
+  // An open modal owns Escape. Marking the event handled lets layers
+  // underneath (full-screen editors, hover menus) leave this keypress alone.
   function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && open) onclose();
+    if (e.key !== 'Escape' || !open) return;
+    e.preventDefault();
+    onclose();
   }
 
   onMount(() => window.addEventListener('keydown', onKey));
@@ -34,12 +38,12 @@
 {#if open}
   <div class="fixed inset-0 z-50 flex items-center justify-center">
     <button
-      class="absolute inset-0 bg-black/50"
+      class="absolute inset-0 bg-black/50 lerd-fade-in"
       aria-label={m.common_close()}
       onclick={onclose}
     ></button>
     <div
-      class="relative bg-white dark:bg-lerd-card border border-gray-200 dark:border-lerd-border rounded-xl shadow-2xl w-full {widthClass} mx-4"
+      class="relative bg-white dark:bg-lerd-card border border-gray-200 dark:border-lerd-border rounded-xl shadow-2xl w-full {widthClass} mx-4 lerd-panel-in transition-[max-width] duration-200 ease-out"
     >
       <div class="flex items-center justify-between gap-3 px-5 py-4 border-b border-gray-100 dark:border-lerd-border">
         <h3 class="min-w-0 break-words font-semibold text-gray-900 dark:text-white">{title}</h3>

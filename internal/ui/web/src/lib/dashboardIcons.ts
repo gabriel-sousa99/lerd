@@ -27,10 +27,19 @@ const ICONS: Record<string, string> = {
     '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/>',
   queue:
     '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5"/>',
+  clock:
+    '<circle cx="12" cy="12" r="8.25" stroke-width="1.5"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 7.5V12l3 1.75"/>',
+  // The stand-in for a worker whose definition says nothing about how to draw it.
+  gear:
+    '<circle cx="12" cy="12" r="3" stroke-width="1.5"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.64 5.64l1.56 1.56M16.8 16.8l1.56 1.56M18.36 5.64L16.8 7.2M7.2 16.8l-1.56 1.56"/>',
   broadcast:
     '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.348 14.652a3.75 3.75 0 010-5.304m5.304 0a3.75 3.75 0 010 5.304m-7.425 2.121a6.75 6.75 0 010-9.546m9.546 0a6.75 6.75 0 010 9.546M12.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0z"/>',
   card:
-    '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z"/>'
+    '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z"/>',
+  // A single page with a folded corner, for a service that produces documents.
+  // Distinct from `docs`, which is the open book the documentation reader uses.
+  document:
+    '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25M8.25 15h7.5m-7.5 3h4.5M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/>'
 };
 
 const UI_ONLY: Record<string, string> = {
@@ -40,6 +49,13 @@ const UI_ONLY: Record<string, string> = {
 
 // A service names its icon in its preset YAML; the name map is only for the UI
 // dashboards (docs, profiler) that are not services and declare nothing.
+// glyphOr resolves a glyph by name and falls back to another glyph rather than
+// to the generic window, so a worker naming a mark this install has not cached
+// yet still reads as a worker.
+export function glyphOr(icon: string | undefined, fallback: string): string {
+  return (icon && ICONS[icon]) || ICONS[fallback] || ICONS.windowIcon;
+}
+
 export function dashboardIconSvg(name: string, icon?: string): string {
   if (icon && ICONS[icon]) return ICONS[icon];
   return UI_ONLY[name] || ICONS.windowIcon;

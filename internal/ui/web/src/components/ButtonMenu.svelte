@@ -15,6 +15,11 @@
     onclick?: () => void;
   }
 
+  // Shared with the other controls that sit in the same action row, so a button
+  // beside the menu is the same button.
+  export const buttonMenuBaseClass =
+    'inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 transition-colors disabled:opacity-50';
+
   export const buttonMenuToneClass: Record<DetailButtonTone, string> = {
     primary: 'bg-lerd-red hover:bg-lerd-redhov text-white',
     secondary:
@@ -80,8 +85,7 @@
     a.onclick?.();
   }
 
-  const baseBtn =
-    'inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 transition-colors disabled:opacity-50';
+  const baseBtn = buttonMenuBaseClass;
 </script>
 
 {#snippet spinner()}

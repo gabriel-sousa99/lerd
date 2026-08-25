@@ -1,6 +1,7 @@
 package linker
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -44,6 +45,15 @@ func Resolve(dir string, cfg *config.GlobalConfig, p Policy) (*Plan, error) {
 	}
 	baseName, _ := siteops.SiteNameAndDomain(rawName, cfg.DNS.TLD)
 	name := FreeSiteName(baseName, dir)
+
+	// One directory is one site. FreeSiteName already folds a re-link back onto
+	// its own name, so a different name here means a second registration for a
+	// path that already has one, which serves the project twice with duplicate
+	// vhosts and workers. Symlinked spellings (/home vs /var/home on ostree
+	// hosts) reach this the same way, since the lookup is canonical.
+	if existing, err := config.FindSiteByPath(dir); err == nil && existing != nil && existing.Name != name {
+		return nil, fmt.Errorf("this directory is already linked as %q — unlink it first to link it under another name", existing.Name)
+	}
 
 	kept, removed := ResolveDomains(desiredDomains(proj, p.Name, name, cfg.DNS.TLD), baseName, dir, cfg.DNS.TLD)
 	plan.DroppedDomains = removed
@@ -194,7 +204,7 @@ func relinkSecured(path string) bool {
 		return false
 	}
 	for _, existing := range reg.Sites {
-		if existing.Path == path && existing.Secured {
+		if existing.Secured && config.SamePath(existing.Path, path) {
 			return true
 		}
 	}
@@ -203,15 +213,25 @@ func relinkSecured(path string) bool {
 
 // ResolveFramework names the framework for dir. The store fallback asks the
 // user which definition to install, so it is only reachable when the caller can
-// put a question on screen.
+// put a question on screen. A project that names a framework no definition can
+// be found for is still that framework, and the name is returned unresolved
+// rather than dropped, so the registry records what the project committed
+// instead of nothing at all. The false then says only that no definition backs
+// it, which is what keeps the caller from taking a public dir or a PHP range
+// from one that isn't there.
 func ResolveFramework(dir string, allowStoreFallback bool) (string, bool) {
 	if name, ok := config.DetectFrameworkForDir(dir); ok {
 		return name, true
 	}
-	if !allowStoreFallback {
-		return "", false
+	if allowStoreFallback {
+		if name, ok := store.DetectFrameworkWithStore(dir); ok {
+			return name, true
+		}
 	}
-	return store.DetectFrameworkWithStore(dir)
+	if proj, err := config.LoadProjectConfig(dir); err == nil {
+		return proj.Framework, false
+	}
+	return "", false
 }
 
 // OwningWorktree returns the site dir is a git worktree of, so a checkout under
@@ -221,18 +241,18 @@ func OwningWorktree(dir string) (*config.Site, string, bool) {
 	if err != nil {
 		return nil, "", false
 	}
-	// Compare canonical paths, as the registry lookup does: a checkout under a
+	// Compare directories, as the registry lookup does: a checkout under a
 	// symlinked parent (/var on macOS, /home on ostree) is spelled one way in
-	// the registry and git's metadata and another by os.Getwd.
-	target := config.CanonicalPath(dir)
+	// the registry and git's metadata and another by os.Getwd, and a
+	// case-insensitive volume spells it several more.
 	for i := range reg.Sites {
 		s := &reg.Sites[i]
-		if s.Ignored || config.CanonicalPath(s.Path) == target {
+		if s.Ignored || config.SamePath(s.Path, dir) {
 			continue
 		}
 		wts, _ := gitpkg.DetectWorktrees(s.Path, s.PrimaryDomain())
 		for _, wt := range wts {
-			if config.CanonicalPath(wt.Path) == target {
+			if config.SamePath(wt.Path, dir) {
 				return s, wt.Branch, true
 			}
 		}

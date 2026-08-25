@@ -6,6 +6,9 @@ import version from './fixtures/version.json';
 import sitesFixture from './fixtures/sites.json';
 import servicesFixture from './fixtures/services.json';
 import presetsFixture from './fixtures/presets.json';
+import serviceIcons from './fixtures/service-icons.json';
+import frameworkMarks from './fixtures/framework-marks.json';
+import workerMarks from './fixtures/worker-marks.json';
 import statusFixture from './fixtures/status.json';
 import accessMode from './fixtures/access-mode.json';
 import settings from './fixtures/settings.json';
@@ -18,6 +21,7 @@ import profilerStatus from './fixtures/profiler_status.json';
 import stats from './fixtures/stats.json';
 import workersHealth from './fixtures/workers_health.json';
 import databasesFixture from './fixtures/databases.json';
+import docsFixture from './fixtures/docs.json';
 
 // Demo follows the system theme (auto). Reset any stale value a previous demo
 // session may have pinned, so it isn't stuck on a forced light/dark.
@@ -151,6 +155,30 @@ const TINKER_DRAFT = `// Demo REPL — edit and hit Run
 $total = Order::where('status', 'paid')->sum('total');
 User::count();
 collect([1, 2, 3])->map(fn ($n) => $n * 2);`;
+
+// Snippets the Tinker tab's picker offers: project files from
+// .lerd/tinker/snippets plus a personal one from ~/.config/lerd. Mutable so
+// the demo's save and delete flows behave like the real backend.
+const TINKER_SNIPPETS = [
+  {
+    name: 'paid-orders-total.php',
+    label: 'Paid orders total',
+    source: 'project',
+    content: "$total = Order::where('status', 'paid')->sum('total');\n"
+  },
+  {
+    name: 'seed-lookups.php',
+    label: 'Seed demo lookups',
+    source: 'project',
+    content: '// @name Seed demo lookups\nSeeder::run();\n'
+  },
+  {
+    name: 'current-user.php',
+    label: 'current-user',
+    source: 'global',
+    content: 'User::first();\n'
+  }
+];
 
 // Per-site request-timing analytics (the site Overview's Request timing view,
 // served at /api/sites/<domain>/analytics). The real view reads a durable SQLite
@@ -522,10 +550,55 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
   const method = (init?.method ?? 'GET').toUpperCase();
   const qs = new URLSearchParams(search);
 
+  // The documentation the real daemon serves out of the binary. The demo ships a
+  // handful of pages so the viewer is browsable without a backend.
+  if (path === '/docs/index.json') {
+    return jsonResponse({ pages: docsFixture.pages.map(({ html: _html, ...meta }) => meta) });
+  }
+  if (path === '/docs/search') {
+    const q = (qs.get('q') || '').toLowerCase();
+    const hits = q
+      ? docsFixture.pages
+          .filter((p) => (p.title + p.html).toLowerCase().includes(q))
+          .map(({ html: _html, ...meta }) => ({ ...meta, snippet: '' }))
+      : [];
+    return jsonResponse({ results: hits });
+  }
+  if (path.startsWith('/docs/page/')) {
+    const route = path.slice('/docs/page/'.length);
+    const page = docsFixture.pages.find((p) => p.route === route);
+    return page ? jsonResponse(page) : new Response('not found', { status: 404 });
+  }
+
   // Live (mutable) collections
   if (path === '/api/sites') return jsonResponse(sites);
   if (path === '/api/services') return jsonResponse(services);
   if (path === '/api/services/presets') return jsonResponse(presets);
+  // Marks and brand colours captured from the store the same way every other
+  // fixture is, so the demo draws each service, framework and worker as itself.
+  if (path === '/api/services/icons') return jsonResponse(serviceIcons);
+  if (path === '/api/frameworks/marks') return jsonResponse(frameworkMarks);
+  if (path === '/api/workers/marks') return jsonResponse(workerMarks);
+
+  if (path === '/api/lan/status' && method === 'POST') {
+    const body = JSON.parse(String(init?.body || '{}')) as { action?: string };
+    if (body.action === 'expose' || body.action === 'unexpose') {
+      lanStatus.exposed = body.action === 'expose';
+      lanStatus.lan_ip = lanStatus.exposed ? '192.168.1.42' : '';
+    } else if (body.action === 'services_on' || body.action === 'services_off') {
+      lanStatus.services_enabled = body.action === 'services_on';
+    }
+    const result = {
+      result: 'ok',
+      exposed: lanStatus.exposed,
+      services_enabled: lanStatus.services_enabled,
+      services_reachable: lanStatus.exposed && lanStatus.services_enabled,
+    };
+    return new Response(`${JSON.stringify(result)}\n`, {
+      status: 200,
+      headers: { 'content-type': 'application/x-ndjson' }
+    });
+  }
 
   // An engine's databases. An engine with no fixture reports none rather than
   // falling through to the empty catch-all, which the tab reads as an error.
@@ -589,7 +662,22 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
     if (/\/env$/.test(path)) return textResponse(ENV_TEXT);
   }
 
-  // Tinker REPL (POST)
+  // Tinker REPL (POST) and its snippet picker (GET list, POST save, DELETE)
+  if (/\/tinker:snippets$/.test(path)) {
+    if (method === 'POST') {
+      const body = JSON.parse(String(init?.body || '{}')) as { name?: string; source?: string; content?: string };
+      const name = (body.name || '').endsWith('.php') ? body.name! : (body.name || '') + '.php';
+      const source = body.source === 'global' ? 'global' : 'project';
+      const idx = TINKER_SNIPPETS.findIndex((s) => s.name === name && s.source === source);
+      const saved = { name, label: name.replace(/\.php$/, ''), source, content: body.content || '' };
+      if (idx >= 0) TINKER_SNIPPETS[idx] = saved;
+      else TINKER_SNIPPETS.push(saved);
+    } else if (method === 'DELETE') {
+      const idx = TINKER_SNIPPETS.findIndex((s) => s.name === qs.get('name') && s.source === qs.get('source'));
+      if (idx >= 0) TINKER_SNIPPETS.splice(idx, 1);
+    }
+    return jsonResponse(TINKER_SNIPPETS);
+  }
   if (/\/tinker$/.test(path)) return jsonResponse(TINKER_RESPONSE);
 
   // Nginx — global /api/nginx and per-site /api/sites/<domain>/nginx (+ /backups)

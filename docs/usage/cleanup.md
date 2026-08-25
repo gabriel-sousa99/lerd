@@ -42,6 +42,8 @@ lerd cleanup --safe       # only reclaim images provably built by lerd, keep unu
 lerd cleanup --yes        # skip the confirmation prompt (for scripts)
 ```
 
+Alongside images, cleanup reclaims the config a preset rendered for a service that is no longer installed (`~/.local/share/lerd/service-files/<name>/`). Removing a service clears its own, so what turns up here was left by an older lerd. A directory is only listed when nothing answers for the name any more: no service definition, no default preset, and no installed quadlet. Your databases live elsewhere, under `~/.local/share/lerd/data/<name>/`, and cleanup never touches them.
+
 Reported sizes are an estimate of the disk each removal frees. An image a live image is still built on is never listed (removing it is impossible and would free nothing), so cleanup never promises space it can't reclaim, though images that share layers with each other can add up to less than their sizes suggest. `lerd doctor` shows the reclaimable total as a read-only line so you discover the bloat early.
 
 The dashboard surfaces this too. The resources widget shows the reclaimable total alongside live CPU and memory, and a **Clean up** button opens a confirmation modal that lists the images that would be removed and the space they would return, mirroring the preview above, before it runs the deep reclaim. Confirming re-inspects the host and applies that fresh plan, so a modal left open across a rebuild never asks podman to remove an image that has since become live. Cleanup only ever reclaims images and never touches a named data volume, and the watcher already runs it unattended every day, so it does not sit in the same class as migrate, remove, or reinstall, which stay CLI-only. The TUI stays informative only.

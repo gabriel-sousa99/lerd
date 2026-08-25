@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import Badge from '$components/Badge.svelte';
+  import FrameworkMark from '$components/FrameworkMark.svelte';
+  import { frameworkMarks } from '$stores/frameworkMarks';
   import {
     type Site,
     pauseSite,
@@ -145,6 +147,15 @@
   const tunnelQrSrc = $derived(
     apiBase + '/api/tunnel-qr/' + site.domain + (activeWorktreeBranch ? '?branch=' + encodeURIComponent(activeWorktreeBranch) : '')
   );
+  const publicShared = $derived(
+    activeWorktree ? Boolean(activeWorktree.public_shared) : Boolean(site.public_shared)
+  );
+  const publicURL = $derived(
+    activeWorktree ? activeWorktree.public_share_url ?? '' : site.public_share_url ?? ''
+  );
+  const publicQrSrc = $derived(
+    apiBase + '/api/public-qr/' + site.domain + (activeWorktreeBranch ? '?branch=' + encodeURIComponent(activeWorktreeBranch) : '')
+  );
   let tunnelBusy = $state(false);
 
   async function startTunnelAuto() {
@@ -174,13 +185,12 @@
   const useTLS = $derived(Boolean(site.tls));
   const scheme = $derived(useTLS ? 'https://' : 'http://');
 
-  // On a remote (non-loopback) dashboard the site's .test domain doesn't
-  // resolve, so the open action targets the LAN share URL instead. When the
-  // site isn't shared yet the primary button flips to a share action, since
-  // there is nothing openable off-host until it is. Loopback is unchanged.
-  const remoteView = $derived(!$accessMode.loopback);
+  // Without dashboard-control authority, treat the view conservatively as
+  // off-host and prefer an active LAN share URL. Authenticated remote
+  // dashboards receive authority and intentionally match the local dashboard.
+  const remoteView = $derived(!$accessMode.localControl);
   const primaryShare = $derived(remoteView && !lanOn && !site.paused);
-  const showLanToggle = $derived(!site.paused && ($accessMode.loopback || lanOn));
+  const showLanToggle = $derived(!site.paused && ($accessMode.localControl || lanOn));
 
   function openTarget() {
     openSiteInBrowser(site, activeWorktreeBranch, remoteView && lanOn && lanURL ? lanURL : undefined);
@@ -451,7 +461,15 @@
 
       <span class="flex items-center gap-1.5 shrink-0">
         {#if activeFrameworkLabel}
-          <span class="hidden @md:inline-flex"><Badge tone="framework">{activeFrameworkLabel}</Badge></span>
+          <!-- A worktree reports its own framework_label but never a framework
+               name of its own, so the mark and the tone come from the site. -->
+          {@const framework = site.framework}
+          <span class="hidden @md:inline-flex">
+            <Badge tone="framework" brand={framework ? $frameworkMarks[framework]?.color : undefined}>
+              <FrameworkMark name={framework} tint={false} />
+              {activeFrameworkLabel}
+            </Badge>
+          </span>
         {/if}
         {#if lanOn && lanURL}
           <span class="hidden @md:inline-flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400">
@@ -463,6 +481,12 @@
           <span class="hidden @md:inline-flex items-center gap-1 text-[10px] text-violet-600 dark:text-violet-400">
             <Icon name="globe" class="w-3 h-3 shrink-0" />
             <ShareLink url={tunnelURL} qrSrc={tunnelQrSrc} />
+          </span>
+        {/if}
+        {#if publicShared && publicURL}
+          <span class="hidden @md:inline-flex items-center gap-1 text-[10px] text-sky-600 dark:text-sky-400">
+            <Icon name="globe" class="w-3 h-3 shrink-0" />
+            <ShareLink url={publicURL} qrSrc={publicQrSrc} />
           </span>
         {/if}
         {#if site.paused}
@@ -552,7 +576,7 @@
 
       <!-- A group secondary shows its main's workspace and moves with it, so it
            has nothing of its own to pick. -->
-      {#if $accessMode.loopback && !activeWorktreeBranch && !site.group_subdomain}
+      {#if $accessMode.localControl && !activeWorktreeBranch && !site.group_subdomain}
         <WorkspacePicker {site} />
       {/if}
 
@@ -595,7 +619,7 @@
         </button>
       {/if}
 
-      {#if $accessMode.loopback}
+      {#if $accessMode.localControl}
         <button
           type="button"
           onclick={() => openTerminal(site.domain, activeWorktreeBranch)}
@@ -717,7 +741,7 @@
                 {pauseBusy ? '...' : site.paused ? m.sites_resume() : m.sites_pause()}
               </button>
             {/if}
-            {#if $accessMode.loopback}
+            {#if $accessMode.localControl}
               <button
                 type="button"
                 role="menuitem"
@@ -870,8 +894,15 @@
     </div>
   {/if}
 
+  {#if publicShared && publicURL}
+    <div class="@md:hidden px-3 pb-2 flex items-center gap-1.5 text-[11px] text-sky-600 dark:text-sky-400 min-w-0">
+      <Icon name="globe" class="w-3 h-3 shrink-0" />
+      <ShareLink url={publicURL} qrSrc={publicQrSrc} />
+    </div>
+  {/if}
+
   {#snippet pathLabel()}
-    {#if $accessMode.loopback}
+    {#if $accessMode.localControl}
       <button
         type="button"
         onclick={() => openFolder(activePath)}

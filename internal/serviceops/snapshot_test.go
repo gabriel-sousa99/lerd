@@ -1,6 +1,8 @@
 package serviceops
 
 import (
+	"bytes"
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -249,22 +251,22 @@ func TestSnapshotDumpCommand(t *testing.T) {
 		{
 			"mysql one database",
 			SnapshotTarget{Service: "mysql", Database: "myapp"},
-			`( $(command -v mysqldump || command -v mariadb-dump) -uroot --single-transaction --quick --no-tablespaces --routines --triggers --events myapp ) | gzip -c`,
+			`if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi; ( $(command -v mysqldump || command -v mariadb-dump) -h 127.0.0.1 -uroot --single-transaction --quick --no-tablespaces --routines --triggers --events myapp ) | gzip -c`,
 		},
 		{
 			"mysql all databases",
 			SnapshotTarget{Service: "mysql", AllDatabases: true},
-			`( $(command -v mysqldump || command -v mariadb-dump) -uroot --single-transaction --quick --no-tablespaces --routines --triggers --events --add-drop-database --all-databases ) | gzip -c`,
+			`if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi; ( $(command -v mysqldump || command -v mariadb-dump) -h 127.0.0.1 -uroot --single-transaction --quick --no-tablespaces --routines --triggers --events --add-drop-database --all-databases ) | gzip -c`,
 		},
 		{
 			"postgres one database",
 			SnapshotTarget{Service: "postgres", Database: "myapp"},
-			`( pg_dump -U postgres --clean --if-exists myapp ) | gzip -c`,
+			`if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi; ( pg_dump -U postgres --clean --if-exists myapp ) | gzip -c`,
 		},
 		{
 			"postgres all databases",
 			SnapshotTarget{Service: "postgres", AllDatabases: true},
-			`( pg_dumpall -U postgres --clean --if-exists ) | gzip -c`,
+			`if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi; ( pg_dumpall -U postgres --clean --if-exists ) | gzip -c`,
 		},
 	}
 	for _, tt := range tests {
@@ -295,12 +297,12 @@ func TestSnapshotRestoreCommand(t *testing.T) {
 		{
 			"mysql one database",
 			SnapshotTarget{Service: "mysql", Database: "myapp"},
-			`gunzip -c | ( $(command -v mysql || command -v mariadb) --max-allowed-packet=1G -uroot myapp )`,
+			`gunzip -c | ( $(command -v mysql || command -v mariadb) -h 127.0.0.1 --max-allowed-packet=1G -uroot myapp )`,
 		},
 		{
 			"mysql all databases",
 			SnapshotTarget{Service: "mysql", AllDatabases: true},
-			`gunzip -c | ( $(command -v mysql || command -v mariadb) --max-allowed-packet=1G -uroot )`,
+			`gunzip -c | ( $(command -v mysql || command -v mariadb) -h 127.0.0.1 --max-allowed-packet=1G -uroot )`,
 		},
 		{
 			"postgres one database",
@@ -358,5 +360,41 @@ introspect:
 `)
 	if SnapshotSupported("halfengine", false) {
 		t.Error("export without import must not support snapshots")
+	}
+}
+
+// Restore drops and recreates the database before it reads the dump, so an
+// empty archive is total data loss. Snapshots written before the dump status
+// was checked are still on disk at 20 bytes and still list as restorable, so
+// the guard has to be on the restore side too, and it has to fire before the
+// drop.
+func TestRestoreSnapshotRefusesAnEmptyDump(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	target := SnapshotTarget{Service: "mysql", Database: "myapp"}
+	dir := snapshotDir(target.Service, target.Database, "poisoned", false)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var empty bytes.Buffer
+	zw := gzip.NewWriter(&empty)
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, snapshotDumpFile), empty.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSnapshotMeta(dir, Snapshot{
+		Name: "poisoned", Service: "mysql", Family: "mysql", Database: "myapp",
+		DumpFile: snapshotDumpFile, Compressed: true, SizeBytes: int64(empty.Len()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := RestoreSnapshot(target, "poisoned", nil)
+	if err == nil {
+		t.Fatal("restoring an empty snapshot was allowed")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error should say the dump is empty, got: %v", err)
 	}
 }

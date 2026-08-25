@@ -21,3 +21,4 @@ env_vars:
   - MAIL_ENCRYPTION=null
 category: mail
 icon: mail
+color: "#00b786"

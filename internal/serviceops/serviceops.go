@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -751,21 +752,6 @@ func EnsureDefaultPresetQuadletPinned(name, pinnedImage string) error {
 	if hasUserPin {
 		svc.Image = pinnedUserImage
 	}
-	// First-install / backfill pin: persist the canonical tag so future YAML
-	// canonical flips don't silently major-jump this install.
-	if canonicalPin == "" && len(p.Versions) > 0 {
-		canonicalPin = p.CanonicalTag()
-	}
-	if canonicalPin != "" {
-		if cfg, _ := config.LoadGlobal(); cfg != nil {
-			entry := cfg.Services[name]
-			if entry.CanonicalVersion != canonicalPin {
-				entry.CanonicalVersion = canonicalPin
-				cfg.Services[name] = entry
-				_ = config.SaveGlobal(cfg)
-			}
-		}
-	}
 	preservedExisting := false
 	if pinnedImage != "" {
 		// Reinstall path: preserve the user's pre-remove tag verbatim. Skip
@@ -808,8 +794,52 @@ func EnsureDefaultPresetQuadletPinned(name, pinnedImage string) error {
 			}
 		}
 	}
+	// The data dir is the last word on which server can open it. A cluster
+	// outlives both the quadlet InstalledImage reads back and the config entry
+	// describing it, so every pin derived above can name an older version than
+	// the files, which then refuses to start. Runs last so it corrects the
+	// strategy, track_latest and reinstall branches alike. An explicit user
+	// image is deliberate and stays authoritative; doctor reports that mismatch.
+	if !hasUserPin {
+		if tag := dataDirVersionTag(name, p); tag != "" && tag != matchVersionByImageTag(svc.Image, p.Versions) {
+			if corrected, resolveErr := p.ResolvePinned(tag); resolveErr == nil {
+				svc = corrected
+				canonicalPin = tag
+			}
+		}
+	}
+	// First-install / backfill pin: persist the canonical tag so future YAML
+	// canonical flips don't silently major-jump this install.
+	if canonicalPin == "" && len(p.Versions) > 0 {
+		canonicalPin = p.CanonicalTag()
+	}
+	if canonicalPin != "" {
+		if cfg, _ := config.LoadGlobal(); cfg != nil {
+			entry := cfg.Services[name]
+			if entry.CanonicalVersion != canonicalPin {
+				entry.CanonicalVersion = canonicalPin
+				cfg.Services[name] = entry
+				_ = config.SaveGlobal(cfg)
+			}
+		}
+	}
 	p.ApplyPlatformOverride(svc, runtime.GOOS)
 	return EnsureCustomServiceQuadlet(svc)
+}
+
+// dataDirVersionTag reports the preset version tag that wrote the service's
+// data dir, read from the marker file the preset declares. Empty when the
+// preset declares no marker, the data dir is absent, or its contents match no
+// version the preset offers.
+func dataDirVersionTag(name string, p *config.Preset) string {
+	if p.DataVersionFile == "" || len(p.Versions) == 0 {
+		return ""
+	}
+	raw, err := podman.ReadUnshared(filepath.Join(config.DataSubDir(name), p.DataVersionFile))
+	if err != nil {
+		return ""
+	}
+	return matchVersionByTagString(strings.TrimSpace(string(raw)), p.Versions)
 }
 
 // matchVersionByImageTag picks the longest version tag that is a prefix of
@@ -829,7 +859,17 @@ func matchVersionByImageTag(image string, versions []config.PresetVersion) strin
 	if at < 0 {
 		return ""
 	}
-	tag := image[at+1:]
+	return matchVersionByTagString(image[at+1:], versions)
+}
+
+// matchVersionByTagString picks the longest preset version tag that the given
+// version string starts a component of. Shared by image-tag matching and the
+// data-dir marker so "18-3.6-alpine" and a PG_VERSION of "18" resolve alike,
+// and a mariadb_upgrade_info of "11.8.8-MariaDB" resolves to "11.8" over "11".
+func matchVersionByTagString(tag string, versions []config.PresetVersion) string {
+	if tag == "" {
+		return ""
+	}
 	best := ""
 	for _, v := range versions {
 		if tag == v.Tag || strings.HasPrefix(tag, v.Tag+".") || strings.HasPrefix(tag, v.Tag+"-") {
@@ -863,6 +903,16 @@ func ensureCustomServiceQuadletDiff(svc *config.CustomService) (bool, error) {
 	// record. Once a port is recorded it sticks (the published_port>0 apply below
 	// short-circuits the probe), never auto-reverting — `lerd service port` changes it.
 	pp := config.ServicePublishedPort(svc.Name)
+	// The one exception: another installed service already publishes the recorded
+	// port. A removed service keeps its config entry, so its port can be handed on
+	// while it is gone and then reclaimed by a reinstall — sticking to it here would
+	// put two units on one port at boot. Drop the stale record and guard again.
+	if pp > 0 && portClaimedByOtherInstalled(svc.Name, pp) {
+		if err := persistPublishedPort(svc.Name, 0); err != nil {
+			return false, fmt.Errorf("clearing lerd-%s off already-published port %d: %w", svc.Name, pp, err)
+		}
+		pp = 0
+	}
 	if pp == 0 {
 		primary := podman.PrimaryHostPort(svc.Ports)
 		if free := maybeShiftPublishedPort(svc.Name, primary, unitActive(svc.Name)); free > 0 {

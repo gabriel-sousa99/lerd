@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +23,9 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/gabriel-sousa99/lerd/internal/shims"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
+
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
+
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -47,8 +49,8 @@ func quadletImage(unit string) string {
 // ensureImages checks all images required by units that are about to start and
 // builds or pulls any that are missing, using the parallel spinner UI.
 func ensureImages() {
-	units := append(coreUnits(), installedServiceUnits()...)
-	units = append(units, installedCustomContainerUnits()...)
+	units := append(lifecycle.CoreUnits(), lifecycle.InstalledServiceUnits()...)
+	units = append(units, lifecycle.InstalledCustomContainerUnits()...)
 	var jobs []BuildJob
 	seen := map[string]bool{}
 
@@ -203,103 +205,6 @@ func ensureDefaultPHPInstalled() {
 	if err := podman.WriteFPMQuadlet(defaultVer); err != nil {
 		fmt.Printf("  WARN: write PHP %s unit: %v\n", defaultVer, err)
 	}
-}
-
-// coreUnits returns the container units managed by lerd start/stop.
-// Does not include lerd-ui or lerd-watcher — those are added separately in runStart.
-// The configured default PHP version is ALWAYS included so the `php`, `composer`,
-// and `laravel new` shims have a working FPM container even on a fresh install
-// with zero registered sites. Other installed versions are only started when
-// at least one site references them; unused versions are left stopped.
-func coreUnits() []string {
-	cfg, _ := config.LoadGlobal()
-	units := []string{"lerd-nginx"}
-	if cfg == nil || cfg.DNS.Enabled {
-		units = append([]string{"lerd-dns"}, units...)
-	}
-	active := activePHPVersions()
-	if cfg != nil && cfg.PHP.DefaultVersion != "" {
-		active[cfg.PHP.DefaultVersion] = true
-	}
-	versions, _ := phpPkg.ListInstalled()
-	for _, v := range versions {
-		if !active[v] {
-			continue
-		}
-		short := strings.ReplaceAll(v, ".", "")
-		units = append(units, "lerd-php"+short+"-fpm")
-	}
-	return units
-}
-
-// installedCustomContainerUnits returns units for per-project custom containers
-// and per-site FrankenPHP containers that have a unit file installed (plist on
-// macOS, quadlet on Linux). These are started alongside FPM and services.
-func installedCustomContainerUnits() []string {
-	var units []string
-	reg, err := config.LoadSites()
-	if err != nil {
-		return nil
-	}
-	for _, site := range reg.Sites {
-		if site.Paused {
-			continue
-		}
-		var unitName string
-		switch {
-		case site.IsCustomContainer():
-			unitName = podman.CustomContainerName(site.Name)
-		case site.IsFrankenPHP():
-			unitName = podman.FrankenPHPContainerName(site.Name)
-		case site.IsCustomFPM():
-			unitName = podman.CustomFPMContainerName(site.Name)
-		default:
-			continue
-		}
-		// Use the platform-aware check (plist on macOS, .container quadlet on Linux)
-		// rather than podman.QuadletInstalled which only checks for .container files
-		// and always returns false on macOS where plists are used instead.
-		if services.Mgr.ContainerUnitInstalled(unitName) {
-			units = append(units, unitName)
-		}
-	}
-	return units
-}
-
-// installedServiceUnits returns service units that have a unit file installed
-// and have not been manually stopped by the user. Used for lerd start.
-func installedServiceUnits() []string {
-	var units []string
-	for _, svc := range knownServices() {
-		if services.Mgr.ContainerUnitInstalled("lerd-"+svc) && !config.ServiceIsPaused(svc) {
-			units = append(units, "lerd-"+svc)
-		}
-	}
-	customs, _ := config.ListCustomServices()
-	for _, svc := range customs {
-		if services.Mgr.ContainerUnitInstalled("lerd-"+svc.Name) && !config.ServiceIsPaused(svc.Name) {
-			units = append(units, "lerd-"+svc.Name)
-		}
-	}
-	return units
-}
-
-// allInstalledServiceUnits returns all service units that have a unit file
-// installed, regardless of paused state. Used for lerd stop.
-func allInstalledServiceUnits() []string {
-	var units []string
-	for _, svc := range knownServices() {
-		if services.Mgr.ContainerUnitInstalled("lerd-" + svc) {
-			units = append(units, "lerd-"+svc)
-		}
-	}
-	customs, _ := config.ListCustomServices()
-	for _, svc := range customs {
-		if services.Mgr.ContainerUnitInstalled("lerd-" + svc.Name) {
-			units = append(units, "lerd-"+svc.Name)
-		}
-	}
-	return units
 }
 
 // PortCheck pairs a host port with a human-readable label and container name.
@@ -537,6 +442,12 @@ func runStart(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Repair units and shims left pointing at a lerd binary that moved, which
+	// is what a package-manager upgrade of lerd itself does to an install.
+	if units, shims := healLerdBinaryMove(); len(units)+len(shims) > 0 {
+		fmt.Println("  " + repairSummary(units, shims))
+	}
+
 	// Restore quadlets and worker units that may be missing after an
 	// uninstall/reinstall cycle. Reads .lerd.yaml from each active site.
 	restoreSiteInfrastructure()
@@ -546,11 +457,11 @@ func runStart(_ *cobra.Command, _ []string) error {
 	reconcileCustomServices()
 
 	// If the configured default PHP version has never been installed (no plist /
-	// quadlet / container), install it now so coreUnits() can include it.
+	// quadlet / container), install it now so CoreUnits can include it.
 	ensureDefaultPHPInstalled()
 
 	// Pre-flight port conflict check.
-	units := append(coreUnits(), installedServiceUnits()...)
+	units := append(lifecycle.CoreUnits(), lifecycle.InstalledServiceUnits()...)
 	checkPortConflicts(units)
 
 	// Build or pull any missing images before starting containers.
@@ -625,19 +536,19 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// Phase 1: start all infrastructure (containers, FPM, custom containers,
 	// UI, watcher) before workers. Workers exec into containers, so they must
 	// be up first.
-	serviceUnits := append(coreUnits(), installedServiceUnits()...)
-	serviceUnits = append(serviceUnits, installedCustomContainerUnits()...)
+	serviceUnits := append(lifecycle.CoreUnits(), lifecycle.InstalledServiceUnits()...)
+	serviceUnits = append(serviceUnits, lifecycle.InstalledCustomContainerUnits()...)
 	serviceUnits = append(serviceUnits, "lerd-ui", "lerd-watcher")
 
 	// Phase 2: worker units that depend on running containers.
-	workerUnits := append(registeredQueueUnits(), registeredStripeUnits()...)
-	workerUnits = append(workerUnits, registeredScheduleUnits()...)
-	workerUnits = append(workerUnits, registeredReverbUnits()...)
+	workerUnits := append(lifecycle.RegisteredQueueUnits(), lifecycle.RegisteredStripeUnits()...)
+	workerUnits = append(workerUnits, lifecycle.RegisteredScheduleUnits()...)
+	workerUnits = append(workerUnits, lifecycle.RegisteredReverbUnits()...)
 	// Also include non-standard framework workers (horizon, vite-dev, etc.)
 	// declared in the site registry, so restored unit files get started here
 	// rather than waiting for the next session.
-	workerUnits = append(workerUnits, registeredFrameworkWorkerUnits()...)
-	workerUnits = append(workerUnits, registeredTimerUnits()...)
+	workerUnits = append(workerUnits, lifecycle.RegisteredFrameworkWorkerUnits()...)
+	workerUnits = append(workerUnits, lifecycle.RegisteredTimerUnits()...)
 	workerUnits = collapseTimerSiblings(dedupeStrings(workerUnits))
 	// Don't resurrect workers the idle engine has gracefully suspended. Without
 	// this, a boot or a manual start after stop would start a deliberately-asleep
@@ -667,6 +578,7 @@ func runStart(_ *cobra.Command, _ []string) error {
 		return jobs
 	}
 
+	startedServiceUnits := lifecycle.InstalledServiceUnits()
 	serviceErr := RunParallel(makeJobs(serviceUnits))
 	// When the Podman Machine's container storage is left corrupt after an
 	// unclean host shutdown, every container start fails. Remount storage and
@@ -682,6 +594,11 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// may also have written empty host lists before any engine was up. Refresh
 	// once engines are running so PMA_HOSTS / LERD_POSTGRES_HOSTS match reality.
 	serviceops.RefreshDiscoverFamilyConsumers()
+	// systemd reports a unit active as soon as its container starts, but the
+	// engine inside is not accepting connections yet. Without this wait, start
+	// hands back control while mysql is still booting and the first request to
+	// a database-backed site returns 500 until the engine catches up.
+	waitServicesReady(startedServiceUnits, serviceReadyTimeout)
 	// If the storage is still corrupt the heal couldn't fix it; every worker
 	// (and the DNS and tray steps below) would fail the same way and bury the
 	// recovery guidance. reportOverlayHealOutcome prints the guidance and
@@ -737,6 +654,9 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// Re-apply DNS routing so .test resolves via lerd-dns on every start.
 	// resolvectl settings are ephemeral and reset on reboot; the NM dispatcher
 	// script fires on interface "up" but that event precedes lerd-dns starting.
+	// The NixOS note lives here (and on install), not inside ConfigureResolver:
+	// the watcher calls that whenever .test fails.
+	dns.NoteNixOSOwnsResolver()
 	if err := dns.ConfigureResolver(); err != nil {
 		fmt.Printf("  WARN: DNS resolver config: %v\n", err)
 	}
@@ -785,7 +705,7 @@ func runStart(_ *cobra.Command, _ []string) error {
 // installed but are not yet running. Called from lerd install to bring back services
 // (mysql, redis, etc.) that were restored from .lerd.yaml.
 func startRestoredServices() {
-	units := installedServiceUnits()
+	units := lifecycle.InstalledServiceUnits()
 	if len(units) == 0 {
 		return
 	}
@@ -841,11 +761,11 @@ func startRestoredServices() {
 	// runStart's phase 1 → phase 2 split. Without this, `lerd install` would
 	// leave workers enabled-but-stopped after restoreSiteInfrastructure, since
 	// restoreWorker only writes the unit file and defers Start to here.
-	workerUnits := append(registeredQueueUnits(), registeredStripeUnits()...)
-	workerUnits = append(workerUnits, registeredScheduleUnits()...)
-	workerUnits = append(workerUnits, registeredReverbUnits()...)
-	workerUnits = append(workerUnits, registeredFrameworkWorkerUnits()...)
-	workerUnits = append(workerUnits, registeredTimerUnits()...)
+	workerUnits := append(lifecycle.RegisteredQueueUnits(), lifecycle.RegisteredStripeUnits()...)
+	workerUnits = append(workerUnits, lifecycle.RegisteredScheduleUnits()...)
+	workerUnits = append(workerUnits, lifecycle.RegisteredReverbUnits()...)
+	workerUnits = append(workerUnits, lifecycle.RegisteredFrameworkWorkerUnits()...)
+	workerUnits = append(workerUnits, lifecycle.RegisteredTimerUnits()...)
 	workerUnits = collapseTimerSiblings(dedupeStrings(workerUnits))
 	// Don't resurrect workers the idle engine has gracefully suspended, exactly
 	// as runStart does. Without this, `lerd install`/`update` (which re-creates
@@ -913,8 +833,6 @@ func reconcileCustomServices() {
 	}
 }
 
-// registeredStripeUnits returns unit names for all lerd-stripe-* service files
-// present in the systemd user dir (i.e. started via `lerd stripe:listen`).
 // restoreSiteInfrastructure ensures FPM quadlets, service quadlets, and worker
 // units exist for all registered (non-paused) sites. This repairs state after
 // an uninstall/reinstall cycle where unit files were deleted but site configs
@@ -1000,7 +918,7 @@ func restoreSiteInfrastructure() {
 		}
 
 		// Restore the host-proxy dev-server worker unit. Phase 2 of runStart
-		// launches it (it is enumerated by registeredFrameworkWorkerUnits).
+		// launches it (it is enumerated by RegisteredFrameworkWorkerUnits).
 		// Bind to the command the user approved at link time: if .lerd.yaml's
 		// dev command drifted since (e.g. a git pull), don't silently run the
 		// new one, warn and wait for a re-link to re-approve it.
@@ -1141,69 +1059,6 @@ func cleanOrphanTimerUnits() {
 	}
 }
 
-func registeredStripeUnits() []string {
-	return services.Mgr.ListServiceUnits("lerd-stripe-*")
-}
-
-// registeredQueueUnits returns unit names for all lerd-queue-* service units
-// (i.e. started via `lerd queue:start`).
-func registeredQueueUnits() []string {
-	return services.Mgr.ListServiceUnits("lerd-queue-*")
-}
-
-// registeredScheduleUnits returns unit names for all lerd-schedule-* service units.
-func registeredScheduleUnits() []string {
-	return services.Mgr.ListServiceUnits("lerd-schedule-*")
-}
-
-// registeredReverbUnits returns unit names for all lerd-reverb-* service units.
-func registeredReverbUnits() []string {
-	return services.Mgr.ListServiceUnits("lerd-reverb-*")
-}
-
-// registeredTimerUnits returns names for every lerd-* timer unit on disk,
-// each with the explicit `.timer` suffix so callers pass them straight to
-// systemctl. These drive scheduled (cron-style) framework workers like
-// Laravel <=10's `php artisan schedule:run`.
-func registeredTimerUnits() []string {
-	return services.Mgr.ListTimerUnits("lerd-*")
-}
-
-// registeredFrameworkWorkerUnits returns lerd-{worker}-{site} unit names for
-// every site/worker pair declared in the site registry. Used to make sure
-// non-standard workers (horizon, vite-dev, etc.) get started in phase 2 of
-// runStart, not just the queue/stripe/schedule/reverb glob.
-func registeredFrameworkWorkerUnits() []string {
-	reg, err := config.LoadSites()
-	if err != nil || reg == nil {
-		return nil
-	}
-	out := make([]string, 0)
-	for _, s := range reg.Sites {
-		if s.Ignored || s.Paused {
-			continue
-		}
-		proj, err := config.LoadProjectConfig(s.Path)
-		if err != nil || proj == nil {
-			continue
-		}
-		for _, w := range proj.Workers {
-			if w == "stripe" {
-				continue
-			}
-			out = append(out, "lerd-"+w+"-"+s.Name)
-		}
-		// Enumerate the dev-server unit unconditionally: this list also drives
-		// stop/quit, so a drifted unit must stay visible to be stoppable. The
-		// drift guard lives in restoreSiteInfrastructure, which won't write the
-		// drifted command, so start can only ever launch the approved one.
-		if s.IsHostProxy() && proj.Proxy != nil && proj.Proxy.Command != "" {
-			out = append(out, hostProxyWorkerUnit(s.Name))
-		}
-	}
-	return out
-}
-
 // suspendedWorkerUnitSet returns the worker unit names (without any .timer
 // suffix) the idle engine currently has suspended across all sites, covering
 // both main-site workers (lerd-{worker}-{site}) and per-worktree workers
@@ -1301,93 +1156,25 @@ func RunStop() error { return runStop(nil, nil) }
 // RunQuit stops all lerd processes and containers (exported for use by the UI server).
 func RunQuit() error { return runQuit(nil, nil) }
 
-// stopUnitSet returns every unit `lerd stop` tears down. lerd-dns is
-// deliberately excluded: the resolver points .test at it until uninstall, so
-// it stays up as install-level DNS plumbing (the watcher would restart it).
-func stopUnitSet() []string {
-	units := append(coreUnits(), allInstalledServiceUnits()...)
-	units = append(units, installedCustomContainerUnits()...)
-	units = append(units, registeredQueueUnits()...)
-	units = append(units, registeredStripeUnits()...)
-	units = append(units, registeredScheduleUnits()...)
-	units = append(units, registeredReverbUnits()...)
-	units = append(units, registeredFrameworkWorkerUnits()...)
-	// Stop scheduled-worker timers explicitly. Stopping the sibling
-	// oneshot .service is a no-op (it isn't running between firings),
-	// so without this the timer keeps dispatching after `lerd stop`.
-	units = append(units, registeredTimerUnits()...)
-	return slices.DeleteFunc(units, func(u string) bool { return u == "lerd-dns" })
+// spinnerRunner runs lifecycle teardown jobs through the CLI's parallel
+// spinner UI, so `lerd stop` and `lerd quit` render progress per unit.
+func spinnerRunner(jobs []lifecycle.Job) error {
+	bjs := make([]BuildJob, len(jobs))
+	for i, j := range jobs {
+		bjs[i] = BuildJob{Label: j.Label, Run: j.Run}
+	}
+	return RunParallel(bjs)
 }
 
 func runStop(_ *cobra.Command, _ []string) error {
-	units := stopUnitSet()
-
-	feedback.Begin()
-	feedback.Line("stopping lerd")
-
-	// Mark the intentional shutdown before tearing anything down, so the worker
-	// health watcher (which keeps running) suppresses heal/notification noise for
-	// the workers we're about to stop. They stay enabled and come back on start.
-	_ = config.MarkStopped()
-
-	// On macOS: stop all containers in one podman call before the parallel
-	// per-unit jobs run. This avoids serialising N individual podman stop
-	// requests through the Podman Machine socket (which can take 5s × N).
-	batchStopContainers(units)
-
-	jobs := make([]BuildJob, len(units))
-	for i, u := range units {
-		unit := u
-		label := strings.TrimSuffix(strings.TrimPrefix(unit, "lerd-"), ".timer")
-		jobs[i] = BuildJob{
-			Label: label,
-			Run:   func(w io.Writer) error { return podman.StopUnit(unit) },
-		}
-	}
-	RunParallel(jobs) //nolint:errcheck
-
-	if reg, err := config.LoadProxies(); err == nil {
-		for _, p := range reg.Proxies {
-			if p.Managed {
-				_ = proxyops.StopManaged(p.Name)
-			}
-		}
-	}
-	return nil
-}
-
-// quitProcessUnits is the ordered set of host process units `lerd quit` tears
-// down after runStop. Unlike `lerd stop`, quit is a full teardown, so it
-// includes lerd-dns. lerd-watcher precedes lerd-dns because the watcher is the
-// only thing that restarts lerd-dns; stopping it first keeps dns down.
-func quitProcessUnits() []string {
-	return []string{"lerd-ui", "lerd-watcher", "lerd-tray", "lerd-dns"}
+	return lifecycle.Stop(spinnerRunner)
 }
 
 func runQuit(_ *cobra.Command, _ []string) error {
-	// Stop containers and services (same as stop). `lerd stop` leaves lerd-dns
-	// up as install-level plumbing; `lerd quit` is a full teardown, so it also
-	// stops lerd-dns below.
-	if err := runStop(nil, nil); err != nil {
-		return err
-	}
-
-	// Stop process units. lerd-watcher comes before lerd-dns: the watcher is the
-	// only thing that restarts lerd-dns, so stopping it first keeps dns down.
-	for _, unit := range quitProcessUnits() {
-		s := feedback.Start("stopping " + unit)
-		if err := podman.StopUnit(unit); err != nil {
-			s.Fail(err)
-		} else {
-			s.OK("")
-		}
-	}
-	// Also kill any directly-launched tray instance not managed by launchd/systemd.
-	killTray()
-
-	stopPodmanMachine()
-
-	return nil
+	// killTray runs before the VM stop: it clears any directly-launched tray
+	// instance launchd and systemd know nothing about, and leaving the icon on
+	// screen for the seconds `podman machine stop` takes reads as a hung quit.
+	return lifecycle.Quit(spinnerRunner, killTray)
 }
 
 // canPromptForPassword reports whether sudo would have someone to ask. sudo reads

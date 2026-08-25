@@ -78,13 +78,17 @@ bash install.sh --local ./build/lerd
 
 ### Install via apt (Ubuntu/Debian)
 
-Lerd is published to a Launchpad PPA, so you can install and update it with your package manager:
+Lerd is published to a Launchpad PPA, so you can install and update it with your package manager. The PPA publishes for every Ubuntu release in standard support and for the current development release; on one of those:
 
 ```bash
 sudo add-apt-repository ppa:lerd/lerd
 sudo apt update
 sudo apt install lerd
 ```
+
+::: warning On other Ubuntu releases
+On a release the PPA does not publish for, `add-apt-repository` leaves behind a source entry that fails every later `apt update` with `does not have a Release file`. Remove it with `sudo add-apt-repository --remove ppa:lerd/lerd` and use the [script installer](#one-line-installer-recommended) instead.
+:::
 
 The package installs the binary to `/usr/bin/lerd` and finishes setup automatically: its maintainer script enables the unprivileged-port sysctl and systemd linger, then runs `lerd install` for your user, so the stack comes up straight away and again at every boot. `.test` DNS and HTTPS are configured with no prompt because the package sets up the sudoers rule and trusts the mkcert CA as root.
 
@@ -96,9 +100,45 @@ sudo apt upgrade
 
 A package-installed lerd lives under `/usr`, so `lerd update` (which self-replaces a `~/.local/bin` install) detects it and defers to your package manager instead of fighting it.
 
-The setup steps behind the package are not Debian-specific: `lerd bootstrap` recognises the Debian, Fedora, Arch and openSUSE trust store layouts and picks whichever the system uses, so the same flow will serve future rpm and AUR packages. On distros with no writable system trust store (NixOS), it prints where the CA lives so you can trust it declaratively.
+The setup steps behind the package are not Debian-specific: `lerd bootstrap` recognises the Debian, Fedora, Arch and openSUSE trust store layouts and picks whichever the system uses, so the same flow serves the deb and rpm packages alike and will serve a future AUR package. On distros with no writable system trust store (NixOS), it prints where the CA lives so you can trust it declaratively.
 
 It is also not package-specific. A normal `lerd install` runs the same `lerd bootstrap` steps through `sudo` rather than through a maintainer script, so the machine ends up in the same state however you installed.
+
+---
+
+### Install via dnf (Fedora)
+
+Lerd is published to the [`georged/lerd`](https://copr.fedorainfracloud.org/coprs/georged/lerd/) Fedora COPR, which builds for every Fedora release in standard support and for rawhide (the project follows Fedora branching, so new releases are picked up automatically):
+
+```bash
+sudo dnf copr enable georged/lerd
+sudo dnf install lerd
+```
+
+The package behaves exactly like the apt one: it installs the binary to `/usr/bin/lerd`, its scriptlet runs the same root-level bootstrap and per-user install, and `.test` DNS and HTTPS come up with no prompt.
+
+Updates come through dnf like any other package:
+
+```bash
+sudo dnf upgrade
+```
+
+As with apt, a package-installed lerd lives under `/usr`, so `lerd update` defers to your package manager.
+
+---
+
+### Install via Homebrew
+
+Homebrew on Linux works too:
+
+```bash
+brew install lerd-env/lerd/lerd
+lerd install
+```
+
+Unlike on macOS, Podman is not pulled in as a Homebrew dependency: lerd integrates with the distribution's own Podman, so install that with your package manager first. Homebrew itself needs its usual Linux prerequisites, notably a C compiler such as gcc, even though the formula only unpacks a prebuilt binary. If Homebrew refuses the tap as untrusted, run `brew trust lerd-env/lerd` once.
+
+Update with `brew upgrade lerd`. Homebrew installs every version into its own directory, so an upgrade moves the binary; the formula repoints the user services and the shims at the new location as part of the upgrade and restarts the daemons, so an unattended upgrade leaves nothing broken behind it. The rest of the environment is reapplied by the first lerd command you run at a terminal afterwards.
 
 ---
 
@@ -109,6 +149,10 @@ lerd update
 ```
 
 Fetches the latest release from GitHub, downloads the binary for your architecture, and atomically replaces the running binary. No restart needed.
+
+This applies to script and source installs in `~/.local/bin`. On a packaged install the binary is owned by apt or dnf, so `lerd update` prints that package manager's upgrade command instead of self-replacing; a Homebrew install updates with `brew upgrade lerd`.
+
+Replacing the binary is only half of an update: quadlets, DNS, nginx config, the user services and the shims all have to be reapplied, which `lerd update` does for you by re-running `lerd install`. A package manager does none of that, so the first lerd command you run at a terminal after the new binary lands reapplies it for you and says so. It runs once per version, and never on a machine where `lerd install` has not run yet, in a script, or from a daemon.
 
 You can also re-run the installer:
 
@@ -124,6 +168,10 @@ wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-sup
 
 :::
 
+::: warning Running something older than 1.26?
+`lerd update` fails on builds from before the project moved to the lerd-env organisation, with an error about an unexpected release URL. [Updating from a version before 1.26](./updating-from-pre-1.26) gets you across in one step.
+:::
+
 ---
 
 ### Uninstall
@@ -136,7 +184,7 @@ Stops all containers, disables and removes Quadlet units, removes the watcher se
 
 Four opt-in prompts before finishing:
 
-1. **Remove all config and data**: deletes `~/.config/lerd` and `~/.local/share/lerd` (takes your `sites.yaml`, bundled binaries, TLS certs, and all service data with it).
+1. **Remove all config and data**: deletes `~/.config/lerd` and `~/.local/share/lerd` (takes your `sites.yaml`, bundled binaries, TLS certs, and all service data with it). Global npm packages that the `npm` shim installed into lerd's managed prefix are not silently lost: when a system npm exists you're offered a reinstall into your own prefix first, and otherwise the exact `npm install -g …` line to run afterwards is printed.
 2. **Remove MCP integration**: unregisters lerd from Claude Code, Cursor, Windsurf, and Junie at user scope, removes `~/.claude/skills/lerd/`, `~/.cursor/rules/lerd.mdc`, and strips the lerd block from `~/.junie/guidelines.md`. Also runs across every registered site to clean the same files per-project.
 3. **Uninstall mkcert CA**: runs `mkcert -uninstall` so browsers and OS trust stores stop trusting the lerd CA that `install` originally added.
 4. **Purge lerd-built container images**: removes `lerd-php*-fpm:local`, `lerd-custom-*:local`, and `lerd-dnsmasq:local`. Upstream pulled images (mysql/redis/postgres/etc.) are deliberately left alone; they're expensive to re-pull and your database/app data lives in host bind mounts, not inside the images, so nothing is lost by keeping them.
@@ -146,6 +194,8 @@ To answer yes to every prompt without interaction:
 ```bash
 lerd uninstall --force
 ```
+
+If lerd came from apt, dnf or Homebrew, the teardown is the same but the binary stays where it is: deleting a file the package manager owns would leave it believing lerd is still installed. `lerd uninstall` prints the matching removal command at that step, so finish with `sudo apt remove lerd`, `sudo dnf remove lerd` or `brew uninstall lerd`.
 
 The installer's own `--uninstall` stops the user units and removes the binary, but the DNS setup lives outside your home directory and only lerd can take it back out: the `lerd0` link unit, the NetworkManager rules and dispatcher, the drop-in that empties `FallbackDNS`, and the passwordless sudoers rule the DNS operations run under. So when it finds that configuration it offers to run `lerd dns:disable` first, and prints the root commands to clear it by hand if you decline or the binary has already gone.
 
@@ -205,7 +255,7 @@ Recent Homebrew versions refuse to load formulae from third-party taps until the
 lerd update
 ```
 
-If you installed via Homebrew instead, update with `brew upgrade lerd && lerd install`.
+If you installed via Homebrew instead, update with `brew upgrade lerd`. The `lerd install` that finishes an update is applied for you by the first lerd command you run at a terminal afterwards, and running it yourself does no harm.
 
 If you're running a local development build (a `git describe` version like `1.25.0-6-g7d03`), the one-line installer and `--update` detect it and ask before replacing it with a release binary, so an ahead-of-release build isn't overwritten silently. Decline to keep your build, or reinstall one explicitly with `install.sh --local <path>`.
 

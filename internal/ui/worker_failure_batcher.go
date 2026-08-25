@@ -86,6 +86,11 @@ var (
 // workerFailureBatchDelay after the *first* failure in the batch even if
 // new failures keep trickling in.
 func queueWorkerFailureNotifications(ws []workerheal.UnhealthyWorker) {
+	// An orphan is pruned rather than healed, so naming it a failing worker
+	// reports a problem the user did not cause and cannot act on. Filtering
+	// before the timer matters: a delta of nothing but orphans must leave the
+	// window unarmed, or the next real failure gets a truncated settle.
+	ws = workerheal.Healable(ws)
 	if len(ws) == 0 {
 		return
 	}

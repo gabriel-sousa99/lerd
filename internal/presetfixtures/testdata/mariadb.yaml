@@ -2,6 +2,7 @@ name: mariadb
 description: MariaDB (MySQL-compatible) versions
 family: mariadb
 env_role: mysql
+stop_timeout: 60
 default_version: "11.8"
 init: true
 versions:

@@ -81,9 +81,10 @@ export interface Service {
   paused?: boolean;
   depends_on?: string[];
   // Resolved from the service's preset YAML, so a service predating these
-  // fields still renders with the right category and icon.
+  // fields still renders with the right category, icon and brand colour.
   category?: string;
   icon?: string;
+  color?: string;
   admin_for?: string[];
   // The preset this service came from ("mariadb" for "mariadb-11-8"), matched
   // against another preset's admin_for to find the UI that administers it.
@@ -294,6 +295,10 @@ export async function setServiceShim(
       await loadServices();
       return { ok: true };
     }
+    // A toggle usually fails because the shim dir no longer holds what the
+    // dashboard is showing, so refresh on the way out as well: the control ends
+    // up where the server says it belongs, beside the reason it did not move.
+    await loadServices();
     return { ok: false, error: data.error || m.common_failed() };
   } catch (e) {
     return { ok: false, error: String(e) };
