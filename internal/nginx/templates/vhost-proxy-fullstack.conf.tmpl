@@ -1,7 +1,7 @@
 server {
     listen 80;
     listen [::]:80;
-    server_name {{.Domain}};
+    server_name{{range .Domains}} {{.}}{{end}};
 {{if .Base.IsSite}}
     root {{.Base.Root}};
     index index.php index.html;
@@ -10,7 +10,7 @@ server {
     location ^~ {{.Path}} {
 {{if .Target.IsSite}}        root {{.Target.Root}};
         try_files $uri @{{.Target.LocationName}};
-{{else}}        proxy_pass http://{{.Target.UpstreamHost}}:{{.Target.UpstreamPort}};
+{{else}}        proxy_pass {{$.UpstreamScheme}}://{{.Target.UpstreamHost}}:{{.Target.UpstreamPort}};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -18,8 +18,9 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-        proxy_read_timeout 86400;
-        proxy_connect_timeout 5s;
+        proxy_read_timeout {{$.RequestTimeout}}s;
+        proxy_connect_timeout {{$.RequestTimeout}}s;
+        proxy_send_timeout {{$.RequestTimeout}}s;
         proxy_buffering off;
 {{end}}    }
 {{end}}
@@ -46,7 +47,7 @@ server {
 {{end}}
     location / {
 {{if .Base.IsSite}}        try_files $uri $uri/ /index.php?$query_string;
-{{else}}        proxy_pass http://{{.Base.UpstreamHost}}:{{.Base.UpstreamPort}};
+{{else}}        proxy_pass {{.UpstreamScheme}}://{{.Base.UpstreamHost}}:{{.Base.UpstreamPort}};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -54,8 +55,9 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-        proxy_read_timeout 86400;
-        proxy_connect_timeout 5s;
+        proxy_read_timeout {{.RequestTimeout}}s;
+        proxy_connect_timeout {{.RequestTimeout}}s;
+        proxy_send_timeout {{.RequestTimeout}}s;
         proxy_buffering off;
 {{end}}    }
 {{if .Base.IsSite}}

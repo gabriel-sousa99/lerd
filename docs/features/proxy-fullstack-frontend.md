@@ -58,6 +58,26 @@ lerd proxy add app.localhost --port 9000 --path ./spa --api-site app-api \
   --api-path /api --api-path /webhooks --api-path /redirect --api-path /authenticate
 ```
 
+No dashboard, ative **Editar rotas individualmente** para misturar destinos no
+mesmo domínio. Cada path pode apontar para um site lerd ou para seu próprio
+host/porta; o target da base `/` continua configurado separadamente no bloco
+SPA. O editor preserva essa lista ao reabrir o proxy, sem achatar destinos
+diferentes para o primeiro target.
+
+## Operação e diagnóstico no dashboard
+
+O detalhe do proxy consulta seu upstream enquanto estiver aberto. Sem um
+`health_path`, a verificação testa a conexão TCP; quando o caminho está definido,
+ela faz uma requisição HTTP usando o protocolo do upstream e mostra latência e
+status HTTP. O painel também confirma a presença do container Nginx, do vhost e,
+para proxies HTTPS, do certificado. O conteúdo do vhost é exibido somente para
+leitura e sempre é resolvido a partir do proxy registrado, não de um caminho
+fornecido pela requisição.
+
+O tráfego usa o mesmo feed de acesso e agregador de timings dos sites, mas com a
+chave `proxy:<nome>` para evitar colisões. Proxies gerenciados também expõem o
+journal do unit na aba **Logs**.
+
 > **Atenção (app-side):** `/redirect` precisa **existir** na API. Apps que não
 > montam o `core/web.php` referenciam a rota sem a definir → 404. O lerd só
 > roteia; a rota é responsabilidade da aplicação.

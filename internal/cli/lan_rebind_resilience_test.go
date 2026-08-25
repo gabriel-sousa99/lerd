@@ -41,6 +41,9 @@ func (m *rebindMgr) Restart(name string) error {
 // then cannot clean up.
 func isolateLaunchAgents(t *testing.T) {
 	t.Helper()
+	// Regeneration refreshes the container hosts file as well as unit files.
+	// Keep that runtime artifact out of the developer's real data directory.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	if runtime.GOOS == "darwin" {
 		t.Setenv("HOME", t.TempDir())
 	}

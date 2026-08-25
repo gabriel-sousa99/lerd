@@ -75,3 +75,22 @@ func RemoveSite(path, site string) error {
 	}
 	return SaveSnapshot(kept, path)
 }
+
+// RemoveKey drops exactly one namespaced snapshot, such as a proxy key. Unlike
+// RemoveSite it does not apply site/worktree prefix semantics.
+func RemoveKey(path, key string) error {
+	snap := Load(path)
+	if snap == nil {
+		return nil
+	}
+	kept := snap[:0]
+	for _, s := range snap {
+		if s.Site != key {
+			kept = append(kept, s)
+		}
+	}
+	if len(kept) == len(snap) {
+		return nil
+	}
+	return SaveSnapshot(kept, path)
+}

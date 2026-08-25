@@ -67,10 +67,19 @@ JetBrains (`phpstorm` / `webstorm` / `idea` / `goland`) → `subl` / `zed` /
 
 ## Proxies (incl. fullstack)
 
-Aba **Proxies** com toggle **Simples | Fullstack (SPA + API)**: pickers de
-site/porta, paths editáveis, mapa de rotas ao vivo e detecção do sufixo `-api`.
-O painel de detalhes mostra o roteamento, e cada site ganha um bloco **"Proxy
-fullstack"** para criar/editar direto dali. Ver [Proxies](../README.md#proxies-para-projetos-não-php).
+A aba **Proxies** segue a mesma navegação em lista e detalhe usada por Sites e
+Serviços. A lista mostra o estado operacional de cada domínio. No detalhe, as
+abas **Visão geral**, **Tráfego**, **Logs** (quando o dev server é gerenciado) e
+**Configuração e diagnóstico** reúnem o upstream, as rotas, o estado do Nginx,
+o health check, a latência, as rotas lentas e o vhost gerado em modo somente
+leitura. Estado e tráfego são atualizados a cada dez segundos enquanto a tela
+está aberta, com atualização manual disponível no diagnóstico.
+
+O editor cobre proxies simples e fullstack, aliases, upstream HTTP ou HTTPS,
+host e porta, caminho de health check, timeout, TLS, autostart e rotas com
+destinos independentes por site ou host/porta. A configuração continua
+declarativa em `proxies.yaml`, e cada alteração regenera o vhost. Ver
+[Proxies](../README.md#proxies-para-projetos-não-php).
 
 ## Serviços novos (presets desta fork)
 

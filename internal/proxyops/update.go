@@ -3,6 +3,8 @@ package proxyops
 import (
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -15,12 +17,16 @@ import (
 // managed on/off requires quadlet install/uninstall and is also out of
 // scope for the edit path.
 type UpdateOptions struct {
-	Port         *int
-	Path         *string
-	Command      *string
-	NodeVersion  *string
-	UpstreamHost *string
-	AutoStart    *bool
+	Aliases        *[]string
+	Port           *int
+	Path           *string
+	Command        *string
+	NodeVersion    *string
+	UpstreamHost   *string
+	UpstreamScheme *string
+	HealthPath     *string
+	TimeoutSeconds *int
+	AutoStart      *bool
 
 	// Fullstack edits. Routes is a WHOLE-LIST replacement when non-nil
 	// (nil = leave unchanged, &[]Route{} = clear → back to simple). Site
@@ -63,6 +69,34 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 		updated.UpstreamHost = *opts.UpstreamHost
 		vhostDirty = true
 	}
+	if opts.UpstreamScheme != nil && *opts.UpstreamScheme != updated.UpstreamScheme {
+		updated.UpstreamScheme = *opts.UpstreamScheme
+		vhostDirty = true
+	}
+	if opts.HealthPath != nil {
+		updated.HealthPath = *opts.HealthPath
+	}
+	if opts.TimeoutSeconds != nil && *opts.TimeoutSeconds != updated.TimeoutSeconds {
+		updated.TimeoutSeconds = *opts.TimeoutSeconds
+		vhostDirty = true
+	}
+	aliasesDirty := false
+	if opts.Aliases != nil {
+		domains := []string{updated.PrimaryDomain()}
+		seen := map[string]bool{updated.PrimaryDomain(): true}
+		for _, alias := range *opts.Aliases {
+			alias = strings.ToLower(strings.TrimSpace(alias))
+			if alias != "" && !seen[alias] {
+				seen[alias] = true
+				domains = append(domains, alias)
+			}
+		}
+		if !slices.Equal(domains, updated.Domains) {
+			updated.Domains = domains
+			aliasesDirty = true
+			vhostDirty = true
+		}
+	}
 	if opts.Path != nil && *opts.Path != updated.Path {
 		if *opts.Path != "" {
 			if _, err := os.Stat(*opts.Path); err != nil {
@@ -104,6 +138,21 @@ func Update(name string, opts UpdateOptions) (*config.Proxy, error) {
 	}
 	if err := updated.Validate(); err != nil {
 		return nil, err
+	}
+	if aliasesDirty {
+		for _, domain := range updated.Domains[1:] {
+			if other, err := config.FindProxyByDomain(domain); err == nil && other.Name != updated.Name {
+				return nil, fmt.Errorf("já existe um proxy para %s", domain)
+			}
+			if site, err := config.FindSiteByDomain(domain); err == nil && site != nil {
+				return nil, fmt.Errorf("domínio %s já está registrado como site PHP (%s)", domain, site.Name)
+			}
+		}
+		if updated.Secured {
+			if err := secureCertFn(updated); err != nil {
+				return nil, fmt.Errorf("emitindo certificado: %w", err)
+			}
+		}
 	}
 
 	if err := config.AddProxy(updated); err != nil {

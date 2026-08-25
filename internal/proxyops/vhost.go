@@ -29,5 +29,16 @@ func RegenerateProxyVhost(p config.Proxy) error {
 		}
 		return nginx.GenerateFullstackProxyVhost(spec)
 	}
-	return nginx.GenerateProxyVhost(p.PrimaryDomain(), upstreamHost(p), p.UpstreamPort, p.Secured)
+	legacyTimeout := 86400
+	if !p.Secured {
+		legacyTimeout = 0
+	}
+	return nginx.GenerateProxyVhostWithOptions(nginx.ProxyVhostOptions{
+		Domains:        p.Domains,
+		UpstreamHost:   upstreamHost(p),
+		UpstreamPort:   p.UpstreamPort,
+		UpstreamScheme: p.EffectiveUpstreamScheme(),
+		RequestTimeout: p.EffectiveTimeoutSeconds(legacyTimeout),
+		Secured:        p.Secured,
+	})
 }

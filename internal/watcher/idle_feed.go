@@ -340,6 +340,9 @@ func resolveHostToStatsKey(host string) (string, bool) {
 	if wt, ok := wtIndex.lookup(host); ok {
 		return reqstats.Key(wt.Site, wt.Branch), true
 	}
+	if proxy, err := config.FindProxyByDomain(host); err == nil && proxy != nil {
+		return reqstats.ProxyKey(proxy.Name), true
+	}
 	return siteNameForHost(host)
 }
 

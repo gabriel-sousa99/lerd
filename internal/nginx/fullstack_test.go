@@ -46,9 +46,12 @@ func TestRenderFullstack_PortBaseSiteRoutes(t *testing.T) {
 
 func TestRenderFullstack_PortRouteHasConnectTimeout(t *testing.T) {
 	spec := ProxyVhostSpec{
-		Domain:  "app.localhost",
-		Secured: true,
-		Base:    ProxyTarget{UpstreamHost: "host.containers.internal", UpstreamPort: 9000},
+		Domain:         "app.localhost",
+		Domains:        []string{"app.localhost", "frontend.localhost"},
+		Secured:        true,
+		UpstreamScheme: "https",
+		RequestTimeout: 90,
+		Base:           ProxyTarget{UpstreamHost: "host.containers.internal", UpstreamPort: 9000},
 		Routes: []ProxyRouteSpec{
 			{Path: "/legacy", Target: ProxyTarget{UpstreamHost: "127.0.0.1", UpstreamPort: 8001}},
 		},
@@ -60,12 +63,18 @@ func TestRenderFullstack_PortRouteHasConnectTimeout(t *testing.T) {
 	if !strings.Contains(out, "location ^~ /legacy {") {
 		t.Errorf("faltou location da rota porta\n%s", out)
 	}
-	if !strings.Contains(out, "proxy_pass http://127.0.0.1:8001;") {
+	if !strings.Contains(out, "server_name app.localhost frontend.localhost;") {
+		t.Errorf("faltaram aliases no server_name\n%s", out)
+	}
+	if !strings.Contains(out, "proxy_pass https://127.0.0.1:8001;") {
 		t.Errorf("faltou proxy_pass da rota porta\n%s", out)
 	}
-	// A rota com target porta deve ter o mesmo connect timeout da base.
-	if n := strings.Count(out, "proxy_connect_timeout 5s;"); n < 2 {
+	// A rota com target porta deve ter o mesmo timeout da base.
+	if n := strings.Count(out, "proxy_connect_timeout 90s;"); n < 2 {
 		t.Errorf("proxy_connect_timeout aparece %d vezes, want >= 2 (base + rota)", n)
+	}
+	if n := strings.Count(out, "proxy_send_timeout 90s;"); n < 2 {
+		t.Errorf("proxy_send_timeout aparece %d vezes, want >= 2 (base + rota)", n)
 	}
 }
 

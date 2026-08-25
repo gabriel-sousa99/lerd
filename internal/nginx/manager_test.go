@@ -1598,6 +1598,38 @@ func TestGenerateProxyVhostPlain(t *testing.T) {
 	}
 }
 
+func TestGenerateProxyVhostAdvancedUpstream(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	err := GenerateProxyVhostWithOptions(ProxyVhostOptions{
+		Domains:        []string{"spa.localhost", "app.localhost"},
+		UpstreamHost:   "127.0.0.1",
+		UpstreamPort:   9443,
+		UpstreamScheme: "https",
+		RequestTimeout: 120,
+	})
+	if err != nil {
+		t.Fatalf("GenerateProxyVhostWithOptions: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(config.NginxConfD(), "spa.localhost.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"server_name spa.localhost app.localhost;",
+		"proxy_pass https://127.0.0.1:9443;",
+		"proxy_connect_timeout 120s;",
+		"proxy_read_timeout 120s;",
+		"proxy_send_timeout 120s;",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("missing %q:\n%s", want, content)
+		}
+	}
+}
+
 func TestGenerateProxyVhostSecured(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)

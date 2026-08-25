@@ -11,16 +11,19 @@ func TestProxyYAMLRoundTrip(t *testing.T) {
 	invalidateProxiesCache()
 
 	original := Proxy{
-		Name:         "gestao-clientes",
-		Domains:      []string{"gestao-clientes.localhost"},
-		UpstreamPort: 9000,
-		UpstreamHost: "host.containers.internal",
-		Path:         "/home/u/projetos/gestao-clientes-spa",
-		Secured:      true,
-		Managed:      true,
-		NodeVersion:  "20",
-		Command:      "npm run dev",
-		AutoStart:    true,
+		Name:           "gestao-clientes",
+		Domains:        []string{"gestao-clientes.localhost", "clientes.localhost"},
+		UpstreamPort:   9000,
+		UpstreamHost:   "host.containers.internal",
+		UpstreamScheme: "https",
+		HealthPath:     "/healthz",
+		TimeoutSeconds: 120,
+		Path:           "/home/u/projetos/gestao-clientes-spa",
+		Secured:        true,
+		Managed:        true,
+		NodeVersion:    "20",
+		Command:        "npm run dev",
+		AutoStart:      true,
 	}
 
 	reg := &ProxyRegistry{Proxies: []Proxy{original}}
@@ -42,6 +45,10 @@ func TestProxyYAMLRoundTrip(t *testing.T) {
 	}
 	if got.PrimaryDomain() != "gestao-clientes.localhost" {
 		t.Fatalf("PrimaryDomain: %q", got.PrimaryDomain())
+	}
+	if len(got.Domains) != 2 || got.Domains[1] != "clientes.localhost" ||
+		got.UpstreamScheme != "https" || got.HealthPath != "/healthz" || got.TimeoutSeconds != 120 {
+		t.Fatalf("advanced settings round-trip mismatch: %+v", got)
 	}
 }
 

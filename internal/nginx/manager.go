@@ -914,9 +914,22 @@ func RemoveVhost(domain string) error {
 // proxyVhostData is the template data for vhost-proxy*.conf.tmpl.
 type proxyVhostData struct {
 	Domain         string
+	Domains        []string
 	UpstreamHost   string
 	UpstreamPort   int
+	UpstreamScheme string
 	RequestTimeout int
+}
+
+// ProxyVhostOptions is the declarative input for a manual single-upstream
+// proxy. Domains[0] is the primary domain used for filenames and certificates.
+type ProxyVhostOptions struct {
+	Domains        []string
+	UpstreamHost   string
+	UpstreamPort   int
+	UpstreamScheme string
+	RequestTimeout int
+	Secured        bool
 }
 
 // renderProxyVhost is renderVhost for the LAN proxy template, which carries its
@@ -939,9 +952,37 @@ func renderProxyVhost(tmpl *template.Template, data proxyVhostData) ([]byte, err
 // conf.d/<domain>-ssl.conf and removes any leftover plain conf so the two
 // don't coexist.
 func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured bool) error {
+	return GenerateProxyVhostWithOptions(ProxyVhostOptions{
+		Domains: []string{domain}, UpstreamHost: upstreamHost,
+		UpstreamPort: upstreamPort, Secured: secured,
+	})
+}
+
+// GenerateProxyVhostWithOptions renders a single-upstream proxy with aliases,
+// scheme and timeout while preserving legacy defaults when they are omitted.
+func GenerateProxyVhostWithOptions(opts ProxyVhostOptions) error {
+	if len(opts.Domains) == 0 || opts.Domains[0] == "" {
+		return fmt.Errorf("proxy domain is required")
+	}
+	scheme := opts.UpstreamScheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("invalid upstream scheme %q", scheme)
+	}
+	timeout := opts.RequestTimeout
+	if timeout <= 0 {
+		if opts.Secured {
+			timeout = 86400
+		} else {
+			timeout = resolveRequestTimeout("")
+		}
+	}
+	domain := opts.Domains[0]
 	tmplName := "vhost-proxy.conf.tmpl"
 	confName := domain + ".conf"
-	if secured {
+	if opts.Secured {
 		tmplName = "vhost-proxy-ssl.conf.tmpl"
 		confName = domain + "-ssl.conf"
 	}
@@ -956,9 +997,11 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured b
 	}
 	data := proxyVhostData{
 		Domain:         domain,
-		UpstreamHost:   upstreamHost,
-		UpstreamPort:   upstreamPort,
-		RequestTimeout: resolveRequestTimeout(""),
+		Domains:        opts.Domains,
+		UpstreamHost:   opts.UpstreamHost,
+		UpstreamPort:   opts.UpstreamPort,
+		UpstreamScheme: scheme,
+		RequestTimeout: timeout,
 	}
 
 	rendered, err := renderProxyVhost(tmpl, data)
@@ -976,7 +1019,7 @@ func GenerateProxyVhost(domain, upstreamHost string, upstreamPort int, secured b
 	// When flipping HTTP<->HTTPS, remove the stale counterpart so the two
 	// server blocks don't coexist and conflict on listen 80.
 	stale := domain + ".conf"
-	if !secured {
+	if !opts.Secured {
 		stale = domain + "-ssl.conf"
 	}
 	_ = os.Remove(filepath.Join(config.NginxConfD(), stale))

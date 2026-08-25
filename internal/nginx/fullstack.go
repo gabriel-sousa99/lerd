@@ -39,10 +39,26 @@ type ProxyRouteSpec struct {
 
 // ProxyVhostSpec is the fully-resolved input for a fullstack proxy vhost.
 type ProxyVhostSpec struct {
-	Domain  string
-	Secured bool
-	Base    ProxyTarget      // catch-all "/"
-	Routes  []ProxyRouteSpec // path-prefixed routes
+	Domain         string
+	Domains        []string
+	Secured        bool
+	UpstreamScheme string
+	RequestTimeout int
+	Base           ProxyTarget      // catch-all "/"
+	Routes         []ProxyRouteSpec // path-prefixed routes
+}
+
+func (s ProxyVhostSpec) withDefaults() ProxyVhostSpec {
+	if len(s.Domains) == 0 {
+		s.Domains = []string{s.Domain}
+	}
+	if s.UpstreamScheme == "" {
+		s.UpstreamScheme = "http"
+	}
+	if s.RequestTimeout <= 0 {
+		s.RequestTimeout = 86400
+	}
+	return s
 }
 
 // validate refuses any value that could break out of the directive it lands in,
@@ -50,8 +66,12 @@ type ProxyVhostSpec struct {
 // are quoted rather than rejected for whitespace, so only the characters that
 // end a directive or open a block are refused.
 func (s ProxyVhostSpec) validate() error {
+	s = s.withDefaults()
 	values := map[string]string{
-		"domain": s.Domain,
+		"domain": s.Domain, "upstream scheme": s.UpstreamScheme,
+	}
+	for i, domain := range s.Domains {
+		values[fmt.Sprintf("domain %d", i+1)] = domain
 	}
 	addTarget := func(label string, t ProxyTarget) {
 		values[label+" doc root"] = t.DocRoot
@@ -77,6 +97,12 @@ func (s ProxyVhostSpec) validate() error {
 		if i := strings.IndexAny(v, nginxValueForbidden); i >= 0 {
 			return fmt.Errorf("nginx %s %q contains %q, which would end the directive it lands in", name, v, string(v[i]))
 		}
+	}
+	if s.UpstreamScheme != "http" && s.UpstreamScheme != "https" {
+		return fmt.Errorf("invalid upstream scheme %q", s.UpstreamScheme)
+	}
+	if s.RequestTimeout <= 0 || s.RequestTimeout > 86400 {
+		return fmt.Errorf("invalid proxy timeout %d", s.RequestTimeout)
 	}
 	// A quote in a doc root would close the quoted token Root emits.
 	for name, v := range map[string]string{"base doc root": s.Base.DocRoot} {
@@ -114,6 +140,7 @@ func (s ProxyVhostSpec) siteLocations() []ProxyTarget {
 // writes conf.d/<domain>.conf (HTTP) or <domain>-ssl.conf (HTTPS),
 // removing the stale counterpart like GenerateProxyVhost does.
 func GenerateFullstackProxyVhost(spec ProxyVhostSpec) error {
+	spec = spec.withDefaults()
 	if err := spec.validate(); err != nil {
 		return err
 	}
@@ -155,6 +182,7 @@ func GenerateFullstackProxyVhost(spec ProxyVhostSpec) error {
 // renderFullstackForTest renders a named fullstack template to a string
 // without touching the filesystem (used by tests).
 func renderFullstackForTest(spec ProxyVhostSpec, name string) (string, error) {
+	spec = spec.withDefaults()
 	tmplData, err := GetTemplate(name)
 	if err != nil {
 		return "", err

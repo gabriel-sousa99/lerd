@@ -15,6 +15,9 @@ export interface Proxy {
   domains: string[];
   upstream_port: number;
   upstream_host: string;
+  upstream_scheme: 'http' | 'https';
+  health_path?: string;
+  timeout_seconds: number;
   path?: string;
   secured: boolean;
   paused: boolean;
@@ -42,7 +45,12 @@ export async function loadProxies(): Promise<void> {
 
 export interface CreateProxyInput {
   domain: string;
+  aliases?: string[];
   port: number;
+  upstream_host?: string;
+  upstream_scheme?: 'http' | 'https';
+  health_path?: string;
+  timeout_seconds?: number;
   path?: string;
   no_secure?: boolean;
   managed?: boolean;
@@ -64,11 +72,15 @@ export async function createProxy(input: CreateProxyInput): Promise<Proxy> {
 }
 
 export interface UpdateProxyInput {
+  aliases?: string[];
   port?: number;
   path?: string;
   cmd?: string;
   node_version?: string;
   upstream_host?: string;
+  upstream_scheme?: 'http' | 'https';
+  health_path?: string;
+  timeout_seconds?: number;
   autostart?: boolean;
   site?: string;
   routes?: Route[];
@@ -95,6 +107,67 @@ export type ProxyAction = 'secure' | 'unsecure' | 'pause' | 'resume' | 'start' |
 export async function proxyAction(name: string, action: ProxyAction): Promise<void> {
   await apiJson<Proxy>(`/api/proxies/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
   await loadProxies();
+}
+
+export interface ProxyRuntimeStatus {
+  state: 'healthy' | 'degraded' | 'unreachable' | 'failed' | 'inactive' | 'paused' | 'misconfigured';
+  upstream_reachable: boolean;
+  latency_ms: number;
+  http_status?: number;
+  checked_at: string;
+  nginx_running: boolean;
+  vhost_present: boolean;
+  certificate_present: boolean;
+  unit_state?: string;
+  error?: string;
+}
+
+export interface ProxyRouteStat {
+  route: string;
+  method: string;
+  example: string;
+  p50_millis: number;
+  p95_millis: number;
+  recent_p95_millis?: number;
+  multiplier: number;
+  samples: number;
+}
+
+export interface ProxyTrafficStats {
+  site: string;
+  median_millis: number;
+  samples: number;
+  slow: ProxyRouteStat[];
+  updated_at?: string;
+}
+
+export interface ProxyGeneratedConfig {
+  path: string;
+  content: string;
+}
+
+export const PROXY_MONITOR_INTERVAL_MS = 10_000;
+
+function proxyEndpoint(name: string, resource: string): string {
+  return `/api/proxies/${encodeURIComponent(name)}/${resource}`;
+}
+
+export function loadProxyRuntime(name: string): Promise<ProxyRuntimeStatus> {
+  return apiJson<ProxyRuntimeStatus>(proxyEndpoint(name, 'status'));
+}
+
+export function loadProxyStats(name: string): Promise<ProxyTrafficStats> {
+  return apiJson<ProxyTrafficStats>(proxyEndpoint(name, 'stats'));
+}
+
+export function loadProxyConfig(name: string): Promise<ProxyGeneratedConfig> {
+  return apiJson<ProxyGeneratedConfig>(proxyEndpoint(name, 'config'));
+}
+
+export function startProxyMonitoring(refresh: () => void | Promise<void>): () => void {
+  void refresh();
+  const timer = window.setInterval(() => void refresh(), PROXY_MONITOR_INTERVAL_MS);
+  return () => window.clearInterval(timer);
 }
 
 // Backend ws_broker emits a frame whenever KindProxies is published. When
