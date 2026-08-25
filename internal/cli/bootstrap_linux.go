@@ -41,6 +41,10 @@ func runBootstrapSystem(target string, skipSudoers bool) error {
 	} else {
 		feedback.Done("systemd linger enabled for " + target)
 	}
+	if dns.HostOwnsResolver() {
+		feedback.Note("NixOS owns the resolver; skipping DNS sudoers")
+		return nil
+	}
 	if skipSudoers {
 		return nil
 	}

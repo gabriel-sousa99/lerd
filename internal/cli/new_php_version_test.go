@@ -31,11 +31,13 @@ func fwWithRange(min, max string) *config.Framework {
 func TestScaffoldPHPVersion_clampsDefaultAboveTheRange(t *testing.T) {
 	setDefaultPHP(t, "8.5")
 
-	// No in-range version is installed in the temp home, so the clamp falls back
-	// to the framework minimum, which is still inside the supported range.
+	// No in-range version is installed in the temp home, so the clamp lands on a
+	// boundary. It has to be the ceiling: a default above the range means the
+	// machine is newer than the framework, and answering the floor sends the
+	// scaffold to a PHP several releases older than the newest one it supports.
 	got := scaffoldPHPVersion(fwWithRange("8.1", "8.3"))
-	if got != "8.1" {
-		t.Errorf("scaffoldPHPVersion = %q, want 8.1 (clamped into 8.1-8.3, not the 8.5 default)", got)
+	if got != "8.3" {
+		t.Errorf("scaffoldPHPVersion = %q, want 8.3 (the top of 8.1-8.3, not the 8.5 default)", got)
 	}
 }
 

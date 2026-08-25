@@ -555,6 +555,14 @@ func TestIsLerdBuiltImage_matchers(t *testing.T) {
 		{"lerd-php83-fpm:local", true},
 		{"lerd-custom-my-app:local", true},
 		{"lerd-dnsmasq:local", true},
+		// What podman actually prints for a local build, which is the only
+		// spelling the purge ever sees.
+		{"localhost/lerd-php85-fpm:local", true},
+		{"localhost/lerd-custom-my-app:local", true},
+		{"localhost/lerd-dnsmasq:local", true},
+		// Pulled, not built here: the base image lerd's own FPM image is built
+		// from is not lerd's to delete.
+		{"ghcr.io/lerd-env/lerd-php85-fpm-base:2f38fdd78a9f", false},
 		{"docker.io/library/mysql:8.0", false},
 		{"docker.io/dunglas/frankenphp:php8.4-alpine", false},
 		{"lerd-nginx:alpine", false},
@@ -580,9 +588,21 @@ func TestIsLerdBuiltImage_matchers(t *testing.T) {
 // `doctor_fix` action, then 28700 → 29400 for the runtime `ini_*` php.ini
 // actions and the shared-vs-per-version guidance, then 29400 → 29700 for the
 // fnm/nvm version-manager choice (`node.manager`), then 29700 → 30300 for the
-// db `import` provider-dump handling and the `php_list` base-image update flag.
+// db `import` provider-dump handling and the `php_list` base-image update flag,
+// then 30300 → 30800 for the worktree `wait` action and the readiness rule it
+// exists to replace: an assistant that guesses from the tree's contents races
+// the watcher's installer, and no amount of probing files can tell it apart,
+// then 30800 → 31000 for the reverse-proxy public share, so the sharing rule
+// names every route rather than reading as though only tunnels exist, then
+// 31000 → 31300 for the snapshot a data wipe now takes first: without it an
+// assistant hands back the renamed data dir as the recovery path, which after
+// a version change is a directory nothing installed can read, then 31300 →
+// 33200 for the env contract, which is what stops an assistant hand-editing a
+// settings.php or reading Laravel's key names on a project that declares none,
+// plus sqlite as a wiring rather than a service, and the doctor fixes that run
+// on the host rather than in the container.
 func TestLerdReference_underSizeCeiling(t *testing.T) {
-	const ceiling = 30300
+	const ceiling = 33200
 	if got := len(lerdReference); got > ceiling {
 		t.Errorf("lerd-reference.md is %d bytes, ceiling is %d — trim before raising", got, ceiling)
 	}

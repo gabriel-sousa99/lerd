@@ -157,13 +157,13 @@ func snapshotDumpCommand(t SnapshotTarget) (string, error) {
 func snapshotRestoreCommand(t SnapshotTarget) (string, error) {
 	spec := EntityFor(t.Service, "databases")
 	if t.AllDatabases {
-		act, ok := entityAction(spec, "import_all")
+		act, ok := entityAction(spec, importActionName(true))
 		if !ok {
 			return "", fmt.Errorf("service-wide snapshots are not supported for %q", t.Service)
 		}
 		return entitySnapshotRestoreCommand(act.Exec), nil
 	}
-	act, ok := entityAction(spec, "import")
+	act, ok := entityAction(spec, importActionName(false))
 	if !ok {
 		return "", fmt.Errorf("snapshots are not supported for %q", t.Service)
 	}
@@ -319,6 +319,10 @@ func CreateSnapshot(t SnapshotTarget, name string, ctx SnapshotMeta, emit func(P
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("dumping %s: %w", label, err)
 	}
+	if err := verifyDumpHasContent(dumpPath, true); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("dumping %s: %w", label, err)
+	}
 
 	var size int64
 	if fi, statErr := os.Stat(dumpPath); statErr == nil {
@@ -348,6 +352,39 @@ func CreateSnapshot(t SnapshotTarget, name string, ctx SnapshotMeta, emit func(P
 	}
 	emit(PhaseEvent{Phase: "done", Message: "snapshot " + clean + " created"})
 	return &snap, nil
+}
+
+// snapshotBeforeDataReset dumps every database on a service into a named
+// snapshot, before an operation that renames the service's data dir aside. That
+// directory carries the on-disk format of the image that wrote it, so once the
+// service comes back on another version it is only readable by an image that is
+// no longer installed; a dump is what db:restore can actually bring back. A
+// service that declares no dump, and one with no data dir yet, have nothing to
+// take. Failures stop the caller: the point of the snapshot is that the user
+// finds it afterwards, so silently wiping without one defeats it.
+func snapshotBeforeDataReset(name, label string, emit func(PhaseEvent)) error {
+	if emit == nil {
+		emit = func(PhaseEvent) {}
+	}
+	if !SnapshotSupported(name, true) {
+		return nil
+	}
+	if _, err := os.Stat(config.DataSubDir(name)); err != nil {
+		return nil
+	}
+	family := familyOf(name)
+	emit(PhaseEvent{Phase: "snapshotting_data", Message: "snapshotting every database on " + name + " first"})
+	if err := startEngineForDump(name, family, emit); err != nil {
+		return fmt.Errorf("%w — retry once it starts, or pass --no-snapshot to wipe without a snapshot", err)
+	}
+	target := SnapshotTarget{Service: name, Family: family, AllDatabases: true}
+	snap, err := CreateSnapshot(target, label, SnapshotMeta{}, nil)
+	if err != nil {
+		return fmt.Errorf("snapshotting %s before its data is wiped: %w — fix it and retry, or pass --no-snapshot to wipe without a snapshot", name, err)
+	}
+	emit(PhaseEvent{Phase: "snapshot_taken",
+		Message: "snapshot " + snap.Name + " taken; restore it with `lerd db:restore -s " + name + " -A " + snap.Name + "`"})
+	return nil
 }
 
 // RestoreSnapshot loads a stored snapshot back into its database. A per-database
@@ -384,6 +421,14 @@ func RestoreSnapshot(t SnapshotTarget, name string, emit func(PhaseEvent)) (Impo
 	}
 	dumpPath := filepath.Join(dir, snap.DumpFile)
 
+	// Checked before the drop: restore recreates the database from empty, so a
+	// dump carrying nothing would replace live data with nothing. Snapshots
+	// written before creation verified its dump are still on disk and still
+	// list as restorable, so this is the guard that protects them.
+	if err := verifyDumpHasContent(dumpPath, snap.Compressed); err != nil {
+		return ImportReport{}, fmt.Errorf("refusing to restore snapshot %q: %w", name, err)
+	}
+
 	if !t.AllDatabases {
 		emit(PhaseEvent{Phase: "dropping_database", Message: "recreating " + t.Database})
 		if _, err := DropDatabase(t.Service, t.Database); err != nil {
@@ -395,7 +440,8 @@ func RestoreSnapshot(t SnapshotTarget, name string, emit func(PhaseEvent)) (Impo
 	}
 
 	emit(PhaseEvent{Phase: "restoring_data", Message: "restoring " + clean})
-	rep, err := restoreFromHost("lerd-"+t.Service, restoreCmd, introspectEnv(), dumpPath, dumpRestoreTimeout)
+	expected := ExpectedImportErrors(t.Service, t.AllDatabases)
+	rep, err := restoreFromHost("lerd-"+t.Service, restoreCmd, introspectEnv(), dumpPath, dumpRestoreTimeout, expected)
 	if err != nil {
 		return rep, fmt.Errorf("restoring snapshot %q: %w", name, err)
 	}

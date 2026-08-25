@@ -13,15 +13,21 @@
 
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { brandTintStyle } from '$lib/brandTint';
 
   interface Props {
     tone: BadgeTone;
+    // A declared brand colour that stands in for the tone's own palette: the
+    // pill fills at low alpha and the text takes the solid tone, so the badge
+    // wears the colour of the thing it names. A value that is not a plain hex
+    // falls through to the tone, which is also what an undeclared colour does.
+    brand?: string;
     dot?: boolean;
     title?: string;
     onclick?: (e: MouseEvent) => void;
     children: Snippet;
   }
-  let { tone, dot = false, title, onclick, children }: Props = $props();
+  let { tone, brand, dot = false, title, onclick, children }: Props = $props();
 
   const toneClass: Record<BadgeTone, string> = {
     running: 'text-emerald-600 dark:text-emerald-500 bg-emerald-50 dark:bg-emerald-900/20',
@@ -52,16 +58,22 @@
   };
 
   const base = 'inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full transition-colors';
+
+  const style = $derived(brandTintStyle(brand));
+  const paint = $derived(style ? 'mark-tint' : toneClass[tone]);
+  // On a brand pill the dot is the pill's own colour; there is no fixed class
+  // to reach for, and a tone dot would be the one part left behind.
+  const dotClass = $derived(style ? 'bg-current' : dotColor[tone]);
 </script>
 
 {#if onclick}
-  <button {onclick} {title} class="{base} {toneClass[tone]}">
-    {#if dot}<span class="w-1.5 h-1.5 rounded-full {dotColor[tone]}"></span>{/if}
+  <button {onclick} {title} class="{base} {paint}" {style}>
+    {#if dot}<span class="w-1.5 h-1.5 rounded-full {dotClass}"></span>{/if}
     {@render children()}
   </button>
 {:else}
-  <span {title} class="{base} {toneClass[tone]}">
-    {#if dot}<span class="w-1.5 h-1.5 rounded-full {dotColor[tone]}"></span>{/if}
+  <span {title} class="{base} {paint}" {style}>
+    {#if dot}<span class="w-1.5 h-1.5 rounded-full {dotClass}"></span>{/if}
     {@render children()}
   </span>
 {/if}

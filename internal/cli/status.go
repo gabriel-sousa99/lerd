@@ -18,6 +18,9 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/tools"
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 	"github.com/gabriel-sousa99/lerd/internal/version"
+
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
+
 	"github.com/spf13/cobra"
 )
 
@@ -128,7 +131,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	// Custom Containers
-	if customUnits := installedCustomContainerUnits(); len(customUnits) > 0 {
+	if customUnits := lifecycle.InstalledCustomContainerUnits(); len(customUnits) > 0 {
 		fmt.Println("\n[Custom Containers]")
 		for _, unit := range customUnits {
 			running, _ := podman.ContainerRunning(unit)
@@ -378,6 +381,14 @@ func printRemoteAccessStatus(cfg *config.GlobalConfig, lanIP string) {
 		ok2(fmt.Sprintf("LAN exposure (%s)", ip))
 	} else {
 		warn2("LAN exposure", "loopback only — enable with: lerd lan expose")
+	}
+	switch {
+	case cfg.LAN.ServicesExposed && cfg.LAN.Exposed:
+		ok2("Managed service LAN access")
+	case cfg.LAN.ServicesExposed:
+		warn2("Managed service LAN access", "enabled but inactive until LAN exposure is on")
+	default:
+		ok2("Managed service LAN access (off; services loopback-only)")
 	}
 	if cfg.UI.PasswordHash != "" {
 		ok2(fmt.Sprintf("Dashboard remote access (user: %s)", cfg.UI.Username))

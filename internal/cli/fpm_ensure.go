@@ -242,10 +242,12 @@ func persistWorktreePHPVersion(worktree, version string) {
 
 // notInstalledErr builds the error returned when a version isn't installed and
 // we can't prompt (no TTY) or have nothing to switch to.
+// It names php:rebuild rather than `lerd install`, which takes no version and
+// so could never add the one being asked for.
 func notInstalledErr(version string) error {
 	if installed := otherInstalledVersions(version); len(installed) > 0 {
-		return fmt.Errorf("PHP %s is not installed (installed: %s) — pin one with a .php-version file, or run 'lerd install' to add %s",
-			version, strings.Join(installed, ", "), version)
+		return fmt.Errorf("PHP %s is not installed (installed: %s) — pin one with a .php-version file, or run 'lerd php:rebuild %s' to add %s",
+			version, strings.Join(installed, ", "), version, version)
 	}
-	return fmt.Errorf("PHP %s is not installed — run 'lerd install' to add it", version)
+	return fmt.Errorf("PHP %s is not installed — run 'lerd php:rebuild %s' to add it", version, version)
 }

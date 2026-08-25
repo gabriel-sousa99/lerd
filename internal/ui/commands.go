@@ -73,12 +73,12 @@ func commandRoute(w http.ResponseWriter, r *http.Request, domain string, rest []
 	}
 	switch {
 	case len(rest) == 1 && r.Method == http.MethodGet:
-		// List is read-only and safe to expose to LAN viewers.
+		// Listing commands does not mutate the host.
 		handleCommandsList(w, r, site)
 	case len(rest) == 3 && rest[2] == "run" && r.Method == http.MethodPost:
-		// Run executes arbitrary shell as the lerd-ui user. Loopback-only
-		// so a LAN client can't trigger commands on the host.
-		if !isLoopbackRequest(r) {
+		// Running a command requires dashboard-control authority because it
+		// executes arbitrary shell code as the lerd-ui user.
+		if !hasHostActionAuthority(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return true
 		}
@@ -256,55 +256,17 @@ func handleCommandRun(w http.ResponseWriter, r *http.Request, site *config.Site,
 // duration, and (when captureURL) a URL parsed from the output. Shared by the
 // command runner and the doctor fix runner so both produce an identical stream.
 func streamShellRun(w http.ResponseWriter, ctx context.Context, cwd, shell string, captureURL bool) {
-	flusher, ok := w.(http.Flusher)
+	send, ok := sseSender(w)
 	if !ok {
-		writeJSON(w, map[string]any{"error": "streaming not supported"})
 		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no") // disable nginx proxy buffering
-	w.WriteHeader(http.StatusOK)
-
-	// writeMu serializes SSE frame writes and `captured` appends across the
-	// two pipe-reader goroutines. http.ResponseWriter and strings.Builder
-	// are not safe for concurrent use; without this lock the bytes from
-	// stdout and stderr can interleave inside a frame and corrupt the
-	// stream (caught by `go test -race`).
-	var writeMu sync.Mutex
-
-	send := func(event, data string) {
-		// Each non-empty data line must be prefixed; multi-line bodies use
-		// multiple `data:` lines per the SSE spec.
-		var b strings.Builder
-		b.WriteString("event: ")
-		b.WriteString(event)
-		b.WriteByte('\n')
-		for _, line := range strings.Split(data, "\n") {
-			b.WriteString("data: ")
-			b.WriteString(line)
-			b.WriteByte('\n')
-		}
-		b.WriteByte('\n')
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		_, _ = io.WriteString(w, b.String())
-		flusher.Flush()
 	}
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", shell)
 	cmd.Dir = cwd
-	// Prepend BinDir so php/composer/npm shims resolve under launchd's
-	// restricted PATH on macOS. Skip the trailing separator when PATH is
-	// empty — a bare "PATH=<bin>:" would search CWD on POSIX.
-	path := config.BinDir()
-	if existing := os.Getenv("PATH"); existing != "" {
-		path += string(os.PathListSeparator) + existing
-	}
 	// Force colour on: the command runs against a pipe, so composer, artisan
 	// and friends would otherwise strip their ANSI escapes and the run modal
 	// would show a wall of grey.
-	cmd.Env = logcolor.Environ(append(os.Environ(), "PATH="+path))
+	cmd.Env = logcolor.Environ(append(os.Environ(), "PATH="+config.PathWithBinDir()))
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -323,16 +285,20 @@ func streamShellRun(w http.ResponseWriter, ctx context.Context, cwd, shell strin
 		return
 	}
 
+	// capturedMu guards the builder across the two pipe-reader goroutines;
+	// strings.Builder is not safe for concurrent use. The frame writes are
+	// serialized by the sender itself.
+	var capturedMu sync.Mutex
 	var captured strings.Builder
 	streamPipe := func(pipe io.Reader, event string) {
 		s := bufio.NewScanner(pipe)
 		s.Buffer(make([]byte, 64*1024), 1024*1024)
 		for s.Scan() {
 			line := s.Text()
-			writeMu.Lock()
+			capturedMu.Lock()
 			captured.WriteString(line)
 			captured.WriteByte('\n')
-			writeMu.Unlock()
+			capturedMu.Unlock()
 			send(event, line)
 		}
 	}
@@ -372,5 +338,59 @@ func streamShellRun(w http.ResponseWriter, ctx context.Context, cwd, shell strin
 		}
 	}
 	body, _ := json.Marshal(payload)
+	send("done", string(body))
+}
+
+// sseSender opens the event stream a run is reported through and returns the
+// frame writer for it. Writes are serialized because a run's stdout and stderr
+// are pumped by separate goroutines, and interleaved bytes corrupt a frame.
+func sseSender(w http.ResponseWriter) (func(event, data string), bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, map[string]any{"error": "streaming not supported"})
+		return nil, false
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx proxy buffering
+	w.WriteHeader(http.StatusOK)
+
+	var writeMu sync.Mutex
+	return func(event, data string) {
+		// Each non-empty data line must be prefixed; multi-line bodies use
+		// multiple `data:` lines per the SSE spec.
+		var b strings.Builder
+		b.WriteString("event: ")
+		b.WriteString(event)
+		b.WriteByte('\n')
+		for _, line := range strings.Split(data, "\n") {
+			b.WriteString("data: ")
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, _ = io.WriteString(w, b.String())
+		flusher.Flush()
+	}, true
+}
+
+// streamHostAction reports a fix lerd carries out on the host, rather than in
+// the site's container, through the same stream a command run speaks, so the
+// run modal shows its outcome like any other.
+func streamHostAction(w http.ResponseWriter, line string, actionErr error) {
+	send, ok := sseSender(w)
+	if !ok {
+		return
+	}
+	exit := 0
+	if actionErr != nil {
+		send("stderr", actionErr.Error())
+		exit = 1
+	} else {
+		send("stdout", line)
+	}
+	body, _ := json.Marshal(map[string]any{"exit": exit, "durationMs": 0})
 	send("done", string(body))
 }

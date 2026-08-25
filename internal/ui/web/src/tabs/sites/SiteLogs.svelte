@@ -24,6 +24,13 @@
     return (site.worktrees || []).find((w) => w.branch === activeWorktreeBranch);
   });
 
+  // A worker keeps its tab whatever state it is in. Its journal outlives the
+  // unit, so yanking the tab away the moment a worker dies hides the one thing
+  // worth reading; a stopped worker is drawn muted instead.
+  function workerTab(id: TabId, label: string, running?: boolean, failing?: boolean): TabItem<TabId> {
+    return { id, label: label + (failing ? ' !' : ''), muted: !running && !failing };
+  }
+
   const tabs: TabItem<TabId>[] = $derived.by(() => {
     const xs: TabItem<TabId>[] = [];
     if (site.has_app_logs) xs.push({ id: 'app', label: m.sites_tabs_appLogs() });
@@ -40,17 +47,22 @@
       // do have their own launchd units — surface those off the
       // worktree's own framework_workers list.
       for (const w of activeWorktree?.framework_workers || []) {
-        if (w.running || w.failing) xs.push({ id: 'worker:' + w.name, label: (w.label || w.name) + (w.failing ? ' !' : '') });
+        xs.push(workerTab('worker:' + w.name, w.label || w.name, w.running, w.failing));
       }
       return xs;
     }
-    if (site.queue_running || site.queue_failing) xs.push({ id: 'queue', label: m.sites_tabs_queue() + (site.queue_failing ? ' !' : '') });
-    if (site.horizon_running || site.horizon_failing) xs.push({ id: 'horizon', label: m.sites_tabs_horizon() + (site.horizon_failing ? ' !' : '') });
-    if (site.stripe_running) xs.push({ id: 'stripe', label: m.sites_tabs_stripe() });
-    if (site.schedule_running || site.schedule_failing) xs.push({ id: 'schedule', label: m.sites_tabs_schedule() + (site.schedule_failing ? ' !' : '') });
-    if (site.reverb_running || site.reverb_failing) xs.push({ id: 'reverb', label: m.sites_tabs_reverb() + (site.reverb_failing ? ' !' : '') });
+    if (site.has_queue_worker || site.queue_running || site.queue_failing)
+      xs.push(workerTab('queue', m.sites_tabs_queue(), site.queue_running, site.queue_failing));
+    if (site.has_horizon || site.horizon_running || site.horizon_failing)
+      xs.push(workerTab('horizon', m.sites_tabs_horizon(), site.horizon_running, site.horizon_failing));
+    if (site.stripe_running || site.stripe_secret_set)
+      xs.push(workerTab('stripe', m.sites_tabs_stripe(), site.stripe_running));
+    if (site.has_schedule_worker || site.schedule_running || site.schedule_failing)
+      xs.push(workerTab('schedule', m.sites_tabs_schedule(), site.schedule_running, site.schedule_failing));
+    if (site.has_reverb || site.reverb_running || site.reverb_failing)
+      xs.push(workerTab('reverb', m.sites_tabs_reverb(), site.reverb_running, site.reverb_failing));
     for (const w of site.framework_workers || []) {
-      if (w.running || w.failing) xs.push({ id: 'worker:' + w.name, label: (w.label || w.name) + (w.failing ? ' !' : '') });
+      xs.push(workerTab('worker:' + w.name, w.label || w.name, w.running, w.failing));
     }
     return xs;
   });

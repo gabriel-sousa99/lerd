@@ -4,6 +4,8 @@ COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE       ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 BUILD_DIR   = ./build
 INSTALL_DIR = $(HOME)/.local/bin
+# Mirrors config.RunDir(): $XDG_DATA_HOME (default ~/.local/share) + /lerd/run.
+LERD_RUN_DIR = $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)/lerd/run
 UI_DIR      = internal/ui/web
 
 # JS runtime for the web UI build. Prefer npm (when lerd manages Node), fall
@@ -50,6 +52,10 @@ install: build build-tray
 	install -Dm755 $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
 	install -Dm755 $(BUILD_DIR)/lerd-tray $(INSTALL_DIR)/lerd-tray
 	@echo "Installed $(INSTALL_DIR)/$(BINARY) and $(INSTALL_DIR)/lerd-tray"
+	@# The watcher tears the whole environment down when it reads a SIGTERM as a
+	@# logout. Restarting it here is not one, so mark it the way lerd's own
+	@# restart paths do, or `make install` stops every container and the VM.
+	@mkdir -p $(LERD_RUN_DIR) && touch $(LERD_RUN_DIR)/watcher-managed-stop
 	@if [ "$$(uname)" = "Darwin" ]; then \
 		launchctl kickstart -k gui/$$(id -u)/com.lerd.lerd-ui 2>/dev/null && echo "Restarted lerd-ui" || true; \
 		launchctl kickstart -k gui/$$(id -u)/com.lerd.lerd-watcher 2>/dev/null && echo "Restarted lerd-watcher" || true; \

@@ -49,6 +49,15 @@ detect:
   - file: artisan
   - composer: laravel/framework
 console: artisan
+workers:
+  vite:
+    label: Vite
+    command: npm run dev
+    icon: vite
+  queue:
+    label: Queue Worker
+    command: php artisan queue:work
+    icon: queue
 `
 
 	symfonyYAML := `name: symfony
@@ -71,6 +80,12 @@ console: bin/console
 	})
 	mux.HandleFunc("/symfony/7.yaml", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(symfonyYAML)) //nolint:errcheck
+	})
+	mux.HandleFunc("/laravel.svg", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ff2d20"><path d="M3 3h18v18H3z"/></svg>`)) //nolint:errcheck
+	})
+	mux.HandleFunc("/workers/vite.svg", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#9135ff"><path d="M4 4h16v16H4z"/></svg>`)) //nolint:errcheck
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -375,5 +390,66 @@ func TestFetchWithRetry_GivesUpAfterMaxAttempts(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != maxFetchAttempts {
 		t.Fatalf("expected %d attempts, got %d", maxFetchAttempts, got)
+	}
+}
+
+// The mark travels with the definition, one file for the whole family, so
+// fetching any version of a framework caches it.
+func TestFetchFramework_CachesTheFamilyMark(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	srv := testServer(t)
+	defer srv.Close()
+
+	if _, err := testClient(t, srv).FetchFramework("laravel", "11"); err != nil {
+		t.Fatalf("FetchFramework: %v", err)
+	}
+	svg, ok := config.FrameworkIcon("laravel")
+	if !ok {
+		t.Fatal("the framework's mark was not cached")
+	}
+	if !strings.Contains(svg, `d="M3 3h18v18H3z"`) {
+		t.Errorf("cached mark lost its drawing: %s", svg)
+	}
+	if strings.Contains(svg, "#ff2d20") {
+		t.Errorf("cached mark kept a colour of its own: %s", svg)
+	}
+}
+
+// A worker's mark travels with the definition that names it, keyed by icon so
+// every framework running that worker draws the same thing.
+func TestFetchFramework_CachesTheWorkerMarksItNames(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	srv := testServer(t)
+	defer srv.Close()
+
+	if _, err := testClient(t, srv).FetchFramework("laravel", "11"); err != nil {
+		t.Fatalf("FetchFramework: %v", err)
+	}
+	svg, ok := config.WorkerIcon("vite")
+	if !ok {
+		t.Fatal("the worker's mark was not cached")
+	}
+	if !strings.Contains(svg, `d="M4 4h16v16H4z"`) {
+		t.Errorf("cached mark lost its drawing: %s", svg)
+	}
+	// queue names a built-in glyph, not a drawing, so the store has nothing to
+	// hand over and the fetch must shrug it off.
+	if _, ok := config.WorkerIcon("queue"); ok {
+		t.Error("a glyph name must not become a cached mark")
+	}
+}
+
+// A framework with no mark in the store is the common case, so a missing file
+// must leave the fetch itself successful.
+func TestFetchFramework_SucceedsWithoutAMark(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	srv := testServer(t)
+	defer srv.Close()
+
+	if _, err := testClient(t, srv).FetchFramework("symfony", "7"); err != nil {
+		t.Fatalf("FetchFramework without a mark: %v", err)
+	}
+	if _, ok := config.FrameworkIcon("symfony"); ok {
+		t.Error("no mark in the store should mean no mark in the cache")
 	}
 }

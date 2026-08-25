@@ -198,7 +198,7 @@ lerd service stop mongodb        # stop without removing
 lerd service remove mongodb      # stop + remove quadlet + delete YAML
 ```
 
-The data directory at `~/.local/share/lerd/data/<name>/` is **not** deleted by `service remove`. Wipe it manually if you want a clean slate.
+The data directory at `~/.local/share/lerd/data/<name>/` is **not** deleted by `service remove`. Wipe it manually if you want a clean slate. The config a preset renders for its container (`~/.local/share/lerd/service-files/<name>/`) does go, since it is generated from the definition being removed and a later install renders it again.
 
 ---
 

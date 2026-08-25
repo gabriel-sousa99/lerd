@@ -294,7 +294,7 @@ func EnsureWorktreeEnv(mainRepoPath, worktreePath, worktreeDomain string, secure
 	var worktreeURLKeys []string
 	if fwName, ok := config.DetectFrameworkForDir(mainRepoPath); ok {
 		if fw, ok := config.GetFrameworkForDir(fwName, mainRepoPath); ok {
-			file, f := fw.Env.Resolve(mainRepoPath)
+			file, f := fw.Env.ResolveWrite(mainRepoPath)
 			if !filepath.IsLocal(file) {
 				return
 			}
@@ -370,14 +370,7 @@ func EnsureWorktreeEnv(mainRepoPath, worktreePath, worktreeDomain string, secure
 	if len(updates) == 0 {
 		return
 	}
-	switch format {
-	case "php-const":
-		_ = envfile.ApplyPhpConstUpdates(worktreeEnv, updates)
-	case "php-array":
-		_ = envfile.ApplyPhpArrayUpdates(worktreeEnv, updates)
-	default:
-		_ = envfile.ApplyUpdates(worktreeEnv, updates)
-	}
+	_ = envfile.ApplyUpdatesIn(worktreeEnv, format, updates)
 }
 
 func copyFile(src, dst string) error {

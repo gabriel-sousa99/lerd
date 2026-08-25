@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,15 @@ func launchctl(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return exec.CommandContext(ctx, "launchctl", args...).CombinedOutput()
+}
+
+// bootout removes a job from the launchd domain. Every bootout of the watcher
+// goes through here so it is always marked as a lerd-initiated stop first:
+// launchd delivers a bootout as the same SIGTERM a logout does, and the watcher
+// tears the whole environment down when it reads one as a logout.
+func bootout(name, domain, label string) ([]byte, error) {
+	podman.MarkManagedWatcherStop(name)
+	return launchctl("bootout", domain+"/"+label)
 }
 
 // uidDomain returns the launchd GUI domain for the current user, e.g. "gui/501".
@@ -123,6 +133,22 @@ func plistPath(name string) string {
 	return filepath.Join(launchAgentsDir(), name+".plist")
 }
 
+// writePlist and removePlist are the only ways a unit file is created or
+// deleted, so the guard that keeps a forgetful test off the developer's own
+// LaunchAgents dir sits on the single path all of them go through.
+func writePlist(name, plist string) error {
+	config.GuardRealWrite(plistPath(name))
+	return os.WriteFile(plistPath(name), []byte(plist), 0644)
+}
+
+func removePlist(name string) error {
+	config.GuardRealWrite(plistPath(name))
+	if err := os.Remove(plistPath(name)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func plistLabel(name string) string {
 	return "com.lerd." + name
 }
@@ -172,6 +198,14 @@ const (
 	keepAliveOnFailure
 )
 
+// watcherExitTimeout is how long launchd lets the logout teardown run before it
+// SIGKILLs the watcher. The containers stop first, and a database declares up to
+// 60s so it can finish writing, so a grace sized for them alone is already gone
+// when the Podman Machine stop starts, which is the step whose loss is the whole
+// point of the teardown. This covers that stop plus the 90s a machine stop gets
+// elsewhere, with room to spare.
+const watcherExitTimeout = 180
+
 func buildPlist(lbl string, args []string, runAtLoad bool, keepAlive keepAlivePolicy, stdoutPath, stderrPath string) string {
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
@@ -207,8 +241,37 @@ func buildPlist(lbl string, args []string, runAtLoad bool, keepAlive keepAlivePo
 		sb.WriteString(xmlEscStr(stderrPath))
 		sb.WriteString("</string>\n")
 	}
+	// The watcher runs the full teardown (containers, then the Podman Machine
+	// VM) when launchd signals a logout, which does not fit the 5s grace
+	// launchd gives these jobs before SIGKILL. Every other job stops fast, and
+	// a longer timeout there would only slow down a hung unit.
+	if lbl == plistLabel(podman.WatcherUnit) {
+		sb.WriteString(fmt.Sprintf("\t<key>ExitTimeOut</key>\n\t<integer>%d</integer>\n", watcherExitTimeout))
+	}
+	if ownsPodmanMachine(lbl) {
+		sb.WriteString("\t<key>AbandonProcessGroup</key>\n\t<true/>\n")
+	}
 	sb.WriteString("</dict>\n</plist>\n")
 	return sb.String()
+}
+
+// machineOwningUnits are the host jobs that can bring the Podman Machine up:
+// lerd-autostart and lerd-tray by running `lerd start`, lerd-ui in-process from
+// the dashboard, and lerd-watcher when it remounts stale container storage.
+var machineOwningUnits = []string{"lerd-autostart", "lerd-ui", "lerd-tray", podman.WatcherUnit}
+
+// ownsPodmanMachine reports whether a job needs AbandonProcessGroup. vfkit and
+// gvproxy reparent to init but keep the process group of whatever started them,
+// and launchd's default is to kill what remains in a job's group once the job
+// exits, taking the VM with it. Container and worker jobs never start the VM
+// and want that cleanup, so the key stays scoped to the units above.
+func ownsPodmanMachine(lbl string) bool {
+	for _, unit := range machineOwningUnits {
+		if lbl == plistLabel(unit) {
+			return true
+		}
+	}
+	return false
 }
 
 func ensurePlistDirs(name string) error {
@@ -409,6 +472,37 @@ func stripIPv6PublishPorts(content string) string {
 	return strings.Join(out, "\n")
 }
 
+// stopTimeoutFlag is podman run's graceful-stop flag. Named once because the
+// window reaches this file under two spellings and has to leave under one.
+const stopTimeoutFlag = "--stop-timeout"
+
+// quadletStopTimeout reads the graceful-stop window the quadlet declares, so
+// macOS gives a container the same grace the Linux unit would. Falls back to
+// the default for a quadlet written before the key existed.
+func quadletStopTimeout(c map[string][]string) int {
+	if v := c["StopTimeout"]; len(v) > 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(v[0])); err == nil && n > 0 {
+			return n
+		}
+	}
+	// The generator writes the window as PodmanArgs= instead whenever it could
+	// not confirm podman is 5.0 or newer, which includes every time the version
+	// probe fails to run. That happens under launchd's restricted PATH, so this
+	// spelling is the reachable one here rather than the exotic one.
+	for _, extra := range c["PodmanArgs"] {
+		for _, field := range strings.Fields(extra) {
+			raw, ok := strings.CutPrefix(field, stopTimeoutFlag+"=")
+			if !ok {
+				continue
+			}
+			if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return config.DefaultStopTimeout
+}
+
 // containerToPodmanArgs builds a podman run argument list from a parsed [Container] section.
 // On macOS we run detached (-d) so that launchctl bootstrap sees an immediate
 // exit 0 (success); podman's own --restart=always policy handles crash recovery.
@@ -417,8 +511,11 @@ func containerToPodmanArgs(c map[string][]string) ([]string, error) {
 
 	if names := c["ContainerName"]; len(names) > 0 {
 		// --replace removes any stale container with this name before starting.
-		// -t 5 limits the stop grace period so restart isn't slow.
-		args = append(args, "--name", names[0], "--replace", "--stop-timeout=5")
+		// --stop-timeout keeps a restart quick for images that exit promptly,
+		// and honours the longer grace a service declared for itself rather
+		// than killing it mid-write on the macOS path only.
+		args = append(args, "--name", names[0], "--replace",
+			fmt.Sprintf("%s=%d", stopTimeoutFlag, quadletStopTimeout(c)))
 	}
 	for _, net := range c["Network"] {
 		args = append(args, "--network", net)
@@ -442,7 +539,16 @@ func containerToPodmanArgs(c map[string][]string) ([]string, error) {
 		args = append(args, "--workdir", expandSpecifiers(dirs[0]))
 	}
 	for _, extra := range c["PodmanArgs"] {
-		args = append(args, strings.Fields(expandSpecifiers(extra))...)
+		for _, field := range strings.Fields(expandSpecifiers(extra)) {
+			// The stop window was already emitted above from whichever spelling
+			// declared it. Letting the PodmanArgs copy through too would put the
+			// flag on the command line twice and leave which one applies resting
+			// on argument order.
+			if strings.HasPrefix(field, stopTimeoutFlag+"=") {
+				continue
+			}
+			args = append(args, field)
+		}
 	}
 
 	images := c["Image"]
@@ -538,7 +644,7 @@ func (m *darwinServiceManager) WriteServiceUnit(name, content string) error {
 	}
 	logPath := filepath.Join(lerdLogsDir(), name+".log")
 	plist := buildPlist(plistLabel(name), args, true, keepAlive, logPath, logPath)
-	return os.WriteFile(plistPath(name), []byte(plist), 0644)
+	return writePlist(name, plist)
 }
 
 func (m *darwinServiceManager) WriteServiceUnitIfChanged(name, content string) (bool, error) {
@@ -556,7 +662,7 @@ func (m *darwinServiceManager) WriteServiceUnitIfChanged(name, content string) (
 	if err := ensurePlistDirs(name); err != nil {
 		return false, err
 	}
-	return true, os.WriteFile(plistPath(name), []byte(newPlist), 0644)
+	return true, writePlist(name, newPlist)
 }
 
 // WriteTimerUnitIfChanged is a no-op on macOS until launchd
@@ -575,10 +681,7 @@ func (m *darwinServiceManager) RemoveTimerUnit(_ string) error { return nil }
 func (m *darwinServiceManager) ListTimerUnits(_ string) []string { return nil }
 
 func (m *darwinServiceManager) RemoveServiceUnit(name string) error {
-	if err := os.Remove(plistPath(name)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return removePlist(name)
 }
 
 func (m *darwinServiceManager) ListServiceUnits(nameGlob string) []string {
@@ -594,12 +697,14 @@ func (m *darwinServiceManager) ListServiceUnits(nameGlob string) []string {
 // --- Container unit files ---
 
 func (m *darwinServiceManager) WriteContainerUnit(name, content string) error {
-	// Apply LAN binding restriction before parsing — mirrors WriteQuadletDiff on Linux.
+	// Apply the same unit-aware LAN policy as the Linux quadlet writer.
 	lanExposed := false
+	servicesExposed := false
 	if cfg, err := config.LoadGlobal(); err == nil && cfg != nil {
 		lanExposed = cfg.LAN.Exposed
+		servicesExposed = cfg.LAN.ServicesExposed
 	}
-	content = podman.BindForLAN(content, lanExposed)
+	content = podman.BindQuadletForLAN(name, content, lanExposed, servicesExposed)
 	// gvproxy (macOS) cannot bind two specific host IPs on the same port;
 	// drop IPv6 PublishPort lines so only IPv4 bindings reach podman run.
 	content = stripIPv6PublishPorts(content)
@@ -622,7 +727,7 @@ func (m *darwinServiceManager) WriteContainerUnit(name, content string) error {
 	// Stdout is suppressed (/dev/null) because `podman run -d` only prints the container
 	// ID there; real container output is accessible via `podman logs <name>`.
 	plist := buildPlist(plistLabel(name), args, false, keepAliveNever, "/dev/null", logPath)
-	return os.WriteFile(plistPath(name), []byte(plist), 0644)
+	return writePlist(name, plist)
 }
 
 func (m *darwinServiceManager) ContainerUnitInstalled(name string) bool {
@@ -631,10 +736,7 @@ func (m *darwinServiceManager) ContainerUnitInstalled(name string) bool {
 }
 
 func (m *darwinServiceManager) RemoveContainerUnit(name string) error {
-	if err := os.Remove(plistPath(name)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return removePlist(name)
 }
 
 func (m *darwinServiceManager) ListContainerUnits(nameGlob string) []string {
@@ -666,7 +768,7 @@ func (m *darwinServiceManager) Start(name string) error {
 	alreadyInDomain := false
 	if _, err := launchctl("print", domain+"/"+label); err == nil {
 		alreadyInDomain = true
-		launchctl("bootout", domain+"/"+label) //nolint:errcheck
+		bootout(name, domain, label) //nolint:errcheck
 		// Brief pause so macOS Sequoia+ doesn't reject the immediately-following
 		// bootstrap with a spurious "already bootstrapped" (36) or EBUSY (5) error.
 		time.Sleep(200 * time.Millisecond)
@@ -699,6 +801,11 @@ func (m *darwinServiceManager) Start(name string) error {
 					return nil
 				}
 			}
+			// kickstart -k kills the running job first, which reaches the
+			// watcher as the same SIGTERM a logout does. Nothing booted it
+			// out on this path (print said it wasn't in the domain), so the
+			// mark has to happen here or a start tears the environment down.
+			podman.MarkManagedWatcherStop(name)
 			if kout, kerr := launchctl("kickstart", "-k", domain+"/"+label); kerr != nil {
 				ks := string(kout)
 				// 37 = EALREADY — job is already running, treat as success.
@@ -781,7 +888,7 @@ func (m *darwinServiceManager) Stop(name string) error {
 	domain := uidDomain()
 	label := plistLabel(name)
 
-	out, err := launchctl("bootout", domain+"/"+label)
+	out, err := bootout(name, domain, label)
 	if err != nil {
 		s := string(out)
 		// 36 = not loaded / already gone — treat as success
@@ -810,7 +917,7 @@ func (m *darwinServiceManager) Restart(name string) error {
 	// Bootout so the subsequent Start (bootstrap) picks up the current
 	// plist on disk. kickstart -k would use launchd's cached copy.
 	if _, err := launchctl("print", domain+"/"+label); err == nil {
-		launchctl("bootout", domain+"/"+label) //nolint:errcheck
+		bootout(name, domain, label) //nolint:errcheck
 		time.Sleep(200 * time.Millisecond)
 	}
 	return m.Start(name)

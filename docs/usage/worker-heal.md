@@ -47,7 +47,11 @@ Heals one worker for the site at the current working directory. Equivalent to `s
 
 ## Dashboard
 
-When the detector finds any failed worker, an amber banner appears at the top of the Sites tab listing the affected workers. Clicking **Heal** runs the same reset-and-start sequence and streams per-unit progress (`Starting lerd-queue-myapp…`) until done. The banner disappears when the count returns to zero.
+When the detector finds any failed worker, an amber banner appears at the bottom of the dashboard listing the affected workers. Clicking **Heal** runs the same reset-and-start sequence and streams per-unit progress (`Starting lerd-queue-myapp…`) until done. The banner disappears when the count returns to zero.
+
+**Stop them** is the other answer. Healing a worker that crashes on every start only buys the next crash, so the banner also offers to put every worker it is reporting down: that runs the same stop the site's own toggle does, disabling the unit and removing it, and a disabled unit is one the detector deliberately leaves alone afterwards. The worker shows as switched off in the site's controls and stays down until you turn it back on. Its Logs tab stays too, so the journal explaining the crash is still there to read.
+
+The banner is the only in-page surface for a downed worker. The `worker_failed` notification still records itself in the bell and still reaches the desktop when the window is not focused, but it no longer raises a toast beside the banner saying the same thing.
 
 The banner refresh is event-driven: the dashboard reloads health on every `sites` WebSocket push (debounced 500ms), so heal results show up without polling.
 

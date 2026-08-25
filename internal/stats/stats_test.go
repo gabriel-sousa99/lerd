@@ -192,51 +192,77 @@ func TestRead_HandlesNoContainers(t *testing.T) {
 	}
 }
 
-// Read merges lerd's host-side processes with the containers into one list and
-// one set of totals, dropping any host unit that is really a container quadlet so
-// it isn't double-counted.
-func TestRead_MergesHostProcesses(t *testing.T) {
+// Every lerd container runs as a quadlet unit, so the cgroup read covers the
+// whole list and podman never has to be spawned. Its cost landed on lerd-ui,
+// which spawns it, and dwarfed everything it was measuring.
+func TestRead_UsesTheCgroupReadAndLeavesPodmanAlone(t *testing.T) {
 	pinNumCPU(t, 1)
+	podmanCalls := 0
 	t.Cleanup(SetReader(func() ([]ContainerStat, error) {
-		return []ContainerStat{
-			{Name: "lerd-mysql", CPUPercent: 0.1, MemBytes: 400_000_000, MemLimit: 33_000_000_000},
-		}, nil
+		podmanCalls++
+		return []ContainerStat{{Name: "lerd-mysql", CPUPercent: 5, MemBytes: 1}}, nil
 	}))
 	t.Cleanup(SetHostReader(func() ([]ContainerStat, error) {
 		return []ContainerStat{
+			{Name: "lerd-mysql", CPUPercent: 0.1, MemBytes: 400_000_000, MemLimit: 33_000_000_000},
 			{Name: "lerd-ui", CPUPercent: 0.2, MemBytes: 66_000_000, MemLimit: 33_000_000_000},
 			{Name: "lerd-vite-app", CPUPercent: 3.0, MemBytes: 180_000_000, MemLimit: 33_000_000_000},
-			// A container quadlet unit also reported by the host reader: must be
-			// dropped in favour of the podman row, not counted twice.
-			{Name: "lerd-mysql", CPUPercent: 9.9, MemBytes: 400_000_000, MemLimit: 33_000_000_000},
 		}, nil
 	}))
 
 	resp := Read()
-	if !resp.Available {
-		t.Fatal("expected Available=true")
+	if podmanCalls != 0 {
+		t.Errorf("podman was spawned %d times, want 0 when the units answer", podmanCalls)
 	}
-	if len(resp.Containers) != 3 {
-		t.Fatalf("got %d rows, want 3 (mysql + ui + vite, mysql dup dropped)", len(resp.Containers))
+	if !resp.Available || len(resp.Containers) != 3 {
+		t.Fatalf("got %d rows, want 3", len(resp.Containers))
 	}
 	// The host-side Vite dev server (highest combined load) should rank first.
 	if resp.Containers[0].Name != "lerd-vite-app" {
 		t.Errorf("first by combined load = %q, want lerd-vite-app", resp.Containers[0].Name)
 	}
-	// Totals span both sources, and the mysql duplicate is counted once.
 	if resp.TotalMemBytes != 646_000_000 {
 		t.Errorf("total mem = %d, want 646000000 (400+66+180)", resp.TotalMemBytes)
 	}
-	wantCPU := 0.1 + 0.2 + 3.0
-	if resp.TotalCPUPercent < wantCPU-0.001 || resp.TotalCPUPercent > wantCPU+0.001 {
-		t.Errorf("total cpu = %v, want ~%v", resp.TotalCPUPercent, wantCPU)
+	// Both headlines have to be what the listed rows add up to, since the list
+	// shows every row: a total that does not match its own rows reads as a lie.
+	var sumCPU float64
+	var sumMem int64
+	for _, r := range resp.Containers {
+		sumCPU += r.CPUPercent
+		sumMem += r.MemBytes
+	}
+	if diff := resp.TotalCPUPercent - sumCPU; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("total cpu = %v, want the sum of the rows %v", resp.TotalCPUPercent, sumCPU)
+	}
+	if resp.TotalMemBytes != sumMem {
+		t.Errorf("total mem = %d, want the sum of the rows %d", resp.TotalMemBytes, sumMem)
 	}
 }
 
-// The per-row CPU% is per-core, so the raw sum can exceed 100% on a multi-core
-// box. The headline total must be normalized to a host fraction (sum / cores) so
-// it reads as "% of the whole host", never an unexplained 300%.
-func TestRead_TotalCPUNormalizedToHostCores(t *testing.T) {
+// macOS has no user units to read, so podman stays the source there and nothing
+// disappears from the list.
+func TestRead_FallsBackToPodmanWithoutUnits(t *testing.T) {
+	pinNumCPU(t, 1)
+	noHostProcesses(t)
+	t.Cleanup(SetReader(func() ([]ContainerStat, error) {
+		return []ContainerStat{{Name: "lerd-mysql", CPUPercent: 2, MemBytes: 400_000_000, MemLimit: 8_000_000_000}}, nil
+	}))
+
+	resp := Read()
+	if !resp.Available || len(resp.Containers) != 1 || resp.Containers[0].Name != "lerd-mysql" {
+		t.Fatalf("rows = %+v, want the single podman row", resp.Containers)
+	}
+	if resp.TotalCPUPercent != 2 {
+		t.Errorf("total cpu = %v, want 2", resp.TotalCPUPercent)
+	}
+}
+
+// Both sources report CPU per core, and a row that reads 100% on a 32-thread box
+// is using three percent of the machine, not all of it. Rows and the headline
+// have to say the same thing, so the rows are shares of the host and the headline
+// is their sum.
+func TestRead_CPUIsAShareOfTheWholeHost(t *testing.T) {
 	pinNumCPU(t, 4)
 	noHostProcesses(t)
 	t.Cleanup(SetReader(func() ([]ContainerStat, error) {
@@ -247,13 +273,11 @@ func TestRead_TotalCPUNormalizedToHostCores(t *testing.T) {
 	}))
 
 	resp := Read()
-	// Raw per-core sum is 200%; on 4 cores that's 50% of the host.
-	if resp.TotalCPUPercent < 49.99 || resp.TotalCPUPercent > 50.01 {
-		t.Errorf("total cpu = %v, want ~50 (200%% per-core / 4 cores)", resp.TotalCPUPercent)
+	if got := resp.Containers[0].CPUPercent; got != 25 {
+		t.Errorf("per-row cpu = %v, want 25 (one pegged core of four)", got)
 	}
-	// Per-row CPU% stays per-core (unnormalized).
-	if resp.Containers[0].CPUPercent != 100 {
-		t.Errorf("per-row cpu = %v, want 100 (per-core, unchanged)", resp.Containers[0].CPUPercent)
+	if resp.TotalCPUPercent < 49.99 || resp.TotalCPUPercent > 50.01 {
+		t.Errorf("total cpu = %v, want ~50, the sum of the rows", resp.TotalCPUPercent)
 	}
 }
 

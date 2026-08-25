@@ -159,6 +159,52 @@ func TestDetectVersion_noFiles_returnsDefault(t *testing.T) {
 	}
 }
 
+// ── UnpinnedVersion ──────────────────────────────────────────────────────────
+
+// The wizard offers the version a blank Node answer accepts, and the field it
+// offers it in writes the .lerd.yaml pin, so an existing pin must not be the
+// answer to that question.
+func TestUnpinnedVersion_ignoresLerdYAMLPin(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	os.WriteFile(filepath.Join(dir, ".lerd.yaml"), []byte("node_version: \"18\"\n"), 0644)
+	os.WriteFile(filepath.Join(dir, ".nvmrc"), []byte("20\n"), 0644)
+
+	if pinned, err := DetectVersion(dir); err != nil || pinned != "18" {
+		t.Fatalf("guard sanity: DetectVersion = %q, %v, want %q", pinned, err, "18")
+	}
+	got, source := UnpinnedVersion(dir)
+	if got != "20" || source != ".nvmrc" {
+		t.Errorf("UnpinnedVersion = %q from %q, want %q from %q", got, source, "20", ".nvmrc")
+	}
+}
+
+func TestUnpinnedVersion_namesTheSource(t *testing.T) {
+	cases := []struct {
+		name         string
+		files        map[string]string
+		want, source string
+	}{
+		{"nvmrc", map[string]string{".nvmrc": "20\n"}, "20", ".nvmrc"},
+		{"node-version file", map[string]string{".node-version": "v18.5.0\n"}, "18", ".node-version"},
+		{"package.json engines", map[string]string{"package.json": `{"engines":{"node":">=24"}}`}, "24", "package.json"},
+		{"nothing declared", nil, "22", "the lerd default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			for name, body := range tc.files {
+				os.WriteFile(filepath.Join(dir, name), []byte(body), 0644)
+			}
+			got, source := UnpinnedVersion(dir)
+			if got != tc.want || source != tc.source {
+				t.Errorf("UnpinnedVersion = %q from %q, want %q from %q", got, source, tc.want, tc.source)
+			}
+		})
+	}
+}
+
 func TestDetectVersion_nvmrcOverridesPackageJSON(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, ".nvmrc"), []byte("20\n"), 0644)

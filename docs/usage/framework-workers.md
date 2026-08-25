@@ -48,6 +48,10 @@ workers:
 
 Port assignment scans all proxy port env keys across all sites to prevent collisions between different workers and frameworks.
 
+The generated nginx location anchors on `path`, so `/app` proxies `/app` and everything under it without also swallowing an unrelated route that merely starts with the same letters (`/appstore`, say). Write `path` as a literal URL path and lerd normalises it, so `/app`, `/app/` and `app` all anchor identically; a `path` of `/` mounts the worker at the site root and proxies everything. Regex-special characters are escaped (a literal `.` in something like `/socket.io`, for instance) before the path reaches nginx's location block, so write it exactly as the URL reads. A `proxy` block with no `path` names nothing to proxy and is ignored.
+
+Anchoring also turns the location into a regex, and nginx runs regex locations in file order ahead of the prefix location it would otherwise have picked, so the proxy takes precedence over lerd's own PHP handling and dotfile deny for anything under `path`. That's the right call for a worker mounted on its own path, but it means a `.php` file or dotfile living under `path` is proxied rather than served by lerd.
+
 **Server health probe**: A worker whose process can outlive its server (a Vite dev server that dies under `npm` while the Node process lingers) declares a `health` block, so lerd probes reachability rather than mere process liveness:
 
 ```yaml
@@ -96,7 +100,13 @@ This needs no configuration and no framework definition. A host worker qualifies
 
 Nothing in the project is edited. lerd writes a generated config to `node_modules/.lerd/` that imports the project's own config and merges in the base, origin and allowed hosts for `serve` only, then starts the tool against it. That file is rewritten on every start, since a worktree seeds `node_modules` from its parent and would otherwise inherit the parent's domain. A project with no config file for the tool, or one that tracks the generated path in git rather than ignoring it, keeps its dev server exactly as it was.
 
+Framework plugins released before Vite grew `server.origin` ignore it and publish whatever address the server bound to, writing it to the file the app reads to find its dev server. That address is a wildcard nothing can route to, and on a secured site the browser blocks the plain-HTTP request as mixed content and drops the padlock, so the page arrives unstyled. The generated config catches that one value as it is written and stores the site's own URL instead, which is what a current plugin writes there anyway. Upgrading the plugin remains worthwhile, but an old one no longer breaks the page.
+
 The port is pinned, because the vhost proxies to it and the tool would otherwise drift to the next free one whenever several sites run. It is kept clear of other sites, of the site's own worktrees, and of whatever else the machine is holding, and a pin something has since taken is re-picked rather than left to fail. Each worktree pins its own port and takes its origin from its own subdomain.
+
+The tool reads those addresses once, when it starts, so lerd writes them back and restarts the dev server whenever they move: `lerd secure` and `lerd unsecure`, `lerd domain add` and `lerd domain remove`, and grouping a site under a main. A dev server that is not running is left down, and a change that leaves the addresses exactly as they were restarts nothing.
+
+A site with more than one domain serves its assets from the primary one, since a dev server can advertise only a single origin. The generated config lists every domain, both as a host the server answers for (along with its subdomains, matching the vhost's wildcard) and as an origin allowed to fetch from it, so a page opened on a second domain loads normally instead of having its assets refused.
 
 Some plugin middleware registers itself ahead of the tool's own base handling and only answers unprefixed, which would 404 on URLs it advertised itself. nginx retries any 404 under the prefix once with the prefix removed, so those routes work without anything having to name them.
 
@@ -136,11 +146,36 @@ custom_workers:
 
 Custom workers are merged with the framework's workers at runtime. They are committed to git so teammates get the same setup.
 
+## Worker icons
+
+A worker declares how the dashboard draws it, so a new worker gets an identity from the store with no binary release:
+
+```yaml
+workers:
+  queue:
+    label: Queue Worker
+    icon: queue                 # built-in glyph, inked in the framework's colour
+    command: php artisan queue:work
+  vite:
+    label: Vite
+    icon: vite                  # a mark the store ships at workers/vite.svg
+    color: "#9135ff"            # the mark's own tone, not the framework's
+    command: npm run dev
+```
+
+`icon` names either one of the built-in glyphs (`queue`, `clock`, `bolt`, `broadcast`, `card`, `gear`, …) or a mark the framework store carries under `workers/<icon>.svg`. Marks are keyed by icon name rather than by framework, so every framework that runs Vite shares one drawing. lerd caches a mark beside the definition that named it, sanitises it on the way in, and serves it to the dashboard from its own copy, so a worker keeps its icon offline and over remote access.
+
+`color` is optional. A worker without one takes its framework's brand colour, which is what tells two schedulers from different products apart; a worker whose mark has a tone of its own (Vite, Horizon) declares it, because inking Vite in Laravel red would read as a different product. A worker that declares neither falls back to its framework's own mark, and then to a plain gear.
+
+Both keys are optional and ignored by older binaries, so a store update carrying them is safe for installs that have not updated yet.
+
 ## Worker logs
 
 ```bash
 journalctl --user -u lerd-messenger-myapp -f
 ```
+
+In the dashboard, a worker keeps its Logs tab whatever state it is in, drawn muted while it is stopped. The journal outlives the unit, so the tab is still the place to read why a worker died after it has gone down, or after the health banner stopped it.
 
 ## Managing custom workers
 

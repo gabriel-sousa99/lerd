@@ -92,14 +92,42 @@ describe('DatabaseCard', () => {
   });
 
   it('drops only the half the segment points at', async () => {
-    const { getByRole, getByLabelText, getAllByRole } = render(DatabaseCard, {
+    const { getByRole, getByLabelText, getAllByRole, queryByLabelText } = render(DatabaseCard, {
       props: { engine, entry: parent, testing }
     });
     await fireEvent.click(within(getByRole('group')).getByRole('button', { name: 'Testing' }));
     await fireEvent.click(getByLabelText('Drop'));
+    // The testing half is nobody's pair, so there is nothing to offer alongside it.
+    expect(queryByLabelText('Also drop havenly_testing')).not.toBeInTheDocument();
     const confirm = getAllByRole('button', { name: 'Drop' }).at(-1)!;
     await fireEvent.click(confirm);
-    expect(dropDatabase).toHaveBeenCalledWith('mysql', 'havenly_testing');
+    expect(dropDatabase).toHaveBeenCalledWith('mysql', 'havenly_testing', false);
+  });
+
+  it('takes the paired testing database along by default, named in full', async () => {
+    const { getByLabelText, getAllByRole } = render(DatabaseCard, {
+      props: { engine, entry: parent, testing }
+    });
+    await fireEvent.click(getByLabelText('Drop'));
+    expect(getByLabelText('Also drop havenly_testing')).toBeChecked();
+    await fireEvent.click(getAllByRole('button', { name: 'Drop' }).at(-1)!);
+    expect(dropDatabase).toHaveBeenCalledWith('mysql', 'havenly', true);
+  });
+
+  it('leaves the testing database alone when the box is unticked', async () => {
+    const { getByLabelText, getAllByRole } = render(DatabaseCard, {
+      props: { engine, entry: parent, testing }
+    });
+    await fireEvent.click(getByLabelText('Drop'));
+    await fireEvent.click(getByLabelText('Also drop havenly_testing'));
+    await fireEvent.click(getAllByRole('button', { name: 'Drop' }).at(-1)!);
+    expect(dropDatabase).toHaveBeenCalledWith('mysql', 'havenly', false);
+  });
+
+  it('offers nothing alongside a database with no testing sibling', async () => {
+    const { getByLabelText, queryByRole } = render(DatabaseCard, { props: { engine, entry: parent } });
+    await fireEvent.click(getByLabelText('Drop'));
+    expect(queryByRole('checkbox')).not.toBeInTheDocument();
   });
 
   it('labels a worktree database with the branch domain it belongs to', () => {

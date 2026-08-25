@@ -17,6 +17,13 @@ import { LOCALES, LOCALE_LABELS, LOCALE_CODES } from '../stores/locale';
 
 const locales: Record<string, Record<string, unknown>> = { en, es, pt, fr, de, id, nl, tr, zh, ja, ro, it: itLocale, pl, vi: viLocale };
 const baseKeys = Object.keys(en).sort();
+// The parsed catalogues above keep the last of a repeated key, so a duplicate
+// is invisible to every check that reads them; only the raw text shows it.
+const rawFiles = import.meta.glob('../../messages/*.json', {
+  query: '?raw',
+  import: 'default',
+  eager: true
+}) as Record<string, string>;
 
 describe('UI locale message files', () => {
   for (const [code, msgs] of Object.entries(locales)) {
@@ -35,6 +42,20 @@ describe('UI locale message files', () => {
       expect((msgs.meta_code as string).length).toBeGreaterThan(0);
     });
   }
+
+  it('every locale sets each key once, so no translation is quietly dead', () => {
+    const repeated: Record<string, string[]> = {};
+    for (const [path, text] of Object.entries(rawFiles)) {
+      const seen = new Set<string>();
+      const twice: string[] = [];
+      for (const [, key] of text.matchAll(/^\s*"([^"]+)":/gm)) {
+        if (seen.has(key)) twice.push(key);
+        seen.add(key);
+      }
+      if (twice.length) repeated[path.split('/').pop() as string] = twice;
+    }
+    expect(repeated).toEqual({});
+  });
 
   it('the locale store covers every compiled locale with a label and code', () => {
     for (const l of LOCALES) {

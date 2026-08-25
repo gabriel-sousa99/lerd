@@ -79,6 +79,9 @@ type ShareToolsInfo struct {
 	// NgrokTokenSet reports only whether a token is stored. The token itself is
 	// a credential and never leaves the machine through this endpoint.
 	NgrokTokenSet bool `json:"ngrok_token_set,omitempty"`
+	// PublicBaseDomain is the domain a public (reverse-proxy) share is served
+	// under, as "<site>.<base>". Empty when none is configured.
+	PublicBaseDomain string `json:"public_base_domain,omitempty"`
 }
 
 var shareToolMeta = map[string]struct{ label, installURL string }{
@@ -87,6 +90,7 @@ var shareToolMeta = map[string]struct{ label, installURL string }{
 	"expose":        {"Expose", "https://expose.dev"},
 	"serveo":        {"Serveo", ""},
 	"localhost-run": {"localhost.run", ""},
+	"pinggy":        {"Pinggy", ""},
 }
 
 // ShareTools reports every supported tunnel tool, which ones are installed,
@@ -104,6 +108,7 @@ func ShareTools() ShareToolsInfo {
 		BaseDomain:         baseDomain,
 		BaseDomainAnswered: answered,
 		NgrokTokenSet:      ngrokToken != "",
+		PublicBaseDomain:   PublicBaseDomain(),
 	}
 	for _, t := range shareTools {
 		meta := shareToolMeta[t.name]
@@ -154,8 +159,8 @@ func autoShareToolName(defaultTool, ngrokToken string) string {
 
 // resolveTunnelTool maps a UI tool name to the shareTool the CLI flags would
 // produce. Empty or "auto" runs the same auto-detection as a bare lerd share.
-func resolveTunnelTool(name, defaultTool, ngrokToken string) (*shareTool, error) {
-	var ngrok, cloudflare, expose, serveo, localhostRun bool
+func resolveTunnelTool(name, defaultTool, ngrokToken, pinggyToken string) (*shareTool, error) {
+	var ngrok, cloudflare, expose, serveo, localhostRun, pinggy bool
 	switch name {
 	case "", "auto":
 	case "ngrok":
@@ -168,13 +173,15 @@ func resolveTunnelTool(name, defaultTool, ngrokToken string) (*shareTool, error)
 		serveo = true
 	case "localhost-run":
 		localhostRun = true
+	case "pinggy":
+		pinggy = true
 	default:
 		return nil, fmt.Errorf("unknown tunnel tool %q: use %s, or auto", name, strings.Join(shareToolNames(), ", "))
 	}
 	if name != "" && name != "auto" {
 		defaultTool = ""
 	}
-	return pickShareTool(ngrok, cloudflare, expose, serveo, localhostRun, "", defaultTool, ngrokToken)
+	return pickShareTool(ngrok, cloudflare, expose, serveo, localhostRun, pinggy, "", defaultTool, ngrokToken, pinggyToken)
 }
 
 func shareToolCanonicalName(t *shareTool) string {
@@ -186,10 +193,7 @@ func shareToolCanonicalName(t *shareTool) string {
 	case shareModeExpose:
 		return "expose"
 	case shareModeSSH:
-		if t.sshHost == "serveo.net" {
-			return "serveo"
-		}
-		return "localhost-run"
+		return t.ssh.name
 	}
 	return ""
 }
@@ -203,6 +207,10 @@ var tunnelURLPatterns = map[string][]*regexp.Regexp{
 	},
 	"serveo":        {regexp.MustCompile(`(https://[a-zA-Z0-9.-]+\.serveo\.net\S*)`)},
 	"localhost-run": {regexp.MustCompile(`(https://[a-z0-9-]+\.lhr\.life\S*)`)},
+	// Pinggy has handed out *.free.pinggy.net, *.pinggy.link and
+	// *.pinggy-free.link shapes, so the pattern accepts any of them rather
+	// than pinning one tier's spelling.
+	"pinggy": {regexp.MustCompile(`(https://[a-zA-Z0-9.-]+\.pinggy(?:-free)?\.(?:net|link)\S*)`)},
 }
 
 // parseTunnelURL extracts the public URL from one line of tool output.
@@ -257,6 +265,21 @@ func TunnelStatus(siteName, branch string) (TunnelInfo, bool) {
 	return tunnelStatusByKey(tunnelKey(siteName, branch))
 }
 
+// TunnelActive reports whether a tunnel is running OR still opening for the site
+// (or worktree). Unlike TunnelStatus it is true during the open window before a
+// URL arrives, so a competing public share can be refused for that window too.
+func TunnelActive(siteName, branch string) bool {
+	key := tunnelKey(siteName, branch)
+	tunnelsMu.Lock()
+	_, inProc := tunnels[key]
+	tunnelsMu.Unlock()
+	if inProc {
+		return true
+	}
+	_, ok := cliTunnelStatus(key)
+	return ok
+}
+
 // resolveShareBaseDomain settles which base domain a start serves under. One
 // given for this run only works with Cloudflare Tunnel, the same way --domain
 // does; the configured one simply does not apply to the other tools.
@@ -298,19 +321,29 @@ func SetShareBaseDomain(baseDomain string, remember bool) error {
 	return config.SaveGlobal(cfg)
 }
 
-// SetShareNgrokToken stores the ngrok auth token, or clears it when empty. The
-// config file holds a credential once this is set, so it is written back with
-// owner-only permissions.
+// SetShareNgrokToken stores the ngrok auth token, or clears it when empty.
 func SetShareNgrokToken(token string) error {
+	return setShareToken(token, func(cfg *config.GlobalConfig) *string { return &cfg.Share.NgrokToken })
+}
+
+// SetSharePinggyToken stores the Pinggy access token, or clears it when empty.
+func SetSharePinggyToken(token string) error {
+	return setShareToken(token, func(cfg *config.GlobalConfig) *string { return &cfg.Share.PinggyToken })
+}
+
+// setShareToken writes one provider's token. The config file holds a credential
+// once any token is set, so it is written back with owner-only permissions.
+func setShareToken(token string, field func(*config.GlobalConfig) *string) error {
 	cfg, err := config.LoadGlobal()
 	if err != nil {
 		return err
 	}
 	token = strings.TrimSpace(token)
-	if cfg.Share.NgrokToken == token {
+	stored := field(cfg)
+	if *stored == token {
 		return nil
 	}
-	cfg.Share.NgrokToken = token
+	*stored = token
 	if err := config.SaveGlobal(cfg); err != nil {
 		return err
 	}
@@ -328,6 +361,12 @@ func SetShareNgrokToken(token string) error {
 // "<site>.<base domain>" through a Cloudflare named tunnel for this run;
 // empty falls back to the configured one.
 func TunnelStart(siteName, branch, toolName, baseDomain string) (string, error) {
+	// A site is exposed one way at a time: refuse a tunnel while a reverse-proxy
+	// public share or a LAN share is live for the same target.
+	if (branch == "" && (PublicShareRunning(siteName) || LANShareRunning(siteName))) ||
+		(branch != "" && (PublicShareWorktreeRunning(siteName, branch) || LANShareWorktreeRunning(siteName, branch))) {
+		return "", errShareBusy
+	}
 	site, err := config.FindSite(siteName)
 	if err != nil {
 		return "", err
@@ -348,7 +387,7 @@ func TunnelStart(siteName, branch, toolName, baseDomain string) (string, error) 
 	if httpsPort == 0 {
 		httpsPort = 443
 	}
-	tool, err := resolveTunnelTool(toolName, cfg.Share.DefaultTool, cfg.Share.NgrokToken)
+	tool, err := resolveTunnelTool(toolName, cfg.Share.DefaultTool, cfg.Share.NgrokToken, cfg.Share.PinggyToken)
 	if err != nil {
 		return "", err
 	}
@@ -485,6 +524,37 @@ func TunnelStop(siteName, branch string) error {
 		stopCLITunnel(key)
 	}
 	return nil
+}
+
+// StopSiteTunnels kills the site's own tunnel and every tunnel its worktrees
+// hold, whether started by the daemon or recorded by a `lerd share` in a
+// terminal. Worktrees tunnel their own domain under a key of their own, so
+// stopping the site's key alone leaves them pointed at a site that is gone.
+func StopSiteTunnels(siteName string) {
+	keys := map[string]bool{siteName: true}
+	tunnelsMu.Lock()
+	for k := range tunnels {
+		if tunnelKeyBelongsToSite(k, siteName) {
+			keys[k] = true
+		}
+	}
+	tunnelsMu.Unlock()
+	for k := range readTunnelStates() {
+		if tunnelKeyBelongsToSite(k, siteName) {
+			keys[k] = true
+		}
+	}
+	for k := range keys {
+		if !stopTunnelByKey(k) {
+			stopCLITunnel(k)
+		}
+	}
+}
+
+// tunnelKeyBelongsToSite reports whether a tunnel key is the site's own or one
+// of its worktrees'. The separator matters: acme-shop is not a worktree of acme.
+func tunnelKeyBelongsToSite(key, siteName string) bool {
+	return key == siteName || strings.HasPrefix(key, siteName+"@")
 }
 
 // stopTunnelByKey kills the tunnel registered under key and reports whether

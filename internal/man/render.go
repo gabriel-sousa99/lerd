@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"charm.land/glamour/v2"
+	"github.com/gabriel-sousa99/lerd/internal/docs"
 )
 
 // RenderMarkdown renders markdown content to ANSI-formatted terminal output.
@@ -15,6 +16,7 @@ func RenderMarkdown(content string, width int, style string) ([]string, error) {
 	if style == "" {
 		style = "dark"
 	}
+	content = docs.Normalize(content)
 	r, err := glamour.NewTermRenderer(
 		glamour.WithStandardStyle(style),
 		glamour.WithWordWrap(width),

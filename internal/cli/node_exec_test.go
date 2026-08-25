@@ -59,6 +59,24 @@ func TestShimLeadingEnv_MatchesPathCaseInsensitively(t *testing.T) {
 	}
 }
 
+func TestShimLeadingEnv_DropsNPMPrefixInEitherSpelling(t *testing.T) {
+	out := shimLeadingEnv([]string{
+		"npm_config_prefix=/home/u/.npm-global",
+		"NPM_CONFIG_PREFIX=/home/u/.npm-global",
+		"FOO=bar",
+	})
+	for _, kv := range out {
+		if name, _, ok := strings.Cut(kv, "="); ok && strings.EqualFold(name, "npm_config_prefix") {
+			// nvm's nvm_die_on_prefix matches case-insensitively and aborts
+			// `nvm use` when the prefix sits outside $NVM_DIR.
+			t.Errorf("inherited npm prefix must be dropped before activation, got %q", kv)
+		}
+	}
+	if !envHas(out, "FOO=bar") {
+		t.Errorf("unrelated vars were not preserved: %v", out)
+	}
+}
+
 func envHas(list []string, want string) bool {
 	for _, s := range list {
 		if s == want {
@@ -107,6 +125,35 @@ func TestSyncNodeGlobalBins_CreatesWrappers(t *testing.T) {
 	}
 	if info.Mode()&0o111 == 0 {
 		t.Errorf("wrapper not executable: mode=%v", info.Mode())
+	}
+}
+
+func TestSyncNodeGlobalBins_InjectsNpmPrefix(t *testing.T) {
+	root := t.TempDir()
+	sourceBin := filepath.Join(root, "node-global", "bin")
+	targetBin := filepath.Join(root, "local-bin")
+	if err := os.MkdirAll(sourceBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceBin, "codex"), []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	execPrefix := "/fake/fnm exec --using=default -- env npm_config_prefix=" + filepath.Join(root, "node-global")
+	if err := syncNodeGlobalBins(sourceBin, targetBin, execPrefix); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(targetBin, "codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "npm_config_prefix=") {
+		t.Errorf("wrapper missing npm_config_prefix: %q", body)
+	}
+	if !strings.Contains(body, filepath.Join(root, "node-global")) {
+		t.Errorf("wrapper missing prefix path: %q", body)
 	}
 }
 

@@ -5,9 +5,12 @@ import (
 	"os"
 
 	"github.com/gabriel-sousa99/lerd/internal/tray"
+
+	"github.com/gabriel-sousa99/lerd/internal/daemon"
 )
 
 func main() {
+	daemon.TuneRuntime()
 	var mono bool
 	flag.BoolVar(&mono, "mono", false, "Use monochrome (template) icon — lets the OS recolor it to match the panel")
 	flag.Parse()

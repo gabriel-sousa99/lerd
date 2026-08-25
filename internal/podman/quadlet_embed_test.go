@@ -376,6 +376,12 @@ func TestGenerateCustomQuadlet_ShareHosts(t *testing.T) {
 }
 
 func TestGenerateCustomQuadlet_InjectsRedisInsightProxyPath(t *testing.T) {
+	// The prefix is injected only for a preset that asks to be proxied, so the
+	// store definition has to be resolvable here.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := config.SaveStorePreset("redisinsight", []byte("name: redisinsight\nimage: docker.io/redis/redisinsight:latest\ndashboard: http://localhost:8085\ndashboard_external: true\n")); err != nil {
+		t.Fatalf("seeding the redisinsight preset: %v", err)
+	}
 	svc := &config.CustomService{
 		Name:              "redisinsight",
 		Image:             "docker.io/redis/redisinsight:latest",

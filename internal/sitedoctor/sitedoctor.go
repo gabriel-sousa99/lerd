@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,8 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	phpkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+
+	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 )
 
 // Check statuses, mirroring the MCP doctor's check shape so the diagnostics
@@ -42,6 +45,26 @@ const (
 	FixComposerUpdate  = "composer_update"
 	FixNpmInstall      = "npm_install"
 	FixNpmAuditFix     = "npm_audit_fix"
+	// FixVhostRegenerate is not a container command like the others: it rewrites
+	// the site's vhost on the host and reloads nginx, so the fix endpoint runs it
+	// through FixVhost rather than through the container shell.
+	FixVhostRegenerate = "vhost_regenerate"
+	// FixEnvDuplicates is resolved by the user rather than by lerd: only the
+	// project knows which of two values it meant, so the dashboard opens the env
+	// editor's resolver on it instead of running anything.
+	FixEnvDuplicates = "env_duplicates_resolve"
+	// FixInstallServices installs the services a site declares and the machine
+	// has never had, on the host like the vhost fix rather than in the site
+	// container, since installing a service is not something a site can do from
+	// the inside.
+	FixInstallServices = "services_install"
+	// FixStartServices starts the services a site declares that are installed
+	// and stopped, the same host-side shape as installing them.
+	FixStartServices = "services_start"
+	// FixEnvSync writes the connection values for the services a project picks
+	// into the env file its framework declares, which is what `lerd env` does
+	// and what resolves a service picked but not wired.
+	FixEnvSync = "env_sync"
 )
 
 // DoctorFixCommands maps each universal fix key to the shell command run in the
@@ -52,6 +75,9 @@ var DoctorFixCommands = map[string]string{
 	FixComposerUpdate:  "composer update",
 	FixNpmInstall:      "npm install",
 	FixNpmAuditFix:     "npm audit fix",
+	// Not a package manager, but the same shape: a command run in the project
+	// directory with lerd's own bin dir on PATH, streaming what it did.
+	FixEnvSync: "lerd env",
 }
 
 // commandTimeout bounds each container exec a check makes (declared command
@@ -148,27 +174,49 @@ func Run(ctx context.Context, path string, fw *config.Framework) Response {
 	envFile, envFormat, exampleFile := envSetup(fw, path)
 	envPath := filepath.Join(path, envFile)
 
-	if c, ok := checkRequiredServices(fw); ok {
+	if c, ok := checkRequiredServices(path, fw); ok {
 		resp.add(c)
 	}
 	if hasEnvConfig(fw) {
-		if c, ok := checkEnvPresent(path, envFile, fwExampleFile(fw)); ok {
+		// The file that has to exist is the one lerd writes, not whichever one it
+		// can currently read: a Drupal project with no .env is read through the
+		// settings.php its installer wrote, and reporting that as the env file
+		// present would hide the missing one lerd and drush both need.
+		writeFile, _ := fw.Env.ResolveWrite(path)
+		if c, ok := checkEnvPresent(path, writeFile, fwExampleFile(fw)); ok {
+			resp.add(c)
+		}
+		if c, ok := checkServiceWiring(path, envFile, fw); ok {
 			resp.add(c)
 		}
 	}
 	// The env drift and app-key checks parse the file as dotenv, so skip them for
 	// frameworks that store config another way (WordPress's wp-config.php, etc.).
 	dbBroken := false
+	// The SQLite check reads whichever keys the framework declares, in whatever
+	// format it declares them, so a project configured through a PHP settings
+	// file is checked like any other.
+	if c, ok := checkSQLiteDatabase(path, envPath, envFormat, fw); ok {
+		resp.add(c)
+		dbBroken = c.Status == StatusFail
+	}
+	// The app-key and drift checks parse the file as dotenv (one diffs it against
+	// a committed example), so they stay for the frameworks that keep one.
+	if c, ok := checkEnvDuplicates(path, envFile, envFormat); ok {
+		resp.add(c)
+	}
+	// Whether the site's database exists is answered through the framework
+	// declaration, so it is asked of every format, not only dotenv.
+	if c, ok := checkServerDatabase(path, fw); ok {
+		resp.add(c)
+		dbBroken = dbBroken || c.Status == StatusFail
+	}
 	if envFormat == "dotenv" {
 		if c, ok := checkAppKey(envPath, fw); ok {
 			resp.add(c)
 		}
 		if c, ok := checkEnvDrift(path, envPath, filepath.Join(path, exampleFile)); ok {
 			resp.add(c)
-		}
-		if c, ok := checkSQLiteDatabase(path, envPath, fw); ok {
-			resp.add(c)
-			dbBroken = c.Status == StatusFail
 		}
 	}
 
@@ -182,7 +230,7 @@ func Run(ctx context.Context, path string, fw *config.Framework) Response {
 		// A known-broken database turns a migration check into "couldn't run" noise
 		// that just repeats the database finding's remedy, so skip a command check
 		// whose fix is the same migrate command; unrelated command checks still run.
-		if dbBroken && spec.Type == "command" && spec.Fix == sqliteFixCommand {
+		if dbBroken && spec.Type == "command" && spec.Fix != "" && spec.Fix == migrateFix(fw) {
 			continue
 		}
 		tasks = append(tasks, func() (Check, bool) { return runDeclaredCheck(ctx, path, envPath, envFormat, spec) })
@@ -192,6 +240,9 @@ func Run(ctx context.Context, path string, fw *config.Framework) Response {
 		resp.add(c)
 	}
 	if c, ok := checkPHPVersion(path, fw); ok {
+		resp.add(c)
+	}
+	if c, ok := checkVhost(path); ok {
 		resp.add(c)
 	}
 	if c, ok := checkSlowRoutes(path); ok {
@@ -230,25 +281,100 @@ func fwExampleFile(fw *config.Framework) string {
 
 // Seams so the required-service check can be tested without podman.
 var (
-	quadletInstalledFn = podman.QuadletInstalled
-	unitStatusFn       = podman.UnitStatus
+	unitStatusFn = podman.UnitStatus
+	// serviceInstalledFn answers "does lerd have this service", which is not
+	// the same question as "is there a quadlet for it": a removed custom
+	// service can leave the unit file behind, and starting that fails with an
+	// unknown service. It is what decides install versus start.
+	serviceInstalledFn = serviceops.ServiceInstalled
 )
 
-// checkRequiredServices reports the framework's declared required services that
-// are absent or stopped. Absent is a failure, since the app cannot boot without
-// it; stopped is a warning, since starting it is one command.
-func checkRequiredServices(fw *config.Framework) (Check, bool) {
-	if fw == nil || len(fw.Requires) == 0 {
+// declaredServices is everything a site says it needs: what its framework
+// requires and what its own .lerd.yaml picks. A project naming a service is as
+// good a declaration as a framework requiring one, and until now only the
+// second was checked, so a project picking redis on a machine that never
+// installed it produced no finding at all.
+//
+// SQLite is excluded because it is a file the project owns rather than
+// something lerd runs, and so is anything the project names in
+// LERD_EXTERNAL_SERVICES: that is the developer saying they run it themselves,
+// which the wiring check and `lerd env` already respect. Reporting one of those
+// missing would offer to install a second copy alongside the real one.
+func declaredServices(path string, fw *config.Framework) []string {
+	seen := map[string]bool{"sqlite": true}
+	if _, external := envfile.ReadOverride(path); external != nil {
+		for name := range external {
+			seen[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	}
+	var out []string
+	add := func(name string) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if fw != nil {
+		for _, name := range fw.Requires {
+			add(name)
+		}
+	}
+	if proj, err := config.LoadProjectConfig(path); err == nil && proj != nil {
+		for _, name := range pickedServices(proj) {
+			add(name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// MissingDeclaredServices returns the services a site declares that this
+// machine has never installed, in the order the fix would install them. It is
+// exported because the fix has to work out the same set the check reported.
+func MissingDeclaredServices(path string, fw *config.Framework) []string {
+	var missing []string
+	for _, name := range declaredServices(path, fw) {
+		if !serviceInstalledFn(name) {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+// StoppedDeclaredServices returns the services a site declares that are
+// installed but not running. Exported for the same reason as the missing set:
+// the fix has to arrive at what the check reported.
+func StoppedDeclaredServices(path string, fw *config.Framework) []string {
+	var stopped []string
+	for _, name := range declaredServices(path, fw) {
+		if !serviceInstalledFn(name) {
+			continue
+		}
+		if status, _ := unitStatusFn("lerd-" + name); status != "active" {
+			stopped = append(stopped, name)
+		}
+	}
+	return stopped
+}
+
+// checkRequiredServices reports the services a site declares that are absent or
+// stopped. Absent is a failure, since the app cannot boot without them, and it
+// carries a fix that installs them; stopped is a warning, since starting one is
+// a single command.
+func checkRequiredServices(path string, fw *config.Framework) (Check, bool) {
+	declared := declaredServices(path, fw)
+	if len(declared) == 0 {
 		return Check{}, false
 	}
 	var missing, stopped []string
-	for _, name := range fw.Requires {
-		unit := "lerd-" + name
-		if !quadletInstalledFn(unit) {
+	for _, name := range declared {
+		if !serviceInstalledFn(name) {
 			missing = append(missing, name)
 			continue
 		}
-		if status, _ := unitStatusFn(unit); status != "active" {
+		if status, _ := unitStatusFn("lerd-" + name); status != "active" {
 			stopped = append(stopped, name)
 		}
 	}
@@ -257,14 +383,17 @@ func checkRequiredServices(fw *config.Framework) (Check, bool) {
 		return Check{
 			Name:   "required_services",
 			Status: StatusFail,
-			Detail: fmt.Sprintf("%s cannot run without %s. Install %s with %s.",
-				frameworkLabel(fw), strings.Join(missing, ", "), plural(len(missing), "it", "them"),
+			Fix:    FixInstallServices,
+			Detail: fmt.Sprintf("%s needs %s, which %s not installed. Install %s with %s.",
+				frameworkLabel(fw), strings.Join(missing, ", "), plural(len(missing), "is", "are"),
+				plural(len(missing), "it", "them"),
 				serviceCommands("lerd service preset", missing)),
 		}, true
 	case len(stopped) > 0:
 		return Check{
 			Name:   "required_services",
 			Status: StatusWarn,
+			Fix:    FixStartServices,
 			Detail: fmt.Sprintf("%s %s required but not running. Start %s with %s.",
 				strings.Join(stopped, ", "), plural(len(stopped), "is", "are"),
 				plural(len(stopped), "it", "them"),
@@ -332,14 +461,18 @@ func runDeclaredCheck(ctx context.Context, path, envPath, envFormat string, spec
 var universalLabels = map[string]string{
 	"required_services": "Required Services",
 	"env_present":       "Env File",
+	"service_wiring":    "Service Wiring",
 	"app_key":           "App Key",
 	"env_drift":         "Env Drift",
+	"env_duplicates":    "Env Keys",
 	"sqlite_database":   "Database",
+	"server_database":   "Database",
 	"composer_deps":     "Composer Dependencies",
 	"composer_audit":    "Composer Audit",
 	"node_deps":         "Node Dependencies",
 	"node_audit":        "Node Audit",
 	"php_version":       "PHP Version",
+	"vhost":             "Nginx Vhost",
 	"slow_routes":       "Response Time",
 }
 
@@ -371,11 +504,16 @@ func applyLabels(resp *Response) {
 
 // checkEnvPresent fails when the framework's env file is missing — every other
 // env-driven check would otherwise read an empty file and misreport.
+// envMissingDetail names the remedy rather than the symptom. `lerd env` is what
+// creates the file, copying the framework's example when it declares one and
+// seeding an empty one when it does not, and then writes the connection values
+// for the services the project picks. Leaving the finding at "it is missing"
+// hands the user a question lerd already knows the answer to.
 func envMissingDetail(envFile, exampleFile string) string {
 	if exampleFile == "" {
-		return fmt.Sprintf("%s is missing.", envFile)
+		return fmt.Sprintf("%s is missing, run `lerd env` to create it and wire the services this project picks.", envFile)
 	}
-	return fmt.Sprintf("%s is missing, copy it from the example and configure it.", envFile)
+	return fmt.Sprintf("%s is missing, run `lerd env` to create it from %s and wire the services this project picks.", envFile, exampleFile)
 }
 
 func checkEnvPresent(path, envFile, exampleFile string) (Check, bool) {
@@ -411,45 +549,61 @@ func checkAppKey(envPath string, fw *config.Framework) (Check, bool) {
 // ("no such table"), which migrate:status can't surface: it reports the missing
 // migrations table, so the remedy would point at migrate rather than the absent
 // file. Skipped unless DB_CONNECTION is sqlite; an in-memory database has none.
-func checkSQLiteDatabase(path, envPath string, fw *config.Framework) (Check, bool) {
-	if !strings.EqualFold(strings.TrimSpace(envfile.ReadKey(envPath, "DB_CONNECTION")), "sqlite") {
+func checkSQLiteDatabase(path, envPath, envFormat string, fw *config.Framework) (Check, bool) {
+	dbFile, ok := declaredSQLiteFile(envPath, envFormat, fw)
+	if !ok || dbFile == ":memory:" {
 		return Check{}, false
 	}
-	dbFile := strings.TrimSpace(envfile.ReadKey(envPath, "DB_DATABASE"))
-	if dbFile == ":memory:" {
-		return Check{}, false
+	fix := migrateFix(fw)
+	var empty bool
+	for _, abs := range sqliteFilePaths(path, publicDirOf(fw), dbFile) {
+		info, err := os.Stat(abs)
+		switch {
+		case os.IsNotExist(err):
+			continue // not here; the next candidate root may have it
+		case err != nil:
+			// A permission error, a flaky mount, a symlink loop: the file may be
+			// there and healthy. Saying it is missing would offer to migrate over
+			// a database this cannot even see.
+			return Check{}, false
+		case info.Size() == 0:
+			empty = true
+		default:
+			return Check{Name: "sqlite_database", Status: StatusOK}, true
+		}
 	}
-	if dbFile == "" {
-		dbFile = filepath.Join("database", "database.sqlite") // Laravel default
-	}
-	abs := dbFile
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(path, dbFile)
-	}
-	// Only offer the migrate button when the framework actually has that command,
-	// so the CLI/TUI don't print a fix that maps to nothing.
-	fix := ""
-	if frameworkHasCommand(fw, sqliteFixCommand) {
-		fix = sqliteFixCommand
-	}
-	info, err := os.Stat(abs)
-	switch {
-	case err != nil && os.IsNotExist(err):
-		return Check{Name: "sqlite_database", Status: StatusFail, Fix: fix,
-			Detail: fmt.Sprintf("SQLite database file is missing at %s — create it and run migrations.", dbFile)}, true
-	case err != nil:
-		return Check{}, false // can't stat for some other reason; don't guess
-	case info.Size() == 0:
+	if empty {
 		return Check{Name: "sqlite_database", Status: StatusFail, Fix: fix,
 			Detail: fmt.Sprintf("SQLite database at %s is empty — run migrations to create the schema.", dbFile)}, true
 	}
-	return Check{Name: "sqlite_database", Status: StatusOK}, true
+	return Check{Name: "sqlite_database", Status: StatusFail, Fix: fix,
+		Detail: fmt.Sprintf("SQLite database file is missing at %s — create it and run migrations.", dbFile)}, true
 }
 
-// sqliteFixCommand names the framework command the doctor offers to populate an
-// empty or missing SQLite database. Laravel's "migrate" creates the schema (and,
-// on current versions, the file); frameworks without a matching command get no fix.
-const sqliteFixCommand = "migrate"
+// publicDirOf is the document root a framework declares, the second place a
+// relative database path can be rooted.
+func publicDirOf(fw *config.Framework) string {
+	if fw == nil {
+		return ""
+	}
+	return fw.PublicDir
+}
+
+// migrateFix returns the framework command the doctor offers to populate an
+// empty or missing database, which is whichever of its own commands the
+// definition declares as the one that applies the schema. Laravel calls it
+// "migrate", Symfony "doctrine:migrations:migrate", Drupal "updb", so nothing
+// but the definition can say. A framework declaring none, or naming a command
+// it does not have, gets no fix rather than a button that maps to nothing.
+func migrateFix(fw *config.Framework) string {
+	if fw == nil || fw.Doctor == nil || fw.Doctor.MigrateCommand == "" {
+		return ""
+	}
+	if !frameworkHasCommand(fw, fw.Doctor.MigrateCommand) {
+		return ""
+	}
+	return fw.Doctor.MigrateCommand
+}
 
 // frameworkHasCommand reports whether fw declares a command of the given name, so
 // a doctor fix only points at something the site can actually run.
@@ -1051,11 +1205,7 @@ func plural(n int, one, many string) string {
 func runCapture(ctx context.Context, cwd, command string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = cwd
-	path := config.BinDir()
-	if existing := os.Getenv("PATH"); existing != "" {
-		path += string(os.PathListSeparator) + existing
-	}
-	cmd.Env = append(os.Environ(), "PATH="+path)
+	cmd.Env = append(os.Environ(), "PATH="+config.PathWithBinDir())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {

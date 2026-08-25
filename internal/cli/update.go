@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -93,11 +94,11 @@ func runUpdate(currentVersion string, beta bool) error {
 	// A Homebrew-managed binary lives under a Cellar prefix; self-replacing it
 	// would fight `brew`, so defer to it. Curl-installed binaries (the default
 	// on macOS now) live in ~/.local/bin and self-update like Linux does below.
-	if runtime.GOOS == "darwin" {
-		if self, err := selfPath(); err == nil && isHomebrewManaged(self) {
-			fmt.Printf("\nThis is a Homebrew install. To update, run:\n\n  brew upgrade lerd\n\n")
-			return nil
-		}
+	// The formula ships Linux bottles, so Linuxbrew counts the same way, which
+	// is also how uninstall already treats it.
+	if self, err := selfPath(); err == nil && isHomebrewManaged(self) {
+		fmt.Printf("\nThis is a Homebrew install. To update, run:\n\n  brew upgrade lerd\n\n")
+		return nil
 	}
 
 	// A deb/rpm install lives under /usr and is owned by the package manager;
@@ -190,23 +191,23 @@ func runUpdate(currentVersion string, beta bool) error {
 	return nil
 }
 
-// refreshStoreFrameworks re-fetches every cached framework yaml so users pick
-// up schema additions (per_worktree, etc.) without waiting for the 24h
-// staleness check in GetFrameworkForDir to expire.
-func refreshStoreFrameworks() {
-	dir := config.StoreFrameworksDir()
-	entries, err := os.ReadDir(dir)
+// storeFrameworkTarget is one definition to fetch: a framework name and the
+// major version of its yaml, empty for a legacy unversioned file.
+type storeFrameworkTarget struct{ name, version string }
+
+// installedStoreFrameworkTargets lists the definitions already cached on disk.
+func installedStoreFrameworkTargets() []storeFrameworkTarget {
+	entries, err := os.ReadDir(config.StoreFrameworksDir())
 	if err != nil {
-		return
+		return nil
 	}
-	type target struct{ name, version string }
-	var targets []target
+	var targets []storeFrameworkTarget
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
 			continue
 		}
 		base := strings.TrimSuffix(e.Name(), ".yaml")
-		var t target
+		var t storeFrameworkTarget
 		if at := strings.Index(base, "@"); at != -1 {
 			t.name = base[:at]
 			t.version = base[at+1:]
@@ -215,9 +216,59 @@ func refreshStoreFrameworks() {
 		}
 		targets = append(targets, t)
 	}
+	return targets
+}
+
+// publishedStoreFrameworkTargets lists every definition the store's cached index
+// publishes. A fresh machine has nothing on disk to refresh, so without this the
+// whole catalogue only arrives one definition at a time, as projects that need
+// each one turn up.
+func publishedStoreFrameworkTargets(idx *store.Index) []storeFrameworkTarget {
+	if idx == nil {
+		var err error
+		if idx, err = store.CachedIndex(); err != nil {
+			// No cache to read: this is the fresh machine the seeding is for, or a
+			// run whose earlier index fetch failed. Ask the store, so a network that
+			// has come back since still fills the catalogue on this run.
+			if idx, err = store.NewClient().RefreshIndex(); err != nil {
+				return nil
+			}
+		}
+	}
+	var targets []storeFrameworkTarget
+	for _, e := range idx.Frameworks {
+		for _, v := range e.Versions {
+			targets = append(targets, storeFrameworkTarget{name: e.Name, version: v})
+		}
+	}
+	return targets
+}
+
+// refreshStoreFrameworks fetches every definition the store publishes, plus any
+// already cached here that it no longer does, so users pick up schema additions
+// (per_worktree, etc.) without waiting for the 24h staleness check in
+// GetFrameworkForDir to expire, and a just-installed machine holds the same
+// catalogue an established one does rather than only the built-ins. idx is the
+// index the caller has already fetched; nil reads the cached copy.
+func refreshStoreFrameworks(idx *store.Index) {
+	seen := map[storeFrameworkTarget]bool{}
+	var targets []storeFrameworkTarget
+	for _, t := range append(publishedStoreFrameworkTargets(idx), installedStoreFrameworkTargets()...) {
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		targets = append(targets, t)
+	}
 	if len(targets) == 0 {
 		return
 	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].name != targets[j].name {
+			return targets[i].name < targets[j].name
+		}
+		return frameworkVersionOrder(targets[i].version) < frameworkVersionOrder(targets[j].version)
+	})
 	feedback.Header(fmt.Sprintf("Refreshing %d framework%s", len(targets), pluralS(len(targets))))
 	client := store.NewClient()
 	for _, t := range targets {
@@ -237,6 +288,38 @@ func refreshStoreFrameworks() {
 		}
 		step.OK("")
 	}
+}
+
+// frameworkVersionOrder sorts a definition's major version numerically, so the
+// listing reads laravel@10 before laravel@13 rather than in string order. An
+// unversioned file has no number and sorts first, ahead of every major.
+func frameworkVersionOrder(version string) int {
+	if version == "" {
+		return -1
+	}
+	n, err := strconv.Atoi(version)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// Seams for the refresh/reconcile pair, swapped in tests so the order between
+// them can be asserted without a network fetch or a systemd reload.
+var (
+	refreshPresetsFn    = refreshStorePresets
+	reconcileServicesFn = reconcileCustomServices
+)
+
+// refreshPresetsThenReconcile pulls the current store preset for every installed
+// service and then re-renders the services those presets describe. The order is
+// the point: the reconcile is what carries a store change into a running
+// container, and running it against presets that have not been refreshed yet
+// leaves the container a release behind while every surface that reads the
+// preset directly has already moved on.
+func refreshPresetsThenReconcile() {
+	refreshPresetsFn()
+	reconcileServicesFn()
 }
 
 // refreshStorePresets re-fetches the store preset backing every installed
@@ -446,6 +529,9 @@ func restartLerdUserServices() {
 func downloadReleaseBinary(version string) (string, func(), error) {
 	arch := runtime.GOARCH // "amd64" or "arm64"
 	ver := stripV(version)
+	if !lerdUpdate.ValidTag(ver) {
+		return "", func() {}, fmt.Errorf("refusing unsafe release version %q", version)
+	}
 
 	filename := fmt.Sprintf("lerd_%s_%s_%s.tar.gz", ver, runtime.GOOS, arch)
 

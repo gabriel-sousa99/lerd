@@ -486,11 +486,11 @@
 <body>
 
 <header class="brandbar">
-  <a class="brand" href="https://github.com/geodro/lerd">
+  <a class="brand" href="https://github.com/gabriel-sousa99/lerd">
     <span class="brand-mark">L</span>
     <span><span class="brand-name">lerd</span> <span class="brand-path">geodro/<b>lerd</b></span></span>
   </a>
-  <a class="gh-link" href="https://github.com/geodro/lerd/compare/v1.26.0...v1.27.0">v1.26.0…v1.27.0 ↗</a>
+  <a class="gh-link" href="https://github.com/gabriel-sousa99/lerd/compare/v1.26.0...v1.27.0">v1.26.0…v1.27.0 ↗</a>
 </header>
 
 <nav class="pillnav">
@@ -583,9 +583,9 @@
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Auto-shift guard <a class="pr" href="https://github.com/geodro/lerd/pull/633">#633</a></h4><p>Coexist with a host MySQL/MariaDB/Postgres. Reserves preset ports in the free-port search, fails closed if the override can't persist, and checks dual-stack bindability.</p><span class="file">internal/serviceops</span></div>
-    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>Ports modal <a class="pr" href="https://github.com/geodro/lerd/pull/688">#688</a></h4><p>A cog on each service page opens a Ports modal for the published host port and extra ports, through one shared serviceops layer the CLI, dashboard and MCP all call.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Presets publish their ports <a class="pr" href="https://github.com/geodro/lerd/pull/708">#708</a></h4><p>The gate now keys off preset ownership, not default-stack membership, so optional presets like gotenberg autofill their host port and can add extra ports.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Auto-shift guard <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/633">#633</a></h4><p>Coexist with a host MySQL/MariaDB/Postgres. Reserves preset ports in the free-port search, fails closed if the override can't persist, and checks dual-stack bindability.</p><span class="file">internal/serviceops</span></div>
+    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>Ports modal <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/688">#688</a></h4><p>A cog on each service page opens a Ports modal for the published host port and extra ports, through one shared serviceops layer the CLI, dashboard and MCP all call.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Presets publish their ports <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/708">#708</a></h4><p>The gate now keys off preset ownership, not default-stack membership, so optional presets like gotenberg autofill their host port and can add extra ports.</p></div>
   </div>
 </div></section>
 
@@ -626,9 +626,9 @@
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Universal baseline <a class="pr" href="https://github.com/geodro/lerd/pull/686">#686</a></h4><p>Env, application key, dependency install and lockfile state, security audits, database presence and PHP range run for every site regardless of framework.</p><span class="file">internal/sitedoctor</span></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Store-declared checks <a class="pr" href="https://github.com/geodro/lerd/pull/686">#686</a></h4><p>Four typed evaluators (env_key_set, env_combo, symlink, command) mean a framework adds coverage by editing lerd-frameworks, not the binary.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Everywhere, with fixes <a class="pr" href="https://github.com/geodro/lerd/pull/686">#686</a></h4><p>Web button, TUI tab, <code>lerd site:doctor --json</code>, and MCP <code>diag site_doctor</code>. Dependency and audit findings expose an allowlisted, loopback-only Fix button.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Universal baseline <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/686">#686</a></h4><p>Env, application key, dependency install and lockfile state, security audits, database presence and PHP range run for every site regardless of framework.</p><span class="file">internal/sitedoctor</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Store-declared checks <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/686">#686</a></h4><p>Four typed evaluators (env_key_set, env_combo, symlink, command) mean a framework adds coverage by editing lerd-frameworks, not the binary.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Everywhere, with fixes <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/686">#686</a></h4><p>Web button, TUI tab, <code>lerd site:doctor --json</code>, and MCP <code>diag site_doctor</code>. Dependency and audit findings expose an allowlisted, loopback-only Fix button.</p></div>
   </div>
 </div></section>
 
@@ -669,9 +669,9 @@
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Shared agent sidecar <a class="pr" href="https://github.com/geodro/lerd/pull/646">#646</a></h4><p>One <code>lerd-ssh-agent</code> container holds the unlocked keys; its socket on a named volume is reachable from every FPM container, macOS included.</p><span class="file">internal/cli · auth</span></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Injected only when up <a class="pr" href="https://github.com/geodro/lerd/pull/646">#646</a></h4><p><code>lerd composer</code>/<code>lerd php</code> inject <code>SSH_AUTH_SOCK</code> into the exec only when the agent is running, falling back to on-disk keys otherwise.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>git + ssh in the images <a class="pr" href="https://github.com/geodro/lerd/pull/645">#645</a></h4><p>The FPM and FrankenPHP runtime images gain git and openssh-client, so on-disk keys work and the agent has the binaries it needs.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Shared agent sidecar <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/646">#646</a></h4><p>One <code>lerd-ssh-agent</code> container holds the unlocked keys; its socket on a named volume is reachable from every FPM container, macOS included.</p><span class="file">internal/cli · auth</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Injected only when up <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/646">#646</a></h4><p><code>lerd composer</code>/<code>lerd php</code> inject <code>SSH_AUTH_SOCK</code> into the exec only when the agent is running, falling back to on-disk keys otherwise.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>git + ssh in the images <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/645">#645</a></h4><p>The FPM and FrankenPHP runtime images gain git and openssh-client, so on-disk keys work and the agent has the binaries it needs.</p></div>
   </div>
 </div></section>
 
@@ -707,9 +707,9 @@
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Safe by construction <a class="pr" href="https://github.com/geodro/lerd/pull/647">#647</a></h4><p>The safe tier requires a <code>dev.lerd.*</code> label or the <code>lerd-php*-fpm-base</code> repo name; the deep tier matches lerd's preset catalogue.</p><span class="file">internal/cleanup</span></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Automatic, throttled <a class="pr" href="https://github.com/geodro/lerd/pull/647">#647</a></h4><p>lerd-watcher runs the safe tier about once a day (persisted timestamp), and a rebuild or service update reaps the exact image it just superseded.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ref">DOCTOR</span></div><h4>Reported in doctor <a class="pr" href="https://github.com/geodro/lerd/pull/647">#647</a></h4><p><code>lerd doctor</code> shows the reclaimable total as a read-only line when there's disk to reclaim; the destructive command stays CLI-only.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Safe by construction <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/647">#647</a></h4><p>The safe tier requires a <code>dev.lerd.*</code> label or the <code>lerd-php*-fpm-base</code> repo name; the deep tier matches lerd's preset catalogue.</p><span class="file">internal/cleanup</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Automatic, throttled <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/647">#647</a></h4><p>lerd-watcher runs the safe tier about once a day (persisted timestamp), and a rebuild or service update reaps the exact image it just superseded.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ref">DOCTOR</span></div><h4>Reported in doctor <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/647">#647</a></h4><p><code>lerd doctor</code> shows the reclaimable total as a read-only line when there's disk to reclaim; the destructive command stays CLI-only.</p></div>
   </div>
 </div></section>
 
@@ -728,19 +728,19 @@
 
   <div class="flow-wrap"><div class="flow-title"><span>UPGRADE HEAL</span><span>linux · fires once per major bump</span></div>
     <div class="pipe">
-      <div class="pipe-step hot"><div class="pipe-n">1</div><div class="pipe-b"><h5>Detect the change</h5><p>Compare the recorded podman version + backend in <code>podman-env.json</code> against the live one (server version via <code>podman info</code>, so a client-only <code>brew upgrade</code> can't false-trigger). <a class="pr" href="https://github.com/geodro/lerd/pull/658">#658</a></p></div></div>
+      <div class="pipe-step hot"><div class="pipe-n">1</div><div class="pipe-b"><h5>Detect the change</h5><p>Compare the recorded podman version + backend in <code>podman-env.json</code> against the live one (server version via <code>podman info</code>, so a client-only <code>brew upgrade</code> can't false-trigger). <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/658">#658</a></p></div></div>
       <div class="pipe-step"><div class="pipe-n">2</div><div class="pipe-b"><h5>Rebuild the bridge</h5><p>Recreate the lerd network in the new backend's format (CNI is removed and not auto-migrated in 5.0); stopped containers are handed back for the caller to restart.</p></div></div>
       <div class="pipe-step"><div class="pipe-n">3</div><div class="pipe-b"><h5>Migrate &amp; clear</h5><p><code>podman system migrate</code>, then clear the stale rootless-netns. <code>lerd doctor</code> also checks for the netavark, aardvark-dns and pasta/slirp4netns helpers a fresh host can lack.</p></div></div>
     </div>
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Ghost containers <a class="pr" href="https://github.com/geodro/lerd/pull/699">#699</a></h4><p>An unclean Machine shutdown leaves a container stuck <code>Created</code> with no storage layer; lerd purges the stuck lerd-* ones inside the VM and retries once (darwin-only, <code>status=created</code>).</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>nginx after resume <a class="pr" href="https://github.com/geodro/lerd/pull/669">#669</a></h4><p>The DNS watcher dials 443 and, after two consecutive down reads on a server it has seen healthy, restarts lerd-nginx so 443 binds again after a long suspend.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>FPM auto-start <a class="pr" href="https://github.com/geodro/lerd/pull/652">#652</a></h4><p><code>php</code>, artisan, tinker and shell start a stopped FPM container, or offer to install a missing version; over MCP they return a clean error instead of a raw podman failure.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ref">REFACTOR</span></div><h4>One podman seam <a class="pr" href="https://github.com/geodro/lerd/pull/631">#631</a></h4><p>Roughly 145 call sites funnel through <code>Cmd</code>/<code>Run</code>/<code>CmdContext</code> in <code>internal/podman</code>, with a guard against building a podman exec outside the package.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ref">REFACTOR</span></div><h4>Service YAML is truth <a class="pr" href="https://github.com/geodro/lerd/pull/679">#679</a></h4><p>Custom-service install state resolves from the definition YAML; a <code>lerd start</code> pass regenerates a missing unit and reaps an orphan quadlet with no backing YAML.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Install &amp; build preflights <a class="pr" href="https://github.com/geodro/lerd/pull/628">#628</a></h4><p><code>lerd install</code> warns about a foreign listener on 80/443/5300 before setup, and the doctor gains rootless podman build preflight checks <a class="pr" href="https://github.com/geodro/lerd/pull/648">#648</a>.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Ghost containers <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/699">#699</a></h4><p>An unclean Machine shutdown leaves a container stuck <code>Created</code> with no storage layer; lerd purges the stuck lerd-* ones inside the VM and retries once (darwin-only, <code>status=created</code>).</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>nginx after resume <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/669">#669</a></h4><p>The DNS watcher dials 443 and, after two consecutive down reads on a server it has seen healthy, restarts lerd-nginx so 443 binds again after a long suspend.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>FPM auto-start <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/652">#652</a></h4><p><code>php</code>, artisan, tinker and shell start a stopped FPM container, or offer to install a missing version; over MCP they return a clean error instead of a raw podman failure.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ref">REFACTOR</span></div><h4>One podman seam <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/631">#631</a></h4><p>Roughly 145 call sites funnel through <code>Cmd</code>/<code>Run</code>/<code>CmdContext</code> in <code>internal/podman</code>, with a guard against building a podman exec outside the package.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ref">REFACTOR</span></div><h4>Service YAML is truth <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/679">#679</a></h4><p>Custom-service install state resolves from the definition YAML; a <code>lerd start</code> pass regenerates a missing unit and reaps an orphan quadlet with no backing YAML.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Install &amp; build preflights <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/628">#628</a></h4><p><code>lerd install</code> warns about a foreign listener on 80/443/5300 before setup, and the doctor gains rootless podman build preflight checks <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/648">#648</a>.</p></div>
   </div>
 </div></section>
 
@@ -757,12 +757,12 @@
   is back, and the rest of the wave sharpens idle-suspend, macOS and LAN-share.</p>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Waking page, not 502 <a class="pr" href="https://github.com/geodro/lerd/pull/673">#673</a></h4><p>A suspended host-proxy site serves an auto-refreshing landing page; resume waits (bounded 60s) for the dev-server port before restoring the proxy vhost.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Pause on worker stop <a class="pr" href="https://github.com/geodro/lerd/pull/670">#670</a></h4><p>Stopping a host-proxy site's dev-server worker pauses the site rather than leaving nginx to 502.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>macOS idle wake &amp; reap <a class="pr" href="https://github.com/geodro/lerd/pull/681">#681</a></h4><p>Suspended workers wake on web access on macOS <a class="pr" href="https://github.com/geodro/lerd/pull/681">#681</a>, and the in-container worker is reaped on stop so idle-suspend actually frees CPU <a class="pr" href="https://github.com/geodro/lerd/pull/662">#662</a>.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Postgres native on ARM <a class="pr" href="https://github.com/geodro/lerd/pull/676">#676</a></h4><p>Postgres runs native on Apple Silicon via an imresamu/postgis rewrite instead of emulation.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>LAN-share over HTTPS <a class="pr" href="https://github.com/geodro/lerd/pull/653">#653</a></h4><p>LAN-shared sites that force HTTPS no longer hit <code>ERR_SSL_PROTOCOL_ERROR</code> <a class="pr" href="https://github.com/geodro/lerd/pull/653">#653</a>, and the proxy carries app WebSockets while only diverting Vite's HMR socket <a class="pr" href="https://github.com/geodro/lerd/pull/657">#657</a>.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Watcher fd budget <a class="pr" href="https://github.com/geodro/lerd/pull/675">#675</a></h4><p>Source-file watches are bounded so an asset dump can't exhaust file descriptors; the idle moon now shows in real time on resume <a class="pr" href="https://github.com/geodro/lerd/pull/703">#703</a>.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Waking page, not 502 <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/673">#673</a></h4><p>A suspended host-proxy site serves an auto-refreshing landing page; resume waits (bounded 60s) for the dev-server port before restoring the proxy vhost.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Pause on worker stop <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/670">#670</a></h4><p>Stopping a host-proxy site's dev-server worker pauses the site rather than leaving nginx to 502.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>macOS idle wake &amp; reap <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/681">#681</a></h4><p>Suspended workers wake on web access on macOS <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/681">#681</a>, and the in-container worker is reaped on stop so idle-suspend actually frees CPU <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/662">#662</a>.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Postgres native on ARM <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/676">#676</a></h4><p>Postgres runs native on Apple Silicon via an imresamu/postgis rewrite instead of emulation.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>LAN-share over HTTPS <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/653">#653</a></h4><p>LAN-shared sites that force HTTPS no longer hit <code>ERR_SSL_PROTOCOL_ERROR</code> <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/653">#653</a>, and the proxy carries app WebSockets while only diverting Vite's HMR socket <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/657">#657</a>.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>Watcher fd budget <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/675">#675</a></h4><p>Source-file watches are bounded so an asset dump can't exhaust file descriptors; the idle moon now shows in real time on resume <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/703">#703</a>.</p></div>
   </div>
 </div></section>
 
@@ -792,9 +792,9 @@
   </div>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill sec">SEC</span></div><h4>framework_def sanitised <a class="pr" href="https://github.com/geodro/lerd/pull/697">#697</a></h4><p>An embedded <code>framework_def</code> loses its host workers and commands on import, the same way its command doctor checks were already stripped.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill sec">SEC</span></div><h4>Gated at the boundary <a class="pr" href="https://github.com/geodro/lerd/pull/697">#697</a></h4><p>Starting a host custom worker or running a project command shows it and asks once; <code>--yes</code>, the confirm modal, and <code>force: true</code> carry that consent.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill feat">SAFE</span></div><h4>Trusted paths untouched <a class="pr" href="https://github.com/geodro/lerd/pull/697">#697</a></h4><p>Trusted store, built-in and user-overlay definitions, in-container workers, and framework-provided commands are unaffected.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill sec">SEC</span></div><h4>framework_def sanitised <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/697">#697</a></h4><p>An embedded <code>framework_def</code> loses its host workers and commands on import, the same way its command doctor checks were already stripped.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill sec">SEC</span></div><h4>Gated at the boundary <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/697">#697</a></h4><p>Starting a host custom worker or running a project command shows it and asks once; <code>--yes</code>, the confirm modal, and <code>force: true</code> carry that consent.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">SAFE</span></div><h4>Trusted paths untouched <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/697">#697</a></h4><p>Trusted store, built-in and user-overlay definitions, in-container workers, and framework-provided commands are unaffected.</p></div>
   </div>
 </div></section>
 
@@ -810,12 +810,12 @@
   cherry-picked macOS and feedback fixes.</p>
 
   <div class="cards three">
-    <div class="card"><div class="card-pills"><span class="pill fix">1.26.2</span></div><h4>Prebuilt base on all podman <a class="pr" href="https://github.com/geodro/lerd/issues/638">#638</a></h4><p>1.26.1 gated the pull's <code>--policy=always</code> behind podman 5.0, but <code>--policy</code> landed later still; the flag is dropped entirely (pull already defaults to always) and the real pull error surfaces.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">1.26.1</span></div><h4>Silent build fallback <a class="pr" href="https://github.com/geodro/lerd/issues/638">#638</a></h4><p><code>podman pull --policy</code> was rejected on podman below 5.0, its stderr discarded, so Ubuntu/Debian hosts quietly built from source; the failure now surfaces.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">1.26.1</span></div><h4>Setup reports build failures <a class="pr" href="https://github.com/geodro/lerd/pull/622">#622</a></h4><p><code>lerd setup</code> returns npm/bun build failures through the feedback step rather than calling <code>os.Exit</code>, so the failure shows in context.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">1.26.1</span></div><h4>macOS LAN exposure <a class="pr" href="https://github.com/geodro/lerd/pull/618">#618</a></h4><p>Bind-all IPv6 publish lines are rewritten to <code>0.0.0.0</code> so <code>lan.exposed</code> containers keep their ports <a class="pr" href="https://github.com/geodro/lerd/pull/618">#618</a>, and the LAN DNS forwarder is skipped where dnsmasq already binds the LAN address <a class="pr" href="https://github.com/geodro/lerd/pull/619">#619</a>.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill fix">1.26.1</span></div><h4>Host worker remedies <a class="pr" href="https://github.com/geodro/lerd/pull/616">#616</a></h4><p>Host workers whose dependencies aren't installed surface a remedy instead of dropping silently, and <code>lerd update</code>'s service restarts warn rather than error.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ref">DOCS</span></div><h4>Host DB override recipe <a class="pr" href="https://github.com/geodro/lerd/pull/626">#626</a></h4><p>The host database override example uses <code>host.containers.internal</code>.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">1.26.2</span></div><h4>Prebuilt base on all podman <a class="pr" href="https://github.com/gabriel-sousa99/lerd/issues/638">#638</a></h4><p>1.26.1 gated the pull's <code>--policy=always</code> behind podman 5.0, but <code>--policy</code> landed later still; the flag is dropped entirely (pull already defaults to always) and the real pull error surfaces.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">1.26.1</span></div><h4>Silent build fallback <a class="pr" href="https://github.com/gabriel-sousa99/lerd/issues/638">#638</a></h4><p><code>podman pull --policy</code> was rejected on podman below 5.0, its stderr discarded, so Ubuntu/Debian hosts quietly built from source; the failure now surfaces.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">1.26.1</span></div><h4>Setup reports build failures <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/622">#622</a></h4><p><code>lerd setup</code> returns npm/bun build failures through the feedback step rather than calling <code>os.Exit</code>, so the failure shows in context.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">1.26.1</span></div><h4>macOS LAN exposure <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/618">#618</a></h4><p>Bind-all IPv6 publish lines are rewritten to <code>0.0.0.0</code> so <code>lan.exposed</code> containers keep their ports <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/618">#618</a>, and the LAN DNS forwarder is skipped where dnsmasq already binds the LAN address <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/619">#619</a>.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">1.26.1</span></div><h4>Host worker remedies <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/616">#616</a></h4><p>Host workers whose dependencies aren't installed surface a remedy instead of dropping silently, and <code>lerd update</code>'s service restarts warn rather than error.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ref">DOCS</span></div><h4>Host DB override recipe <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/626">#626</a></h4><p>The host database override example uses <code>host.containers.internal</code>.</p></div>
   </div>
 </div></section>
 
@@ -837,8 +837,8 @@
   </div>
 
   <div class="cards">
-    <div class="card"><div class="card-pills"><span class="pill ref">DOCS</span></div><h4>lerd-nixos flake <a class="pr" href="https://github.com/geodro/lerd/pull/710">#710</a></h4><p>A documented flake and a <a href="https://lerd.sh/getting-started/nixos" style="color:var(--amber)">NixOS guide</a> for the declarative stack, since the imperative installer's DNS and self-install steps don't fit NixOS.</p></div>
-    <div class="card"><div class="card-pills"><span class="pill ref">DOCS</span></div><h4>MCP reference synced <a class="pr" href="https://github.com/geodro/lerd/pull/706">#706</a></h4><p>The MCP reference is brought back in step with the current tool surface, including the new <code>diag site_doctor</code> and service-port actions.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ref">DOCS</span></div><h4>lerd-nixos flake <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/710">#710</a></h4><p>A documented flake and a <a href="https://lerd.sh/getting-started/nixos" style="color:var(--amber)">NixOS guide</a> for the declarative stack, since the imperative installer's DNS and self-install steps don't fit NixOS.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ref">DOCS</span></div><h4>MCP reference synced <a class="pr" href="https://github.com/gabriel-sousa99/lerd/pull/706">#706</a></h4><p>The MCP reference is brought back in step with the current tool surface, including the new <code>diag site_doctor</code> and service-port actions.</p></div>
   </div>
 </div></section>
 
@@ -863,7 +863,7 @@
   </div>
   <div class="foot-end">
     <span>lerd v1.27.0 · 2026-07-01</span>
-    <span><a href="https://github.com/geodro/lerd/compare/v1.26.0...v1.27.0">v1.26.0…v1.27.0</a> · <a href="https://lerd.sh/">docs</a> · <a href="https://github.com/geodro/lerd">github</a></span>
+    <span><a href="https://github.com/gabriel-sousa99/lerd/compare/v1.26.0...v1.27.0">v1.26.0…v1.27.0</a> · <a href="https://lerd.sh/">docs</a> · <a href="https://github.com/gabriel-sousa99/lerd">github</a></span>
   </div>
 </footer>
 

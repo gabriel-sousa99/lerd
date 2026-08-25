@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { DumpEvent } from '$lib/dumpsStream';
   import DumpView from './DumpView.svelte';
+  import SourcePath from './SourcePath.svelte';
   import { parseDump, looksLikeDump } from '$lib/dump-parser';
   import { lastFlashId } from '$stores/dumps';
   import { m } from '../paraglide/messages.js';
@@ -26,13 +27,6 @@
     return result.nodes;
   });
 
-  function shortFile(path: string): string {
-    if (!path) return '';
-    const parts = path.split('/');
-    if (parts.length <= 3) return path;
-    return '…/' + parts.slice(-3).join('/');
-  }
-
   function timeOnly(ts: string): string {
     const d = new Date(ts);
     if (isNaN(d.getTime())) return ts;
@@ -47,8 +41,8 @@
       <span class="font-mono text-amber-700 dark:text-amber-300">{event.label}</span>
     {/if}
     {#if event.src.file}
-      <span class="ml-auto font-mono text-xs text-gray-400 truncate" title={event.src.file + ':' + event.src.line}>
-        {shortFile(event.src.file)}:{event.src.line}
+      <span class="ml-auto text-xs text-gray-400 min-w-0">
+        <SourcePath file={event.src.file} line={event.src.line} muted short />
       </span>
     {/if}
   </div>

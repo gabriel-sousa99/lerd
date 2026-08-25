@@ -30,6 +30,8 @@
     launchCommand,
     type Command
   } from '$stores/commands';
+  import FrameworkMark from '$components/FrameworkMark.svelte';
+  import ServiceIcon from '$components/ServiceIcon.svelte';
   import { m } from '../paraglide/messages.js';
 
   type Group = 'pages' | 'sites' | 'services' | 'presets' | 'toggles' | 'commands' | 'actions';
@@ -37,6 +39,10 @@
     id: string;
     label: string;
     hint?: string;
+    // Framework name for a site entry, service name for a service one, so the
+    // hint can carry the mark either one is known by.
+    framework?: string;
+    service?: string;
     group: Group;
     action: () => void | Promise<void>;
   }
@@ -59,6 +65,7 @@
         id: 'site:' + s.domain,
         label: s.domain,
         hint: s.framework_label || s.framework,
+        framework: s.framework,
         group: 'sites',
         action: () => goToTab('sites', s.domain)
       });
@@ -69,6 +76,7 @@
         id: 'svc:' + svc.name,
         label: serviceLabel(svc.name),
         hint: svc.version || (svc.status === 'active' ? 'active' : 'inactive'),
+        service: svc.name,
         group: 'services',
         action: () => goToTab('services', svc.name)
       });
@@ -76,7 +84,7 @@
 
     // Installable service presets: each surfaces as a direct install action so
     // a search like "install redis" runs the install without opening the modal.
-    if ($accessMode.loopback) {
+    if ($accessMode.localControl) {
       for (const p of $installablePresets) {
         list.push({
           id: 'preset:' + p.name,
@@ -199,7 +207,7 @@
       }
     }
 
-    if ($accessMode.loopback) {
+    if ($accessMode.localControl) {
       list.push({ id: 'act:link', label: m.palette_action_link(), group: 'actions', action: openLinkModal });
       list.push({ id: 'act:preset', label: m.palette_action_addService(), group: 'actions', action: openPresetModal });
     }
@@ -383,7 +391,14 @@
               >
                 <span class="flex-1 truncate">{e.label}</span>
                 {#if e.hint}
-                  <span class="text-[11px] font-mono text-gray-400 dark:text-gray-500 truncate">{e.hint}</span>
+                  <span class="flex items-center gap-1 text-[11px] font-mono text-gray-400 dark:text-gray-500 truncate">
+                    {#if e.service}
+                      <ServiceIcon name={e.service} bare inline />
+                    {:else}
+                      <FrameworkMark name={e.framework} />
+                    {/if}
+                    {e.hint}
+                  </span>
                 {/if}
               </button>
             </li>

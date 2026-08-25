@@ -24,7 +24,7 @@ The next steps depend on what you're building. Each walkthrough is end-to-end, f
 
 - [**Laravel**](laravel.md): built-in framework, queue + scheduler + Reverb workers
 - [**Symfony**](symfony.md): Doctrine migrations, Messenger worker, MySQL or Postgres
-- [**WordPress**](wordpress.md): manual `wp-config.php` setup, MySQL
+- [**WordPress**](wordpress.md): `wp-config.php` wired up from the store definition, MySQL
 - [**Containers**](containers.md): Node, Python, Go, Ruby, or any runtime via a per-project `Containerfile.lerd`
 
 Already cloning an existing repo with a committed `.lerd.yaml`? `cd` in and run `lerd setup`; it reads the config and runs every install/migrate/build step automatically. See [Project Setup](../features/project-setup.md).

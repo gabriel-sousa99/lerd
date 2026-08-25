@@ -22,11 +22,11 @@
   import LensToggle from '$components/LensToggle.svelte';
   import TestEventsToggle from '$components/TestEventsToggle.svelte';
   import TraceBlock from '$components/TraceBlock.svelte';
+  import CopyButton from '$components/CopyButton.svelte';
   import LensLoadMore from '$components/LensLoadMore.svelte';
   import LensGroupLabel from '$components/LensGroupLabel.svelte';
   import { windowGroups, LENS_PAGE } from '$lib/lensWindow';
   import { inlineBindings } from '$lib/sqlInline';
-  import type { QueryRow } from '$stores/queries';
   import { m } from '../paraglide/messages.js';
 
   interface Props {
@@ -51,7 +51,6 @@
   });
   onDestroy(() => {
     stopDumpsStream();
-    for (const t of Object.values(copyTimers)) clearTimeout(t);
   });
 
   const groups = $derived(
@@ -114,21 +113,6 @@
   }
   let expanded = $state<Record<string, boolean>>({});
   const toggleRow = (id: string) => (expanded[id] = !expanded[id]);
-
-  // Copy the query with its bindings inlined so it pastes straight into a SQL
-  // editor. Feedback is per-row (keyed by event id) and clears after 1.5s.
-  let copied = $state<Record<string, boolean>>({});
-  const copyTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-  async function copyRow(row: QueryRow) {
-    try {
-      await navigator.clipboard.writeText(inlineBindings(row.data.sql, row.data.bindings));
-      copied[row.event.id] = true;
-      if (copyTimers[row.event.id]) clearTimeout(copyTimers[row.event.id]);
-      copyTimers[row.event.id] = setTimeout(() => (copied[row.event.id] = false), 1500);
-    } catch {
-      /* clipboard unavailable; leave the row untouched */
-    }
-  }
 </script>
 
 <div class="flex flex-col h-full overflow-hidden">
@@ -249,19 +233,11 @@
                     >{fmtMs(row.data.time_ms)} ms{#if row.slow}&nbsp;{m.queries_slow_badge()}{/if}</span>
                   </span>
                 </button>
-                <button
-                  type="button"
-                  class="shrink-0 px-2 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-50 dark:hover:bg-white/5 border-l border-gray-100 dark:border-lerd-border/50 {copied[row.event.id] ? 'text-emerald-600 dark:text-emerald-500' : ''}"
-                  onclick={() => copyRow(row)}
-                  title={m.queries_copySql()}
-                  aria-label={m.queries_copySql()}
-                >
-                  {#if copied[row.event.id]}
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5" /></svg>
-                  {:else}
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
-                  {/if}
-                </button>
+                <CopyButton
+                  text={() => inlineBindings(row.data.sql, row.data.bindings)}
+                  label={m.queries_copySql()}
+                  class="px-2 hover:bg-gray-50 dark:hover:bg-white/5 border-l border-gray-100 dark:border-lerd-border/50"
+                />
               </div>
               {#if expanded[row.event.id]}
                 <div class="px-2.5 pb-2 pt-1 border-t border-gray-100 dark:border-lerd-border/50 text-[11px] space-y-1.5">

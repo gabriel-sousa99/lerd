@@ -9,7 +9,7 @@ Both kinds use the same YAML schema in `internal/config/presets/*.yaml` and the 
 
 ## The external service store
 
-Beyond the presets bundled in the binary, lerd can fetch presets from an external store repo, so new services can be published without shipping a new lerd release. This mirrors the [framework store](framework-definitions.md): the presets live in the `lerd-env/services` repo as a flat `index.json` plus one `<name>.yaml` per preset.
+Beyond the presets bundled in the binary, lerd can fetch presets from an external store repo, so new services can be published without shipping a new lerd release. This mirrors the [framework store](framework-definitions.md): the presets live in the `lerd-env/services` repo as a flat `index.json` plus one `<name>.yaml` per preset, optionally with a `<name>.svg` beside it carrying the preset's own mark.
 
 ```bash
 lerd service search                # list everything the store offers
@@ -157,6 +157,30 @@ Each default-preset install records which version's tag was canonical at install
 
 `lerd service migrate <service> <tag>` is the explicit cross-major path. Beyond the dump/restore, it rewrites `canonical_version` to the new tag so the next reconcile honors the move instead of reverting to the original pin.
 
+### The data dir has the last word
+
+A data dir outlives the config entry and the quadlet that described it, so a pin
+alone is not enough. Reinstall lerd after losing `config.yaml`, restore a
+machine from a partial backup, or re-add a service whose data was kept, and the
+pin can end up naming an older server than the files on disk, which then
+refuses to start at all.
+
+A preset closes that gap by declaring where the engine records the version that
+wrote its data:
+
+```yaml
+data_version_file: PG_VERSION   # relative to the service's data dir
+```
+
+The contents are matched against the preset's version tags, so a `PG_VERSION`
+of `18` selects version `18` and a mariadb `mariadb_upgrade_info` of
+`11.8.8-MariaDB` selects `11.8`. When that disagrees with the version resolution
+arrived at any other way, the data dir wins and the pin is corrected to match.
+Presets whose engine keeps no readable marker leave the field out, mysql among
+them: since 8.4 the version lives in the data dictionary rather than a text
+file. An explicit `image:` in `config.yaml` is a deliberate choice and still
+takes precedence, so nothing is rewritten behind your back.
+
 The mysql preset bundles a `my.cnf` (`/etc/mysql/conf.d/lerd.cnf`) that
 enables `innodb_large_prefix`, `Barracuda`, `innodb_default_row_format=DYNAMIC`
 (via `loose-` so MySQL 5.6 ignores it), and `innodb_strict_mode=OFF`. Combined
@@ -172,6 +196,7 @@ never requires a change to lerd itself:
 category: admin       # discovery section: databases, cache, messaging, search,
                       # mail, admin, storage, testing, other
 icon: search          # key in the UI icon set
+color: "#00758f"      # brand colour the dashboard tints the mark with
 admin_for:            # the services this preset's UI administers
   - opensearch
 ```
@@ -189,6 +214,47 @@ button opens that UI once it is installed.
 
 An unrecognised `category` falls back to `other` and an unrecognised `icon` to a
 generic glyph, so a preset written for a newer lerd degrades rather than breaks.
+That is what makes naming a glyph added in a later release safe: installs that
+predate it draw the generic one until they upgrade.
+
+### The preset's own mark
+
+`icon:` names one of the glyphs built into the binary, which means a preset can
+only borrow a mark someone already drew. A preset in the store can bring its own
+instead, as a `services/<name>.svg` beside its `services/<name>.yaml`. lerd
+fetches it with the YAML and caches it in the same directory, so it arrives
+within the usual 24 hour window and needs no lerd release. lerd-ui then serves
+the cached copy to the dashboard, which keeps the marks drawing offline and over
+remote access, and means the browser never talks to the store itself.
+
+The default stack is the exception, because it is embedded rather than fetched:
+its marks ship in the binary next to its YAML and are served underneath the
+store cache. Publishing a `mysql.svg` to the store still supersedes the shipped
+one, the same way a store preset supersedes the built-in definition of the same
+name. The shipped marks come from [Simple Icons](https://simpleicons.org), which
+is CC0.
+
+The mark is **monochrome**: a single silhouette drawn as filled paths, with no
+colours of its own. The dashboard paints it through `currentColor` in the tone
+`color:` declares, exactly as it paints the built-in glyphs, so one icon works in
+both themes and sits properly beside the glyphs it renders next to. A full-colour
+brand mark is not what this is for.
+
+Because that markup is remote and ends up inlined in the page, lerd cuts it down
+to a plain drawing on the way into the cache. Only `svg`, `g`, `path`, `circle`,
+`ellipse`, `rect`, `line`, `polyline` and `polygon` survive, carrying only their
+geometry: script, `foreignObject`, event handlers, external references, and any
+`fill`, `stroke`, `style`, `class` or `id` of their own are dropped, and so is
+anything over 32 KB. Keep the file to a bare `<svg viewBox="…">` wrapping its
+paths and nothing is lost in the trip. A file the sanitizer refuses is simply not
+cached, and the preset falls back to the glyph its `icon:` names.
+
+`color:` must be a plain hex literal, `#00758f` or `#abc`. Anything else, a
+colour function or a CSS variable, is dropped rather than passed through, because
+the value reaches the page as a custom property. A colour too dark to read on the
+dark card, or too light for the light one, is nudged toward the card until it
+separates, so the tone you declare is the one you get wherever it still reads.
+A preset that declares no colour keeps its category's tint.
 
 ## Service families and admin UI auto-discovery
 
@@ -409,6 +475,16 @@ flow uses. `format: sql` on the entity tells lerd the dump is SQL text, which
 turns on the import sanitizer and the per-statement error tally; leave it off for
 engines with their own archive format and the bytes stream through untouched.
 
+An import may declare `expected_errors:`, a list of substrings the engine's own
+complaint lines are matched against, and the tally leaves those out of its error
+count. It is for the complaints a load makes whatever the data, so a restore that
+produced only those reads as the success it is: a `pg_dumpall` replay drops and
+recreates the role it is connected as and the template databases the image ships,
+so `import_all` on the PostgreSQL preset expects those six lines and nothing else.
+Keep the list to what the dump does to itself. Anything a user's data can cause
+belongs in the count, which is why the per-database `import` on the same preset
+declares none.
+
 A service whose own image ships no client tooling can name an `image:` on the
 entity, and lerd runs every command in an ephemeral container of that image on
 the lerd network instead of exec-ing the service container, with the entity's
@@ -429,6 +505,6 @@ older lerd versions keep listing.
 
 ## Removing and reinstalling presets
 
-Default presets can be removed: `lerd service remove postgres` (or any other) stops the unit, deletes the quadlet, and frees the slot. The preset itself stays available in `lerd service preset list` as not-installed, so a future `lerd service preset postgres` brings it back. Pass `--purge` to also rename the data dir aside.
+Default presets can be removed: `lerd service remove postgres` (or any other) stops the unit, deletes the quadlet, and frees the slot. The preset itself stays available in `lerd service preset list` as not-installed, so a future `lerd service preset postgres` brings it back. Pass `--purge` to also rename the data dir aside, which snapshots every database on the service first.
 
-`lerd service reinstall <name>` stops, removes, and reinstalls at the current version. `--reset-data` wipes the data and recreates per-site state on the fresh container (databases for mysql/mariadb/postgres, buckets for rustfs). See [custom services](custom-services.md#reinstalling-a-service) for the resolution rules.
+`lerd service reinstall <name>` stops, removes, and reinstalls at the current version. `--reset-data` snapshots every database on the service, wipes the data, and recreates per-site state on the fresh container (databases for mysql/mariadb/postgres, buckets for rustfs). See [custom services](custom-services.md#reinstalling-a-service) for the resolution rules, and [snapshots before a data wipe](database.md#snapshots-before-a-data-wipe) for what to restore from afterwards.

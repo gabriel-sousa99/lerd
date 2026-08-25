@@ -7,11 +7,11 @@
   import PhpIniTab from './PhpIniTab.svelte';
   import PhpPortsTab from './PhpPortsTab.svelte';
   import PhpExtensionsTab from './PhpExtensionsTab.svelte';
+  import SitesPopover from '$components/SitesPopover.svelte';
   import { status, loadStatus } from '$stores/status';
   import { setDefaultPhp, startPhp, stopPhp, checkPhpUpdates } from '$stores/phpVersions';
   import { sites, sitesByPhp } from '$stores/sites';
   import { xdebugOn, xdebugOff, XDEBUG_MODES, type XdebugMode } from '$stores/xdebug';
-  import { goToTab } from '$stores/route';
   import { openPhpRemoveModal, openPhpRebuildModal } from '$stores/modals';
   import { notifyLocalInfo } from '$lib/notify';
   import { m } from '../../paraglide/messages.js';
@@ -28,7 +28,7 @@
   const xdebugEnabled = $derived(Boolean(fpm?.xdebug_enabled));
   const xdebugMode = $derived<XdebugMode>((fpm?.xdebug_mode as XdebugMode) || 'debug');
   const container = $derived('lerd-php' + version.replace('.', '') + '-fpm');
-  const sitesUsing = $derived($sites.filter((s) => s.php_version === version));
+  const sitesUsing = $derived($sites.filter((s) => s.php_version === version).map((s) => s.domain));
   const baseUpdate = $derived(Boolean(fpm?.update_available));
 
   let defaultBusy = $state(false);
@@ -69,18 +69,17 @@
     };
   });
 
-  type TabId = 'logs' | 'sites' | 'config' | 'ports' | 'extensions';
+  type TabId = 'logs' | 'config' | 'ports' | 'extensions';
   let active = $state<TabId>('logs');
   const tabs = $derived<TabItem<TabId>[]>([
     { id: 'logs', label: m.services_tabs_logs(), hidden: !running },
-    { id: 'sites', label: m.system_php_sites() },
     { id: 'config', label: m.system_php_iniTab() },
     { id: 'ports', label: m.system_php_portsTab() },
     { id: 'extensions', label: m.system_php_extensionsTab() }
   ]);
 
   $effect(() => {
-    if (active === 'logs' && !running) active = 'sites';
+    if (active === 'logs' && !running) active = 'config';
   });
 
   // Log section tabs at the bottom of the panel.
@@ -355,6 +354,7 @@
       {/if}
     {/if}
   </div>
+  <SitesPopover domains={sitesUsing} />
   <ButtonMenu actions={versionActions} busy={versionBusy} />
 {/snippet}
 

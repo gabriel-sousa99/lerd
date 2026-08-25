@@ -135,7 +135,9 @@ func regenNginxVhost(siteName, sitePath string) {
 	}
 	var vhostErr error
 	if site.Secured {
-		vhostErr = nginx.GenerateSSLVhost(*site, phpVer)
+		if vhostErr = nginx.GenerateSSLVhost(*site, phpVer); vhostErr == nil {
+			vhostErr = nginx.InstallSSLVhost(site.PrimaryDomain())
+		}
 	} else {
 		vhostErr = nginx.GenerateVhost(*site, phpVer)
 	}

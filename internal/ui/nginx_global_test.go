@@ -22,6 +22,7 @@ func setupGlobalNginx(t *testing.T) string {
 	data := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", data)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	isolateLaunchAgents(t)
 	stubNginxReload(t)
 	stubNginxTest(t, "nginx: configuration file /etc/nginx/nginx.conf test is successful", nil)
 	if _, err := nginx.RewriteNginxQuadlet(); err != nil {

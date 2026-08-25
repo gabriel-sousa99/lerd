@@ -34,6 +34,7 @@ DESKTOP_INSTALL_CMD="${LERD_DESKTOP_INSTALL_CMD:-flatpak install --user https://
 INSTALL_DIR="${LERD_INSTALL_DIR:-$HOME/.local/bin}"
 LERD_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lerd"
 LERD_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/lerd"
+LERD_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/lerd"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -50,7 +51,13 @@ warn()    { echo -e "  ${YELLOW}!${RESET}  $*"; }
 error()   { echo -e "  ${RED}✗${RESET}  $*" >&2; }
 die()     { error "$*"; exit 1; }
 header()  { echo -e "\n${BOLD}$*${RESET}"; }
-ask()     { echo -en "  ${BOLD}?${RESET}  $* [y/N] "; read -r _ans </dev/tty 2>/dev/null || true; [[ "$_ans" =~ ^[Yy]$ ]]; }
+# /dev/tty exists and is readable by its permission bits even when the process
+# has no controlling terminal, so only opening it answers the question. Getting
+# this wrong skips whatever the caller guarded, silently.
+have_tty() { ( : >/dev/tty ) 2>/dev/null; }
+# _ans is seeded because `set -u` is on and a read that never ran leaves it
+# unset, which aborts the script instead of declining the question.
+ask()     { local _ans=""; echo -en "  ${BOLD}?${RESET}  $* [y/N] "; read -r _ans 2>/dev/null </dev/tty || true; [[ "$_ans" =~ ^[Yy]$ ]]; }
 star_note() {
   echo ""
   echo -e "  ${CYAN}★${RESET}  If lerd is useful to you, a GitHub star helps others find it:"
@@ -142,7 +149,7 @@ ask_dns_mode() {
   echo "  dnsmasq, no mkcert, and no extra packages."
   echo ""
   echo -en "  ${BOLD}?${RESET}  Let lerd manage DNS for .test sites with HTTPS? [Y/n] "
-  read -r _ans </dev/tty 2>/dev/null || true
+  read -r _ans 2>/dev/null </dev/tty || true
   if [[ "$_ans" =~ ^[Nn]$ ]]; then
     DNS_MODE="localhost"
     info "Using *.localhost over HTTP, no certificates or extra packages required"
@@ -181,6 +188,46 @@ check_dns_resolver() {
     warn "No supported DNS resolver running (need NetworkManager or systemd-resolved)"
     MISSING_PKGS+=("networkmanager")
   fi
+}
+
+# dnsmasq lives in sbin on Debian-family systems, which a normal user's PATH
+# often omits, so a plain PATH lookup would miss an installed binary.
+DNSMASQ_PATHS="/usr/sbin/dnsmasq /sbin/dnsmasq /usr/local/sbin/dnsmasq"
+
+host_has_dnsmasq() {
+  command -v dnsmasq &>/dev/null && return 0
+  local p
+  for p in $DNSMASQ_PATHS; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# Overridable so the tests can point the resolver check at a fixture.
+RESOLV_CONF="${RESOLV_CONF:-/etc/resolv.conf}"
+
+# systemd-resolved counts as the resolver only when resolv.conf actually routes
+# through it, the same test internal/dns makes. A host where resolved is running
+# but NetworkManager still writes resolv.conf takes the NM dnsmasq path instead.
+resolved_is_resolver() {
+  systemctl is-active --quiet systemd-resolved 2>/dev/null || return 1
+  grep -qE '127\.0\.0\.53|systemd-resolved' "$RESOLV_CONF" 2>/dev/null
+}
+
+# NetworkManager without systemd-resolved resolves .test through NM's dnsmasq
+# plugin, which needs the host dnsmasq binary that nothing pulls in on Arch.
+# Queue it here so the consent prompt covers it instead of lerd stopping later.
+check_nm_dnsmasq() {
+  systemctl is-active --quiet NetworkManager 2>/dev/null || return 0
+  resolved_is_resolver && return 0
+  if host_has_dnsmasq; then
+    success "dnsmasq found (NetworkManager's DNS plugin runs it)"
+    return
+  fi
+  local pkg="dnsmasq"
+  [ "$(distro_family)" = "debian" ] && pkg="dnsmasq-base"
+  warn "dnsmasq missing (NetworkManager's DNS plugin needs it for .test resolution)"
+  MISSING_PKGS+=("$pkg")
 }
 
 check_certutil() {
@@ -259,6 +306,7 @@ check_prerequisites_linux() {
   check_podman_rootless
   if [ "$DNS_MODE" = "managed" ]; then
     check_certutil
+    check_nm_dnsmasq
   fi
 
   if [ ${#MISSING_PKGS[@]} -eq 0 ]; then
@@ -456,7 +504,7 @@ guard_dev_build() {
   local target="$1" current_raw; current_raw="$(installed_version_raw)"
   version_is_dev "$current_raw" || return 0
   warn "A local development build (v${current_raw}) is installed."
-  if [ -r /dev/tty ] && ask "Replace it with release v${target}?"; then
+  if have_tty && ask "Replace it with release v${target}?"; then
     return 0
   fi
   info "Keeping your local build. Reinstall a dev build with: install.sh --local <path>"
@@ -521,6 +569,14 @@ remove_from_path() {
   if grep -q "$SHELL_MARKER" "$rc" 2>/dev/null; then
     sed -i.bak -e "/^${SHELL_MARKER}/{N;d;}" "$rc" && rm -f "${rc}.bak"
     info "Removed PATH entry from $rc"
+  fi
+
+  # lerd puts its own bin dir on PATH from inside the binary, unmarked, and only
+  # `lerd uninstall` ever took that line out. Removing the binary here leaves it
+  # pointing at a directory that is about to be deleted, so it goes too.
+  if grep -q "${LERD_DATA_DIR}/bin" "$rc" 2>/dev/null; then
+    sed -i.bak -e "\#^export PATH=\"${LERD_DATA_DIR}/bin:\$PATH\"\$#d" "$rc" && rm -f "${rc}.bak"
+    info "Removed the lerd bin entry from $rc"
   fi
 }
 
@@ -587,7 +643,7 @@ cmd_install() {
   # When this script is piped through `curl|bash`, our own stdin is the pipe
   # and lerd's prompts would silently hit EOF. Hand it /dev/tty when one is
   # available so [Y/n] questions reach the user.
-  if [ -r /dev/tty ]; then
+  if have_tty; then
     "${INSTALL_DIR}/${BINARY}" install --dns "$DNS_MODE" </dev/tty
   else
     "${INSTALL_DIR}/${BINARY}" install --dns "$DNS_MODE"
@@ -595,7 +651,7 @@ cmd_install() {
 
   # Offer the desktop app on a fresh Linux install. Its own installer does the
   # download; here we only record the notification sink the user prefers.
-  if [ -z "$was_installed" ] && [ "$(uname -s)" = "Linux" ] && [ -r /dev/tty ]; then
+  if [ -z "$was_installed" ] && [ "$(uname -s)" = "Linux" ] && have_tty; then
     offer_desktop_app
   fi
 
@@ -649,6 +705,22 @@ cmd_update() {
 }
 
 # ── Uninstall ────────────────────────────────────────────────────────────────
+
+# Containers write their files as a subuid inside the rootless user namespace,
+# so a plain rm cannot remove them and set -e would abort the uninstall there.
+# podman unshare enters that namespace, where they are removable.
+remove_lerd_dir() {
+  local dir="$1"
+  [ -e "$dir" ] || return 0
+  rm -rf "$dir" 2>/dev/null || true
+  [ -e "$dir" ] || return 0
+  podman unshare rm -rf "$dir" >/dev/null 2>&1 || true
+  [ -e "$dir" ] || return 0
+  warn "Could not remove $dir"
+  info "Remove it with: podman unshare rm -rf $dir"
+  return 1
+}
+
 cmd_uninstall() {
   if [ "$(detect_os)" = "darwin" ]; then
     cmd_uninstall_macos
@@ -670,7 +742,7 @@ cmd_uninstall_macos() {
   if command -v lerd &>/dev/null; then
     warn "This script does not remove the DNS resolver (/etc/resolver/test) or the Podman machine."
     info "Those are torn down by 'lerd uninstall' (needs sudo), which is unavailable once the binary is gone."
-    if [ -r /dev/tty ] && ! ask "Continue and remove the lerd binary now?"; then
+    if have_tty && ! ask "Continue and remove the lerd binary now?"; then
       info "Aborted. Run 'lerd uninstall' first, then re-run this uninstaller."
       exit 0
     fi
@@ -717,9 +789,11 @@ cmd_uninstall_macos() {
   remove_from_path
 
   if ask "Remove all Lerd data and config? (~/.config/lerd, ~/.local/share/lerd)"; then
-    rm -rf "$LERD_CONFIG_DIR"
-    rm -rf "$LERD_DATA_DIR"
-    success "Removed config and data directories"
+    local kept=0
+    remove_lerd_dir "$LERD_CONFIG_DIR" || kept=1
+    remove_lerd_dir "$LERD_DATA_DIR" || kept=1
+    remove_lerd_dir "$LERD_CACHE_DIR" || kept=1
+    [ "$kept" -eq 1 ] || success "Removed config and data directories"
   else
     info "Config kept at $LERD_CONFIG_DIR"
     info "Data kept at $LERD_DATA_DIR"
@@ -811,8 +885,10 @@ cmd_uninstall_linux() {
     info "Removed Quadlet units from $quadlet_dir"
   fi
 
-  # Stop and remove user service unit files
-  for svc in lerd-watcher lerd-ui; do
+  # Stop and remove user service unit files. The tray is one of them: it is
+  # installed alongside the binary and left running it would keep polling an
+  # API that is going away.
+  for svc in lerd-watcher lerd-ui lerd-tray; do
     if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
       systemctl --user stop "$svc" 2>/dev/null || true
     fi
@@ -821,21 +897,30 @@ cmd_uninstall_linux() {
   done
 
   systemctl --user daemon-reload 2>/dev/null || true
+  # A unit stopped by removing its file underneath it is left behind as failed
+  # and not-found, which is how an uninstalled lerd went on showing up in
+  # systemctl --user for good.
+  systemctl --user reset-failed 'lerd-*' 2>/dev/null || true
 
-  # Remove binary
-  if [ -f "${INSTALL_DIR}/${BINARY}" ]; then
-    rm -f "${INSTALL_DIR}/${BINARY}"
-    success "Removed ${INSTALL_DIR}/${BINARY}"
-  fi
+  # Remove binaries. The tray ships beside lerd, so an uninstall that took only
+  # one of them left the other on PATH with nothing to talk to.
+  for b in "$BINARY" lerd-tray; do
+    if [ -f "${INSTALL_DIR}/${b}" ]; then
+      rm -f "${INSTALL_DIR}/${b}"
+      success "Removed ${INSTALL_DIR}/${b}"
+    fi
+  done
 
   # Remove PATH entry from shell rc
   remove_from_path
 
   # Optionally remove data
   if ask "Remove all Lerd data and config? (~/.config/lerd, ~/.local/share/lerd)"; then
-    rm -rf "$LERD_CONFIG_DIR"
-    rm -rf "$LERD_DATA_DIR"
-    success "Removed config and data directories"
+    local kept=0
+    remove_lerd_dir "$LERD_CONFIG_DIR" || kept=1
+    remove_lerd_dir "$LERD_DATA_DIR" || kept=1
+    remove_lerd_dir "$LERD_CACHE_DIR" || kept=1
+    [ "$kept" -eq 1 ] || success "Removed config and data directories"
   else
     info "Config kept at $LERD_CONFIG_DIR"
     info "Data kept at $LERD_DATA_DIR"

@@ -50,6 +50,7 @@ func TestWorkersModeFromArgs_UnknownValueErrors(t *testing.T) {
 func TestApplyWorkersMode_UpdatesConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	isolateLaunchAgents(t)
 
 	if err := applyWorkersMode(config.WorkerExecModeContainer, nil); err != nil {
 		t.Fatalf("applyWorkersMode: %v", err)
@@ -75,6 +76,7 @@ func TestApplyWorkersMode_UpdatesConfig(t *testing.T) {
 func TestApplyWorkersMode_SameValueIsNoOp(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	isolateLaunchAgents(t)
 	// Default is exec; applying exec should succeed without error.
 	if err := applyWorkersMode(config.WorkerExecModeExec, nil); err != nil {
 		t.Fatalf("applyWorkersMode no-op: %v", err)

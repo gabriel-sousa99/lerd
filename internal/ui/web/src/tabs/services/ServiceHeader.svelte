@@ -3,6 +3,9 @@
   import StatusPill from '$components/StatusPill.svelte';
   import Icon from '$components/Icon.svelte';
   import ButtonMenu, { type ButtonMenuAction } from '$components/ButtonMenu.svelte';
+  import ServiceIcon from '$components/ServiceIcon.svelte';
+  import SitesPopover from '$components/SitesPopover.svelte';
+  import ParentSiteBadge from './ParentSiteBadge.svelte';
   import ServiceDependencies from './ServiceDependencies.svelte';
   import ServiceDeleteModal from './ServiceDeleteModal.svelte';
   import ServiceReinstallModal from './ServiceReinstallModal.svelte';
@@ -12,6 +15,7 @@
     serviceLabel,
     detailLabel,
     isServiceWorker,
+    parentSiteDomain,
     serviceAction,
     streamServiceAction,
     checkServiceUpdates,
@@ -23,10 +27,10 @@
   import { accessMode } from '$stores/accessMode';
   import { m } from '../../paraglide/messages.js';
 
-  // Service ports and their web UIs bind to loopback on the host, so their
-  // localhost links are dead from a remote (LAN) dashboard. Disable the open
-  // actions with a "host only" hint rather than offering links that can't work.
-  const remote = $derived(!$accessMode.loopback);
+  // Disable localhost dashboard links only when dashboard-control authority is
+  // unavailable. Authenticated remote dashboards receive full authority and
+  // intentionally show the same actions as direct local dashboards.
+  const remote = $derived(!$accessMode.localControl);
 
   function localDetailLabel(s: Service): string {
     if (s.queue_site) return m.services_labels_queueWorker();
@@ -60,6 +64,11 @@
   }
 
   const isWorker = $derived(isServiceWorker(svc));
+  // A worker answers to one site, which reads better stated inline than folded
+  // behind a dropdown of one; a service is used by however many, so those
+  // collapse into the count control.
+  const parent = $derived(isWorker ? parentSiteDomain(svc) : null);
+  const siteDomains = $derived(!isWorker && svc.site_domains ? svc.site_domains : []);
   const active = $derived(svc.status === 'active');
   // When active and a host port is exposed, the status pill shows the port (a
   // moved port reads at a glance) and copies 127.0.0.1:<port> on click; otherwise
@@ -224,8 +233,8 @@
       });
     }
 
-    // Strip the click/link and grey out an open action when the dashboard is
-    // viewed remotely: the target is a loopback-only localhost URL.
+    // Without dashboard-control authority, strip localhost links instead of
+    // offering actions that cannot be trusted or completed.
     const openAct = (a: ButtonMenuAction): ButtonMenuAction =>
       remote
         ? { id: a.id, tone: a.tone, icon: a.icon, disabled: true, label: `${a.label} · ${m.services_hostOnly()}`, title: m.services_hostOnly() }
@@ -350,9 +359,21 @@
 </script>
 
 <div
-  class="flex flex-wrap items-center justify-between gap-y-2 px-3 py-2.5 border-b border-gray-100 dark:border-lerd-border shrink-0"
+  class="flex flex-wrap items-center justify-between gap-y-2 px-3 pt-2.5 shrink-0"
 >
   <div class="flex items-center gap-3">
+    <!-- A worker has no mark of its own and would draw the generic fallback
+         glyph, which says less than the label already does. -->
+    {#if !isWorker}
+      <ServiceIcon
+        name={svc.name}
+        category={svc.category}
+        icon={svc.icon}
+        color={svc.color}
+        preset={svc.preset}
+        bare
+      />
+    {/if}
     <div>
       <div class="flex items-center gap-2">
         <span class="font-semibold text-gray-900 dark:text-white text-base">{localDetailLabel(svc)}</span>
@@ -365,6 +386,9 @@
           title={pillTitle}
           onclick={exposedPort ? copyExposedAddr : undefined}
         />
+        {#if parent}
+          <ParentSiteBadge domain={parent} />
+        {/if}
         {#if dbCount !== null}
           <span
             class="inline-flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400"
@@ -476,22 +500,25 @@
   {/snippet}
 
   <div class="flex flex-col items-end gap-1.5">
-    <ButtonMenu
-      actions={buildActions({
-        external: externalIcon,
-        start: startIcon,
-        stop: stopIcon,
-        restart: restartIcon,
-        update: updateIcon,
-        upgrade: upgradeIcon,
-        migrate: migrateIcon,
-        rollback: rollbackIcon,
-        pin: pinIcon,
-        trash: trashIcon,
-        checkUpdates: checkUpdatesIcon
-      })}
-      {busy}
-    />
+    <div class="flex items-center gap-2">
+      <SitesPopover domains={siteDomains} />
+      <ButtonMenu
+        actions={buildActions({
+          external: externalIcon,
+          start: startIcon,
+          stop: stopIcon,
+          restart: restartIcon,
+          update: updateIcon,
+          upgrade: upgradeIcon,
+          migrate: migrateIcon,
+          rollback: rollbackIcon,
+          pin: pinIcon,
+          trash: trashIcon,
+          checkUpdates: checkUpdatesIcon
+        })}
+        {busy}
+      />
+    </div>
     {#if updating}
       <span
         class="text-[11px] text-gray-500 dark:text-gray-400 truncate max-w-[32ch]"

@@ -56,6 +56,14 @@ describe('sites store', () => {
     expect(siteDomainForName(list, '')).toBe('');
   });
 
+  it('siteDotColor reports serving, paused and stopped, and never guesses for an unknown site', async () => {
+    const { siteDotColor } = await import('./sites');
+    expect(siteDotColor({ domain: 'a.test', fpm_running: true })).toBe('green');
+    expect(siteDotColor({ domain: 'a.test', fpm_running: true, paused: true })).toBe('amber');
+    expect(siteDotColor({ domain: 'a.test' })).toBe('gray');
+    expect(siteDotColor(undefined)).toBe('gray');
+  });
+
   it('saveSiteEnv PUTs JSON body to the site env endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ ok: true, backup_path: '.env.20260528-103045' }), {

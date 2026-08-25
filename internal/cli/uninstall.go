@@ -44,6 +44,24 @@ func runUninstall(force bool) error {
 	// Ask about data removal up front — the StepRunner puts stdin into raw
 	// mode and its reader goroutine would consume bytes meant for this prompt.
 	removeData := force || confirmRemoveData()
+
+	// Global npm packages the npm shim captured into lerd's prefix would
+	// silently vanish with the data dir — nobody expects uninstalling a dev
+	// tool to take their globals with it. Offer to move them back to the
+	// user's own npm before anything is deleted.
+	var strandedGlobals []string
+	var reinstallNPM string
+	if removeData {
+		strandedGlobals = nodeGlobalPackages(config.NodeGlobalDir())
+		if len(strandedGlobals) > 0 && !force {
+			if npm := systemNPMPath(); npm != "" && feedback.Confirm(
+				fmt.Sprintf("Reinstall %d global npm package(s) (%s) with your own npm?",
+					len(strandedGlobals), formatNodeGlobalsNote(strandedGlobals)), true) {
+				reinstallNPM = npm
+			}
+		}
+	}
+
 	removeMCP := force || confirmRemoveMCPIntegration()
 	removeMkcertCA := force || confirmRemoveMkcertCA()
 	purgeImages := force || confirmPurgeLerdImages()
@@ -88,22 +106,7 @@ func runUninstall(force bool) error {
 	ok()
 
 	step("Removing service units")
-	{
-		seen := map[string]bool{}
-		for _, unit := range services.Mgr.ListContainerUnits("lerd-*") {
-			seen[unit] = true
-			_ = services.Mgr.RemoveContainerUnit(unit)
-		}
-		for _, unit := range services.Mgr.ListServiceUnits("lerd-*") {
-			if seen[unit] {
-				continue
-			}
-			_ = services.Mgr.RemoveServiceUnit(unit)
-		}
-		for _, unit := range services.Mgr.ListTimerUnits("lerd-*") {
-			_ = services.Mgr.RemoveTimerUnit(strings.TrimSuffix(unit, ".timer"))
-		}
-	}
+	removeServiceUnits()
 	ok()
 
 	step("Reloading service manager")
@@ -155,6 +158,7 @@ func runUninstall(force bool) error {
 	// Homebrew Cellar or a package's file list leaves that manager believing
 	// lerd is still installed.
 	if self, err := selfPath(); err == nil && (isSystemPackageManaged(self) || isHomebrewManaged(self)) {
+		removeScriptInstalledBinaries(self)
 		fmt.Println(feedback.Dim("kept, package-managed"))
 		feedback.Note("remove the binaries with your package manager, e.g. " + packageManagerRemoveHint(self))
 	} else {
@@ -165,10 +169,25 @@ func runUninstall(force bool) error {
 	}
 
 	if removeData {
+		if reinstallNPM != "" {
+			feedback.Line("reinstalling global npm packages with your own npm")
+			if err := reinstallNodeGlobals(reinstallNPM, strandedGlobals); err != nil {
+				feedback.Warn("npm install -g failed: %v", err)
+				feedback.Note("reinstall them yourself with: npm install -g " + strings.Join(strandedGlobals, " "))
+			}
+		} else if len(strandedGlobals) > 0 {
+			feedback.Note("global npm packages removed with lerd: " + formatNodeGlobalsNote(strandedGlobals))
+			feedback.Note("reinstall them with: npm install -g " + strings.Join(strandedGlobals, " "))
+		}
 		step("Removing config and data directories")
 		os.RemoveAll(config.ConfigDir())
-		os.RemoveAll(config.DataDir())
-		ok()
+		os.RemoveAll(config.CacheDir())
+		if kept := removeDataDir(config.DataDir()); kept != "" {
+			fmt.Println(feedback.Amber("!"))
+			feedback.Note("could not remove " + kept + ", remove it with: podman unshare rm -rf " + kept)
+		} else {
+			ok()
+		}
 	} else {
 		feedback.Note("config kept at " + config.ConfigDir())
 		feedback.Note("data kept at " + config.DataDir())
@@ -176,6 +195,49 @@ func runUninstall(force bool) error {
 
 	feedback.Done("lerd uninstalled")
 	return nil
+}
+
+// resetFailedUnit is podman.ResetFailedUnit, indirected so a test can watch the
+// removal reset what it removed without a systemd to reset it on.
+var resetFailedUnit = podman.ResetFailedUnit
+
+// removeServiceUnits deletes every lerd unit file and clears the failed state
+// systemd keeps for it, which the installer script has always done and this path
+// did not: a unit already failed when its file goes is listed as failed and
+// not-found for good, on a machine with no lerd left to clear it.
+func removeServiceUnits() {
+	seen := map[string]bool{}
+	for _, unit := range services.Mgr.ListContainerUnits("lerd-*") {
+		seen[unit] = true
+		_ = services.Mgr.RemoveContainerUnit(unit)
+		resetFailedUnit(unit)
+	}
+	for _, unit := range services.Mgr.ListServiceUnits("lerd-*") {
+		if seen[unit] {
+			continue
+		}
+		_ = services.Mgr.RemoveServiceUnit(unit)
+		resetFailedUnit(unit)
+	}
+	for _, unit := range services.Mgr.ListTimerUnits("lerd-*") {
+		name := strings.TrimSuffix(unit, ".timer")
+		_ = services.Mgr.RemoveTimerUnit(name)
+		resetFailedUnit(name)
+	}
+}
+
+// removeDataDir removes the lerd data directory and returns the path if it
+// survived. Containers write files as a subuid, so os.RemoveAll fails; podman
+// unshare rm -rf enters the user namespace where they are removable.
+func removeDataDir(dir string) string {
+	if err := os.RemoveAll(dir); err == nil {
+		return ""
+	}
+	_ = podman.Cmd("unshare", "rm", "-rf", dir).Run()
+	if _, err := os.Stat(dir); err == nil {
+		return dir
+	}
+	return ""
 }
 
 func confirmRemoveMCPIntegration() bool {
@@ -215,8 +277,12 @@ func removeLerdImages() {
 	}
 }
 
-// isLerdBuiltImage matches the locally-built tags lerd owns.
+// isLerdBuiltImage matches the locally-built tags lerd owns. podman reports a
+// local build fully qualified, as localhost/lerd-dnsmasq:local, so the registry
+// is stripped before matching; comparing against the whole reference matched
+// nothing at all and the purge quietly kept every image it said it removed.
 func isLerdBuiltImage(ref string) bool {
+	ref = strings.TrimPrefix(ref, "localhost/")
 	switch {
 	case strings.HasPrefix(ref, "lerd-php") && strings.HasSuffix(ref, "-fpm:local"):
 		return true
@@ -262,6 +328,27 @@ var shellRCMarkers = []struct {
 func removeInstalledBinaries(self string) {
 	os.Remove(self)                                           //nolint:errcheck
 	os.Remove(filepath.Join(filepath.Dir(self), "lerd-tray")) //nolint:errcheck
+}
+
+// removeScriptInstalledBinaries clears the pair lerd's own installers write to
+// ~/.local/bin. It runs when the binary being uninstalled is package-managed,
+// where the guard above declines to delete anything: that guard is about files
+// brew, apt or nix own, and ~/.local/bin is owned by none of them, so a machine
+// carrying both installs would otherwise keep a script-installed lerd on PATH
+// pointing at a data directory the same run has just deleted. The running
+// binary is never touched, since that one is the package manager's to remove.
+func removeScriptInstalledBinaries(self string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	for _, name := range []string{"lerd", "lerd-tray"} {
+		p := filepath.Join(home, ".local", "bin", name)
+		if p == self {
+			continue
+		}
+		os.Remove(p) //nolint:errcheck
+	}
 }
 
 func removeShellEntry() {

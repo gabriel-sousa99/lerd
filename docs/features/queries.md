@@ -21,6 +21,7 @@ Events ship over the **same** Unix socket (Linux) or TCP loopback (macOS) the de
 - **N+1 detection.** Queries whose SQL normalizes to the same fingerprint (literals collapsed) are flagged as duplicates; a request with three or more repeats of one shape is flagged **N+1**.
 - **Slow-query tagging.** Any single query at or over 100ms is tagged **slow**.
 - **Caller, bindings, connection.** Expand a row for the originating `file:line`, the bound parameters, and (when a framework adapter is present) the connection name and read/write type.
+- **Copy the caller.** Every path in the debug views, the primary frame, each frame of an expanded stack trace, a rendered template, and a dump's header, opens in your editor when clicked and carries a faint copy button beside it that copies the whole `file:line` reference, even where the display is shortened.
 - **Copy runnable SQL.** A copy button next to each query's duration copies the statement with its bindings resolved: positional `?` placeholders are replaced with properly escaped SQL literals (strings quoted, single quotes doubled, `NULL` for nulls, `1`/`0` for booleans), while question marks inside quoted strings are left untouched. Queries with no bindings copy verbatim. Paste it straight into a SQL editor without hand-substituting each parameter.
 
 ## Wire format
@@ -60,7 +61,7 @@ Non-Laravel apps (and queries that run before the framework boots) still fall ba
 Beyond queries, the same adapter feeds additional Debug sub-tabs:
 
 - **Jobs** *(Laravel)*: queued jobs as they finish, with status (processed/failed), connection, and the exception on failure.
-- **Views**: every template rendered, with its source path and the top-level data keys passed in.
+- **Views**: every template rendered, with its source path and the top-level data keys passed in. Each variable is labelled with what it holds, `page array(4)`, `user User`, `title "Dashboard"`, so the shape is visible without opening anything, with a string kept whole up to 160 characters and truncated past that. The values are not shipped: a view's data is the whole page payload on an Inertia app and routinely holds the authenticated user, so a label is both the useful part and the safe one. A render Blade compiled for itself is left out: an inline or anonymous component has no source file, so it appears under a hashed `__components::` name pointing into the compiled cache, and a template a developer wrote never lives there. The cache location comes from the app's own `view.compiled` config, so a project that moves it is still understood.
 - **Mail**: outgoing messages captured before send, with subject, recipients, and a sandboxed HTML preview.
 - **Cache** *(Laravel)*: hit / miss / write / forget events with the key and store. Framework-internal keys (the queue restart/pause signals, scheduler overlap mutexes, and reverb/horizon/pulse/telescope pub-sub) are filtered out so the tab shows the application's own cache use rather than background machinery, this matters most with worker capture on, where those keys are polled constantly.
 - **Events** *(Laravel)*: application and package events dispatched (framework-internal `Illuminate\*` events are filtered out).
@@ -109,7 +110,7 @@ The same capture is available to an AI assistant through lerd's MCP server, so a
 
 ## Open in editor
 
-Every query's caller path in the Queries lens is a link. Expand a row to see the originating application frame (`Class::method — file:line`) and a **Details** button for the full stack trace; click any `file:line` to open it in your editor. lerd autodetects a known GUI editor (VS Code, Cursor, PhpStorm, Sublime, Zed, …); override it with an `editor` command in `~/.config/lerd/config.yaml`, e.g. `editor: "phpstorm --line {line} {file}"` ({file} and {line} are substituted). The endpoint is loopback-only.
+Every query's caller path in the Queries lens is a link. Expand a row to see the originating application frame (`Class::method — file:line`) and a **Details** button for the full stack trace; click any `file:line` to open it in the host's editor. lerd autodetects a known GUI editor (VS Code, Cursor, PhpStorm, Sublime, Zed, …); override it with an `editor` command in `~/.config/lerd/config.yaml`, e.g. `editor: "phpstorm --line {line} {file}"` ({file} and {line} are substituted). The endpoint requires dashboard-control authority, which authenticated remote sessions receive.
 
 ## Caveats
 

@@ -37,6 +37,12 @@ func LANShareEnsurePort(siteName string) (int, error) {
 	if site.LANPort != 0 {
 		return site.LANPort, nil
 	}
+	// Same one-share-at-a-time rule the daemon enforces on start. Without it
+	// the CLI persists a LAN port the daemon then refuses to serve, and the
+	// next restore binds both listeners for one site.
+	if PublicShareRunning(siteName) || TunnelActive(siteName, "") {
+		return 0, errShareBusy
+	}
 	port := assignLANSharePort(siteName)
 	site.LANPort = port
 	if err := config.AddSite(*site); err != nil {
@@ -72,6 +78,9 @@ func LANShareStart(siteName string) (int, error) {
 	if site.Paused {
 		return site.LANPort, fmt.Errorf("site %q is paused", siteName)
 	}
+	if PublicShareRunning(siteName) || TunnelActive(siteName, "") {
+		return 0, errShareBusy
+	}
 
 	port := site.LANPort
 	if port == 0 {
@@ -99,7 +108,7 @@ func LANShareStart(siteName string) (int, error) {
 		httpsPort = 443
 	}
 
-	srv, err := startLANShareProxy(site.PrimaryDomain(), port, httpPort, httpsPort, site.Secured)
+	srv, err := startLANShareProxy(site.PrimaryDomain(), port, httpPort, httpsPort, site.Secured, reachLAN)
 	if err != nil {
 		return 0, err
 	}
@@ -131,6 +140,21 @@ func LANShareStopServer(siteName string) {
 	closeLANShareServer(siteName)
 }
 
+// LANShareStopWorktrees closes the LAN proxy every worktree of the site holds
+// and drops its registry entry. Unlike DropOrphanedWorktreeLANShares this keeps
+// nothing: it runs when the site itself is going away, so no branch of it is
+// still live.
+func LANShareStopWorktrees(siteName string) {
+	entries, err := config.WorktreeLANsForSite(siteName)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		closeLANShareServer(worktreeLANServerKey(e.Site, e.Branch))
+		_, _, _ = config.RemoveWorktreeLAN(e.Site, e.Branch)
+	}
+}
+
 func closeLANShareServer(siteName string) {
 	lanShareMu.Lock()
 	srv, running := lanShareServers[siteName]
@@ -151,6 +175,11 @@ func LANShareRunning(siteName string) bool {
 	_, ok := lanShareServers[siteName]
 	return ok
 }
+
+// errShareBusy is returned when a site (or worktree) is already exposed one way
+// and a second, different share is attempted: it may only be shared one way at
+// a time (LAN, public reverse-proxy, or a tunnel).
+var errShareBusy = fmt.Errorf("this site is already shared another way; stop that first")
 
 // LANShareRefreshIfRunning closes any running share proxy for the site and
 // re-opens it using the current site config — needed when TLS gets toggled
@@ -207,7 +236,7 @@ func RestoreLANShareProxies() {
 		if !shouldRunLANShareProxy(s) {
 			continue
 		}
-		srv, err := startLANShareProxy(s.PrimaryDomain(), s.LANPort, httpPort, httpsPort, s.Secured)
+		srv, err := startLANShareProxy(s.PrimaryDomain(), s.LANPort, httpPort, httpsPort, s.Secured, reachLAN)
 		if err != nil {
 			continue
 		}
@@ -243,7 +272,7 @@ func RestoreLANShareProxies() {
 			continue
 		}
 		domain := e.Branch + "." + s.PrimaryDomain()
-		srv, err := startLANShareProxy(domain, e.Port, httpPort, httpsPort, s.Secured)
+		srv, err := startLANShareProxy(domain, e.Port, httpPort, httpsPort, s.Secured, reachLAN)
 		if err != nil {
 			continue
 		}
@@ -329,6 +358,9 @@ func LANShareStartWorktree(siteName, branch string) (int, error) {
 	if site.Paused {
 		return 0, fmt.Errorf("site %q is paused", siteName)
 	}
+	if PublicShareWorktreeRunning(siteName, branch) || TunnelActive(siteName, branch) {
+		return 0, errShareBusy
+	}
 
 	worktreeDomain := branch + "." + site.PrimaryDomain()
 
@@ -364,7 +396,7 @@ func LANShareStartWorktree(siteName, branch string) (int, error) {
 		httpsPort = 443
 	}
 
-	srv, err := startLANShareProxy(worktreeDomain, port, httpPort, httpsPort, site.Secured)
+	srv, err := startLANShareProxy(worktreeDomain, port, httpPort, httpsPort, site.Secured, reachLAN)
 	if err != nil {
 		return 0, err
 	}
@@ -424,7 +456,36 @@ const vitePrefix = "/__lerd_vite__/"
 // and Location headers to replace domain URLs with the LAN address. Requests
 // under vitePrefix are forwarded to a Vite dev server on loopback so dev-mode
 // JS/CSS assets and the HMR websocket work from LAN devices.
-func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bool) (*http.Server, error) {
+// shareReach says how far a share proxy's audience extends, which decides two
+// things the proxy cannot infer from its own arguments: whether forwarding the
+// site's loopback ports is acceptable, and which scheme the audience arrives on.
+type shareReach int
+
+const (
+	// reachLAN serves the local network. Mapping loopback dev-server ports
+	// through the proxy is the point: a phone on the WiFi has no localhost of
+	// the developer's to fetch Vite assets from.
+	reachLAN shareReach = iota
+	// reachPublic is fronted by the user's own reverse proxy and answers the
+	// internet. Every loopback port on the machine stays closed, and the
+	// audience arrives over the TLS that proxy terminates.
+	reachPublic
+)
+
+// forwardsLoopbackPorts reports whether the proxy may relay /__lerd_vite__/<port>
+// to localhost:<port>. Only ever true for the local network.
+func (r shareReach) forwardsLoopbackPorts() bool { return r == reachLAN }
+
+// scheme is what the audience's browser used to reach the proxy, and therefore
+// what self-referential URLs in headers and bodies must be rewritten to.
+func (r shareReach) scheme() string {
+	if r == reachPublic {
+		return "https"
+	}
+	return "http"
+}
+
+func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bool, reach shareReach) (*http.Server, error) {
 	var target *url.URL
 	if secured {
 		target = &url.URL{Scheme: "https", Host: fmt.Sprintf("localhost:%d", httpsPort)}
@@ -440,7 +501,7 @@ func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bo
 		proxy.Transport = t
 	}
 
-	const scheme = "http"
+	scheme := reach.scheme()
 
 	orig := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -460,7 +521,7 @@ func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bo
 		req.Header.Set("Accept-Encoding", "identity")
 	}
 
-	handler := newLANShareHandler(proxy)
+	handler := newLANShareHandler(proxy, reach)
 
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		lanHost := resp.Request.Header.Get("X-Forwarded-Host")
@@ -513,7 +574,7 @@ func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bo
 		}
 
 		var advertised []int
-		body, advertised = rewriteLANShareBody(body, domain, lanHost)
+		body, advertised = rewriteLANShareBody(body, domain, lanHost, reach)
 		handler.allowVitePorts(advertised)
 
 		resp.Body = io.NopCloser(bytes.NewReader(body))
@@ -540,7 +601,8 @@ func startLANShareProxy(domain string, port, httpPort, httpsPort int, secured bo
 // the dev server — module imports lose the prefix after one hop and the
 // Referer alone can't be relied on.
 type lanShareHandler struct {
-	main http.Handler
+	main  http.Handler
+	reach shareReach
 
 	mu             sync.Mutex
 	viteProxies    map[int]*httputil.ReverseProxy
@@ -553,9 +615,10 @@ type lanShareHandler struct {
 	allowedVitePorts map[int]bool
 }
 
-func newLANShareHandler(main http.Handler) *lanShareHandler {
+func newLANShareHandler(main http.Handler, reach shareReach) *lanShareHandler {
 	return &lanShareHandler{
 		main:             main,
+		reach:            reach,
 		viteProxies:      map[int]*httputil.ReverseProxy{},
 		allowedVitePorts: map[int]bool{},
 	}
@@ -583,7 +646,7 @@ func (h *lanShareHandler) vitePortAllowed(port int) bool {
 }
 
 func (h *lanShareHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if port, rest, ok := parseVitePrefixPath(r.URL.Path); ok {
+	if port, rest, ok := parseVitePrefixPath(r.URL.Path); ok && h.reach.forwardsLoopbackPorts() {
 		// SSRF guard: only forward to loopback ports the proxy itself
 		// advertised by rewriting a leaked dev-server URL into this prefix.
 		// A LAN device requesting an arbitrary port (lerd-ui dashboard, DBs,
@@ -926,17 +989,25 @@ func PrintLANShareQR(rawURL string) {
 // (e.g. http://<ip>:443/foo when the framework used SERVER_PORT from nginx).
 // The final pass redirects loopback dev-server URLs (Vite on [::1]:5173 etc.)
 // through the share proxy's Vite prefix so LAN devices can reach them.
-func rewriteLANShareBody(body []byte, domain, lanHost string) ([]byte, []int) {
-	body = bytes.ReplaceAll(body, []byte("https://"+domain), []byte("http://"+lanHost))
-	body = bytes.ReplaceAll(body, []byte("http://"+domain), []byte("http://"+lanHost))
-	body = bytes.ReplaceAll(body, []byte("https://"+lanHost), []byte("http://"+lanHost))
+func rewriteLANShareBody(body []byte, domain, lanHost string, reach shareReach) ([]byte, []int) {
+	scheme := reach.scheme()
+	body = bytes.ReplaceAll(body, []byte("https://"+domain), []byte(scheme+"://"+lanHost))
+	body = bytes.ReplaceAll(body, []byte("http://"+domain), []byte(scheme+"://"+lanHost))
+	if reach == reachLAN {
+		body = bytes.ReplaceAll(body, []byte("https://"+lanHost), []byte("http://"+lanHost))
+	}
 	if lanIP, _, err := net.SplitHostPort(lanHost); err == nil && lanIP != "" {
 		// Terminator class covers HTML/JS quotes, JSON terminators, plus
 		// `)` for CSS url(...) and `;` for CSS rules.
 		re := regexp.MustCompile(`https?://` + regexp.QuoteMeta(lanIP) + `(?::\d+)?([/"'<>?#;)\s])`)
-		body = re.ReplaceAll(body, []byte("http://"+lanHost+"$1"))
+		body = re.ReplaceAll(body, []byte(scheme+"://"+lanHost+"$1"))
 	}
-	return rewriteLoopbackViteURLs(body, lanHost)
+	// Only a LAN audience can be pointed back at this machine's loopback ports;
+	// a public share must not advertise a route to them.
+	if reach.forwardsLoopbackPorts() {
+		return rewriteLoopbackViteURLs(body, lanHost)
+	}
+	return body, nil
 }
 
 // loopbackViteURLRe matches http(s)://<loopback>:<port> URLs that leaked into

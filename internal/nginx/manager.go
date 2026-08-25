@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -23,7 +25,19 @@ import (
 )
 
 // detectSiteProxy checks the site's framework definition for a worker with a
-// proxy configuration. Returns the proxy path and port if found.
+// proxy configuration. Returns the proxy path and port if found. The path is
+// regexp.QuoteMeta-escaped: the vhost templates interpolate it into an nginx
+// regex location (`location ~ ^{{.ProxyPath}}(/|$)`) so the anchoring only
+// matches that path and its subpaths, not an unrelated one sharing the same
+// prefix. A framework-declared path is realistically literal but can contain
+// regex metacharacters a template author never intended as regex — "/socket.io"
+// being the common one, where an unescaped "." would also match "/socketXio".
+// The path is normalised first, since every way of writing one that reads
+// naturally has to anchor the same: a trailing slash is trimmed (`^/app/(/|$)`
+// would match the literal "/app/" and nothing else, not "/app" and nothing
+// under it) and a missing leading slash is added (`^app(/|$)` can never match a
+// URI, which always starts with "/"). A proxy declaring no path at all names
+// nothing to proxy, and is reported as no proxy rather than capturing the site.
 func detectSiteProxy(site config.Site) (path string, port int, ok bool) {
 	fw, fwOK := config.GetFrameworkForDir(site.Framework, site.Path)
 	if !fwOK {
@@ -44,7 +58,17 @@ func detectSiteProxy(site config.Site) (path string, port int, ok bool) {
 			}
 		}
 	}
-	return proxy.Path, proxyPort, true
+	if proxy.Path == "" {
+		return "", 0, false
+	}
+	// "/" trims to empty, which renders `^(/|$)`: the root and everything under
+	// it, what a root-mounted worker means. Restoring it to "/" instead would
+	// render `^/(/|$)`, matching "/" and "//" and nothing else.
+	proxyPath := strings.TrimSuffix(proxy.Path, "/")
+	if proxyPath != "" && !strings.HasPrefix(proxyPath, "/") {
+		proxyPath = "/" + proxyPath
+	}
+	return regexp.QuoteMeta(proxyPath), proxyPort, true
 }
 
 // detectSiteDevServer returns the prefix and host port for a site whose
@@ -342,23 +366,10 @@ func profilerEnabled() bool {
 	return err == nil && cfg.IsProfilerEnabled()
 }
 
-// resolvePublicDir returns the document root subdirectory for a site.
-// site.PublicDir wins (set from .lerd.yaml's public_dir, or from autodetect
-// when no framework matched), then the framework definition's PublicDir, then
-// "public" as the final fallback. Each candidate runs through ValidatePublicDir
-// so a hostile .lerd.yaml can't pivot the nginx root out of the project.
+// resolvePublicDir returns the document root subdirectory for a site, resolved
+// from the project, the registry and the framework definition alike.
 func resolvePublicDir(site config.Site) string {
-	if site.PublicDir != "" {
-		if err := config.ValidatePublicDir(site.PublicDir); err == nil {
-			return site.PublicDir
-		}
-	}
-	if fw, ok := config.GetFrameworkForDir(site.Framework, site.Path); ok && fw.PublicDir != "" {
-		if err := config.ValidatePublicDir(fw.PublicDir); err == nil {
-			return fw.PublicDir
-		}
-	}
-	return "public"
+	return config.PublicDirFor(site)
 }
 
 // serverNamesWithWildcards returns a space-separated list of all domains plus
@@ -373,83 +384,44 @@ func serverNamesWithWildcards(domains []string) string {
 	return strings.Join(parts, " ")
 }
 
-// GenerateVhost renders the HTTP vhost template and writes it to conf.d.
-func GenerateVhost(site config.Site, phpVersion string) error {
-	tmplData, err := GetTemplate("vhost.conf.tmpl")
-	if err != nil {
-		return err
-	}
-
-	tmpl, err := template.New("vhost").Parse(string(tmplData))
-	if err != nil {
-		return err
-	}
-
-	publicDir := resolvePublicDir(site)
-	serverNames := serverNamesWithWildcards(site.Domains)
-
-	proxyPath, proxyPort, hasProxy := detectSiteProxy(site)
-	devBase, devPort := detectSiteDevServer(site)
-	fpmContainer := podman.FPMContainerName(site, phpVersion)
-	data := VhostData{
-		Domain:          site.PrimaryDomain(),
-		ServerNames:     serverNames,
-		Path:            site.Path,
-		PHPVersion:      phpVersion,
-		PHPVersionShort: phpShort(phpVersion),
-		FPMContainer:    fpmContainer,
-		PublicDir:       publicDir,
-		Proxy:           hasProxy,
-		ProxyPath:       proxyPath,
-		ProxyPort:       proxyPort,
-		UpstreamHost:    hostProxyUpstream(),
-		DevServerBase:   devBase,
-		DevServerPort:   devPort,
-		LerdSite:        site.Name,
-		Profiling:       profilerEnabled(),
-		RequestTimeout:  resolveRequestTimeout(site.Path),
-		FrameworkNginx:  resolveFrameworkNginx(site, publicDir, fpmContainer),
-	}
-
-	rendered, err := renderVhost(tmpl, data)
-	if err != nil {
-		return err
-	}
-
+// writeSiteConf writes a rendered vhost into conf.d under name.
+func writeSiteConf(name string, rendered []byte) error {
 	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
 		return err
 	}
-	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
+	confPath := filepath.Join(config.NginxConfD(), name)
 	config.GuardRealWrite(confPath)
 	return os.WriteFile(confPath, rendered, 0644)
 }
 
-// GenerateSSLVhost renders the SSL vhost template and writes it to conf.d.
-func GenerateSSLVhost(site config.Site, phpVersion string) error {
-	tmplData, err := GetTemplate("vhost-ssl.conf.tmpl")
-	if err != nil {
-		return err
+// renderFPMVhost renders the vhost for a site served by fastcgi, over HTTP or,
+// with ssl set, HTTPS. Both are the same document root, upstream and framework
+// snippet; only the template and the certificate differ.
+func renderFPMVhost(site config.Site, phpVersion string, ssl bool) ([]byte, error) {
+	name := "vhost.conf.tmpl"
+	if ssl {
+		name = "vhost-ssl.conf.tmpl"
 	}
-
-	tmpl, err := template.New("vhost-ssl").Parse(string(tmplData))
+	tmplData, err := GetTemplate(name)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	tmpl, err := template.New(strings.TrimSuffix(name, ".conf.tmpl")).Parse(string(tmplData))
+	if err != nil {
+		return nil, err
 	}
 
 	publicDir := resolvePublicDir(site)
-	serverNames := serverNamesWithWildcards(site.Domains)
-
 	proxyPath, proxyPort, hasProxy := detectSiteProxy(site)
 	devBase, devPort := detectSiteDevServer(site)
 	fpmContainer := podman.FPMContainerName(site, phpVersion)
 	data := VhostData{
 		Domain:          site.PrimaryDomain(),
-		ServerNames:     serverNames,
+		ServerNames:     serverNamesWithWildcards(site.Domains),
 		Path:            site.Path,
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
 		FPMContainer:    fpmContainer,
-		CertDomain:      site.PrimaryDomain(),
 		PublicDir:       publicDir,
 		Proxy:           hasProxy,
 		ProxyPath:       proxyPath,
@@ -462,155 +434,117 @@ func GenerateSSLVhost(site config.Site, phpVersion string) error {
 		RequestTimeout:  resolveRequestTimeout(site.Path),
 		FrameworkNginx:  resolveFrameworkNginx(site, publicDir, fpmContainer),
 	}
+	if ssl {
+		data.CertDomain = site.PrimaryDomain()
+	}
+	return renderVhost(tmpl, data)
+}
 
-	rendered, err := renderVhost(tmpl, data)
+// GenerateVhost renders the HTTP vhost template and writes it to conf.d.
+func GenerateVhost(site config.Site, phpVersion string) error {
+	rendered, err := renderFPMVhost(site, phpVersion, false)
 	if err != nil {
 		return err
 	}
+	return writeSiteConf(site.PrimaryDomain()+".conf", rendered)
+}
 
-	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
+// GenerateSSLVhost renders the SSL vhost template and writes it to conf.d.
+func GenerateSSLVhost(site config.Site, phpVersion string) error {
+	rendered, err := renderFPMVhost(site, phpVersion, true)
+	if err != nil {
 		return err
 	}
-	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, rendered, 0644)
+	return writeSiteConf(site.PrimaryDomain()+"-ssl.conf", rendered)
+}
+
+// InstallSSLVhost moves the SSL vhost every Generate*SSLVhost writes onto the
+// name nginx serves the site under. It is the second half of generating one:
+// conf.d is a glob, so a <domain>-ssl.conf left beside <domain>.conf is loaded
+// as a second server block for the same names, and it sorts first, so nginx
+// keeps the sidecar and ignores the file every other path rewrites. Unlink
+// clears both names, but unsecure removes only the served one and deletes the
+// certificate, leaving a sidecar that points at a file that is gone and a
+// configuration nginx can no longer load at all.
+func InstallSSLVhost(domain string) error {
+	confD := config.NginxConfD()
+	mainConf := filepath.Join(confD, domain+".conf")
+	if err := os.Remove(mainConf); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(filepath.Join(confD, domain+"-ssl.conf"), mainConf)
+}
+
+// renderContainerVhost renders the vhost for a site nginx reverse-proxies to a
+// container, which is FrankenPHP and custom-container sites alike: only the
+// container name, the port and whether the backend speaks TLS differ.
+func renderContainerVhost(site config.Site, container string, port int, backendSSL, ssl bool) ([]byte, error) {
+	name := "vhost-custom.conf.tmpl"
+	if ssl {
+		name = "vhost-custom-ssl.conf.tmpl"
+	}
+	tmplData, err := GetTemplate(name)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, err := template.New(strings.TrimSuffix(name, ".conf.tmpl")).Parse(string(tmplData))
+	if err != nil {
+		return nil, err
+	}
+
+	data := VhostData{
+		Domain:          site.PrimaryDomain(),
+		ServerNames:     serverNamesWithWildcards(site.Domains),
+		CustomContainer: container,
+		CustomPort:      port,
+		BackendSSL:      backendSSL,
+		RequestTimeout:  resolveRequestTimeout(site.Path),
+	}
+	if ssl {
+		data.CertDomain = site.PrimaryDomain()
+	}
+	return renderVhost(tmpl, data)
 }
 
 // GenerateFrankenPHPVhost renders the HTTP vhost template for a FrankenPHP
 // site. Nginx reverse-proxies to the per-site lerd-fp-<name>:8000 container
 // using the shared custom-container template.
 func GenerateFrankenPHPVhost(site config.Site) error {
-	tmplData, err := GetTemplate("vhost-custom.conf.tmpl")
+	rendered, err := renderContainerVhost(site, podman.FrankenPHPContainerName(site.Name), podman.FrankenPHPPort, false, false)
 	if err != nil {
 		return err
 	}
-	tmpl, err := template.New("vhost-custom").Parse(string(tmplData))
-	if err != nil {
-		return err
-	}
-
-	data := VhostData{
-		Domain:          site.PrimaryDomain(),
-		ServerNames:     serverNamesWithWildcards(site.Domains),
-		CustomContainer: podman.FrankenPHPContainerName(site.Name),
-		CustomPort:      podman.FrankenPHPPort,
-		RequestTimeout:  resolveRequestTimeout(site.Path),
-	}
-
-	rendered, err := renderVhost(tmpl, data)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
-		return err
-	}
-	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, rendered, 0644)
+	return writeSiteConf(site.PrimaryDomain()+".conf", rendered)
 }
 
 // GenerateFrankenPHPSSLVhost renders the HTTPS vhost template for a FrankenPHP site.
 func GenerateFrankenPHPSSLVhost(site config.Site) error {
-	tmplData, err := GetTemplate("vhost-custom-ssl.conf.tmpl")
+	rendered, err := renderContainerVhost(site, podman.FrankenPHPContainerName(site.Name), podman.FrankenPHPPort, false, true)
 	if err != nil {
 		return err
 	}
-	tmpl, err := template.New("vhost-custom-ssl").Parse(string(tmplData))
-	if err != nil {
-		return err
-	}
-
-	data := VhostData{
-		Domain:          site.PrimaryDomain(),
-		ServerNames:     serverNamesWithWildcards(site.Domains),
-		CertDomain:      site.PrimaryDomain(),
-		CustomContainer: podman.FrankenPHPContainerName(site.Name),
-		CustomPort:      podman.FrankenPHPPort,
-		RequestTimeout:  resolveRequestTimeout(site.Path),
-	}
-
-	rendered, err := renderVhost(tmpl, data)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
-		return err
-	}
-	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, rendered, 0644)
+	return writeSiteConf(site.PrimaryDomain()+"-ssl.conf", rendered)
 }
 
 // GenerateCustomVhost renders the HTTP vhost template for a custom container
 // site and writes it to conf.d. Nginx reverse-proxies to the container instead
 // of using fastcgi_pass.
 func GenerateCustomVhost(site config.Site) error {
-	tmplData, err := GetTemplate("vhost-custom.conf.tmpl")
+	rendered, err := renderContainerVhost(site, podman.CustomContainerName(site.Name), site.ContainerPort, site.ContainerSSL, false)
 	if err != nil {
 		return err
 	}
-
-	tmpl, err := template.New("vhost-custom").Parse(string(tmplData))
-	if err != nil {
-		return err
-	}
-
-	data := VhostData{
-		Domain:          site.PrimaryDomain(),
-		ServerNames:     serverNamesWithWildcards(site.Domains),
-		CustomContainer: podman.CustomContainerName(site.Name),
-		CustomPort:      site.ContainerPort,
-		BackendSSL:      site.ContainerSSL,
-		RequestTimeout:  resolveRequestTimeout(site.Path),
-	}
-
-	rendered, err := renderVhost(tmpl, data)
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
-		return err
-	}
-	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, rendered, 0644)
+	return writeSiteConf(site.PrimaryDomain()+".conf", rendered)
 }
 
 // GenerateCustomSSLVhost renders the SSL vhost template for a custom container
 // site and writes it to conf.d.
 func GenerateCustomSSLVhost(site config.Site) error {
-	tmplData, err := GetTemplate("vhost-custom-ssl.conf.tmpl")
+	rendered, err := renderContainerVhost(site, podman.CustomContainerName(site.Name), site.ContainerPort, site.ContainerSSL, true)
 	if err != nil {
 		return err
 	}
-
-	tmpl, err := template.New("vhost-custom-ssl").Parse(string(tmplData))
-	if err != nil {
-		return err
-	}
-
-	data := VhostData{
-		Domain:          site.PrimaryDomain(),
-		ServerNames:     serverNamesWithWildcards(site.Domains),
-		CertDomain:      site.PrimaryDomain(),
-		CustomContainer: podman.CustomContainerName(site.Name),
-		CustomPort:      site.ContainerPort,
-		BackendSSL:      site.ContainerSSL,
-		RequestTimeout:  resolveRequestTimeout(site.Path),
-	}
-
-	rendered, err := renderVhost(tmpl, data)
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
-		return err
-	}
-	confPath := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, rendered, 0644)
+	return writeSiteConf(site.PrimaryDomain()+"-ssl.conf", rendered)
 }
 
 // hostProxyUpstream returns the host address nginx proxies a host-proxy site to.
@@ -640,13 +574,23 @@ func GenerateHostProxySSLVhost(site config.Site) error {
 }
 
 func generateHostProxyVhost(site config.Site, tmplName, confName string, ssl bool) error {
-	tmplData, err := GetTemplate(tmplName)
+	rendered, err := renderHostProxyVhost(site, tmplName, ssl)
 	if err != nil {
 		return err
 	}
+	return writeSiteConf(confName, rendered)
+}
+
+// renderHostProxyVhost renders the vhost for a site nginx proxies to a process
+// on the host rather than to a container.
+func renderHostProxyVhost(site config.Site, tmplName string, ssl bool) ([]byte, error) {
+	tmplData, err := GetTemplate(tmplName)
+	if err != nil {
+		return nil, err
+	}
 	tmpl, err := template.New(tmplName).Parse(string(tmplData))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	data := VhostData{
@@ -660,18 +604,7 @@ func generateHostProxyVhost(site config.Site, tmplName, confName string, ssl boo
 	if ssl {
 		data.CertDomain = site.PrimaryDomain()
 	}
-
-	rendered, err := renderVhost(tmpl, data)
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
-		return err
-	}
-	confPath := filepath.Join(config.NginxConfD(), confName)
-	config.GuardRealWrite(confPath)
-	return os.WriteFile(confPath, rendered, 0644)
+	return renderVhost(tmpl, data)
 }
 
 // GenerateWorktreeVhostFor picks GenerateWorktreeSSLVhost or GenerateWorktreeVhost
@@ -1173,10 +1106,33 @@ func RepairVhosts() []VhostRepair {
 		}
 
 		confPath := filepath.Join(confDir, entry.Name())
+		// A site is served from <domain>.conf, so a <domain>-ssl.conf beside it
+		// is a half-installed render. Both name the same site, and stripping
+		// only ".conf" would leave the sidecar matching none of them, so its
+		// site could never be repaired — only deleted as an orphan.
+		sidecar := strings.HasSuffix(entry.Name(), "-ssl.conf")
 		domain := strings.TrimSuffix(entry.Name(), ".conf")
+		if sidecar {
+			domain = strings.TrimSuffix(entry.Name(), "-ssl.conf")
+		}
 
 		data, err := os.ReadFile(confPath)
 		if err != nil {
+			continue
+		}
+
+		// A sidecar whose certificate is fine is the second half of a render that
+		// never finished: nginx loads it as a duplicate server block, sorts it
+		// ahead of the served file and answers from it, so the site runs on
+		// whatever was true when it was generated. Installing it is the step that
+		// was skipped. A paused or idle-suspended site is serving a vhost lerd
+		// swapped on purpose, so its sidecar waits for the site to come back.
+		if sidecar && !hasMissingCert(string(data), certsDir) {
+			if site, ok := securedServingSite(reg, domain); ok {
+				if err := InstallSSLVhost(site.PrimaryDomain()); err == nil {
+					repairs = append(repairs, VhostRepair{Domain: domain, Reason: "stranded-ssl"})
+				}
+			}
 			continue
 		}
 
@@ -1187,7 +1143,13 @@ func RepairVhosts() []VhostRepair {
 
 		repaired := false
 		for i, site := range reg.Sites {
-			if site.PrimaryDomain() != domain || !site.Secured {
+			// Ownership is the domain alone. Requiring the registry to also call
+			// the site secured meant a site whose entry and whose file disagreed,
+			// which is exactly what a half-finished unsecure leaves, read as
+			// belonging to nobody and had the only vhost serving it deleted. An
+			// ignored site is the one exception: it serves nothing by design, so
+			// its file goes rather than coming back.
+			if site.PrimaryDomain() != domain || site.Ignored {
 				continue
 			}
 			// Regenerate as plain HTTP vhost.
@@ -1205,12 +1167,19 @@ func RepairVhosts() []VhostRepair {
 			if regenErr != nil {
 				continue
 			}
-			reg.Sites[i].Secured = false
-			dirty = true
+			if site.Secured {
+				reg.Sites[i].Secured = false
+				dirty = true
+			}
 			repaired = true
 			repairs = append(repairs, VhostRepair{Domain: domain, Reason: "missing-cert"})
 			os.Remove(filepath.Join(certsDir, domain+".crt")) //nolint:errcheck
 			os.Remove(filepath.Join(certsDir, domain+".key")) //nolint:errcheck
+			// The HTTP render lands at <domain>.conf, so a sidecar is a
+			// separate file nginx would go on loading and failing over.
+			if sidecar {
+				os.Remove(confPath) //nolint:errcheck
+			}
 			break
 		}
 		if !repaired {
@@ -1225,6 +1194,23 @@ func RepairVhosts() []VhostRepair {
 	}
 
 	return repairs
+}
+
+// securedServingSite finds the registered site a sidecar belongs to, and only
+// when that site is the one nginx should be serving its SSL vhost for: a site
+// that is not secured, ignored, or paused is deliberately being served
+// something else.
+func securedServingSite(reg *config.SiteRegistry, domain string) (config.Site, bool) {
+	for _, site := range reg.Sites {
+		if site.PrimaryDomain() != domain {
+			continue
+		}
+		if !site.Secured || site.Paused || site.Ignored {
+			return config.Site{}, false
+		}
+		return site, true
+	}
+	return config.Site{}, false
 }
 
 // hasMissingCert returns true if the vhost content contains an ssl_certificate
@@ -1566,6 +1552,10 @@ func EnsureLerdVhost() error {
         proxy_pass http://host.containers.internal:7073;
     }
 
+    location ^~ /docs/ {
+        proxy_pass http://host.containers.internal:7073;
+    }
+
     location = /manifest.webmanifest {
         proxy_pass http://host.containers.internal:7073;
     }
@@ -1612,6 +1602,10 @@ func EnsureLerdVhost() error {
     }
 
     location ^~ /_svc/ {
+        proxy_pass http://unix:%[1]s:$request_uri;
+    }
+
+    location ^~ /docs/ {
         proxy_pass http://unix:%[1]s:$request_uri;
     }
 
@@ -1733,6 +1727,14 @@ map $http_x_forwarded_host $spx_key {
 `, key)
 }
 
+// ProfilerStatePath is a marker location on the profiler.localhost vhost that
+// answers with the profiler setting the serving configuration was generated
+// from. Arming rewrites every FPM vhost and reloads nginx, and a reload drains
+// the old workers rather than swapping in place, so a request sent the instant
+// the reload returns can still be served with no profiler attached. Asking nginx
+// what it is serving is the only honest way to know the toggle has landed.
+const ProfilerStatePath = "/_lerd/profiler-state"
+
 // EnsureProfilerVhost writes the profiler.localhost vhost: a dedicated
 // hostname routed to a PHP-FPM container so SPX serves its report UI for the
 // dashboard's global Profiler entry, independent of any site.
@@ -1743,6 +1745,10 @@ func EnsureProfilerVhost() error {
 	cfg, err := config.LoadGlobal()
 	if err != nil {
 		return err
+	}
+	state := "off"
+	if cfg.IsProfilerEnabled() {
+		state = "on"
 	}
 	// SCRIPT_FILENAME just needs a real file to exist; SPX intercepts the
 	// SPX_UI_URI request and serves its UI. It must point at the dedicated
@@ -1757,6 +1763,12 @@ func EnsureProfilerVhost() error {
     listen [::]:80;
     server_name profiler.localhost;
 
+    location = %s {
+        access_log off;
+        default_type text/plain;
+        return 200 %q;
+    }
+
     location / {
         set $fpm "lerd-php%s-fpm";
         fastcgi_pass $fpm:9000;
@@ -1765,9 +1777,46 @@ func EnsureProfilerVhost() error {
         fastcgi_param HTTP_COOKIE "SPX_KEY=$spx_key";
     }
 }
-`, phpShort(cfg.PHP.DefaultVersion))
+`, ProfilerStatePath, state, phpShort(cfg.PHP.DefaultVersion))
 	config.GuardRealWrite(filepath.Join(config.NginxConfD(), "_profiler.conf"))
 	return os.WriteFile(filepath.Join(config.NginxConfD(), "_profiler.conf"), []byte(content), 0644)
+}
+
+// ServedProfilerState reports the profiler setting nginx is serving right now,
+// read from the marker location. ok is false when the answer cannot be trusted:
+// nginx down, or an install whose vhost predates the marker.
+func ServedProfilerState() (on bool, ok bool) {
+	httpPort := 80
+	if cfg, err := config.LoadGlobal(); err == nil && cfg.Nginx.HTTPPort > 0 {
+		httpPort = cfg.Nginx.HTTPPort
+	}
+	return servedProfilerStateAt(fmt.Sprintf("127.0.0.1:%d", httpPort))
+}
+
+// servedProfilerStateAt is ServedProfilerState against a given address, so the
+// probe can be tested without a running nginx.
+func servedProfilerStateAt(addr string) (on bool, ok bool) {
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+ProfilerStatePath, nil)
+	if err != nil {
+		return false, false
+	}
+	req.Host = "profiler.localhost"
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		return false, false
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return false, false
+	}
+	switch strings.TrimSpace(string(body)) {
+	case "on":
+		return true, true
+	case "off":
+		return false, true
+	}
+	return false, false
 }
 
 // EnsureCustomD creates the user-override directory. Lerd never writes here

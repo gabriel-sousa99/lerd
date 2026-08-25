@@ -124,7 +124,13 @@ Add the following to `configuration.nix`. Each block is explained in the comment
 
 This is the part that bites people. Lerd is built for Debian/Ubuntu/Arch and, by default, **imperatively rewrites your system resolver** (a systemd-resolved drop-in and/or a NetworkManager dispatcher script) to point *all* DNS at its container. On those distros it works; on NixOS it fights the declarative config and, if the lerd-dns container isn't up, can take down **all** name resolution (you'll see `Could not resolve host: cache.nixos.org` even during `nixos-rebuild`).
 
-The config above sidesteps that: **NixOS** owns the resolver and routes only `~test` to lerd-dns. Because that routing lives in the main `resolved.conf` (which lerd never edits), it's the stable anchor. The consequence is that you should **decline** lerd's offer to configure DNS, see the next section.
+The config above sidesteps that: **NixOS** owns the resolver and routes only `~test` to lerd-dns. Because that routing lives in the main `resolved.conf` (which lerd never edits), it's the stable anchor.
+
+Since 1.30, lerd also writes an always-up dummy link (`lerd0`) and empties systemd-resolved's `FallbackDNS`. Since 1.31, `lerd install` runs `sudo lerd bootstrap --system` first, which installs a passwordless DNS sudoers rule, so `lerd start` and the watcher can apply those files without a prompt. Ctrl+C on the old dispatcher line no longer stops it. On NixOS that combination takes down **all** name resolution, not just `.test`.
+
+Lerd skips those host-resolver writes when `/etc/NIXOS` exists. The `lerd-dns` container still runs; block #5 is what routes `*.test` to it. Non-NixOS behaviour is unchanged.
+
+`lerd install` and `lerd start` say so when they skip, and `lerd doctor` reports the resolver hookup as skipped rather than failed, leaves out the interface and `lerd0` checks it no longer installs, and points at `configuration.nix` instead of `lerd install` when `.test` does not resolve.
 
 ## First-time lerd setup
 
@@ -144,9 +150,7 @@ Do this once, in order. You need working internet DNS first, and if it's already
 
    This generates the mkcert root CA at `~/.local/share/mkcert/rootCA.pem`, writes the container Quadlets, and starts dns/nginx/php-fpm.
 
-   ::: warning Decline the DNS prompt
-   When it prints **"Configuring NetworkManager dispatcher for .test DNS resolution"** and asks for sudo, press **Ctrl+C to decline.** Your NixOS config (block #5) already resolves `.test`, so lerd doesn't need to touch DNS. Declining keeps it out of your resolver permanently.
-   :::
+   On NixOS (`/etc/NIXOS`), lerd does not write resolver drop-ins, `lerd0`, or the DNS sudoers rule. Block #5 is what routes `*.test` to the `lerd-dns` container. If you are on an older binary that still offers the dispatcher sudo prompt, decline it — but 1.31+ can apply the new files without a prompt you can usefully Ctrl+C.
 
 3. **Trust the CA.** Copy it into your config repo and enable line #6:
 
@@ -211,7 +215,8 @@ sudo rm -f /etc/systemd/resolved.conf.d/lerd-fallback.conf \
            /etc/NetworkManager/conf.d/lerd-dns-link.conf \
            /etc/NetworkManager/conf.d/lerd.conf \
            /etc/NetworkManager/dnsmasq.d/lerd.conf \
-           /etc/NetworkManager/dispatcher.d/99-lerd-dns
+           /etc/NetworkManager/dispatcher.d/99-lerd-dns \
+           /etc/sudoers.d/lerd
 sudo systemctl daemon-reload
 
 # Reset and restart whichever resolver you run
@@ -228,7 +233,7 @@ sudo rm -f /etc/resolv.conf
 printf 'nameserver 192.168.0.1\nnameserver 8.8.8.8\n' | sudo tee /etc/resolv.conf
 ```
 
-The permanent fix is the NixOS DNS config (block #5) plus declining lerd's DNS prompt. Once that's in place this shouldn't recur. The only things that re-touch DNS are `lerd install` / `lerd start` (decline the prompt) and the lerd watcher (which only acts when `.test` is already broken).
+The permanent fix is the NixOS DNS config (block #5) plus a lerd that skips host resolver writes when `/etc/NIXOS` exists. An older 1.31+ binary will put the files back on `lerd install` / `lerd start` / watcher repair.
 
 ### "could not find … lerd-nginx" on `lerd link`
 

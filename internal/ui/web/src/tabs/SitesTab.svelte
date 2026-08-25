@@ -25,6 +25,7 @@
     type WorkspaceLayoutEntry
   } from '$stores/workspaces';
   import { openLinkModal, openWorkspaceDeleteModal } from '$stores/modals';
+  import { activeRun } from '$stores/wizard';
   import { get } from 'svelte/store';
   import { flushSync, untrack } from 'svelte';
   import { dndzone, SOURCES, TRIGGERS, type DndEvent } from 'svelte-dnd-action';
@@ -54,7 +55,7 @@
   const sortedMains = $derived(sortSites(mains, $sitesSort));
   // Reordering is available whenever we can write (loopback), in any sort mode.
   // Dragging a site auto-switches the list into manual mode (see persistRowDrop).
-  const canReorder = $derived($accessMode.loopback);
+  const canReorder = $derived($accessMode.localControl);
 
   // Collapse key for the paused block. Leading space, like UNGROUPED, so it can
   // never collide with a workspace name (the server trims those).
@@ -446,10 +447,15 @@
 </script>
 
 {#snippet actions()}
-  {#if $accessMode.loopback}
+  {#if $accessMode.localControl}
     <DumpBridgeToggle />
     <ProfilerToggle />
-    <ActionButton title={m.sites_linkNew()} tone="accent" onclick={openLinkModal}>
+    <ActionButton
+      title={$activeRun ? m.siteWizard_backgroundRunning() : m.sites_linkNew()}
+      tone="accent"
+      loading={$activeRun !== null}
+      onclick={openLinkModal}
+    >
       <Icon name="plus" class="w-3.5 h-3.5" />
     </ActionButton>
   {/if}
@@ -518,7 +524,7 @@
       </div>
     {/if}
 
-    {#if $accessMode.loopback}
+    {#if $accessMode.localControl}
       <button
         type="button"
         onclick={() => ((addingWorkspace = !addingWorkspace), (sortMenuOpen = false))}

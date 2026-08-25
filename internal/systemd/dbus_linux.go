@@ -12,6 +12,7 @@ import (
 
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/coreos/go-systemd/v22/dbus"
+	godbus "github.com/godbus/dbus/v5"
 )
 
 // errUnitOpTimedOut is the sentinel a single unit-op attempt returns when the
@@ -162,10 +163,27 @@ func DBusStartUnit(name string) error {
 // DBusStopUnit stops a user unit via DBus.
 func DBusStopUnit(name string) error {
 	if err := dbusUnitOp("stop", "stop", name); err != nil {
+		if unitNotLoaded(err) {
+			return nil
+		}
 		return err
 	}
 	_ = DBusResetFailed(name)
 	return nil
+}
+
+// unitNotLoaded reports whether an op failed because systemd has no such unit.
+// For a stop that is the goal already met, not a failure: the stop set is built
+// partly from what a site declares rather than from what is on disk, so a
+// machine that never installed a declared worker named units systemd has never
+// heard of and a clean shutdown printed a failure for each one. launchd's side
+// has always treated its equivalent (exit 36) as success.
+func unitNotLoaded(err error) bool {
+	var dberr godbus.Error
+	if errors.As(err, &dberr) {
+		return dberr.Name == "org.freedesktop.systemd1.NoSuchUnit"
+	}
+	return false
 }
 
 // DBusRestartUnit restarts a user unit via DBus.

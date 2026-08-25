@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -8,6 +9,8 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -84,7 +87,7 @@ func TestRewriteLANShareBody_collapsesHTTPSToHTTP(t *testing.T) {
 <script src="https://laravel.test/build/app.js"></script>
 <a href="http://laravel.test/login">Login</a>`)
 
-	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100", reachLAN)
 	got := string(out)
 
 	want := `<link href="http://192.168.1.42:9100/build/app.css">
@@ -102,7 +105,7 @@ func TestRewriteLANShareBody_downgradesAlreadyRewrittenHTTPS(t *testing.T) {
 	in := []byte(`<link href="https://192.168.1.42:9100/build/app.css">
 <script src="https://192.168.1.42:9100/build/app.js"></script>`)
 
-	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100", reachLAN)
 	got := string(out)
 
 	want := `<link href="http://192.168.1.42:9100/build/app.css">
@@ -116,7 +119,7 @@ func TestRewriteLANShareBody_downgradesAlreadyRewrittenHTTPS(t *testing.T) {
 func TestRewriteLANShareBody_leavesUnrelatedURLsAlone(t *testing.T) {
 	in := []byte(`<img src="https://cdn.example.com/logo.png">
 <a href="https://other.test/foo">other</a>`)
-	got, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	got, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100", reachLAN)
 	if string(got) != string(in) {
 		t.Errorf("expected URLs for other domains untouched:\nGOT:\n%s", got)
 	}
@@ -131,7 +134,7 @@ func TestRewriteLANShareBody_rewritesViteLoopback(t *testing.T) {
 <link rel="stylesheet" href="http://127.0.0.1:5173/resources/css/app.css">
 <script type="module" src="http://localhost:5173/main.js"></script>`)
 
-	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100", reachLAN)
 	got := string(out)
 
 	want := `<script src="http://192.168.1.42:9100/__lerd_vite__/5173/@vite/client"></script>
@@ -236,7 +239,7 @@ func TestLANShareHandler_routesViteRequests(t *testing.T) {
 		fmt.Fprint(w, "main-response")
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	h.allowVitePorts([]int{vitePort}) // proxy would have advertised it via body rewrite
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -289,7 +292,7 @@ func TestLANShareHandler_nonVitePrefixPathDoesNotPoisonActivePort(t *testing.T) 
 		fmt.Fprint(w, "main")
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	h.allowVitePorts([]int{vitePort, rustfsPort}) // both advertised by body rewrite
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -358,7 +361,7 @@ func TestLANShareHandler_doesNotTrustReferer(t *testing.T) {
 		fmt.Fprint(w, "main")
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -387,7 +390,7 @@ func TestLANShareHandler_viteInternalPathWithoutReferer_fallsThroughToMain(t *te
 		fmt.Fprint(w, "main")
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -421,7 +424,7 @@ func TestLANShareHandler_viteInternalPathUsesActivePort(t *testing.T) {
 		fmt.Fprint(w, "main")
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	h.allowVitePorts([]int{vitePort}) // proxy would have advertised it via body rewrite
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -518,7 +521,7 @@ func TestLANShareHandler_websocketUpgradeRoutesToVite(t *testing.T) {
 		dispatched = "main"
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	// Pre-seed an active vite port so the upgrade has somewhere to go.
 	h.setActiveVitePort(54321)
 	// Stub the vite proxy entry for that port so we observe dispatch
@@ -586,7 +589,7 @@ func TestLANShareHandler_routesMainRequests(t *testing.T) {
 		fmt.Fprint(w, "main-response")
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -644,7 +647,7 @@ func TestLANShareHandler_rejectsUnadvertisedVitePort(t *testing.T) {
 		fmt.Fprint(w, "main")
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	// Note: secretPort is NEVER added to the allowlist.
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -682,7 +685,7 @@ func TestLANShareHandler_forwardsAdvertisedVitePort(t *testing.T) {
 		t.Errorf("main proxy should not be called for an advertised Vite port")
 	})
 
-	h := newLANShareHandler(main)
+	h := newLANShareHandler(main, reachLAN)
 	// Simulate the body rewriter having advertised this port to the client.
 	h.allowVitePorts([]int{vitePort})
 	srv := httptest.NewServer(h)
@@ -719,6 +722,35 @@ func mustExtractPort(t *testing.T, rawURL string) int {
 	return p
 }
 
+// A probed port is only free until the probe closes, and the proxy binds every
+// interface rather than the loopback the probe held, so a busy runner can take
+// it in between. Probe the same address the proxy will bind and retry when it
+// loses the race.
+func mustStartLANShareProxy(t *testing.T, domain string, httpPort, httpsPort int, secured bool, reach shareReach) (*http.Server, int) {
+	t.Helper()
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		probe, err := net.Listen("tcp", "0.0.0.0:0")
+		if err != nil {
+			t.Fatalf("probe listen: %v", err)
+		}
+		port := probe.Addr().(*net.TCPAddr).Port
+		probe.Close()
+
+		srv, err := startLANShareProxy(domain, port, httpPort, httpsPort, secured, reach)
+		if err == nil {
+			t.Cleanup(func() { srv.Close() })
+			return srv, port
+		}
+		lastErr = err
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			break
+		}
+	}
+	t.Fatalf("startLANShareProxy: %v", lastErr)
+	return nil, 0
+}
+
 func TestLANShareProxy_rewritesHTTPSLocationRedirects(t *testing.T) {
 	// Upstream stands in for nginx/the app. It builds a redirect Location from
 	// the path: /to-domain uses the origin domain, /to-lanhost uses the
@@ -739,19 +771,7 @@ func TestLANShareProxy_rewritesHTTPSLocationRedirects(t *testing.T) {
 	defer upstream.Close()
 	upstreamPort := mustExtractPort(t, upstream.URL)
 
-	// Reserve a free port for the proxy, then hand it to startLANShareProxy.
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("probe listen: %v", err)
-	}
-	proxyPort := probe.Addr().(*net.TCPAddr).Port
-	probe.Close()
-
-	srv, err := startLANShareProxy(domain, proxyPort, upstreamPort, 0, false)
-	if err != nil {
-		t.Fatalf("startLANShareProxy: %v", err)
-	}
-	defer srv.Close()
+	_, proxyPort := mustStartLANShareProxy(t, domain, upstreamPort, 0, false, reachLAN)
 
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -781,7 +801,7 @@ func TestRewriteLANShareBody_fixesLANIPWithWrongPort(t *testing.T) {
 <script src="https://192.168.1.42:443/build/app.js"></script>
 <img src="http://192.168.1.42/logo.png">`)
 
-	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100")
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100", reachLAN)
 	got := string(out)
 
 	want := `<link rel="manifest" href="http://192.168.1.42:9100/manifest.json">
@@ -889,5 +909,89 @@ func TestLANShareEnsureWorktreePort_branchesGetDistinctPorts(t *testing.T) {
 	}
 	if a == b {
 		t.Errorf("both branches got port %d", a)
+	}
+}
+
+// A LAN share deliberately maps the machine's loopback ports through the
+// proxy, so a phone on the WiFi can reach the site's Vite dev server. A public
+// share is fronted by the user's own proxy and answers the internet, where the
+// same route would hand out mailpit, adminer, RustFS and every other loopback
+// service on the host.
+func TestShareProxyRejectsUnadvertisedLoopbackPorts(t *testing.T) {
+	const domain = "laravel.test"
+	const secret = "inbox contents"
+
+	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(secret))
+	}))
+	defer loopback.Close()
+	loopbackPort := mustExtractPort(t, loopback.URL)
+
+	nginx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("no such vhost"))
+	}))
+	defer nginx.Close()
+	nginxPort := mustExtractPort(t, nginx.URL)
+
+	for _, tc := range []struct {
+		name      string
+		reach     shareReach
+		wantProxy bool
+	}{
+		{"lan", reachLAN, false},
+		{"public", reachPublic, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, proxyPort := mustStartLANShareProxy(t, domain, nginxPort, 0, false, tc.reach)
+
+			url := fmt.Sprintf("http://127.0.0.1:%d%s%d/", proxyPort, vitePrefix, loopbackPort)
+			resp, err := http.Get(url) //nolint:noctx
+			if err != nil {
+				t.Fatalf("GET %s: %v", url, err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if got := strings.Contains(string(body), secret); got != tc.wantProxy {
+				t.Errorf("loopback port reachable = %v, want %v (body %q)", got, tc.wantProxy, body)
+			}
+		})
+	}
+}
+
+// The body rewriter is the other half of the same route: it turns absolute
+// loopback URLs into the prefix form. A public share must not advertise a path
+// its handler refuses to serve, nor downgrade its own https origin.
+func TestRewriteShareBodyKeepsLoopbackURLsOffPublicShares(t *testing.T) {
+	in := []byte(`<script src="http://localhost:5173/@vite/client"></script>`)
+
+	out, _ := rewriteLANShareBody(in, "laravel.test", "192.168.1.42:9100", reachLAN)
+	if got := string(out); !strings.Contains(got, vitePrefix) {
+		t.Errorf("LAN share stopped rewriting loopback URLs: %q", got)
+	}
+	out, _ = rewriteLANShareBody(in, "laravel.test", "app.example.com", reachPublic)
+	got := string(out)
+	if strings.Contains(got, vitePrefix) {
+		t.Errorf("public share advertised a loopback route: %q", got)
+	}
+	if got != string(in) {
+		t.Errorf("public share rewrote a loopback URL it cannot serve: %q", got)
+	}
+}
+
+// A public share is reached over the TLS its fronting proxy terminates, so
+// self-referential URLs must stay https rather than being rewritten down.
+func TestRewriteShareBodyKeepsPublicSharesOnHTTPS(t *testing.T) {
+	in := []byte(`<a href="https://laravel.test/login">in</a><a href="http://laravel.test/up">up</a>`)
+
+	out, _ := rewriteLANShareBody(in, "laravel.test", "app.example.com", reachPublic)
+	got := string(out)
+	if strings.Contains(got, "http://app.example.com") {
+		t.Errorf("public share downgraded its own origin to http: %q", got)
+	}
+	if !strings.Contains(got, "https://app.example.com/login") ||
+		!strings.Contains(got, "https://app.example.com/up") {
+		t.Errorf("public share did not rewrite the origin domain: %q", got)
 	}
 }

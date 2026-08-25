@@ -52,15 +52,16 @@ describe('dashboard store', () => {
     open.mockRestore();
   });
 
-  it('openDocs embeds the docs landing page in the overlay', async () => {
+  it('openDocs opens the built-in documentation on its first page', async () => {
     const { openDocs, dashboardOpen } = await import('./dashboard');
 
     dashboardOpen.set(null);
     openDocs();
     const cur = get(dashboardOpen);
     expect(cur?.name).toBe('docs');
-    expect(cur?.dashboard).toBe('https://lerd.sh/getting-started/requirements');
-    expect(location.hash).toBe('#docs');
+    // The pages come from the daemon; lerd.sh is only where the header links out.
+    expect(cur?.dashboard).toBe('https://lerd.sh');
+    expect(location.hash).toBe('#docs/getting-started/requirements');
   });
 
   it('openMailpitMessage opens overlay with extraPath when mailpit is present', async () => {

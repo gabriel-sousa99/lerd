@@ -11,6 +11,8 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/profiler"
+
+	"github.com/gabriel-sousa99/lerd/internal/spxreport"
 )
 
 // handleProfilerToggle turns the SPX profiler on or off globally. Loopback-
@@ -20,7 +22,7 @@ func handleProfilerToggle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !isLoopbackRequest(r) {
+	if !hasHostActionAuthority(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -57,14 +59,33 @@ func buildProfilerStatusJSON() []byte {
 	return b
 }
 
-// handleProfilerClear deletes every captured SPX report. Loopback-only: it
-// removes files from the shared profiler data directory.
+// handleProfilerCaptures reports how many SPX captures exist for a host, and
+// optionally for one normalized route. The dashboard reads it before firing a
+// request at a slow route and again while it waits, so it opens SPX once the
+// profile is on disk rather than the moment the request left.
+func handleProfilerCaptures(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		writeJSON(w, map[string]int{"count": 0})
+		return
+	}
+	writeJSON(w, map[string]int{
+		"count": spxreport.CountCaptures(config.SpxDataDir(), host, r.URL.Query().Get("route")),
+	})
+}
+
+// handleProfilerClear deletes every captured SPX report. It requires
+// dashboard-control authority because it removes files from the host.
 func handleProfilerClear(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !isLoopbackRequest(r) {
+	if !hasHostActionAuthority(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

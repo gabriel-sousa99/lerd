@@ -57,6 +57,7 @@ func TestWriteWorkerUnitFileAcceptsNormalFields(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 	t.Setenv("XDG_DATA_HOME", tmp)
+	isolateLaunchAgents(t)
 
 	changed, err := writeWorkerUnitFile(
 		"lerd-queue-mysite", "Queue Worker", "mysite", t.TempDir(), "8.4",

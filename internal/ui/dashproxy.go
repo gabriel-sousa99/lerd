@@ -15,14 +15,14 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
 )
 
-// Bundled admin dashboards (rabbitmq, redisinsight) set session/consent cookies
-// the browser refuses to carry into a cross-origin iframe, and their upstreams
-// expose no SameSite knob the way pgadmin/phpmyadmin do. We serve them
-// same-origin under /_svc/<name>/ so their cookies are first-party again, the
-// same trick the SPX profiler uses under /_spx/ (see profiler.go). The upstream
-// apps are configured to mount their UI at the same /_svc/<name> prefix
-// (rabbitmq management.path_prefix, redisinsight RI_PROXY_PATH), so the proxy
-// forwards the path unchanged rather than stripping it.
+// Bundled admin dashboards set session cookies the browser refuses to carry
+// into a cross-origin iframe. We serve them same-origin under /_svc/<name>/ so
+// their cookies are first-party again, the same trick the SPX profiler uses
+// under /_spx/ (see profiler.go). Each upstream is told to mount its UI at that
+// same prefix, so the proxy forwards the path unchanged rather than stripping
+// it: rabbitmq via management.path_prefix and phpmyadmin via an apache Alias
+// (conf mounts), redisinsight and mongo-express via env (PresetProxyEnv), and
+// pgadmin per request (PresetProxyHeader).
 
 const dashProxyPrefix = config.DashboardProxyPrefix
 
@@ -41,16 +41,30 @@ func dashProxyName(p string) string {
 }
 
 // dashProxyEligible reports whether a custom service should be served through
-// the same-origin proxy rather than opened in a new tab. Only bundled presets
-// (Preset set and still resolvable) that asked for an external dashboard
-// qualify; a user-defined custom service with dashboard_external keeps the
-// new-tab behavior.
+// the same-origin proxy rather than opened in a new tab. It shares the decision
+// with the quadlet generator, which uses it to tell the upstream where it is
+// mounted, so the two can't disagree about where the dashboard lives.
 func dashProxyEligible(svc *config.CustomService) bool {
-	if svc == nil || !svc.DashboardExternal || svc.Dashboard == "" || svc.Preset == "" {
-		return false
+	return config.DashboardProxied(svc)
+}
+
+// dashProxyTweaks are the per-preset adjustments one proxied dashboard needs:
+// a request header telling the upstream which path it is mounted at, and an
+// inline <script> injected into its HTML so it opens authenticated. Both are
+// derived from the preset, so they are stable for a given service name.
+type dashProxyTweaks struct {
+	headerKey   string
+	headerValue string
+	bootstrap   string
+}
+
+// dashProxyTweaksFor collects what the proxy must add for a service's preset.
+func dashProxyTweaksFor(svc *config.CustomService) dashProxyTweaks {
+	tw := dashProxyTweaks{bootstrap: config.PresetDashboardBootstrap(svc)}
+	if k, v, ok := config.PresetProxyHeader(svc); ok {
+		tw.headerKey, tw.headerValue = k, v
 	}
-	_, err := config.LoadPreset(svc.Preset)
-	return err == nil
+	return tw
 }
 
 var (
@@ -59,16 +73,15 @@ var (
 )
 
 // dashProxyFor returns a cached reverse proxy for the named service, keyed by
-// name and target so a changed dashboard URL rebuilds. bootstrap is an inline
-// <script> injected into the dashboard's HTML so it opens authenticated.
-func dashProxyFor(name string, target *url.URL, bootstrap string) *httputil.ReverseProxy {
+// name and target so a changed dashboard URL rebuilds.
+func dashProxyFor(name string, target *url.URL, tw dashProxyTweaks) *httputil.ReverseProxy {
 	key := name + "|" + target.String()
 	dashProxyMu.Lock()
 	defer dashProxyMu.Unlock()
 	if p, ok := dashProxyCache[key]; ok {
 		return p
 	}
-	p := newDashProxy(name, target, bootstrap)
+	p := newDashProxy(name, target, tw)
 	dashProxyCache[key] = p
 	return p
 }
@@ -78,13 +91,18 @@ func dashProxyFor(name string, target *url.URL, bootstrap string) *httputil.Reve
 // because the upstream is mounted at the same prefix; the response is rewritten
 // so it can be embedded in the lerd-ui iframe (strip framing headers, scope
 // cookies and redirects to the mount path).
-func newDashProxy(name string, target *url.URL, bootstrap string) *httputil.ReverseProxy {
+func newDashProxy(name string, target *url.URL, tw dashProxyTweaks) *httputil.ReverseProxy {
 	prefix := strings.TrimSuffix(dashProxyPath(name), "/")
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	orig := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		orig(req)
 		req.Host = target.Host
+		// Set, not add: the mount path is ours to state, and a client-supplied
+		// value would otherwise steer where the upstream thinks it lives.
+		if tw.headerKey != "" {
+			req.Header.Set(tw.headerKey, tw.headerValue)
+		}
 		// Preserve the scheme the browser actually used (nginx forwards it, and
 		// lerd.localhost is served over https) so an upstream that builds absolute
 		// URLs from X-Forwarded-Proto doesn't downgrade them to http. Default to
@@ -102,7 +120,7 @@ func newDashProxy(name string, target *url.URL, bootstrap string) *httputil.Reve
 		}
 		// We rewrite the HTML to inject the auth bootstrap, so ask the upstream
 		// for an uncompressed body we can edit.
-		if bootstrap != "" {
+		if tw.bootstrap != "" {
 			req.Header.Del("Accept-Encoding")
 		}
 	}
@@ -120,8 +138,8 @@ func newDashProxy(name string, target *url.URL, bootstrap string) *httputil.Reve
 		if loc := resp.Header.Get("Location"); loc != "" {
 			resp.Header.Set("Location", rewriteLocation(loc, target.Host, prefix))
 		}
-		if bootstrap != "" {
-			return injectDashboardBootstrap(resp, bootstrap)
+		if tw.bootstrap != "" {
+			return injectDashboardBootstrap(resp, tw.bootstrap)
 		}
 		return nil
 	}
@@ -259,9 +277,9 @@ func resolveDashboardURL(svc *config.CustomService, services map[string]config.S
 }
 
 // handleDashProxy serves a bundled service dashboard same-origin under
-// /_svc/<name>/. Loopback-only, since it forwards into a local admin UI.
+// /_svc/<name>/. It requires dashboard-control authority.
 func handleDashProxy(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackRequest(r) {
+	if !hasHostActionAuthority(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -301,5 +319,5 @@ func handleDashProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("dashboard for %s must be loopback", name), http.StatusBadGateway)
 		return
 	}
-	dashProxyFor(name, target, config.PresetDashboardBootstrap(svc)).ServeHTTP(w, r)
+	dashProxyFor(name, target, dashProxyTweaksFor(svc)).ServeHTTP(w, r)
 }

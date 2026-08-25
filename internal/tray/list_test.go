@@ -225,3 +225,47 @@ func TestToggleTitle(t *testing.T) {
 		t.Errorf("toggleTitle(off) = %q", got)
 	}
 }
+
+func TestManagedServiceLANTitleDistinguishesEffectiveState(t *testing.T) {
+	cases := []struct {
+		name string
+		snap Snapshot
+		want string
+	}{
+		{"off", Snapshot{}, "Managed service LAN access: Off"},
+		{"armed", Snapshot{LANServicesExposed: true}, "Managed service LAN access: Armed (LAN exposure off)"},
+		{"active", Snapshot{LANExposed: true, LANServicesExposed: true}, "Managed service LAN access: ✔ On"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := managedServiceLANTitle(&tc.snap); got != tc.want {
+				t.Fatalf("managedServiceLANTitle() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestServiceSection_LeavesTheMenuAloneWhenTheReadFailed(t *testing.T) {
+	if _, redraw := serviceSection(&Snapshot{ServicesKnown: false}); redraw {
+		t.Error("a section the poll could not read must be left as it is, not emptied")
+	}
+}
+
+func TestServiceSection_RedrawsWhateverWasRead(t *testing.T) {
+	snap := &Snapshot{ServicesKnown: true, Services: []serviceInfo{{Name: "mysql", Status: "active"}}}
+
+	rows, redraw := serviceSection(snap)
+	if !redraw {
+		t.Fatal("a section that was read must be redrawn")
+	}
+	if len(rows) != 1 || !strings.Contains(rows[0].title, "mysql") {
+		t.Errorf("rows = %v, want the one service that was read", rows)
+	}
+}
+
+func TestServiceSection_AnEmptyReadHidesTheSection(t *testing.T) {
+	rows, redraw := serviceSection(&Snapshot{ServicesKnown: true})
+	if !redraw || len(rows) != 0 {
+		t.Errorf("serviceSection = %v, %v; want an empty redraw so the section hides", rows, redraw)
+	}
+}

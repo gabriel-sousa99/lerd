@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { readable } from 'svelte/store';
+import { readable, writable } from 'svelte/store';
 import { tick } from 'svelte';
 import { vi } from 'vitest';
 
@@ -28,10 +28,11 @@ vi.mock('$stores/status', async (orig) => {
 });
 vi.mock('$stores/sites', async (orig) => {
   const actual = (await orig()) as object;
-  return { ...actual, sites: readable([]), sitesByPhp: readable(new Map()) };
+  return { ...actual, sites: writable([]), sitesByPhp: readable(new Map()) };
 });
 
 import PhpDetail from './PhpDetail.svelte';
+import { sites } from '$stores/sites';
 
 function setStatus(fpm: Record<string, unknown> = {}) {
   statusStore.set({
@@ -43,14 +44,41 @@ function setStatus(fpm: Record<string, unknown> = {}) {
 }
 
 function openMenu(container: HTMLElement) {
-  const toggle = container.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+  const toggle = container.querySelector<HTMLButtonElement>('[data-testid="button-menu-toggle"]');
   expect(toggle).not.toBeNull();
   toggle!.click();
   return tick();
 }
 
 describe('PhpDetail', () => {
-  beforeEach(() => setStatus());
+  beforeEach(() => {
+    setStatus();
+    sites.set([]);
+  });
+
+  it('carries the sites on the version in the tab strip instead of a tab of its own', async () => {
+    sites.set([
+      { domain: 'acme.test', php_version: '8.4', fpm_running: true },
+      { domain: 'shop.test', php_version: '8.4' },
+      { domain: 'old.test', php_version: '8.3' }
+    ]);
+    const { container } = render(PhpDetail, { props: { version: '8.4' } });
+
+    expect(screen.queryByRole('button', { name: 'Sites' })).not.toBeInTheDocument();
+    const trigger = screen.getByLabelText('2 sites');
+    expect(container.querySelector('.border-b')?.contains(trigger)).toBe(true);
+
+    trigger.click();
+    await tick();
+    expect(screen.getByText('acme.test')).toBeInTheDocument();
+    expect(screen.getByText('shop.test')).toBeInTheDocument();
+    expect(screen.queryByText('old.test')).not.toBeInTheDocument();
+  });
+
+  it('leaves the tab strip without a sites control when no site is on the version', () => {
+    render(PhpDetail, { props: { version: '8.4' } });
+    expect(screen.queryByLabelText(/sites$/)).not.toBeInTheDocument();
+  });
 
   it('leaves the version, default star and status pill to the card', () => {
     render(PhpDetail, { props: { version: '8.4' } });

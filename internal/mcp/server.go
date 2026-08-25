@@ -112,10 +112,23 @@ type mcpSchema struct {
 }
 
 type mcpProp struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
+	Type        string    `json:"type"`
+	Description string    `json:"description,omitempty"`
+	Enum        []string  `json:"enum,omitempty"`
+	Items       *mcpItems `json:"items,omitempty"`
 }
+
+// mcpItems is the element schema for an array-typed property. Pick the one
+// matching what the handler actually parses: a strict client validates against
+// this, and an element the handler cannot assert is dropped without an error.
+type mcpItems struct {
+	Type string `json:"type"`
+}
+
+var (
+	stringItems = &mcpItems{Type: "string"}
+	objectItems = &mcpItems{Type: "object"}
+)
 
 // Serve runs the MCP server, reading JSON-RPC messages from stdin and writing responses to stdout.
 // All diagnostic output goes to stderr so it never corrupts the JSON-RPC stream on stdout.
@@ -1543,12 +1556,14 @@ func execServiceRemove(args map[string]any) (any, *rpcError) {
 	}
 	removeData := boolArg(args, "remove_data")
 
-	if err := serviceops.RemoveService(name, serviceops.RemoveOptions{RemoveData: removeData}, nil); err != nil {
+	opts := serviceops.RemoveOptions{RemoveData: removeData, SkipSnapshot: boolArg(args, "no_snapshot")}
+	taken := ""
+	if err := serviceops.RemoveService(name, opts, snapshotNoter(&taken)); err != nil {
 		return toolErr(err.Error()), nil
 	}
 
 	if removeData {
-		return toolOK(fmt.Sprintf("Service %q removed. Data renamed aside as %s.pre-remove-<ts>.", name, config.DataSubDir(name))), nil
+		return toolOK(fmt.Sprintf("Service %q removed. Data renamed aside as %s.pre-remove-<ts>.%s", name, config.DataSubDir(name), taken)), nil
 	}
 	return toolOK(fmt.Sprintf("Service %q removed. Persistent data was NOT deleted.", name)), nil
 }
@@ -1559,13 +1574,26 @@ func execServiceReinstall(args map[string]any) (any, *rpcError) {
 		return toolErr("name is required"), nil
 	}
 	resetData := boolArg(args, "reset_data")
-	if err := serviceops.ReinstallService(name, resetData, nil); err != nil {
+	opts := serviceops.ReinstallOptions{ResetData: resetData, SkipSnapshot: boolArg(args, "no_snapshot")}
+	taken := ""
+	if err := serviceops.ReinstallService(name, opts, snapshotNoter(&taken)); err != nil {
 		return toolErr(err.Error()), nil
 	}
 	if resetData {
-		return toolOK(fmt.Sprintf("Service %q reinstalled with fresh data; linked sites' DBs/buckets were recreated.", name)), nil
+		return toolOK(fmt.Sprintf("Service %q reinstalled with fresh data; linked sites' DBs/buckets were recreated.%s", name, taken)), nil
 	}
 	return toolOK(fmt.Sprintf("Service %q reinstalled (data preserved).", name)), nil
+}
+
+// snapshotNoter collects the safety-snapshot line off the phase stream, so the
+// tool result can tell the caller what to restore from rather than leaving the
+// snapshot to be discovered in db:snapshots.
+func snapshotNoter(out *string) func(serviceops.PhaseEvent) {
+	return func(e serviceops.PhaseEvent) {
+		if e.Phase == "snapshot_taken" {
+			*out = " " + e.Message
+		}
+	}
 }
 
 // resolveTunableService returns the resolved service definition + the
@@ -3075,6 +3103,7 @@ func execCommandsRun(args map[string]any) (any, *rpcError) {
 	}
 	cmd := exec.Command("sh", "-c", target.Command)
 	cmd.Dir = cwd
+	cmd.Env = hostCommandEnv()
 	out, runErr := cmd.CombinedOutput()
 	body := string(out)
 	if runErr != nil {
@@ -3733,7 +3762,7 @@ func execProjectNew(args map[string]any) (any, *rpcError) {
 	}
 	extraArgs := strSliceArg(args, "args")
 
-	fw, ok := config.GetFrameworkOrFetch(frameworkName)
+	fw, ok := config.GetFrameworkForScaffold(frameworkName, "")
 	if !ok {
 		return toolErr(fmt.Sprintf("unknown framework %q — use framework_list to see available frameworks", frameworkName)), nil
 	}
@@ -4032,6 +4061,9 @@ func execSiteRuntime(args map[string]any) (any, *rpcError) {
 		if site.Secured {
 			if err := nginx.GenerateSSLVhost(*site, site.PHPVersion); err != nil {
 				return toolErr("regenerating SSL vhost: " + err.Error()), nil
+			}
+			if err := nginx.InstallSSLVhost(site.PrimaryDomain()); err != nil {
+				return toolErr("installing SSL vhost: " + err.Error()), nil
 			}
 		} else if err := nginx.GenerateVhost(*site, site.PHPVersion); err != nil {
 			return toolErr("regenerating vhost: " + err.Error()), nil
@@ -4613,4 +4645,11 @@ func execUnpark(args map[string]any) (any, *rpcError) {
 		return toolErr("path is required"), nil
 	}
 	return runLerdCmd("unpark", path)
+}
+
+// hostCommandEnv is the environment for a framework command run on the host.
+// Those strings all start with `php`, which resolves through lerd's shim dir,
+// and `lerd path:disable` keeps that dir off the user's own PATH.
+func hostCommandEnv() []string {
+	return append(os.Environ(), "PATH="+config.PathWithBinDir())
 }

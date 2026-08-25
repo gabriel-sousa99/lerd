@@ -70,6 +70,7 @@ func installDNSService(w io.Writer) error {
 	if err := os.MkdirAll(filepath.Dir(plistFile), 0755); err != nil {
 		return err
 	}
+	config.GuardRealWrite(plistFile)
 	return os.WriteFile(plistFile, []byte(plist), 0644)
 }
 

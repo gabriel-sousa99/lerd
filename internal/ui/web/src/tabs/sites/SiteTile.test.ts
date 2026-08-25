@@ -48,6 +48,24 @@ describe('SiteTile', () => {
     expect(container.querySelector('.opacity-60')).toBeTruthy();
   });
 
+  // The dashboard widget renders the same tile in a much narrower column, so
+  // it asks for a tighter card rather than restyling the tile.
+  it('tightens the card and the icon box when compact', () => {
+    const { container } = render(SiteTile, { props: { site: site(), compact: true } });
+    const card = container.firstElementChild as HTMLElement;
+    expect(card.className).toContain('rounded-lg');
+    expect(card.className).toContain('p-2.5');
+    expect(container.querySelector('.w-8.h-8')).toBeTruthy();
+  });
+
+  it('keeps the roomier card by default', () => {
+    const { container } = render(SiteTile, { props: { site: site() } });
+    const card = container.firstElementChild as HTMLElement;
+    expect(card.className).toContain('rounded-xl');
+    expect(card.className).toContain('p-3');
+    expect(container.querySelector('.w-9.h-9')).toBeTruthy();
+  });
+
   it('shows a running worker dot when a worker is active', () => {
     const { container } = render(SiteTile, { props: { site: site({ queue_running: true }) } });
     expect(container.querySelector('.bg-amber-400')).toBeTruthy();

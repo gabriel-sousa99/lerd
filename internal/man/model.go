@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/gabriel-sousa99/lerd/internal/docs"
 )
 
 var (
@@ -39,8 +40,8 @@ func renderCmd(path, content string, width int, style string) tea.Cmd {
 
 // Model is the bubbletea model for the documentation browser.
 type Model struct {
-	allPages  []Page
-	filtered  []Page
+	allPages  []docs.Page
+	filtered  []docs.Page
 	cursor    int
 	filter    string
 	state     viewState
@@ -56,7 +57,7 @@ type Model struct {
 
 // NewModel creates a new Model. If args contains a page slug, that page is opened directly.
 // glamStyle should be determined before the TUI starts (e.g. "dark" or "light").
-func NewModel(pages []Page, args []string, glamStyle string) Model {
+func NewModel(pages []docs.Page, args []string, glamStyle string) Model {
 	m := Model{
 		allPages:  pages,
 		filtered:  pages,
@@ -77,7 +78,7 @@ func NewModel(pages []Page, args []string, glamStyle string) Model {
 			}
 		}
 		m.filter = query
-		m.filtered = FilterPages(pages, query)
+		m.filtered = docs.FilterPages(pages, query)
 	}
 	return m
 }
@@ -184,7 +185,7 @@ func (m Model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.filter) > 0 {
 			runes := []rune(m.filter)
 			m.filter = string(runes[:len(runes)-1])
-			m.filtered = FilterPages(m.allPages, m.filter)
+			m.filtered = docs.FilterPages(m.allPages, m.filter)
 			if m.cursor >= len(m.filtered) {
 				m.cursor = max(0, len(m.filtered)-1)
 			}
@@ -193,7 +194,7 @@ func (m Model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		if msg.Text != "" {
 			m.filter += msg.Text
-			m.filtered = FilterPages(m.allPages, m.filter)
+			m.filtered = docs.FilterPages(m.allPages, m.filter)
 			m.cursor = 0
 		}
 	}
@@ -296,7 +297,7 @@ func (m Model) viewList() string {
 					lines = append(lines, lineInfo{text: "", pageIdx: -1})
 				}
 				lines = append(lines, lineInfo{
-					text:    "  " + sectionStyle.Render(SectionLabel(page.Section)),
+					text:    "  " + sectionStyle.Render(docs.SectionLabel(page.Section)),
 					pageIdx: -1,
 				})
 				lastSection = page.Section
@@ -352,7 +353,7 @@ func (m Model) viewDetail() string {
 	b.WriteString("\n")
 	header := fmt.Sprintf("  %s", page.Title)
 	if page.Section != "" {
-		header += "  " + dimStyle.Render("["+SectionLabel(page.Section)+"]")
+		header += "  " + dimStyle.Render("["+docs.SectionLabel(page.Section)+"]")
 	}
 	b.WriteString(titleStyle.Render(header) + "\n")
 	b.WriteString(m.divider() + "\n")

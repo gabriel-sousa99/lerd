@@ -430,7 +430,7 @@ func (m *Model) dashResourcesCard(width int) cardContent {
 	if !m.stats.Available {
 		return cardContent{[]string{dimStyle.Render("collecting…")}, nil}
 	}
-	lines := []string{dashRowRight("CPU", fmt.Sprintf("%.1f%%", m.stats.TotalCPUPercent), width)}
+	lines := []string{dashRowRight("CPU", fmt.Sprintf("%.2f%%", m.stats.TotalCPUPercent), width)}
 	memText := stats.FormatBytes(m.stats.TotalMemBytes)
 	if m.stats.HostMemBytes > 0 {
 		memText += " / " + stats.FormatBytes(m.stats.HostMemBytes)
@@ -438,7 +438,7 @@ func (m *Model) dashResourcesCard(width int) cardContent {
 	lines = append(lines, dashRowRight("Memory", memText, width), "")
 	for _, c := range m.stats.Containers {
 		name := dimStyle.Render(truncatePlain(c.Name, 18))
-		value := fmt.Sprintf("%5.1f%%  %s", c.CPUPercent, stats.FormatBytes(c.MemBytes))
+		value := fmt.Sprintf("%5.2f%%  %s", c.CPUPercent, stats.FormatBytes(c.MemBytes))
 		lines = append(lines, dashRowRight(name, value, width))
 	}
 	return cardContent{lines, nil}

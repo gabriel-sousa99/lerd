@@ -37,6 +37,14 @@ import (
 // Per-unit cooldown prevents heal storms when a worker crashes on launch
 // (e.g. FPM container down): we wait at least 2 minutes before retrying
 // the same unit so launchd's own throttling has room to work.
+// healPaused reports whether a tick must not heal anything right now. A tick
+// landing inside a teardown would see every plist with a dead PID and start the
+// workers back up, and the logout teardown runs in this same process, so the
+// window is real rather than theoretical.
+func healPaused() bool {
+	return config.IsStopped() || cli.WorkerMigrationActive()
+}
+
 func WatchExecWorkers(interval time.Duration) {
 	const minHealInterval = 2 * time.Minute
 	cooldown := map[string]time.Time{}
@@ -45,7 +53,7 @@ func WatchExecWorkers(interval time.Duration) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if cli.WorkerMigrationActive() {
+		if healPaused() {
 			continue
 		}
 		cfg, err := config.LoadGlobal()

@@ -314,16 +314,23 @@ func Enrich(s config.Site, flags EnrichFlag) EnrichedSite {
 	var hasFw bool
 
 	if flags&EnrichFramework != 0 || flags&EnrichWorkers != 0 || flags&EnrichLogs != 0 || flags&EnrichFavicon != 0 {
-		fw, hasFw = config.GetFrameworkForDir(s.Framework, s.Path)
+		// The registry holds a copy of the name, written once when the site was
+		// linked and never revisited, so a site registered while its definition
+		// could not resolve carries nothing. The project itself is the committed
+		// truth, so ask it rather than reading the site as frameworkless.
+		if e.FrameworkName == "" {
+			if name, ok := config.DetectFrameworkForDir(s.Path); ok {
+				e.FrameworkName = name
+			}
+		}
+		fw, hasFw = config.GetFrameworkForDir(e.FrameworkName, s.Path)
 		if hasFw {
-			e.FrameworkVersion = fw.Version
-			if fw.VersionGuessed {
-				// Report the project's real version, not the borrowed
-				// definition's, and don't enforce that definition's PHP range.
-				if fw.DetectedVersion != "" {
-					e.FrameworkVersion = fw.DetectedVersion
-				}
-			} else {
+			// The version reported is the one the project runs, whichever
+			// definition lerd had to borrow to serve it. The PHP range is a
+			// separate question: it holds unless the definition predates the
+			// project so far that its ceiling would be wrong.
+			e.FrameworkVersion = frameworkVersionOf(fw)
+			if !fw.VersionGuessed {
 				e.FrameworkPHPMin = fw.PHP.Min
 				e.FrameworkPHPMax = fw.PHP.Max
 			}
@@ -331,8 +338,8 @@ func Enrich(s config.Site, flags EnrichFlag) EnrichedSite {
 	}
 
 	if flags&EnrichFramework != 0 {
-		e.FrameworkLabel = frameworkLabel(s.Framework, s.Path, fw, hasFw)
-		e.AppName = LaravelAppName(s.Framework, s.Path)
+		e.FrameworkLabel = frameworkLabel(e.FrameworkName, s.Path, fw, hasFw)
+		e.AppName = LaravelAppName(e.FrameworkName, s.Path)
 	}
 
 	if flags&EnrichVersions != 0 {
@@ -368,7 +375,7 @@ func Enrich(s config.Site, flags EnrichFlag) EnrichedSite {
 	}
 
 	if flags&EnrichFavicon != 0 {
-		e.HasFavicon = DetectFavicon(s.Path, s.PublicDir, s.Framework, fw, hasFw) != ""
+		e.HasFavicon = DetectFavicon(s.Path, s.PublicDir, e.FrameworkName, fw, hasFw) != ""
 	}
 
 	return e
@@ -728,15 +735,13 @@ func (e *EnrichedSite) enrichGit() {
 				}
 				info.DBIsolated = cfg.DBIsolated
 			}
-			info.DBDatabase = envfile.ReadKey(filepath.Join(wt.Path, ".env"), "DB_DATABASE")
+			wtBinding := config.DBEnvBindingFor(wt.Path)
+			info.DBDatabase = envfile.Reader(filepath.Join(wt.Path, wtBinding.File), wtBinding.Format)(wtBinding.NameKey)
 			if entry, ok, err := config.FindWorktreeLAN(e.Name, wt.Branch); err == nil && ok {
 				info.LANPort = entry.Port
 			}
 			if fw, ok := config.GetFrameworkForDir(e.FrameworkName, wt.Path); ok {
-				info.FrameworkVersion = fw.Version
-				if fw.VersionGuessed && fw.DetectedVersion != "" {
-					info.FrameworkVersion = fw.DetectedVersion
-				}
+				info.FrameworkVersion = frameworkVersionOf(fw)
 				info.FrameworkLabel = frameworkLabel(e.FrameworkName, wt.Path, fw, true)
 				info.FrameworkWorkers = enrichWorktreeWorkers(e.Name, wt.Path, fw)
 			} else {
@@ -757,14 +762,22 @@ func (e *EnrichedSite) enrichServices() {
 
 	if projErr == nil && proj != nil {
 		for _, ps := range proj.Services {
-			if ps.Name != "" && !svcSet[ps.Name] {
-				e.Services = append(e.Services, ps.Name)
-				svcSet[ps.Name] = true
+			// A project already carrying sqlite in its services list is not
+			// carrying a service: it has no preset, no container and nothing to
+			// install, so a surface rendering it can only offer to install
+			// something that cannot exist. Projects written before lerd stopped
+			// recording it keep the entry, so it is ignored here rather than
+			// only at the source.
+			if ps.Name == "" || ps.Name == "sqlite" || svcSet[ps.Name] {
+				continue
 			}
+			e.Services = append(e.Services, ps.Name)
+			svcSet[ps.Name] = true
 		}
 	}
 
-	envData, err := os.ReadFile(filepath.Join(e.Path, ".env"))
+	envFile, _ := config.EnvFileFor(e.Path)
+	envData, err := os.ReadFile(filepath.Join(e.Path, envFile))
 	if err != nil {
 		return
 	}
@@ -817,7 +830,7 @@ func (e *EnrichedSite) enrichDomainConflicts() {
 			continue
 		}
 		owner := ""
-		if owning, _ := config.IsDomainUsed(full); owning != nil && owning.Path != e.Path {
+		if owning, _ := config.IsDomainUsed(full); owning != nil && !config.SamePath(owning.Path, e.Path) {
 			owner = owning.Name
 		}
 		e.ConflictingDomains = append(e.ConflictingDomains, ConflictingDomain{
@@ -831,28 +844,28 @@ func (e *EnrichedSite) enrichLogs(fw *config.Framework, hasFw bool) {
 	e.HasAppLogs = hasLogFiles(hasFw, fw, e.Path)
 }
 
+// frameworkVersionOf is the version a site runs, which is the project's own
+// whenever it differs from the definition serving it. A WordPress 7 site read
+// "WordPress 6" because the borrowed definition's version was reported instead,
+// and a definition is borrowed in both directions: below the oldest published
+// one and past the newest.
+func frameworkVersionOf(fw *config.Framework) string {
+	if fw == nil {
+		return ""
+	}
+	if fw.DetectedVersion != "" {
+		return fw.DetectedVersion
+	}
+	return fw.Version
+}
+
 func frameworkLabel(name, path string, fw *config.Framework, hasFw bool) string {
 	if name == "" {
 		return ""
 	}
 	if hasFw {
-		// Prefer the version detected from the project's composer.json
-		// constraint (e.g. `"laravel/framework": "^8.75"` → "8") over
-		// fw.Version, which is the bundled definition's version — always
-		// the upstream latest, and stale for older projects. Fork fix for
-		// "Laravel 13 shown on a Laravel 8 project".
-		version := config.DetectMajorVersion(path, name)
-		// A guessed definition is borrowed from a different major, so its own
-		// Version never describes this project; the version detection recorded
-		// on the definition still does.
-		if version == "" && fw.VersionGuessed {
-			version = fw.DetectedVersion
-		}
-		if version == "" {
-			version = fw.Version
-		}
-		if version != "" {
-			return fw.Label + " " + version
+		if v := frameworkVersionOf(fw); v != "" {
+			return fw.Label + " " + v
 		}
 		return fw.Label
 	}

@@ -34,6 +34,7 @@ func NewShareCmd() *cobra.Command {
 	var useExpose bool
 	var useServeo bool
 	var useLocalhostRun bool
+	var usePinggy bool
 	var domain string
 	var token string
 
@@ -50,6 +51,8 @@ Supported tools:
   expose         https://expose.dev
   localhost.run  free SSH tunnel, no account needed (--localhost-run)
   serveo.net     free SSH tunnel, no account needed (--serveo)
+  Pinggy         free SSH tunnel, no account needed (--pinggy); a token from
+                 "lerd share:token pinggy" gives a stable subdomain
 
 A default tool can be set with "lerd share:tool"; flags override it per run.
 
@@ -62,7 +65,7 @@ A base domain set with "lerd share:domain" does the same without the flag: a
 Cloudflare share is served on "<site>.<base domain>".`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runShare(args, useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun, domain, token)
+			return runShare(args, useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun, usePinggy, domain, token)
 		},
 	}
 
@@ -71,8 +74,9 @@ Cloudflare share is served on "<site>.<base domain>".`,
 	cmd.Flags().BoolVar(&useExpose, "expose", false, "Use Expose")
 	cmd.Flags().BoolVar(&useServeo, "serveo", false, "Use serveo.net (SSH, no signup)")
 	cmd.Flags().BoolVar(&useLocalhostRun, "localhost-run", false, "Use localhost.run (SSH, no signup)")
+	cmd.Flags().BoolVar(&usePinggy, "pinggy", false, "Use Pinggy (SSH, no signup)")
 	cmd.Flags().StringVar(&domain, "domain", "", "Serve on your own Cloudflare-managed hostname (implies Cloudflare Tunnel)")
-	cmd.Flags().StringVar(&token, "token", "", "ngrok auth token for this run, overriding the one from \"lerd share:token\"")
+	cmd.Flags().StringVar(&token, "token", "", "Auth token for this run, overriding the stored one (ngrok, or Pinggy with --pinggy)")
 	return cmd
 }
 
@@ -86,16 +90,48 @@ const (
 )
 
 type shareTool struct {
-	mode    shareMode
-	sshHost string // only for shareModeSSH
-	domain  string // only for shareModeCloudflare: user's own hostname (named tunnel)
+	mode   shareMode
+	ssh    sshProvider // only for shareModeSSH
+	domain string      // only for shareModeCloudflare: user's own hostname (named tunnel)
 	// ngrok / ngrokToken are only for shareModeNgrok: which route runs the
 	// tool, and the token that authenticates it on either of them.
 	ngrok      ngrokRunner
 	ngrokToken string
 }
 
-func runShare(args []string, useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun bool, domain, token string) error {
+// sshProvider is the connection shape of one SSH tunnel provider. The providers
+// disagree on every part of the invocation, so the mode carries the whole shape
+// rather than just a host.
+type sshProvider struct {
+	name string // canonical tool name
+	host string
+	port int    // 0 uses ssh's default port
+	user string // "" connects without a user part
+	// remotePort is the remote side of the -R forward; "0" asks the server to
+	// pick one, which is how Pinggy allocates a tunnel.
+	remotePort string
+}
+
+var sshProviders = map[string]sshProvider{
+	"serveo":        {name: "serveo", host: "serveo.net", user: "nokey", remotePort: "80"},
+	"localhost-run": {name: "localhost-run", host: "localhost.run", user: "nokey", remotePort: "80"},
+	"pinggy":        {name: "pinggy", host: "free.pinggy.io", port: 443, remotePort: "0"},
+}
+
+// pinggyProHost serves tokened Pinggy tunnels; the token rides as the SSH user.
+const pinggyProHost = "pro.pinggy.io"
+
+// pinggySSHProvider is the pinggy entry with the stored token applied: a token
+// moves the connection to the pro endpoint and becomes the SSH user.
+func pinggySSHProvider(token string) sshProvider {
+	p := sshProviders["pinggy"]
+	if token != "" {
+		p.host, p.user = pinggyProHost, token
+	}
+	return p
+}
+
+func runShare(args []string, useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun, usePinggy bool, domain, token string) error {
 	site, branch, err := resolveShareSite(args)
 	if err != nil {
 		return err
@@ -115,13 +151,19 @@ func runShare(args []string, useNgrok, useCloudflare, useExpose, useServeo, useL
 	}
 
 	// The flag is for a single run, so it outranks the stored token without
-	// replacing it.
+	// replacing it. It goes to Pinggy when Pinggy was picked explicitly, and
+	// keeps meaning ngrok everywhere else.
 	ngrokToken := cfg.Share.NgrokToken
+	pinggyToken := cfg.Share.PinggyToken
 	if token != "" {
-		ngrokToken = token
+		if usePinggy {
+			pinggyToken = token
+		} else {
+			ngrokToken = token
+		}
 	}
 
-	tool, err := pickShareTool(useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun, domain, cfg.Share.DefaultTool, ngrokToken)
+	tool, err := pickShareTool(useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun, usePinggy, domain, cfg.Share.DefaultTool, ngrokToken, pinggyToken)
 	if err != nil {
 		return err
 	}
@@ -338,12 +380,21 @@ func buildTunnelCommand(tool *shareTool, tunnelName string, target shareTarget, 
 		if !headless {
 			fmt.Printf("Local proxy started on port %d (Host: %s → nginx:%d)\n\n", proxyPort, target.domain, httpPort)
 		}
-		cmd = exec.Command(hostbin.Path("ssh"),
+		args := []string{
 			"-o", "StrictHostKeyChecking=no",
 			"-o", "ServerAliveInterval=30",
-			"-R", fmt.Sprintf("80:localhost:%d", proxyPort),
-			"nokey@"+tool.sshHost,
-		)
+		}
+		if tool.ssh.port != 0 {
+			args = append(args, "-p", strconv.Itoa(tool.ssh.port))
+		}
+		dest := tool.ssh.host
+		if tool.ssh.user != "" {
+			dest = tool.ssh.user + "@" + dest
+		}
+		// "--" ends option parsing: a Pinggy token rides as the SSH user, so a
+		// token starting with "-" would otherwise reach ssh as a flag.
+		args = append(args, "-R", fmt.Sprintf("%s:localhost:%d", tool.ssh.remotePort, proxyPort), "--", dest)
+		cmd = exec.Command(hostbin.Path("ssh"), args...)
 	default:
 		// Unreachable through pickShareTool, but a nil command here would be a
 		// nil dereference in the caller rather than an error it can report.
@@ -386,15 +437,15 @@ func resolveShareSite(args []string) (*config.Site, string, error) {
 	return ensureSiteAndBranchForCwd()
 }
 
-func pickShareTool(useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun bool, domain, defaultTool, ngrokToken string) (*shareTool, error) {
+func pickShareTool(useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun, usePinggy bool, domain, defaultTool, ngrokToken, pinggyToken string) (*shareTool, error) {
 	count := 0
-	for _, f := range []bool{useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun} {
+	for _, f := range []bool{useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRun, usePinggy} {
 		if f {
 			count++
 		}
 	}
 	if count > 1 {
-		return nil, fmt.Errorf("only one of --ngrok, --cloudflare, --expose, --serveo, --localhost-run may be specified")
+		return nil, fmt.Errorf("only one of --ngrok, --cloudflare, --expose, --serveo, --localhost-run, --pinggy may be specified")
 	}
 	fromDefault := false
 
@@ -420,6 +471,8 @@ func pickShareTool(useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRu
 			useServeo = true
 		case "localhost-run":
 			useLocalhostRun = true
+		case "pinggy":
+			usePinggy = true
 		default:
 			return nil, fmt.Errorf("unknown default share tool %q in config: run \"lerd share:tool\" to fix it", defaultTool)
 		}
@@ -445,10 +498,13 @@ func pickShareTool(useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRu
 		return &shareTool{mode: shareModeExpose}, nil
 	}
 	if useServeo {
-		return &shareTool{mode: shareModeSSH, sshHost: "serveo.net"}, nil
+		return &shareTool{mode: shareModeSSH, ssh: sshProviders["serveo"]}, nil
 	}
 	if useLocalhostRun {
-		return &shareTool{mode: shareModeSSH, sshHost: "localhost.run"}, nil
+		return &shareTool{mode: shareModeSSH, ssh: sshProviders["localhost-run"]}, nil
+	}
+	if usePinggy {
+		return &shareTool{mode: shareModeSSH, ssh: pinggySSHProvider(pinggyToken)}, nil
 	}
 
 	// Auto-detect.
@@ -469,7 +525,7 @@ func pickShareTool(useNgrok, useCloudflare, useExpose, useServeo, useLocalhostRu
 	}
 	if _, ok := hostbin.Look("ssh"); ok {
 		fmt.Println("ngrok/cloudflared/Expose not found — using localhost.run (SSH, no signup required)")
-		return &shareTool{mode: shareModeSSH, sshHost: "localhost.run"}, nil
+		return &shareTool{mode: shareModeSSH, ssh: sshProviders["localhost-run"]}, nil
 	}
 
 	return nil, fmt.Errorf("no tunnel tool found — install ngrok (https://ngrok.com/download), cloudflared (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), or Expose (https://expose.dev), or ensure ssh is in PATH")
@@ -526,53 +582,68 @@ func ensureCloudflareTunnel(siteName, domain string, interactive bool) (string, 
 	if err != nil && !reused {
 		return "", fmt.Errorf("cloudflared tunnel create %s: %w\n%s", name, err, out)
 	}
-	if reused {
-		if err := checkTunnelCredentials(name); err != nil {
-			return "", err
+	// A tunnel that exists on the account but has no local credentials file
+	// (the ~/.cloudflared creds were cleared, or it was created on another
+	// machine) cannot be run and "create" won't overwrite it. Recover by
+	// deleting it and creating a fresh one, which writes new local credentials,
+	// rather than failing and asking the user to do it by hand.
+	if reused && credentialsMissing(name) {
+		if interactive {
+			fmt.Printf("Cloudflare tunnel %q has no local credentials; recreating it.\n", name)
+		}
+		if out, derr := exec.Command(hostbin.Path("cloudflared"), "tunnel", "delete", name).CombinedOutput(); derr != nil {
+			return "", fmt.Errorf("recreating tunnel %s: could not delete the orphaned tunnel: %w\n%s", name, derr, out)
+		}
+		if out, cerr := exec.Command(hostbin.Path("cloudflared"), "tunnel", "create", name).CombinedOutput(); cerr != nil {
+			return "", fmt.Errorf("recreating tunnel %s: create after delete failed: %w\n%s", name, cerr, out)
 		}
 	}
 
-	// Re-routing a hostname that already points here is a no-op, but cloudflared
-	// refuses to overwrite a record aimed elsewhere, so tolerate that and let the
-	// user verify where it points.
+	// Point the hostname at this tunnel. A record that already exists for a lerd
+	// share hostname is a stale one from an earlier tunnel: cloudflared refuses to
+	// overwrite it, and a stale CNAME to a gone tunnel is exactly Cloudflare error
+	// 1033. So on "already exists" retry with --overwrite-dns to repoint it at the
+	// current tunnel rather than leaving the site unreachable.
 	out, err = exec.Command(hostbin.Path("cloudflared"), "tunnel", "route", "dns", name, domain).CombinedOutput()
-	if err != nil {
-		if strings.Contains(string(out), "already exists") || strings.Contains(string(out), "already configured") {
-			if interactive {
-				fmt.Printf("DNS record for %s already exists, make sure it CNAMEs to tunnel %q.\n", domain, name)
-			}
-		} else {
-			return "", fmt.Errorf("cloudflared tunnel route dns %s %s: %w\n%s", name, domain, err, out)
+	if err != nil && (strings.Contains(string(out), "already exists") || strings.Contains(string(out), "already configured")) {
+		if interactive {
+			fmt.Printf("DNS record for %s already exists; repointing it at tunnel %q.\n", domain, name)
 		}
-	} else if interactive && strings.Contains(string(out), "Added CNAME") {
+		out, err = exec.Command(hostbin.Path("cloudflared"), "tunnel", "route", "dns", "--overwrite-dns", name, domain).CombinedOutput()
+	}
+	if err != nil {
+		return "", fmt.Errorf("cloudflared tunnel route dns %s %s: %w\n%s", name, domain, err, out)
+	}
+	if interactive && strings.Contains(string(out), "Added CNAME") {
 		fmt.Printf("Routed %s to tunnel %q. The record is new, so give it a moment: opening it too early can leave your resolver caching the miss for up to 30 minutes.\n", domain, name)
 	}
 	return name, nil
 }
 
-// checkTunnelCredentials verifies the credentials file for an existing tunnel is
-// present locally. Without it "tunnel run" dies with an opaque cloudflared error,
-// which is what happens when the tunnel was created on another machine.
-func checkTunnelCredentials(name string) error {
+// credentialsMissing reports whether an existing named tunnel has no local
+// credentials file. Without it "tunnel run" dies with an opaque cloudflared
+// error, which is what happens when the tunnel was created on another machine or
+// the ~/.cloudflared credentials were cleared. Callers recover by recreating the
+// tunnel. Unknowable states (list fails, no cert) report false, so recovery is
+// only attempted when the missing file is certain.
+func credentialsMissing(name string) bool {
 	out, err := exec.Command(hostbin.Path("cloudflared"), "tunnel", "list", "--name", name, "--output", "json").Output()
 	if err != nil {
-		return nil // cannot tell, let "tunnel run" be the judge
+		return false
 	}
 	var tunnels []struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(out, &tunnels); err != nil || len(tunnels) == 0 {
-		return nil
+		return false
 	}
 	cert := cloudflaredCertPath()
 	if cert == "" {
-		return nil
+		return false
 	}
 	creds := filepath.Join(filepath.Dir(cert), tunnels[0].ID+".json")
-	if _, err := os.Stat(creds); err == nil {
-		return nil
-	}
-	return fmt.Errorf("tunnel %q exists on your Cloudflare account but its credentials file is missing at %s: copy it from the machine that created the tunnel, or run \"cloudflared tunnel delete %s\" and share again", name, creds, name)
+	_, err = os.Stat(creds)
+	return err != nil
 }
 
 // startHostProxy starts a local HTTP reverse proxy on a random loopback port.

@@ -23,6 +23,17 @@ type RemoveOptions struct {
 	// recoverability promise holds across filesystems too.
 	RemoveData bool
 
+	// SkipSnapshot suppresses the safety snapshot RemoveData otherwise takes
+	// of every database on the service. The escape hatch for a service whose
+	// engine cannot be brought up to dump from, and for a user who knows the
+	// data is disposable.
+	SkipSnapshot bool
+
+	// SnapshotLabel names that snapshot so it reads for what it is weeks
+	// later in db:snapshots. Defaults to "pre-remove"; ReinstallService sets
+	// its own.
+	SnapshotLabel string
+
 	// SkipFamilyRegen suppresses the post-remove RegenerateFamilyConsumers
 	// pass. Set by ReinstallService, which then drives the regen itself
 	// after install: InstallPresetByName regenerates internally for custom
@@ -50,12 +61,21 @@ var (
 	// osRenameFn is the rename seam used by renameDataAside. Tests swap it
 	// to inject EXDEV without needing two filesystems.
 	osRenameFn = os.Rename
+
+	// removeSnapshotFn is the pre-wipe database snapshot seam, so the
+	// removal flow can be tested without an engine to dump from.
+	removeSnapshotFn = snapshotBeforeDataReset
 )
+
+// defaultResetSnapshotLabel names the snapshot a plain `service remove --purge`
+// leaves behind.
+const defaultResetSnapshotLabel = "pre-remove"
 
 // RemoveService stops, removes, and (optionally) wipes the data of a service.
 // It is the single entry point shared by the CLI, MCP, and UI handlers.
 //
 // Order:
+//  0. (if RemoveData and not SkipSnapshot) snapshot every database on it
 //  1. emit stopping_unit, StopUnit (only if active/activating; abort on error)
 //  2. emit removing_container, RemoveContainer
 //  3. (if RemoveData) emit removing_data, rename-aside ~/.local/share/lerd/data/<name>
@@ -99,6 +119,18 @@ func RemoveService(name string, opts RemoveOptions, emit func(PhaseEvent)) error
 		preset = existing.Preset
 	}
 
+	// Before anything stops: the dump has to come off a running engine, and it
+	// has to happen while the data is still where the engine expects it.
+	if opts.RemoveData && !opts.SkipSnapshot {
+		label := opts.SnapshotLabel
+		if label == "" {
+			label = defaultResetSnapshotLabel
+		}
+		if err := removeSnapshotFn(name, label, emit); err != nil {
+			return err
+		}
+	}
+
 	emit(PhaseEvent{Phase: "stopping_unit", Unit: unit})
 	status, _ := removeUnitStatusFn(unit)
 	if status == "active" || status == "activating" {
@@ -136,6 +168,14 @@ func RemoveService(name string, opts RemoveOptions, emit func(PhaseEvent)) error
 	emit(PhaseEvent{Phase: "removing_config"})
 	if err := config.RemoveCustomService(name); err != nil {
 		return fmt.Errorf("remove service config: %w", err)
+	}
+
+	// The rendered preset files are derived from the definition just deleted, not
+	// user state like the data dir or the tuning override, so they leave with it.
+	// Kept, they hand the next install a stale rendering, and a chown:true mount
+	// among them is one podman has re-owned beyond this user's reach.
+	if err := os.RemoveAll(config.ServiceFilesDir(name)); err != nil {
+		return fmt.Errorf("remove rendered files for %s: %w", name, err)
 	}
 
 	// Prune the cached store preset once no installed service still references it,

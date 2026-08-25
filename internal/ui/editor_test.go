@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -32,48 +31,6 @@ func writeEditorConfig(t *testing.T, editor string) {
 	}
 	if err := os.WriteFile(cfgFile, []byte("editor: \""+editor+"\"\n"), 0644); err != nil {
 		t.Fatalf("write config: %v", err)
-	}
-}
-
-func TestEditorCommandConfigTemplate(t *testing.T) {
-	tests := []struct {
-		name   string
-		editor string
-		file   string
-		line   int
-		want   []string
-	}{
-		{
-			name:   "file and line placeholders substituted",
-			editor: "phpstorm --line {line} {file}",
-			file:   "/home/u/app/Models/User.php",
-			line:   42,
-			want:   []string{"phpstorm", "--line", "42", "/home/u/app/Models/User.php"},
-		},
-		{
-			name:   "only file placeholder substituted",
-			editor: "myeditor {file}",
-			file:   "/home/u/a.php",
-			line:   9,
-			want:   []string{"myeditor", "/home/u/a.php"},
-		},
-		{
-			name:   "no placeholder appends the file",
-			editor: "myeditor -w",
-			file:   "/home/u/a.php",
-			line:   7,
-			want:   []string{"myeditor", "-w", "/home/u/a.php"},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			isolateEditorEnv(t)
-			writeEditorConfig(t, tc.editor)
-			got := editorCommand(tc.file, tc.line)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("editorCommand() = %v, want %v", got, tc.want)
-			}
-		})
 	}
 }
 

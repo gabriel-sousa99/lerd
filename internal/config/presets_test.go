@@ -60,6 +60,7 @@ func TestListPresets_SortedByName(t *testing.T) {
 }
 
 func TestLoadPreset_PhpMyAdmin(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	p, err := LoadPreset("phpmyadmin")
 	if err != nil {
 		t.Fatalf("LoadPreset(phpmyadmin) error = %v", err)
@@ -80,9 +81,13 @@ func TestLoadPreset_PhpMyAdmin(t *testing.T) {
 	if !foundFramingCfg {
 		t.Errorf("phpmyadmin preset must ship config.user.inc.php enabling AllowThirdPartyFraming for iframe embedding")
 	}
+	if !p.DashboardProxy {
+		t.Errorf("phpmyadmin must set dashboard_proxy so lerd-ui proxies it same-origin and its session cookie survives the iframe")
+	}
 }
 
 func TestLoadPreset_PgAdmin(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	p, err := LoadPreset("pgadmin")
 	if err != nil {
 		t.Fatalf("LoadPreset(pgadmin) error = %v", err)
@@ -99,6 +104,26 @@ func TestLoadPreset_PgAdmin(t *testing.T) {
 	}
 	if !foundFramingCfg {
 		t.Errorf("pgadmin preset must ship config_local.py clearing X_FRAME_OPTIONS for iframe embedding")
+	}
+	if !p.DashboardProxy {
+		t.Errorf("pgadmin must set dashboard_proxy so lerd-ui proxies it same-origin and its session cookie survives the iframe")
+	}
+}
+
+func TestLoadPreset_MongoExpress(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	p, err := LoadPreset("mongo-express")
+	if err != nil {
+		t.Fatalf("LoadPreset(mongo-express) error = %v", err)
+	}
+	if len(p.DependsOn) != 1 || p.DependsOn[0] != "mongo" {
+		t.Errorf("mongo-express should depend on mongo, got %v", p.DependsOn)
+	}
+	if !p.DashboardProxy {
+		t.Errorf("mongo-express must set dashboard_proxy so lerd-ui proxies it same-origin and its session cookie survives the iframe")
+	}
+	if _, ok := p.Environment["ME_CONFIG_SITE_BASEURL"]; ok {
+		t.Errorf("the proxy base URL must be injected at generation, not stored in the preset, or a binary that predates the proxy moves the app off / and 404s its own dashboard link")
 	}
 }
 
@@ -529,6 +554,32 @@ func TestCustomService_ExpandEnvRoundTrip(t *testing.T) {
 	}
 	if out.Environment["RI_REDIS_HOST"] != "lerd-redis" {
 		t.Errorf("static fallback lost in round trip: %#v", out.Environment)
+	}
+}
+
+// The first host an admin UI discovers is the server it opens on, so the order
+// the spec declares has to survive: installing an engine whose name sorts
+// earlier must not displace the family named ahead of it.
+func TestResolveDynamicEnv_DiscoverFamily_KeepsDeclaredOrder(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	if err := SaveCustomService(&CustomService{
+		Name: "mariadb-11-8", Image: "x", Family: "mariadb",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &CustomService{
+		Name: "phpmyadmin", Image: "x",
+		DynamicEnv: map[string]string{"PMA_HOSTS": "discover_family:mysql,mariadb"},
+	}
+	if err := ResolveDynamicEnv(svc); err != nil {
+		t.Fatalf("ResolveDynamicEnv: %v", err)
+	}
+	if got := svc.Environment["PMA_HOSTS"]; got != "lerd-mysql,lerd-mariadb-11-8" {
+		t.Errorf("PMA_HOSTS = %q, want lerd-mysql,lerd-mariadb-11-8", got)
 	}
 }
 

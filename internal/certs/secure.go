@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 )
@@ -52,13 +51,8 @@ func SecureSite(site config.Site) error {
 		return fmt.Errorf("generating SSL vhost: %w", err)
 	}
 
-	sslConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+"-ssl.conf")
-	mainConf := filepath.Join(config.NginxConfD(), site.PrimaryDomain()+".conf")
-	if err := os.Remove(mainConf); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing HTTP vhost: %w", err)
-	}
-	if err := os.Rename(sslConf, mainConf); err != nil {
-		return fmt.Errorf("renaming SSL config: %w", err)
+	if err := nginx.InstallSSLVhost(site.PrimaryDomain()); err != nil {
+		return fmt.Errorf("installing SSL vhost: %w", err)
 	}
 
 	// Regenerate SSL vhosts and sync APP_URL + VITE_REVERB_* for worktrees.
@@ -70,12 +64,12 @@ func SecureSite(site config.Site) error {
 				if RegenerateHostProxyWorktreeVhost != nil {
 					_ = RegenerateHostProxyWorktreeVhost(site, wt.Path, wt.Domain, true)
 				}
-				envfile.SyncPrimaryDomain(wt.Path, wt.Domain, true) //nolint:errcheck
+				config.SyncSiteURL(wt.Path, wt.Domain, true) //nolint:errcheck
 				continue
 			}
 			effectivePHP := config.WorktreePHPVersion(wt.Path, site.PHPVersion)
 			_ = nginx.GenerateWorktreeSSLVhost(wt.Domain, wt.Path, effectivePHP, site.PrimaryDomain(), site.Name, wt.Branch)
-			envfile.SyncPrimaryDomain(wt.Path, wt.Domain, true) //nolint:errcheck
+			config.SyncSiteURL(wt.Path, wt.Domain, true) //nolint:errcheck
 		}
 	}
 
@@ -184,19 +178,25 @@ func UnsecureSite(site config.Site) error {
 				if RegenerateHostProxyWorktreeVhost != nil {
 					_ = RegenerateHostProxyWorktreeVhost(site, wt.Path, wt.Domain, false)
 				}
-				envfile.SyncPrimaryDomain(wt.Path, wt.Domain, false) //nolint:errcheck
+				config.SyncSiteURL(wt.Path, wt.Domain, false) //nolint:errcheck
 				continue
 			}
 			effectivePHP := config.WorktreePHPVersion(wt.Path, site.PHPVersion)
 			_ = nginx.GenerateWorktreeVhost(wt.Domain, wt.Path, effectivePHP, site.Name, wt.Branch)
-			envfile.SyncPrimaryDomain(wt.Path, wt.Domain, false) //nolint:errcheck
+			config.SyncSiteURL(wt.Path, wt.Domain, false) //nolint:errcheck
 		}
 	}
 
-	// Remove cert files
-	certsDir := filepath.Join(config.CertsDir(), "sites")
-	os.Remove(filepath.Join(certsDir, site.PrimaryDomain()+".crt")) //nolint:errcheck
-	os.Remove(filepath.Join(certsDir, site.PrimaryDomain()+".key")) //nolint:errcheck
+	RemoveSiteCerts(site.PrimaryDomain())
 
 	return nil
+}
+
+// RemoveSiteCerts deletes a domain's certificate pair. Site certs live in the
+// sites/ subdirectory, so a caller building the path from CertsDir alone
+// silently removes nothing.
+func RemoveSiteCerts(domain string) {
+	certsDir := filepath.Join(config.CertsDir(), "sites")
+	os.Remove(filepath.Join(certsDir, domain+".crt")) //nolint:errcheck
+	os.Remove(filepath.Join(certsDir, domain+".key")) //nolint:errcheck
 }

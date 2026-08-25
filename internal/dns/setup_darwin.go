@@ -185,3 +185,7 @@ func ReadUpstreamDNS() []string {
 func ResolverHint() string {
 	return "run 'lerd install' to reconfigure DNS"
 }
+
+// NoteNixOSOwnsResolver is a no-op on macOS: NixOS host-resolver ownership is
+// Linux-only. The shared install and start paths call this around ConfigureResolver.
+func NoteNixOSOwnsResolver() {}

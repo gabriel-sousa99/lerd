@@ -23,7 +23,7 @@
 
 Available services: `mysql` (8.4 LTS canonical, 9.7 LTS / 5.7 alternates), `redis` (7-alpine), `postgres` (16 canonical with PostGIS, 17 / 18 alternates), `meilisearch` (v1.42), `rustfs` (S3-compatible), `mailpit` (SMTP catcher).
 
-Default services are defined as YAML presets with `default: true` in the lerd binary. Adding or replacing a default service is a YAML edit, not a code change. Each preset declares its own `update_strategy` (patch / minor / rolling), whether `track_latest` should auto-bump fresh installs to the current upstream, and whether `allow_major_upgrade` lets the cross-strategy upgrade button cross numeric majors. See [Service updates](service-updates.md) for the full update / upgrade / migrate / rollback flow.
+Default services are defined as YAML presets with `default: true` in the lerd binary. Adding or replacing a default service is a YAML edit, not a code change. Each preset declares its own `update_strategy` (patch / minor / rolling), whether `track_latest` should auto-bump fresh installs to the current upstream, whether `allow_major_upgrade` lets the cross-strategy upgrade button cross numeric majors, and where the engine records the version that wrote its data (`data_version_file`) so a data dir that outlives its config still gets a server that can open it. See [Service updates](service-updates.md) for the full update / upgrade / migrate / rollback flow.
 
 `lerd service list` shows the version (derived from the image tag) and an Update column with green / amber / violet badges:
 
@@ -99,11 +99,66 @@ The dashboard link for a service always follows the port its dashboard is served
 
 The chosen ports are persisted in `~/.config/lerd/config.yaml` and reapplied on every start: the primary under `services.<name>.published_port`, any other mapping under `services.<name>.published_ports` keyed by container port. Once a port is set, automatically or with `lerd service port`, it sticks: lerd never moves it again on its own, not even back to the default when that frees up later. Change it only with `lerd service port`.
 
+Removing a service leaves its recorded ports in `config.yaml`, so reinstalling it later lands back on the same ports rather than picking new ones. While it is gone those ports are free again: another service can be moved onto one, and the automatic shift can hand one out. If that happens, the reinstall passes through the ownership guard like a fresh install and takes a free port instead of publishing on top of whoever holds it now.
+
 Every published port can also be moved from the dashboard: a service's **Ports** tab lists one editable host-port field per published port (primary and secondary alike), each with a reset-to-default. The TUI shows the current published and extra ports read-only; editing stays in the CLI, dashboard and MCP.
 
 ::: warning Known limitation
 The shift is decided at quadlet-write time, from whether the port can be bound right then. A host server that is installed but stopped at that moment leaves its port looking free, so lerd may take it and clash when that server next starts (for example at boot). This is the deliberate trade for not inspecting the host: a host database is usually running, and the failure is loud. Recover by moving lerd onto a free port with `lerd service port <name> <port>`.
 :::
+
+---
+
+## Using a service you run on the host
+
+Moving lerd's published port lets a host-installed server keep its own. The step past that is pointing a project at your server instead of lerd's container: the database you already have, with your data and your users, while lerd keeps managing everything else.
+
+It takes two things, both in the project's personal, gitignored [`.env.lerd_override`](../features/env-setup.md#personal-overrides-envlerd_override): the connection values that point at your server, and the reserved `LERD_EXTERNAL_SERVICES` key that tells lerd to stay out of the way.
+
+```dotenv
+# .env.lerd_override: this project uses the MySQL installed on the machine
+DB_HOST=host.containers.internal
+DB_PORT=3306
+DB_DATABASE=myapp
+DB_USERNAME=myapp
+DB_PASSWORD=secret
+
+LERD_EXTERNAL_SERVICES=mysql
+```
+
+Run `lerd env` and those values are written into `.env`, last, over anything lerd computed. For a service named in `LERD_EXTERNAL_SERVICES` lerd still writes the connection variables your framework reads, but it does not start the container and does not create the project database or S3 bucket. The key is comma or space separated, so `LERD_EXTERNAL_SERVICES=mysql, redis` opts both out, and it is consumed by lerd rather than written into `.env`. The output names what it skipped:
+
+```
+Updating existing .env...
+  Detected mysql        — applying lerd connection values
+   mysql externally managed (.env.lerd_override) — not starting it
+  Applying 5 override(s) from .env.lerd_override
+Done.
+```
+
+Opting out does not stop a lerd service that is already running. Leave it (the two coexist once their ports differ, see above) or shut it down with `lerd service stop mysql`.
+
+Use `host.containers.internal` as the host, never `127.0.0.1` or `localhost`. The app runs inside the PHP-FPM container, where loopback is the container itself; `host.containers.internal` is an entry lerd maintains that points at an address it has probed and found routable back to your machine. `lerd doctor` prints the one in force under **Container → Host connectivity**.
+
+### What the host server has to allow
+
+A container is not on your machine's loopback, and what that costs you depends on the platform.
+
+**macOS.** gvproxy maps `host.containers.internal` to `192.168.127.254` and hands the connection to the host's loopback, so a server listening on `127.0.0.1` with `'user'@'localhost'` grants accepts it with nothing changed.
+
+**Linux.** The connection arrives from a real, non-loopback address, so a distro package left at its defaults refuses it. On Ubuntu, `mysql-server` ships `bind-address = 127.0.0.1` in `/etc/mysql/mysql.conf.d/mysqld.cnf` and grants only for `localhost`, which is exactly the combination that produces a refused connection from a lerd site. Three things need attention:
+
+1. **Listen past loopback.** MySQL and MariaDB: set `bind-address = 0.0.0.0` and restart the server. PostgreSQL: `listen_addresses = '*'` in `postgresql.conf`. Redis: comment out `bind 127.0.0.1` or add the address the container reaches.
+2. **Grant from somewhere other than `localhost`.** `CREATE USER 'myapp'@'%'` rather than `'myapp'@'localhost'`; PostgreSQL needs a matching `host` line in `pg_hba.conf`. The address the server actually sees is your machine's own address on one of its interfaces, and which one it is depends on the podman network setup, so `%` is the practical choice on a development machine. If you would rather pin it, make one failed attempt and read it back out of the rejection: MySQL answers `Access denied for user 'myapp'@'192.168.122.139'`, and that address is the one to grant.
+3. **Let it through the firewall.** ufw and firewalld both drop the port by default once they are enabled.
+
+::: warning Binding wider than loopback
+`bind-address = 0.0.0.0` exposes the server to every network the machine is on, not just to containers. On a laptop that joins untrusted networks, keep a firewall rule that allows the port only from the podman subnet, or bind to that bridge address specifically instead of to everything.
+:::
+
+### What still points at lerd's container
+
+The `lerd db:*` commands resolve their target from the service, not from `DB_HOST`, so `db:shell`, `db:import`, `db:export` and the snapshot commands keep talking to `lerd-mysql` even while your site reads and writes your own server. Use your own `mysql` or `psql` client for a host-run database. Everything else, the site's `.env`, migrations, queue workers, and the app itself, goes to the host server.
 
 ---
 
@@ -137,6 +192,8 @@ Additional UIs:
 Captured emails can pop a notification with the subject and sender; clicking the notification opens the captured message in the Mailpit overlay. This is one of several notification kinds the dashboard supports, see [Notifications](../features/notifications.md) for the full list (worker failures, finished service operations, service updates, dumps) and how to configure them under **System → Notifications**.
 
 ### RustFS, per-site buckets
+
+Mail sent through PHP's own `mail()` reaches Mailpit too, without any project configuration. The FPM image's `sendmail` is BusyBox's, which talks to `127.0.0.1:25` and finds nothing listening inside the container, so lerd writes a `sendmail_path` pointing at the mail catcher it runs and mounts it into every PHP container. That covers the frameworks that send through `mail()` rather than SMTP, Drupal and WordPress among them, which would otherwise report that mail could not be sent with nothing to show for it. A `sendmail_path` you set yourself in the shared or per-version `php.ini` wins, since lerd's file loads before both.
 
 RustFS is an S3-compatible object storage service (a drop-in replacement for MinIO). When `lerd env` detects it is needed (via `FILESYSTEM_DISK=s3` or `AWS_ENDPOINT` in `.env`), it automatically:
 

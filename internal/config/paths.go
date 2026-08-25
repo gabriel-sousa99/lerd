@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 // DumpsTCPPort is the loopback port the dump receiver binds on darwin
@@ -39,9 +40,34 @@ func DataDir() string {
 	return filepath.Join(xdgDataHome(), "lerd")
 }
 
+// CacheDir returns ~/.cache/lerd/ (or $XDG_CACHE_HOME/lerd/). Nothing in here
+// is state a user would miss, which is why it is written without ceremony and
+// why the uninstall takes it along with the rest.
+func CacheDir() string {
+	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
+		return filepath.Join(v, "lerd")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache", "lerd")
+}
+
 // BinDir returns the lerd bin directory.
 func BinDir() string {
 	return filepath.Join(DataDir(), "bin")
+}
+
+// PathWithBinDir returns the inherited PATH with lerd's shim dir in front, for
+// child processes that run a shell command string. Framework commands all start
+// with `php`, which only resolves through that dir, and it is absent from the
+// user's own PATH both under `lerd path:disable` and under launchd on macOS.
+// An empty inherited PATH yields the dir alone: a trailing separator would make
+// the shell search the working directory.
+func PathWithBinDir() string {
+	path := BinDir()
+	if existing := os.Getenv("PATH"); existing != "" {
+		path += string(os.PathListSeparator) + existing
+	}
+	return path
 }
 
 // NodeGlobalDir is the npm prefix lerd points its node shim at, so
@@ -150,7 +176,28 @@ func SystemdUserDir() string {
 	return filepath.Join(xdgConfigHome(), "systemd", "user")
 }
 
+// LaunchAgentsDir returns the directory macOS keeps lerd's launchd units in,
+// empty on Linux, whose unit dirs follow the XDG vars instead. This one follows
+// HOME, which is why isolating only the XDG vars leaves it exposed.
+func LaunchAgentsDir() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, "Library", "LaunchAgents")
+}
+
 // PHPImageHashFile returns the path to the stored PHP-FPM Containerfile hash.
+// InstalledVersionFile records the lerd version whose `lerd install` last ran,
+// so a binary replaced by a package manager can be told from one this install
+// has already been set up for.
+func InstalledVersionFile() string {
+	return filepath.Join(DataDir(), "installed-version")
+}
+
 func PHPImageHashFile() string {
 	return filepath.Join(DataDir(), "php-image-hash")
 }
@@ -328,6 +375,15 @@ func DevtoolsIniFile() string {
 	return filepath.Join(DevtoolsAssetsDir(), "96-lerd-devtools.ini")
 }
 
+// MailIniFile is the host path for the conf.d ini that points PHP's mail() at
+// the mail catcher lerd runs. The FPM image's sendmail is BusyBox's, which
+// connects to 127.0.0.1:25 by default and finds nothing listening inside the
+// container, so every framework sending through mail() fails until this names
+// the catcher.
+func MailIniFile() string {
+	return filepath.Join(DataDir(), "php", "mail", "94-lerd-mail.ini")
+}
+
 // DevtoolsWorkersFlagFile is the sentinel that opts worker (queue/scheduler)
 // queries into capture. Absent (default) = workers skipped. Lives beside the
 // devtools enable flag under the /usr/local/etc/lerd mount; toggling it never
@@ -352,7 +408,13 @@ func CustomServicesDir() string {
 // for the named custom service. Each file is bind-mounted into the container
 // at its declared target path.
 func ServiceFilesDir(name string) string {
-	return filepath.Join(DataDir(), "service-files", name)
+	return filepath.Join(ServiceFilesRoot(), name)
+}
+
+// ServiceFilesRoot returns the parent of every service's rendered FileMount
+// directory, so a sweep can tell which of them no service claims any more.
+func ServiceFilesRoot() string {
+	return filepath.Join(DataDir(), "service-files")
 }
 
 // ServiceTuningFile returns the host path for a service's user-editable runtime
@@ -567,6 +629,39 @@ func ClearStopped() error {
 func IsStopped() bool {
 	_, err := os.Stat(stoppedMarkerPath())
 	return err == nil
+}
+
+// watcherManagedStopMarkerPath is the sentinel lerd writes just before it stops
+// the watcher itself. The watcher is signalled the same way by a logout and by
+// `lerd install`, `lerd update`, or `lerd quit` restarting it, and SIGTERM
+// carries nothing to tell those apart; this marker does.
+func watcherManagedStopMarkerPath() string {
+	return filepath.Join(RunDir(), "watcher-managed-stop")
+}
+
+// watcherManagedStopTTL bounds how long a marker stays believable. A managed
+// stop signals within milliseconds of the write, so anything older is a marker
+// whose watcher died before reading it, and a real logout must not inherit it.
+const watcherManagedStopTTL = 60 * time.Second
+
+// MarkWatcherManagedStop records that lerd is about to stop the watcher itself,
+// so the watcher exits without running the shutdown teardown.
+func MarkWatcherManagedStop() error {
+	if err := os.MkdirAll(RunDir(), 0755); err != nil {
+		return err
+	}
+	guardRealWrite(watcherManagedStopMarkerPath())
+	return os.WriteFile(watcherManagedStopMarkerPath(), []byte("managed\n"), 0644)
+}
+
+// ConsumeWatcherManagedStop reports whether the stop the watcher just received
+// came from lerd rather than from the OS, clearing the marker either way so a
+// later logout is never mistaken for another managed stop.
+func ConsumeWatcherManagedStop() bool {
+	st, err := os.Stat(watcherManagedStopMarkerPath())
+	guardRealWrite(watcherManagedStopMarkerPath())
+	_ = os.Remove(watcherManagedStopMarkerPath())
+	return err == nil && time.Since(st.ModTime()) < watcherManagedStopTTL
 }
 
 // PprofMarkerPath is the sentinel that unlocks lerd-ui's profiling endpoints.

@@ -15,6 +15,8 @@ Lerd resolves framework definitions from multiple sources. Higher priority wins:
 
 Workers from the user overlay and project `.lerd.yaml` are merged on top of store or built-in definitions. See [Framework workers](framework-workers.md) for the worker lifecycle and how custom workers are added and managed.
 
+`lerd install` seeds the store: it pulls the index early, so detection sees the whole published catalogue rather than only the frameworks compiled into the binary, then fetches every definition the index lists. A fresh machine therefore ends up with the same definitions an established one has, and resolves any of them offline, instead of collecting them one at a time as the projects that need each one turn up. The refresh keeps any definition you already have that the store has since stopped publishing, and the watcher refreshes the index every six hours. An install that cannot reach the store keeps working on the built-ins and seeds itself on the next run.
+
 ::: warning Untrusted projects
 A `.lerd.yaml` ships inside a project, so its embedded `framework_def` is treated as untrusted, and lerd strips its host-execution surfaces when restoring it into the store: `command`-type doctor checks, `host: true` workers, the whole `commands:` list, the `nginx:` block, `requires:`, and `php.cli_ini` are dropped, because each would otherwise run on your host, rewrite your nginx config, or start containers straight from a cloned repo. Those run only for frameworks that come from the store, a built-in, or your user overlay (`~/.config/lerd/frameworks/`); a definition already installed there is never overwritten by a project's embedded copy. In-container workers, env, symlink, and combo checks are inert and still work from a project definition.
 
@@ -31,6 +33,8 @@ When loading a framework definition for a project, the version is resolved in or
 
 When `composer.lock` shows a different version than `.lerd.yaml`, the pinned version is auto-updated.
 
+A project whose own major version has no definition published for it still gets one. Sitting below the published range, it is served the oldest definition and flagged as guessed, so that definition's PHP range is reported rather than enforced and a Laravel 6 project is still allowed PHP 7.4. Sitting above the range, or in a gap inside it, it is served the newest definition, the same one an install that already had definitions on disk would have fallen back to, so a WordPress 7 site is treated as a WordPress site rather than as no framework at all. A version the store's cached index does not list is never requested, since that fetch can only fail; an install that has never reached the store has no index to rule anything out and asks for the project's own version as before.
+
 ## Environment setup
 
 The `env` section in a framework definition controls how `lerd env` works:
@@ -40,7 +44,7 @@ env:
   file: .env                        # primary env file
   example_file: .env.example        # copied to file if missing
   format: dotenv                    # dotenv | php-const | php-array
-  fallback_file: wp-config.php      # used when file doesn't exist
+  fallback_file: wp-config.php      # read when file doesn't exist (never written)
   fallback_format: php-const        # format for fallback_file
   url_key: APP_URL                  # env key holding the app URL (or "none")
   worktree_url_keys:                # keys set to a worktree's own base URL
@@ -68,6 +72,16 @@ env:
         - DB_PASSWORD=lerd
 ```
 
+### Which file lerd writes
+
+`file` is the env file lerd writes, and `lerd env` creates it when it is not there yet, from `example_file` when the definition names one and empty otherwise. `fallback_file` is only ever read, so a project that is already configured is detected through the file it actually has.
+
+`app_file` and `app_format` name the file the application itself reads, for a framework whose configuration is not a dotenv file at all: Drupal's database lives in a `$databases` array its installer writes into `settings.php`, and nothing lerd puts anywhere else reaches it. When a definition declares them, that file is what lerd both reads and writes, and `file`/`fallback_file` describe what an older binary should do with the same definition. That is why they are a separate pair rather than a change to the existing fields: a published definition reaches every install within a day, whatever version it runs, so one that renamed `format` to something an older release cannot parse would break those installs. An unknown field is ignored; an unknown *format* is not, and a binary too old for a format now refuses to write the file rather than treating it as dotenv.
+
+That distinction matters for a framework whose own configuration is not the file lerd writes. Drupal keeps its database in a `$databases` array its installer writes into `settings.php`, and its `site:install` command sources a `.env` at the project root to build the `--db-url` it hands drush. So the definition names `.env` as its `file` and `settings.php` as a read-only `fallback_file`: lerd writes the former, Drupal writes the latter, and neither trips over the other.
+
+A definition that names no `file` at all has only its fallback, and then that fallback *is* the configuration and lerd writes it. That is WordPress, whose `wp-config.php` is the whole story.
+
 ### Env file formats
 
 | Format | Shape | Key syntax |
@@ -75,8 +89,38 @@ env:
 | `dotenv` | `KEY=value` lines | `DB_HOST` |
 | `php-const` | `define('KEY', 'value')` calls, as in WordPress's `wp-config.php` | `DB_HOST` |
 | `php-array` | a PHP file that `return`s a nested array, as in Magento's `app/etc/env.php` | dotted path, `db.connection.default.host` |
+| `php-vars` | a PHP file of top-level assignments, as in Drupal's `web/sites/default/settings.php` | dotted path rooted at the variable, `databases.default.default.host` |
+
+`php-vars` is for a framework that configures itself through assignments rather than a returned array. `databases.default.default.host` addresses `$databases['default']['default']['host']`, and writing rewrites only the statements whose values change, leaving the rest of the file, which for Drupal is hundreds of lines of guidance the user may have edited, byte for byte. A key no statement covers is appended as one of its own. That is how lerd writes the file Drupal actually reads: its installer puts the `$databases` array in `settings.php` and reads it back on every request, so connection values left anywhere else wire nothing.
 
 The `php-array` reader flattens the returned array to dotted keys, and the writer sets a dotted path, creating the intermediate arrays when they are missing. Scalar types are preserved, so an int stays an int and a bool stays a bool. The file is reparsed and reprinted rather than patched line by line, which is what Magento's own `DeploymentConfig\Writer` does, so comments in it are not preserved by lerd or by Magento. A rewrite that would not change anything is skipped, so a file already holding every value lerd wants keeps its mtime.
+
+### Wiring the doctor checks
+
+A service a project picks in its `.lerd.yaml` is expected to appear in the env file, and the doctor says so when it does not: it asks whether the file references the `lerd-<service>` container, which is a text question every format answers, so a WordPress site's `wp-config.php` and a Magento site's `app/etc/env.php` are held to it exactly as a `.env` is. Only services this section declares are checked, since those are the ones lerd knows how to wire; a `phpmyadmin` picked alongside `mysql` is picked for its own sake and is never expected in a project's config. A drop-in is checked against the block it stands in for, by family or by its preset's `env_role`, so a project on MariaDB is measured against your `mysql` block. A service listed in `.env.lerd_override`'s `LERD_EXTERNAL_SERVICES`, and `sqlite`, which has no container at all, are both left alone.
+
+### Offering SQLite
+
+A framework that can run on a file database declares an `env.sqlite` block, and that declaration is what puts SQLite in the database choice at `lerd init`. It takes the same `detect` and `vars` a service mapping takes: the detect rules say a project is already on a file database, the vars are what lerd writes to point it at one. A framework declaring none is never offered it, since picking it would configure a project for a database its application cannot open. A project lerd recognises no framework for keeps the option: nothing has declared otherwise.
+
+```yaml
+env:
+  file: .env
+  sqlite:
+    detect:
+      - key: DB_CONNECTION
+        value_prefix: sqlite
+    vars:
+      - DB_CONNECTION=sqlite
+      - DB_DATABASE=database/database.sqlite
+  services:
+    mysql:
+      # …
+```
+
+It sits beside `services:` rather than among them because SQLite is not a service. Nothing installs it, starts it or draws a card for it, and a binary that read it as a service entry would announce it and then try to start a container that does not exist. That is also why it is a separate field rather than a `services:` key: a published definition reaches every install within a day, whatever version it runs, and an unknown field is ignored while an unknown service is not.
+
+Choosing it records nothing in `.lerd.yaml`, for the same reason: the project's own configuration already says it is on SQLite, which is what lerd reads to answer that question. An entry left by an older lerd is ignored where it is found.
 
 ### Drop-in services
 
@@ -96,6 +140,7 @@ Do not pin a database version your framework passes to its ORM. Doctrine picks i
 # Required
 name: symfony                     # slug [a-z0-9-], must match filename stem
 label: Symfony                    # display name
+color: "#000000"                  # brand colour the dashboard tints the mark with
 public_dir: public                # document root relative to project
 
 # Version (required for store definitions)
@@ -134,6 +179,14 @@ env:
     env_key: APP_KEY
     command: key:generate
     fallback_prefix: "base64:"
+
+  sqlite:                         # wiring for a file database (optional). Not a
+    detect:                       # service: nothing installs, starts or draws it.
+      - key: DB_CONNECTION        # Declaring it is what offers SQLite at `lerd init`.
+        value_prefix: sqlite
+    vars:
+      - "DB_CONNECTION=sqlite"
+      - "DB_DATABASE=database/database.sqlite"
 
   # Per-service env detection and variable injection for `lerd env`
   #
@@ -222,6 +275,9 @@ setup:
       composer: doctrine/doctrine-migrations-bundle  # skipped if package not installed
   - label: "Install the app"                         # placeholders work here too
     command: "bin/install --url={{scheme}}://{{domain}}/ --db={{site}}"
+    default: false
+    check:
+      missing_file: config/installed.php             # only while the app is not installed yet
 
 # Application log files shown in the UI "App Logs" tab
 logs:
@@ -243,6 +299,7 @@ commands:
 
 # Site doctor checks, run after the universal baseline every framework gets (optional)
 doctor:
+  migrate_command: doctrine:migrations:migrate   # the command that applies the schema
   checks:
     - name: storage_link              # stable id
       type: symlink                   # env_key_set | env_combo | symlink | command
@@ -271,11 +328,44 @@ worktree:
 
 An app that keeps deployment state in its database cannot share the parent's. Magento hashes its file config and stores the hash in the database, so seeding a worktree's own base URL into `env.php` makes the store refuse to serve until `app:config:import` re-syncs it, and running that import against a shared database would rewrite the hash out from under the parent site. `db_isolation: required` therefore skips the prompt and isolates, `db_source: main` clones the parent's data (an empty schema is useless to a store that cannot bootstrap itself), and `commands` run afterwards, in the worktree, through the framework's own `console` binary.
 
+## The framework's own mark
+
+A framework had a label and nothing else to identify it, so it showed up as a
+text badge on the site header, in the sites widget, in a site tile's subtitle, as
+the heading a sites dashboard groups under, and as the hint in the command
+palette. A definition in the store can now bring its own logo: a
+`frameworks/<name>.svg` beside the versioned files, fetched and cached with the
+definition, so a framework published tomorrow arrives with its mark and no lerd
+release.
+
+The mark is per family, not per version. Laravel 11 and Laravel 12 are the same
+logo, so one file sits next to `<name>/<version>.yaml` rather than inside each of
+them, and every version resolves to it. The colour is the opposite: it is
+declared in the YAML, which only exists per version, so each version file repeats
+the same `color:`.
+
+It is **monochrome**: a silhouette of filled paths with no colours of its own,
+rendered through `currentColor` and tinted by `color:`. Because that markup is
+remote and ends up inlined in the page, lerd cuts it down on the way in to the
+same drawing subset a service mark gets, dropping script, `foreignObject`, event
+handlers, external references and any `fill`, `stroke` or `style` of its own. See
+[service presets](service-presets.md) for the exact subset; the rule is shared.
+
+`color:` must be a plain hex literal. Anything else, a colour function or a CSS
+variable, is dropped rather than passed through, and a colour too dark or too
+light for the card it lands on is nudged toward it until it separates, so
+Symfony's black still reads on the dark card. A framework that declares a colour
+but ships no mark still gets the tint; one with neither renders as its label
+alone, which is what every framework did before.
+
+This is not the `icon:` a framework command declares. That names a glyph from the
+built-in set for a button in the dashboard and is a different thing entirely.
+
 ## Site placeholders
 
 The <code v-pre>{{site}}</code>, <code v-pre>{{site_testing}}</code>, <code v-pre>{{bucket}}</code>, <code v-pre>{{domain}}</code>, <code v-pre>{{scheme}}</code>, and <code v-pre>{{&lt;service&gt;_version}}</code> placeholders listed above are expanded in three places: the `env.services` vars, every `setup:` command, and every `commands:` entry. They resolve against the registered site the command runs for. A git worktree is not a registered site, so a command run against one resolves <code v-pre>{{site}}</code> but leaves <code v-pre>{{domain}}</code> and <code v-pre>{{scheme}}</code> alone.
 
-This is what lets a framework whose bootstrap needs to know where the site lives declare that step as data. Magento 2.4 removed its web installer, so a fresh store is installed with `bin/magento setup:install --base-url=… --db-name=…`; the definition can now express exactly that. A step that creates schema should carry `default: false` so it is opt-in rather than running on every `lerd setup`.
+This is what lets a framework whose bootstrap needs to know where the site lives declare that step as data. Magento 2.4 removed its web installer, so a fresh store is installed with `bin/magento setup:install --base-url=… --db-name=…`; the definition can now express exactly that. A step that creates schema should carry `default: false` so it is opt-in rather than running on every `lerd setup`, and it should gate itself on `check: missing_file:` naming the file the install writes, so it is offered on a project that has never been bootstrapped and nowhere else. `default: false` alone is not enough for that: `lerd setup --all` runs every step it is offered regardless of the default, and rerunning an installer over a working app is how its data goes away.
 
 A placeholder whose value is empty, or one lerd does not recognise, is left in the command verbatim rather than being replaced with an empty string, so a half-resolved context can never quietly produce `--base-url=://`.
 
@@ -296,7 +386,7 @@ The `commands:` list is the framework's own verbs: the things you would otherwis
 
 `confirm: true` puts the command behind a confirmation showing the exact command line before anything runs, and the dashboard, `lerd run` (unless you pass `--yes`) and MCP (unless the caller forces it) all honour it. This is what lets a genuinely destructive command ship as a command rather than as a setup step: Laravel's `migrate:fresh` drops every table, and Magento ships `setup:install` this way.
 
-`check` takes the same rule shape as a worker's or a setup step's, so `composer: <package>` or `file: <path>`, and a command whose check fails is dropped from the resolved set rather than merely hidden, which means it also disappears from `lerd run` and from any doctor `fix:` pointing at it. Use it for commands that only make sense when an optional package is installed.
+`check` takes the same rule shape as a worker's or a setup step's, so `composer: <package>`, `file: <path>`, or `missing_file: <path>` for the opposite reading, and a command whose check fails is dropped from the resolved set rather than merely hidden, which means it also disappears from `lerd run` and from any doctor `fix:` pointing at it. Use it for commands that only make sense when an optional package is installed.
 
 `icon` is drawn from a fixed vocabulary, and a name outside it renders a generic fallback rather than failing. The set is:
 
@@ -304,13 +394,28 @@ The `commands:` list is the framework's own verbs: the things you would otherwis
 
 `lerd check` validates a definition's commands, and it is the fastest way to catch a typo: an unknown `output` is an error, and an unknown `icon` is a warning.
 
+## Declining a warning
+
+A definition can turn off a warning that says nothing useful about sites built on it:
+
+```yaml
+notifications:
+  nplusone: false                 # this framework's own layers issue the repeats
+```
+
+The repeated-query warning is the case that needs it. On a content management system the entity, config and cache layers issue the repeats during an ordinary request, so the warning names a loop inside the framework that nobody using it can change, and browsing an admin fires one after another. Where the queries come from the code a developer writes, which is most application frameworks, it stays on and is worth having, so a definition saying nothing keeps it.
+
 ## Doctor checks
 
-The `doctor:` section adds framework-specific health checks to the ones every site gets for free (env file present, dependencies installed and locked, audit clean, PHP version in range). They run on `lerd site:doctor` and in the dashboard's doctor panel. Keeping them declarative is what stops the doctor from growing a Go branch per framework.
+The `doctor:` section adds framework-specific health checks to the ones every site gets for free (env file present, every picked service wired into it, dependencies installed and locked, audit clean, PHP version in range, nginx vhost current). They run on `lerd site:doctor` and in the dashboard's doctor panel. Keeping them declarative is what stops the doctor from growing a Go branch per framework.
+
+The section also takes a `migrate_command`, naming whichever of the framework's own `commands:` applies the schema. The universal database checks offer it as their fix, so an empty or missing database is reported with the button that fills it. Every framework spells it differently (Laravel `migrate`, Symfony `doctrine:migrations:migrate`, Drupal `updb`), so nothing but the definition can say; a framework that declares none, or names a command it does not have, gets a finding with no fix rather than a button that maps to nothing.
 
 Each check carries a `name` (a stable id), a `type` that selects the evaluator, an optional `label` for display, an optional `detail` that overrides the generated message, an optional `severity`, and an optional `fix`.
 
-`fix` names one of the framework's own `commands:` entries, by `name`. That indirection is the whole design: the doctor never grows its own mutation endpoints, it just points at a command the framework already exposes, and the UI renders a Fix button that runs it. A `fix` naming a command that does not exist, or one whose `check` rule failed, simply renders no button, and nothing validates the reference, so check your spelling. Four universal keys are also accepted, for the fixes that are not framework-specific: `composer_install`, `composer_update`, `npm_install` and `npm_audit_fix`.
+A top-level `cache_command` names the console subcommand that clears the framework's compiled caches, `cr` for Drupal, `cache:clear` for Symfony, `optimize:clear` for Laravel. lerd runs it through `console` after rewriting a project's database connection: a framework caches the container definitions built from that configuration, and one built against the old database survives the swap and answers every request with an error about something it can no longer find. It runs only when a database key's value actually changed, and only when the project's dependencies are installed.
+
+`fix` names one of the framework's own `commands:` entries, by `name`. That indirection is the whole design: the doctor never grows its own mutation endpoints, it just points at a command the framework already exposes, and the UI renders a Fix button that runs it. A `fix` naming a command that does not exist, or one whose `check` rule failed, simply renders no button, and nothing validates the reference, so check your spelling. Five universal keys are also accepted, for the fixes that are not framework-specific: `composer_install`, `composer_update`, `npm_install`, `npm_audit_fix` and `vhost_regenerate`. The first four run in the site's container like any command; `vhost_regenerate` rewrites the site's vhost on the host and reloads nginx, and is the fix the vhost check carries.
 
 The Fix button runs the command through the same gate as everywhere else, so a fix pointing at a `confirm: true` command still asks first, and the doctor re-checks only once the command has actually run.
 
@@ -411,7 +516,7 @@ This is distinct from the per-site [nginx override](nginx-overrides.md) in `cust
 
 ## Framework detection
 
-Framework detection only runs during `lerd link`, `lerd init`, `lerd env`, `lerd setup`, and `lerd park`. All other commands read the saved framework from the site registry.
+Framework detection only runs during `lerd link`, `lerd init`, `lerd env`, `lerd setup`, and `lerd park`. All other commands read the saved framework from the site registry, and fall back to detecting one for a site whose registry entry holds no framework, so a site registered before its definition existed picks it up on the next read rather than needing a relink. A project that names a framework no definition can be found for keeps that name: it is registered and labelled as what it says it is, without the public dir or PHP range a definition would have supplied.
 
 Detection order:
 
@@ -426,6 +531,8 @@ The first match wins. Detection rules are OR-based, any single matching rule is 
 If no framework matches and no `--public-dir` is specified, lerd tries these candidate directories in order, accepting the first that contains an `index.php`:
 
 `public` → `web` → `webroot` → `pub` → `www` → `htdocs` → `.` (project root)
+
+Serving a site resolves the root again from three places, in this order: the `public_dir` the project commits in its `.lerd.yaml`, the root recorded for the site when it was linked, and the framework definition's `public_dir`. The recorded one gives way to the definition's in one case, when it holds no `index.php` and the definition's does. A root lerd guessed is only as good as the moment it was guessed in, and a project linked before `composer install` has an empty document root to walk, so the guess lands on the project root and would otherwise pin the site there long after the real root appeared.
 
 ## Log viewer
 

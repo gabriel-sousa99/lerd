@@ -372,9 +372,20 @@ func CloneDatabase(service, src, dst string) error {
 
 // entitySnapshotDumpCommand wraps a declared export so its dump crosses podman
 // exec gzipped, which is how snapshots are stored.
+// pipefail is requested rather than assumed: the shell reports the last command
+// in a pipeline, so without it a dump that died still exits 0 through gzip and
+// stores an empty archive. The request is probed in a subshell first because a
+// shell that doesn't know the option (dash, which is /bin/sh on the Ubuntu-based
+// engine images) exits on the bare `set`, killing the dump before it runs. Where
+// the probe fails the dump runs without pipefail and verifyDumpHasContent
+// catches the same failure from the bytes.
 func entitySnapshotDumpCommand(exportCmd string) string {
-	return "( " + strings.TrimSpace(exportCmd) + " ) | gzip -c"
+	return shellPipefail + " ( " + strings.TrimSpace(exportCmd) + " ) | gzip -c"
 }
+
+// shellPipefail turns on pipefail in the shells that have it, and is a no-op in
+// the ones that don't.
+const shellPipefail = "if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi;"
 
 // entitySnapshotRestoreCommand feeds a stored gzipped dump into a declared
 // import.

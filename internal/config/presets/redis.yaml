@@ -20,3 +20,4 @@ client_shims:
   - redis-cli
 category: cache
 icon: bolt
+color: "#ff4438"

@@ -4,6 +4,10 @@ update_strategy: minor
 track_latest: true
 description: PostgreSQL with PostGIS
 family: postgres
+# The image stops with SIGINT (fast shutdown), which still checkpoints before it
+# exits. Five seconds does not cover that on a warm buffer cache, and a killed
+# checkpoint costs a recovery pass on the next start.
+stop_timeout: 60
 default_version: "16"
 versions:
   - tag: "18"
@@ -22,6 +26,7 @@ versions:
 ports:
   - "{{host_port}}:5432"
 data_dir: /var/lib/postgresql/data
+data_version_file: PG_VERSION
 environment:
   POSTGRES_PASSWORD: lerd
   POSTGRES_DB: lerd
@@ -41,6 +46,7 @@ client_shims:
   - pg_restore
 category: databases
 icon: elephant
+color: "#4169e1"
 introspect:
   entities:
     - kind: databases
@@ -64,7 +70,19 @@ introspect:
           filename: "{{name}}.sql"
         import: psql -U postgres -d {{name}}
         export_all: pg_dumpall -U postgres --clean --if-exists
-        import_all: psql -U postgres -d postgres
+        import_all:
+          exec: psql -U postgres -d postgres
+          # A pg_dumpall replay drops and recreates the role it is connected as
+          # and the template databases this image ships, none of which a live
+          # cluster can be without. Every one of these is the dump talking to
+          # itself, so a restore that produced only these worked.
+          expected_errors:
+            - "cannot drop a template database"
+            - "current user cannot be dropped"
+            - 'role "postgres" already exists'
+            - 'database "template_postgis" already exists'
+            - 'schema "tiger" already exists'
+            - 'schema "topology" already exists'
 extensions:
   - name: postgis
     types: [geometry, geography]

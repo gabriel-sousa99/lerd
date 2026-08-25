@@ -3,7 +3,9 @@ package serviceops
 import (
 	"errors"
 	"fmt"
-	"slices"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -12,14 +14,40 @@ import (
 
 // Seams so tests can drive reconcile without real podman/quadlet work.
 var (
-	ensureQuadletFn          = EnsureCustomServiceQuadlet
+	ensureQuadletFn          = ensureCustomServiceQuadletDiff
 	listManagedServiceNames  = podman.ListManagedServiceNames
 	orphanContainerRunningFn = podman.ContainerRunningQuiet
 	materializeFilesFn       = config.MaterializeServiceFiles
 	newestFileMtimeFn        = config.ServiceFilesNewestMtime
 	containerStartedAtFn     = podman.ContainerStartedAt
 	restartUnitFn            = podman.RestartUnit
+	quadletMtimeFn           = quadletMtime
 )
+
+// quadletMtime reports when a service's unit file was last written, and whether
+// it exists at all.
+func quadletMtime(name string) (time.Time, bool) {
+	info, err := os.Stat(filepath.Join(config.QuadletDir(), "lerd-"+name+".container"))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
+}
+
+// containerOlderThanUnit reports whether a running container was started before
+// the unit file it runs from was last written. A unit rewritten by an earlier
+// pass — the install refreshes every service quadlet long before it reaches the
+// reconcile — leaves nothing for this pass to change, so asking only "did I just
+// rewrite it" let a container keep serving a definition that had already moved
+// on. Comparing against the container's own start time catches both.
+func containerOlderThanUnit(name string) bool {
+	started, running := containerStartedAtFn("lerd-" + name)
+	if !running {
+		return false
+	}
+	mtime, ok := quadletMtimeFn(name)
+	return ok && mtime.After(started)
+}
 
 // ReconcileResult reports what ReconcileServices changed.
 type ReconcileResult struct {
@@ -63,25 +91,44 @@ func ReconcileServices(emit func(PhaseEvent)) (ReconcileResult, error) {
 			}
 		}
 		unitInstalled := UnitInstalledFn("lerd-" + svc.Name)
-		if unitInstalled {
-			if applied, err := RestartIfConfigDrifted(svc.Name, svc.Preset); err != nil {
-				errs = append(errs, err)
-			} else if applied {
-				res.ConfigsApplied = append(res.ConfigsApplied, svc.Name)
-			}
-			if !slices.Contains(res.DefinitionsRefreshed, svc.Name) {
-				continue
-			}
-		}
-		// Regenerate the quadlet when the unit is missing, or when the definition
-		// changed. WriteQuadletDiff is a no-op when the content is identical, so a
-		// client_shims-only change (which never appears in the quadlet) is free.
-		if err := ensureQuadletFn(svc); err != nil {
+		// Render the quadlet every pass and let the content decide. What a unit
+		// renders to is not all in the YAML: file mounts and the proxy env come
+		// from the preset when the quadlet is written and are never stored on the
+		// service, so gating this on the definition having changed left a preset
+		// that added either of them unable to reach the unit at all. WriteQuadletDiff
+		// is a no-op when the content is identical, so a steady state costs a
+		// comparison and a change nobody can see in the YAML still lands.
+		//
+		// Before the drift restart below, not after: a change that adds a file
+		// mount changes the unit too, and restarting the old one brings the
+		// container back without the mount, leaving it a pass behind until
+		// something restarts it again.
+		changed, err := ensureQuadletFn(svc)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("regenerating quadlet for %s: %w", svc.Name, err))
 			continue
 		}
+		unitChanged := changed
 		if !unitInstalled {
 			res.QuadletsRegenerated = append(res.QuadletsRegenerated, svc.Name)
+		}
+		if unitInstalled {
+			applied, err := RestartIfConfigDrifted(svc.Name, svc.Preset)
+			if err != nil {
+				errs = append(errs, err)
+			} else if applied {
+				res.ConfigsApplied = append(res.ConfigsApplied, svc.Name)
+			} else if unitChanged || containerOlderThanUnit(svc.Name) {
+				// The drift check reads the materialised config files and is blind to
+				// the unit itself, so a definition that moved a port, changed the image
+				// or added an environment variable would sit rewritten on disk while the
+				// container kept running on what it started with.
+				if restarted, err := restartRunningUnit(svc.Name); err != nil {
+					errs = append(errs, err)
+				} else if restarted {
+					res.ConfigsApplied = append(res.ConfigsApplied, svc.Name)
+				}
+			}
 		}
 	}
 
@@ -230,4 +277,16 @@ func orphanCandidates() []string {
 		}
 	}
 	return names
+}
+
+// restartRunningUnit restarts a service only if its container is up, so a
+// rewritten unit reaches a running service without starting a stopped one.
+func restartRunningUnit(name string) (bool, error) {
+	if _, running := containerStartedAtFn("lerd-" + name); !running {
+		return false, nil
+	}
+	if err := restartUnitFn("lerd-" + name); err != nil {
+		return false, fmt.Errorf("restarting %s after a unit change: %w", name, err)
+	}
+	return true, nil
 }

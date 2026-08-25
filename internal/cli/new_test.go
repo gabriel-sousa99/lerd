@@ -15,16 +15,48 @@ import (
 // base name breaks for nested targets (lerd new apps/myapp → cd myapp).
 func TestNewNextStep(t *testing.T) {
 	cases := []struct {
-		target string
-		want   string
+		target  string
+		chained bool
+		want    string
 	}{
-		{"myapp", "cd myapp && lerd link && lerd setup"},
-		{"apps/myapp", "cd apps/myapp && lerd link && lerd setup"},
-		{"/abs/path/myapp", "cd /abs/path/myapp && lerd link && lerd setup"},
+		{"myapp", false, "cd myapp && lerd link && lerd setup"},
+		{"apps/myapp", false, "cd apps/myapp && lerd link && lerd setup"},
+		{"/abs/path/myapp", false, "cd /abs/path/myapp && lerd link && lerd setup"},
+		// A run that linked and set the project up itself has nothing left to
+		// suggest but the move it cannot make on the user's behalf.
+		{"myapp", true, "cd myapp"},
+		{"apps/myapp", true, "cd apps/myapp"},
 	}
 	for _, tc := range cases {
-		if got := newNextStep(tc.target); got != tc.want {
-			t.Errorf("newNextStep(%q) = %q, want %q", tc.target, got, tc.want)
+		if got := newNextStep(tc.target, tc.chained); got != tc.want {
+			t.Errorf("newNextStep(%q, %v) = %q, want %q", tc.target, tc.chained, got, tc.want)
+		}
+	}
+}
+
+// `lerd new` with no name at all has to reach the wizard rather than index a
+// positional that isn't there, and `lerd new -- --flag` names no project either:
+// both arrive as a bare list, so only the dash position tells them apart.
+func TestNewArgs(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		dash       int
+		wantTarget string
+		wantExtra  []string
+	}{
+		{"no arguments", nil, -1, "", nil},
+		{"target only", []string{"myapp"}, -1, "myapp", []string{}},
+		{"target and extras", []string{"myapp", "--dev"}, 1, "myapp", []string{"--dev"}},
+		{"extras with no target", []string{"--dev"}, 0, "", []string{"--dev"}},
+	}
+	for _, tc := range cases {
+		target, extra := newArgs(tc.args, tc.dash)
+		if target != tc.wantTarget {
+			t.Errorf("%s: target = %q, want %q", tc.name, target, tc.wantTarget)
+		}
+		if len(extra) != len(tc.wantExtra) {
+			t.Errorf("%s: extra = %v, want %v", tc.name, extra, tc.wantExtra)
 		}
 	}
 }
@@ -35,8 +67,7 @@ func runNewCmd(t *testing.T, args ...string) (target, framework string, extra []
 	t.Helper()
 	cmd := NewNewCmd()
 	cmd.RunE = func(c *cobra.Command, positional []string) error {
-		target = positional[0]
-		extra = positional[1:]
+		target, extra = newArgs(positional, c.ArgsLenAtDash())
 		framework, _ = c.Flags().GetString("framework")
 		return nil
 	}
@@ -84,8 +115,10 @@ func TestNewCmdForwardsArgsAfterDash(t *testing.T) {
 	if target != "myapp" {
 		t.Errorf("target = %q, want myapp", target)
 	}
-	if framework != "laravel" {
-		t.Errorf("framework = %q, want laravel", framework)
+	// The flag carries no default any more: an empty value is what tells the
+	// command to ask, and runNew is where a non-interactive run falls back.
+	if framework != "" {
+		t.Errorf("framework = %q, want it unset", framework)
 	}
 	if want := []string{"--no-interaction", "--dev"}; !reflect.DeepEqual(extra, want) {
 		t.Errorf("extra args = %v, want %v", extra, want)

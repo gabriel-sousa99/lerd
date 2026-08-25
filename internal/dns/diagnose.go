@@ -14,6 +14,8 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
+
+	"github.com/gabriel-sousa99/lerd/pkg/distro"
 )
 
 // StepStatus is the outcome of a single rung in the layered DNS check.
@@ -63,6 +65,18 @@ type probeFns struct {
 	// lanExposedIP is the LAN IP dnsmasq hands out under lan:expose, or "" when
 	// off, so the answer checks accept it as legitimate (see probe.go Check).
 	lanExposedIP func() string
+	// hostDnsmasqPresent reports whether dnsmasq is on PATH. Only meaningful
+	// for the nmDnsmasqKind hookup, where NetworkManager needs it to act on
+	// the config lerd writes.
+	hostDnsmasqPresent func() bool
+	// hostOwnsResolver reports a host whose own config owns the resolver, so
+	// the hookup, interface and lerd0 rungs probe files lerd never wrote.
+	hostOwnsResolver func() bool
+}
+
+// ownsResolver keeps the rungs working for callers that predate the field.
+func (p probeFns) ownsResolver() bool {
+	return p.hostOwnsResolver != nil && p.hostOwnsResolver()
 }
 
 // exposedIP is the LAN IP dnsmasq publishes under lan:expose, or "" when the
@@ -231,9 +245,32 @@ func diagnose(tld string, p probeFns) Diagnostic {
 
 	// Rung 5 — resolver hookup file.
 	kind, exists, path := p.resolverHookup()
-	if exists {
+	hostOwned := p.ownsResolver()
+	if exists && kind == nmDnsmasqKind && p.hostDnsmasqPresent != nil && !p.hostDnsmasqPresent() {
+		// Config file is real, but with no dnsmasq binary to run it
+		// NetworkManager silently keeps using upstream DNS instead.
+		d.Steps = append(d.Steps, Step{
+			Name:   "resolver hookup",
+			Status: StepFail,
+			Detail: kind + ": " + path + " (dnsmasq binary not found on PATH)",
+			Hint:   dnsmasqInstallHint() + ", then sudo systemctl restart NetworkManager",
+		})
+		return finalize(d)
+	}
+	switch {
+	case exists:
 		d.Steps = append(d.Steps, Step{Name: "resolver hookup", Status: StepOK, Detail: kind + ": " + path})
-	} else {
+	case hostOwned:
+		// Not a failure and not repairable by lerd: on NixOS the resolver is
+		// generated from configuration.nix, so lerd writes no hookup at all and
+		// the ~tld route there is what carries .test. Rung 7 is the real test.
+		d.Steps = append(d.Steps, Step{
+			Name:   "resolver hookup",
+			Status: StepSkip,
+			Detail: "NixOS owns the resolver; lerd installs no hookup here",
+			Hint:   "the ~" + tld + " route in configuration.nix is what carries ." + tld,
+		})
+	default:
 		d.Steps = append(d.Steps, Step{
 			Name:   "resolver hookup",
 			Status: StepFail,
@@ -243,8 +280,11 @@ func diagnose(tld string, p probeFns) Diagnostic {
 		return finalize(d)
 	}
 
-	// Rung 6 — Linux interface-level routing (skip on macOS).
-	if runtime.GOOS == "linux" {
+	// Rung 6 — Linux interface-level routing (skip on macOS). NetworkManager's
+	// own dnsmasq answers .test without systemd-resolved, which is typically
+	// masked on those hosts, so resolvectl has nothing to report and probing it
+	// would warn about a healthy install.
+	if runtime.GOOS == "linux" && kind != nmDnsmasqKind && !hostOwned {
 		iface, has5300, hasTLD, err := p.interfaceRouting(tld)
 		switch {
 		case err != nil:
@@ -281,7 +321,7 @@ func diagnose(tld string, p probeFns) Diagnostic {
 	// way, and the damage only shows once the user goes offline, which is exactly
 	// why it's worth saying out loud here rather than leaving them to find it on a
 	// train.
-	if runtime.GOOS == "linux" && usesDummyLink(kind) && p.dummyLinkRouting != nil {
+	if runtime.GOOS == "linux" && usesDummyLink(kind) && p.dummyLinkRouting != nil && !hostOwned {
 		switch present, routed := p.dummyLinkRouting(tld); {
 		case !present:
 			d.Steps = append(d.Steps, Step{
@@ -312,10 +352,10 @@ func diagnose(tld string, p probeFns) Diagnostic {
 	accepted := acceptedAnswer(addrs, lanIP)
 	switch {
 	case err != nil:
-		d.Steps = append(d.Steps, systemLookupFailStep(err.Error(), vpn))
+		d.Steps = append(d.Steps, systemLookupFailStep(err.Error(), vpn, hostOwned))
 	case accepted == "":
 		d.Steps = append(d.Steps, systemLookupFailStep(
-			fmt.Sprintf("got %v, want one entry to be %s", addrs, want), vpn))
+			fmt.Sprintf("got %v, want one entry to be %s", addrs, want), vpn, hostOwned))
 	default:
 		d.Steps = append(d.Steps, Step{Name: "system DNS lookup", Status: StepOK, Detail: accepted})
 	}
@@ -328,7 +368,15 @@ func diagnose(tld string, p probeFns) Diagnostic {
 // taken over DNS, .test still resolves via lerd-dns directly, and the
 // watcher re-syncs container DNS automatically. That is a warning, not a
 // failure, so the chain doesn't flag a broken state lerd already handles.
-func systemLookupFailStep(detail string, vpn bool) Step {
+func systemLookupFailStep(detail string, vpn, hostOwned bool) Step {
+	if hostOwned && !vpn {
+		return Step{
+			Name:   "system DNS lookup",
+			Status: StepFail,
+			Detail: detail,
+			Hint:   "lerd leaves the resolver alone on NixOS; route the TLD yourself in configuration.nix (services.resolved.domains, see docs/getting-started/nixos.md)",
+		}
+	}
 	if vpn {
 		return Step{
 			Name:   "system DNS lookup",
@@ -371,17 +419,69 @@ func findListenerCmd(port int) string {
 // defaultProbes wires the production implementations for each rung.
 func defaultProbes() probeFns {
 	return probeFns{
-		containerRunning: defaultContainerRunning,
-		dnsmasqConfigOK:  defaultDnsmasqConfigOK,
-		portOpen:         defaultPortOpen,
-		dnsmasqAnswer:    defaultDnsmasqAnswer,
-		resolverHookup:   defaultResolverHookup,
-		interfaceRouting: defaultInterfaceRouting,
-		dummyLinkRouting: defaultDummyLinkRouting,
-		systemLookup:     defaultSystemLookup,
-		vpnActive:        VPNActive,
-		lanExposedIP:     defaultLanExposedIP,
+		containerRunning:   defaultContainerRunning,
+		dnsmasqConfigOK:    defaultDnsmasqConfigOK,
+		portOpen:           defaultPortOpen,
+		dnsmasqAnswer:      defaultDnsmasqAnswer,
+		resolverHookup:     defaultResolverHookup,
+		interfaceRouting:   defaultInterfaceRouting,
+		dummyLinkRouting:   defaultDummyLinkRouting,
+		systemLookup:       defaultSystemLookup,
+		vpnActive:          VPNActive,
+		lanExposedIP:       defaultLanExposedIP,
+		hostDnsmasqPresent: hostDnsmasqPresent,
+		hostOwnsResolver:   HostOwnsResolver,
 	}
+}
+
+// dnsmasqSbinPaths are the usual dnsmasq locations outside PATH. Debian-style
+// user PATHs omit the sbin dirs, but NetworkManager still finds the binary
+// there via its compile-time path, so PATH alone would false-negative.
+var dnsmasqSbinPaths = []string{"/usr/sbin/dnsmasq", "/sbin/dnsmasq", "/usr/local/sbin/dnsmasq"}
+
+// hostDnsmasqPresent reports whether the dnsmasq binary exists on PATH or in
+// one of the sbin locations. Lives here rather than setup.go because that
+// file is linux-only and this one also serves the macOS path.
+func hostDnsmasqPresent() bool {
+	return dnsmasqFound(exec.LookPath, dnsmasqSbinPaths)
+}
+
+// detectDistro resolves the host distribution. Seam for tests.
+var detectDistro = distro.Detect
+
+// dnsmasqInstallAny covers a host whose family could not be resolved.
+const dnsmasqInstallAny = "sudo apt install dnsmasq-base / sudo dnf install dnsmasq / sudo pacman -S dnsmasq"
+
+// dnsmasqInstallHint names the command that installs the dnsmasq binary this
+// host needs, the same package install.sh queues. The debian family gets
+// dnsmasq-base: the full dnsmasq package also starts a resolver on :53, which
+// collides with the NetworkManager plugin the binary is being installed for.
+func dnsmasqInstallHint() string {
+	d, err := detectDistro()
+	if err != nil || d == nil {
+		return dnsmasqInstallAny
+	}
+	switch {
+	case d.IsDebian():
+		return "sudo apt install dnsmasq-base"
+	case d.IsFedora():
+		return "sudo dnf install dnsmasq"
+	case d.IsArch():
+		return "sudo pacman -S dnsmasq"
+	}
+	return dnsmasqInstallAny
+}
+
+func dnsmasqFound(lookPath func(string) (string, error), fallbacks []string) bool {
+	if _, err := lookPath("dnsmasq"); err == nil {
+		return true
+	}
+	for _, p := range fallbacks {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultLanExposedIP returns the host's primary LAN IP when lan:expose is on,

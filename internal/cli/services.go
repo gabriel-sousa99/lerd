@@ -20,6 +20,9 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/gabriel-sousa99/lerd/internal/shims"
 	"github.com/gabriel-sousa99/lerd/internal/store"
+
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
+
 	"github.com/spf13/cobra"
 )
 
@@ -27,10 +30,9 @@ import (
 // Backed by the preset YAMLs so adding a default preset surfaces here automatically.
 func knownServices() []string { return config.DefaultPresetNames() }
 
-// sqliteEnvVars are the Laravel-standard env values for the sqlite "service"
-// (which isn't a podman container — just a per-project file). Kept hardcoded
-// because there's no preset YAML to host it: sqlite has no image, no port,
-// and no install flow.
+// sqliteEnvVars are the keys a framework that declares no sqlite wiring of its
+// own gets. They are the dotenv names Laravel and the frameworks built on it
+// use, which is what every project reaching this fallback has.
 var sqliteEnvVars = []string{
 	"DB_CONNECTION=sqlite",
 	"DB_DATABASE=database/database.sqlite",
@@ -74,6 +76,16 @@ func seedEnvDefaults(envPath string, defaults []string, updates map[string]strin
 		}
 		updates[k] = v
 	}
+}
+
+// sqliteVarsFor returns the env values that point a project at its file
+// database. Which keys those are is the definition's to say, like every other
+// wiring: a Datasources driver reaches CakePHP and DB_CONNECTION does not.
+func sqliteVarsFor(fw *config.Framework) []string {
+	if fw != nil && fw.Env.SQLite != nil && len(fw.Env.SQLite.Vars) > 0 {
+		return fw.Env.SQLite.Vars
+	}
+	return sqliteEnvVars
 }
 
 // serviceEnvVars returns the recommended Laravel .env KEY=VALUE pairs for a
@@ -687,6 +699,7 @@ func ListInstallablePresets() ([]config.PresetMeta, error) {
 				DefaultVersion: e.DefaultVersion,
 				Category:       e.Category,
 				Icon:           e.Icon,
+				Color:          config.NormalizeBrandColor(e.Color),
 				AdminFor:       e.AdminFor,
 			})
 		}
@@ -815,7 +828,7 @@ func MissingPresetDependencies(svc *config.CustomService) []string {
 
 // newServiceRemoveCmd returns the `service remove` command.
 func newServiceRemoveCmd() *cobra.Command {
-	var purge bool
+	var purge, noSnapshot bool
 	cmd := &cobra.Command{
 		Use:   "remove <service>",
 		Short: "Stop and remove a service (custom or default)",
@@ -830,6 +843,8 @@ func newServiceRemoveCmd() *cobra.Command {
 
 			emit := func(e serviceops.PhaseEvent) {
 				switch e.Phase {
+				case "snapshotting_data", "snapshot_taken":
+					feedback.Line(e.Message)
 				case "stopping_unit":
 					feedback.Line("stopping " + e.Unit)
 				case "removing_data":
@@ -839,7 +854,8 @@ func newServiceRemoveCmd() *cobra.Command {
 				}
 			}
 
-			if err := serviceops.RemoveService(name, serviceops.RemoveOptions{RemoveData: purge}, emit); err != nil {
+			opts := serviceops.RemoveOptions{RemoveData: purge, SkipSnapshot: noSnapshot}
+			if err := serviceops.RemoveService(name, opts, emit); err != nil {
 				return err
 			}
 
@@ -854,6 +870,7 @@ func newServiceRemoveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&purge, "purge", false, "also rename the service data dir aside (recoverable as <dir>.pre-remove-<ts>)")
+	cmd.Flags().BoolVar(&noSnapshot, "no-snapshot", false, "with --purge, skip the snapshot of every database taken before the data goes")
 	return cmd
 }
 
@@ -861,11 +878,11 @@ func newServiceRemoveCmd() *cobra.Command {
 // removes, and reinstalls the same version. With --reset-data the data dir
 // is renamed-aside and per-site DBs/buckets are recreated on the fresh service.
 func newServiceReinstallCmd() *cobra.Command {
-	var resetData bool
+	var resetData, noSnapshot bool
 	cmd := &cobra.Command{
 		Use:   "reinstall <service>",
 		Short: "Stop, remove, and reinstall a service in place",
-		Long:  "Reinstall the service at its current version. With --reset-data the data dir is renamed-aside (recoverable) and any linked sites' databases or buckets are recreated on the fresh service.",
+		Long:  "Reinstall the service at its current version. With --reset-data every database on the service is snapshotted first, the data dir is renamed-aside (recoverable) and any linked sites' databases or buckets are recreated on the fresh service.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
@@ -874,6 +891,8 @@ func newServiceReinstallCmd() *cobra.Command {
 				switch e.Phase {
 				case "reinstall_starting":
 					feedback.Line("reinstalling " + name)
+				case "snapshotting_data", "snapshot_taken":
+					feedback.Note(e.Message)
 				case "stopping_unit":
 					feedback.Note("stopping " + e.Unit)
 				case "removing_data":
@@ -894,7 +913,8 @@ func newServiceReinstallCmd() *cobra.Command {
 					feedback.Note("reprovisioning skipped: " + e.Message)
 				}
 			}
-			if err := serviceops.ReinstallService(name, resetData, emit); err != nil {
+			opts := serviceops.ReinstallOptions{ResetData: resetData, SkipSnapshot: noSnapshot}
+			if err := serviceops.ReinstallService(name, opts, emit); err != nil {
 				return err
 			}
 			fmt.Printf("Reinstalled %q.\n", name)
@@ -902,6 +922,7 @@ func newServiceReinstallCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&resetData, "reset-data", false, "wipe data dir (rename-aside) and recreate linked-site databases/buckets on the fresh service")
+	cmd.Flags().BoolVar(&noSnapshot, "no-snapshot", false, "with --reset-data, skip the snapshot of every database taken before the data goes")
 	return cmd
 }
 
@@ -934,6 +955,18 @@ func ensureServiceQuadlet(name string) error {
 // tools generate identical quadlets.
 func ensureCustomServiceQuadlet(svc *config.CustomService) error {
 	return serviceops.EnsureCustomServiceQuadlet(svc)
+}
+
+// installedServiceDefinition returns the definition a service quadlet should be
+// written from. A site's .lerd.yaml keeps the copy it was linked with, while the
+// installed YAML is the one reconcile keeps in sync with the store, so an
+// install that preferred the site copy would put the service back on an image
+// and a host port the store has since moved away from.
+func installedServiceDefinition(name string, inline *config.CustomService) *config.CustomService {
+	if installed, err := config.LoadCustomService(name); err == nil && installed != nil {
+		return installed
+	}
+	return inline
 }
 
 // newServiceExposeCmd returns the `service expose` command.
@@ -1196,35 +1229,8 @@ func autoStopUnusedServices() {
 }
 
 // activePHPVersions returns the set of PHP versions actually in use by
-// non-ignored, non-paused sites, using live disk detection (.php-version file)
-// with the stored registry value as fallback.
-func activePHPVersions() map[string]bool {
-	reg, err := config.LoadSites()
-	if err != nil {
-		return nil
-	}
-	active := make(map[string]bool)
-	for _, s := range reg.Sites {
-		if s.Ignored {
-			continue
-		}
-		phpMin, phpMax := "", ""
-		if s.Framework != "" {
-			// A guessed framework definition's PHP range must not constrain the
-			// site (a Laravel 6 served by the Laravel 10 def still runs on 7.4),
-			// so skip its range and let the real detected version drive which
-			// FPM unit coreUnits starts.
-			if fw, fwOk := config.GetFrameworkForDir(s.Framework, s.Path); fwOk && !fw.VersionGuessed {
-				phpMin, phpMax = fw.PHP.Min, fw.PHP.Max
-			}
-		}
-		v := phpPkg.DetectVersionClamped(s.Path, phpMin, phpMax, s.PHPVersion)
-		if v != "" {
-			active[v] = true
-		}
-	}
-	return active
-}
+// non-ignored, non-paused sites.
+func activePHPVersions() map[string]bool { return lifecycle.ActivePHPVersions() }
 
 // activeFrankenPHPVersions returns the distinct, normalized PHP versions used by
 // non-ignored, non-paused FrankenPHP sites, for derived-image rebuild detection.

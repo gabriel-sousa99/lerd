@@ -329,9 +329,9 @@ func TestReconcileServices_continuesPastForwardError(t *testing.T) {
 
 	prev := ensureQuadletFn
 	t.Cleanup(func() { ensureQuadletFn = prev })
-	ensureQuadletFn = func(svc *config.CustomService) error {
+	ensureQuadletFn = func(svc *config.CustomService) (bool, error) {
 		if svc.Name == "bad" {
-			return errors.New("boom")
+			return false, errors.New("boom")
 		}
 		return prev(svc)
 	}
@@ -387,7 +387,21 @@ func TestReconcileServices_noRestartWhenConfigCurrent(t *testing.T) {
 	}
 	writeQuadlet(t, "mysql", true)
 
+	// The staged unit is a stand-in, not what the generator would write, so
+	// report it unchanged: this test is about the drift decision, and a unit
+	// that rewrote itself here would restart the container for its own reason.
+	prevEnsure := ensureQuadletFn
+	t.Cleanup(func() { ensureQuadletFn = prevEnsure })
+	ensureQuadletFn = func(*config.CustomService) (bool, error) { return false, nil }
+
 	boot := time.Unix(1_000_000, 0)
+	// The staged file carries a real mtime while the container's boot is
+	// synthetic, so date the unit behind it: this service booted from the unit it
+	// has, which is the case being asserted.
+	prevMtime := quadletMtimeFn
+	t.Cleanup(func() { quadletMtimeFn = prevMtime })
+	quadletMtimeFn = func(string) (time.Time, bool) { return boot.Add(-time.Hour), true }
+
 	restarted := false
 	restore := swapDriftSeams(t,
 		func(*config.CustomService) error { return nil },
@@ -435,5 +449,251 @@ func TestReconcileServices_steadyStateNoop(t *testing.T) {
 	}
 	if len(res.QuadletsRegenerated) != 0 || len(res.OrphansRemoved) != 0 {
 		t.Fatalf("steady state must be a no-op, got %+v", res)
+	}
+}
+
+// A store change that adds a file mount has to land in one pass. The drift
+// restart must run against the regenerated unit, or the container comes back
+// without the new mount and whatever it carried (phpmyadmin's apache alias, so
+// its dashboard answers under the proxy) is missing until something restarts it
+// again.
+func TestReconcileServices_regeneratesBeforeRestartingOnDrift(t *testing.T) {
+	reconcileEnv(t)
+	if err := config.SaveStorePreset("probe-svc", []byte("name: probe-svc\nimage: example/probe:1\ndashboard: http://localhost:9999\n")); err != nil {
+		t.Fatalf("store preset: %v", err)
+	}
+	if err := config.SaveCustomService(&config.CustomService{Name: "probe-svc", Image: "example/probe:1", Preset: "probe-svc"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	writeQuadlet(t, "probe-svc", true)
+
+	var order []string
+	prevEnsure := ensureQuadletFn
+	t.Cleanup(func() { ensureQuadletFn = prevEnsure })
+	ensureQuadletFn = func(*config.CustomService) (bool, error) {
+		order = append(order, "regenerate")
+		return false, nil
+	}
+
+	boot := time.Unix(1_000_000, 0)
+	restore := swapDriftSeams(t,
+		func(*config.CustomService) error { return nil },
+		func(*config.CustomService) (time.Time, bool) { return boot.Add(time.Hour), true },
+		func(string) (time.Time, bool) { return boot, true },
+		func(string) error { order = append(order, "restart"); return nil },
+		func(string) bool { return true },
+	)
+	defer restore()
+
+	if _, err := ReconcileServices(nil); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(order) != 2 || order[0] != "regenerate" || order[1] != "restart" {
+		t.Fatalf("want the unit regenerated before the drift restart, got %v", order)
+	}
+}
+
+// A store change that touches only the unit — a moved port, a new image, an
+// added environment variable — leaves every materialised config file untouched,
+// so the drift check sees nothing and the running container keeps whatever it
+// started with until someone restarts it by hand.
+func TestReconcileServices_restartsOnAUnitOnlyChange(t *testing.T) {
+	reconcileEnv(t)
+	if err := config.SaveStorePreset("probe-svc", []byte("name: probe-svc\nimage: example/probe:1\ndashboard: http://localhost:9999\n")); err != nil {
+		t.Fatalf("store preset: %v", err)
+	}
+	if err := config.SaveCustomService(&config.CustomService{Name: "probe-svc", Image: "example/probe:1", Preset: "probe-svc"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	writeQuadlet(t, "probe-svc", true)
+
+	var order []string
+	prevEnsure := ensureQuadletFn
+	t.Cleanup(func() { ensureQuadletFn = prevEnsure })
+	ensureQuadletFn = func(*config.CustomService) (bool, error) {
+		order = append(order, "regenerate")
+		return true, nil
+	}
+
+	boot := time.Unix(1_000_000, 0)
+	restore := swapDriftSeams(t,
+		func(*config.CustomService) error { return nil },
+		// No config file is newer than the container: nothing drifted on disk.
+		func(*config.CustomService) (time.Time, bool) { return time.Time{}, false },
+		func(string) (time.Time, bool) { return boot, true },
+		func(string) error { order = append(order, "restart"); return nil },
+		func(string) bool { return true },
+	)
+	defer restore()
+
+	if _, err := ReconcileServices(nil); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(order) != 2 || order[0] != "regenerate" || order[1] != "restart" {
+		t.Fatalf("a rewritten unit never reached the running container, got %v", order)
+	}
+}
+
+// A rewritten unit for a service that is not running must not start it.
+func TestReconcileServices_leavesAStoppedServiceStopped(t *testing.T) {
+	reconcileEnv(t)
+	if err := config.SaveStorePreset("probe-svc", []byte("name: probe-svc\nimage: example/probe:1\ndashboard: http://localhost:9999\n")); err != nil {
+		t.Fatalf("store preset: %v", err)
+	}
+	if err := config.SaveCustomService(&config.CustomService{Name: "probe-svc", Image: "example/probe:1", Preset: "probe-svc"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	writeQuadlet(t, "probe-svc", true)
+
+	prevEnsure := ensureQuadletFn
+	t.Cleanup(func() { ensureQuadletFn = prevEnsure })
+	ensureQuadletFn = func(*config.CustomService) (bool, error) { return true, nil }
+
+	restarted := false
+	restore := swapDriftSeams(t,
+		func(*config.CustomService) error { return nil },
+		func(*config.CustomService) (time.Time, bool) { return time.Time{}, false },
+		func(string) (time.Time, bool) { return time.Time{}, false },
+		func(string) error { restarted = true; return nil },
+		func(string) bool { return true },
+	)
+	defer restore()
+
+	if _, err := ReconcileServices(nil); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if restarted {
+		t.Error("a stopped service was started by a unit rewrite")
+	}
+}
+
+// A store preset can change the unit without changing the YAML saved when the
+// service was installed: file mounts and the proxy env are read from the preset
+// at render time and never stored on the service. Gating the re-render on the
+// definition having changed meant a preset that moved a dashboard behind the
+// lerd-ui proxy landed on disk with the container still on a unit that had no
+// mount for it, so the dashboard answered 404 at the path the UI had already
+// switched to. What the unit would render to decides, not what the YAML says.
+func TestReconcileServices_regeneratesWhenOnlyThePresetChanged(t *testing.T) {
+	reconcileEnv(t)
+	if err := config.SaveStorePreset("probe-svc", []byte("name: probe-svc\nimage: example/probe:1\ndashboard: http://localhost:9999\n")); err != nil {
+		t.Fatalf("store preset: %v", err)
+	}
+	// Saved exactly as the preset resolves, so nothing about the definition is
+	// stale and the refresh reports no change.
+	if err := config.SaveCustomService(&config.CustomService{
+		Name:      "probe-svc",
+		Image:     "example/probe:1",
+		Dashboard: "http://localhost:9999",
+		Preset:    "probe-svc",
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	writeQuadlet(t, "probe-svc", true)
+
+	var order []string
+	prevEnsure := ensureQuadletFn
+	t.Cleanup(func() { ensureQuadletFn = prevEnsure })
+	ensureQuadletFn = func(*config.CustomService) (bool, error) {
+		order = append(order, "regenerate")
+		return true, nil
+	}
+
+	boot := time.Unix(1_000_000, 0)
+	restore := swapDriftSeams(t,
+		func(*config.CustomService) error { return nil },
+		func(*config.CustomService) (time.Time, bool) { return time.Time{}, false },
+		func(string) (time.Time, bool) { return boot, true },
+		func(string) error { order = append(order, "restart"); return nil },
+		func(string) bool { return true },
+	)
+	defer restore()
+
+	res, err := ReconcileServices(nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(res.DefinitionsRefreshed) != 0 {
+		t.Fatalf("the definition was not supposed to change, got %v", res.DefinitionsRefreshed)
+	}
+	if len(order) != 2 || order[0] != "regenerate" || order[1] != "restart" {
+		t.Fatalf("a preset-only change never reached the unit, got %v", order)
+	}
+}
+
+// A container is stale against a unit that changed at any point, not only
+// against one this pass rewrote. The install rewrites service quadlets early and
+// leaves an already-running container alone, so by the time the reconcile came
+// round the unit on disk was current, nothing looked changed, and the container
+// kept serving from the definition it booted with. What the container started
+// before decides.
+func TestReconcileServices_restartsAContainerOlderThanItsUnit(t *testing.T) {
+	reconcileEnv(t)
+	if err := config.SaveCustomService(&config.CustomService{Name: "probe-svc", Image: "example/probe:1"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	writeQuadlet(t, "probe-svc", true)
+
+	prevEnsure := ensureQuadletFn
+	t.Cleanup(func() { ensureQuadletFn = prevEnsure })
+	// Nothing to rewrite: the unit on disk is already what it should be.
+	ensureQuadletFn = func(*config.CustomService) (bool, error) { return false, nil }
+
+	prevMtime := quadletMtimeFn
+	t.Cleanup(func() { quadletMtimeFn = prevMtime })
+	boot := time.Unix(1_000_000, 0)
+	quadletMtimeFn = func(string) (time.Time, bool) { return boot.Add(time.Hour), true }
+
+	restarted := false
+	restore := swapDriftSeams(t,
+		func(*config.CustomService) error { return nil },
+		func(*config.CustomService) (time.Time, bool) { return time.Time{}, false },
+		func(string) (time.Time, bool) { return boot, true },
+		func(string) error { restarted = true; return nil },
+		func(string) bool { return true },
+	)
+	defer restore()
+
+	if _, err := ReconcileServices(nil); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !restarted {
+		t.Fatal("a container older than its unit was left running on the old definition")
+	}
+}
+
+// The same check must not restart a container that already booted from the
+// current unit, or every pass would bounce every service.
+func TestReconcileServices_leavesAContainerNewerThanItsUnit(t *testing.T) {
+	reconcileEnv(t)
+	if err := config.SaveCustomService(&config.CustomService{Name: "probe-svc", Image: "example/probe:1"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	writeQuadlet(t, "probe-svc", true)
+
+	prevEnsure := ensureQuadletFn
+	t.Cleanup(func() { ensureQuadletFn = prevEnsure })
+	ensureQuadletFn = func(*config.CustomService) (bool, error) { return false, nil }
+
+	prevMtime := quadletMtimeFn
+	t.Cleanup(func() { quadletMtimeFn = prevMtime })
+	boot := time.Unix(1_000_000, 0)
+	quadletMtimeFn = func(string) (time.Time, bool) { return boot.Add(-time.Hour), true }
+
+	restarted := false
+	restore := swapDriftSeams(t,
+		func(*config.CustomService) error { return nil },
+		func(*config.CustomService) (time.Time, bool) { return time.Time{}, false },
+		func(string) (time.Time, bool) { return boot, true },
+		func(string) error { restarted = true; return nil },
+		func(string) bool { return true },
+	)
+	defer restore()
+
+	if _, err := ReconcileServices(nil); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if restarted {
+		t.Fatal("a container already running the current unit was restarted for nothing")
 	}
 }

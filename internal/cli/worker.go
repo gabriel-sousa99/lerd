@@ -717,6 +717,14 @@ func WorkerStopForSite(siteName, sitePath, workerName string) error {
 	return stopWorkerUnit(unitName, workerName, displaySite)
 }
 
+// StopWorkerUnit tears down a worker unit the caller has already resolved to a
+// full unit name. The health detector names failing units directly, worktree
+// ones included, so telling one to stay down does not have to rediscover which
+// checkout it belongs to.
+func StopWorkerUnit(unit, label string) error {
+	return stopWorkerUnit(unit, label, "")
+}
+
 // stopWorkerUnit tears down a fully-qualified unit name. Used by both the
 // per-site stop entry point and the worktree-removal cleanup pass. Disable
 // + Stop + RemoveTimerUnit + RemoveServiceUnit are run unconditionally so

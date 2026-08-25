@@ -2,15 +2,25 @@ package cleanup
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/imgledger"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // withImages swaps the image-scan and layer-inspect seams for fixtures and
 // restores them after. layers maps an image ID to its RootFS layers.
 func withImages(t *testing.T, imgs []image, layers map[string][]string) {
 	t.Helper()
+	// Point the config paths at a temp dir: the plan now includes rendered
+	// service config from disk, and no test may read, let alone reclaim, what is
+	// under the real ~/.local/share/lerd.
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
 	scanImages = func() ([]image, error) { return imgs, nil }
 	imageLayers = func(ids []string) (map[string][]string, error) {
 		m := map[string][]string{}
@@ -349,5 +359,70 @@ func TestApply_SkipsFailedRemovalsButContinues(t *testing.T) {
 	}
 	if gotN != 1 {
 		t.Errorf("removed count = %d, want 1 (only the successful removal)", gotN)
+	}
+}
+
+// seedServiceFiles renders a service's file directory and returns its path.
+func seedServiceFiles(t *testing.T, name string) string {
+	t.Helper()
+	dir := config.ServiceFilesDir(name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "conf"), []byte("rendered\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	return dir
+}
+
+// Rendered config for a service that no longer exists is reclaimable; anything
+// still backed by a definition, a default preset or an installed quadlet is not.
+func TestInspect_ListsRenderedFilesOfRemovedServicesOnly(t *testing.T) {
+	withImages(t, nil, nil)
+
+	gone := seedServiceFiles(t, "phpmyadmin")
+	seedServiceFiles(t, "mysql")     // default preset, still ours
+	seedServiceFiles(t, "gotenberg") // custom definition below
+	seedServiceFiles(t, "typesense") // no definition, but a quadlet is installed
+
+	if err := config.SaveCustomService(&config.CustomService{Name: "gotenberg", Image: "docker.io/gotenberg/gotenberg:8"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := os.MkdirAll(config.QuadletDir(), 0o755); err != nil {
+		t.Fatalf("mkdir quadlet dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(config.QuadletDir(), "lerd-typesense.container"), []byte("[Container]\n"), 0o644); err != nil {
+		t.Fatalf("write quadlet: %v", err)
+	}
+
+	plan, err := Inspect(ScopeDeep)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+
+	var got []string
+	for _, tgt := range plan.Targets {
+		if tgt.Kind == KindFiles {
+			got = append(got, tgt.ID)
+		}
+	}
+	if len(got) != 1 || got[0] != gone {
+		t.Fatalf("file targets = %v, want [%s]", got, gone)
+	}
+}
+
+// The sweep deletes the directory and counts what it freed.
+func TestApply_RemovesRenderedFileTargets(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	dir := seedServiceFiles(t, "phpmyadmin")
+
+	gotN, freed := Apply(Plan{Targets: []Target{{Kind: KindFiles, ID: dir, Desc: "rendered config", Bytes: 9}}})
+
+	if gotN != 1 || freed != 9 {
+		t.Errorf("removed=%d freed=%d, want 1 and 9", gotN, freed)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("directory should be gone, stat err = %v", err)
 	}
 }

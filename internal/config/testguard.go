@@ -10,8 +10,11 @@ import (
 // realStateDirs are the lerd dirs of whoever is running the process, resolved once
 // at start. XDG_DATA_HOME and XDG_CONFIG_HOME decide them and a test moves those,
 // so resolving later can't tell a test's temp dir from the developer's own. The
-// unit dirs are here too: the bug that started this wrote a real systemd unit.
-var realStateDirs = []string{DataDir(), ConfigDir(), SystemdUserDir(), QuadletDir()}
+// unit dirs are here too: the bug that started this wrote a real systemd unit,
+// and the macOS one follows HOME, which the XDG isolation every test does misses.
+var realLaunchAgentsDir = LaunchAgentsDir()
+
+var realStateDirs = []string{DataDir(), ConfigDir(), SystemdUserDir(), QuadletDir(), realLaunchAgentsDir}
 
 // underTest reports whether this process is a test binary, read from the command
 // line rather than testing.Testing() so the std testing package stays out of the
@@ -51,10 +54,19 @@ func guardRealWrite(path string) {
 		}
 		real = resolveLinks(real)
 		if abs == real || strings.HasPrefix(abs, real+string(os.PathSeparator)) {
-			panic(fmt.Sprintf("test wrote to or removed the real lerd state at %s: isolate it with "+
-				`t.Setenv("XDG_DATA_HOME", t.TempDir())`+" and "+`t.Setenv("XDG_CONFIG_HOME", t.TempDir())`, abs))
+			panic(fmt.Sprintf("test wrote to or removed the real lerd state at %s: isolate it with %s", abs, isolationHint(real)))
 		}
 	}
+}
+
+// isolationHint names the vars that actually move the dir the test tripped on.
+// The launchd one follows HOME, so telling its author to set the XDG vars would
+// send them after an isolation that cannot work.
+func isolationHint(dir string) string {
+	if realLaunchAgentsDir != "" && dir == resolveLinks(realLaunchAgentsDir) {
+		return `t.Setenv("HOME", t.TempDir())`
+	}
+	return `t.Setenv("XDG_DATA_HOME", t.TempDir())` + " and " + `t.Setenv("XDG_CONFIG_HOME", t.TempDir())`
 }
 
 // resolveLinks canonicalises what exists of path, so a symlinked state dir can't

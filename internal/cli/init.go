@@ -16,6 +16,10 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+
+	"github.com/gabriel-sousa99/lerd/internal/linker"
+	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
+
 	"github.com/spf13/cobra"
 )
 
@@ -96,6 +100,27 @@ func initShouldRunWizard(hasExisting, fresh bool) bool {
 	return !hasExisting || fresh
 }
 
+// nodeVersionDefault prefills the Node field the way the PHP one above it is
+// prefilled: a version already saved in .lerd.yaml wins, otherwise the version
+// the project resolves to on its own.
+func nodeVersionDefault(saved, resolved string) string {
+	if saved != "" {
+		return saved
+	}
+	return resolved
+}
+
+// nodeVersionDescription says what clearing the Node field does. An answer there
+// writes a node_version pin that outranks .nvmrc, .node-version, engines.node
+// and the machine default, and keeps outranking them, so an empty field is not
+// Node being turned off, it is the project going on resolving its own version.
+func nodeVersionDescription(source string) string {
+	if source == "" {
+		return "Clear to leave the version unpinned"
+	}
+	return fmt.Sprintf("Clear to follow %s instead of pinning", source)
+}
+
 func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfig, error) {
 	gcfg, err := config.LoadGlobal()
 	if err != nil {
@@ -157,6 +182,10 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 		// phpChoice falls through to the PHP wizard below.
 	}
 
+	// Resolved before the seeding below, which fills defaults from the registry
+	// and would leave an unconfigured project looking like a configured one.
+	secured, httpsAvailable := resolveSecuredDefault(cwd, defaults, gcfg)
+
 	// Seed defaults from the site registry when no saved config exists yet,
 	// so already-set PHP version and HTTPS state are reflected on first run.
 	if defaults.PHPVersion == "" && !defaults.Secured {
@@ -170,23 +199,7 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 		}
 	}
 
-	phpDefault := defaults.PHPVersion
-	if phpDefault == "" {
-		if v, detErr := phpPkg.DetectVersion(cwd); detErr == nil {
-			phpDefault = v
-		} else {
-			phpDefault = gcfg.PHP.DefaultVersion
-		}
-	}
-	phpMin, phpMax := "", ""
-	if framework != "" {
-		// Skip a guessed definition's range so a legacy project keeps its real
-		// detected default (Laravel 6 on 7.4, not the borrowed Laravel 10 8.1).
-		if fw, fwOk := config.GetFrameworkForDir(framework, cwd); fwOk && !fw.VersionGuessed {
-			phpMin, phpMax = fw.PHP.Min, fw.PHP.Max
-		}
-	}
-	phpDefault = phpPkg.ClampToRange(phpDefault, phpMin, phpMax)
+	phpDefault := wizardPHPDefault(cwd, defaults, gcfg, framework)
 
 	// Database is picked as a single choice (sqlite | mysql family member |
 	// postgres family member), while other services are a multi-select. This
@@ -194,66 +207,13 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 	// accidentally selecting both mysql and postgres for the same project.
 	// Multi-version mysql/postgres alternates installed via presets show up as
 	// extra Database options instead of polluting the Services list.
-	dbOptions, dbNameSet := buildDatabaseOptions()
-	defaultPresets := knownServices()
-	nonDBServiceOptions := make([]string, 0, len(defaultPresets))
-	for _, svc := range defaultPresets {
-		if !dbNameSet[svc] {
-			nonDBServiceOptions = append(nonDBServiceOptions, svc)
-		}
-	}
-	if customs, err := config.ListCustomServices(); err == nil {
-		for _, svc := range customs {
-			if dbNameSet[svc.Name] {
-				continue
-			}
-			// Skip developer tools that the project's code never consumes
-			// (phpMyAdmin, pgAdmin, mongo-express). They have no env_vars
-			// and no env_detect because they don't integrate with .env.
-			if len(svc.EnvVars) == 0 && svc.EnvDetect == nil {
-				continue
-			}
-			nonDBServiceOptions = append(nonDBServiceOptions, svc.Name)
-		}
-	}
-
-	// Use saved named services as defaults if re-running (--fresh), otherwise auto-detect.
-	serviceDefaults := defaults.ServiceNames()
-	if len(serviceDefaults) == 0 {
-		serviceDefaults = detectServicesFromDir(cwd)
-	}
-
-	// Split detected/saved services into the DB choice and the rest.
-	dbChoice := "sqlite"
-	for _, name := range serviceDefaults {
-		if dbNameSet[name] {
-			dbChoice = name
-			break
-		}
-	}
-	// If nothing was saved/detected for DB, fall back to whatever .env says
-	// (or sqlite, which is also Laravel's default).
-	if dbChoice == "sqlite" {
-		switch detectDBConnection(cwd) {
-		case "mysql", "mariadb":
-			dbChoice = "mysql"
-		case "pgsql", "postgres":
-			dbChoice = "postgres"
-		case "oracle":
-			dbChoice = "oracle"
-		}
-	}
-	nonDBSelected := make([]string, 0, len(serviceDefaults))
-	for _, name := range serviceDefaults {
-		if !dbNameSet[name] {
-			nonDBSelected = append(nonDBSelected, name)
-		}
-	}
+	dbFramework, _ := config.GetFrameworkForDir(framework, cwd)
+	dbOptions, dbNameSet := buildDatabaseOptions(dbFramework)
+	nonDBServiceOptions := nonDatabaseServiceNames(dbNameSet)
+	dbChoice, nonDBSelected := wizardServiceDefaults(cwd, defaults, dbNameSet)
 
 	phpVersion := phpDefault
 	nodeVersion := defaults.NodeVersion
-	httpsAvailable := gcfg.DNSManaged()
-	secured := defaults.Secured && httpsAvailable
 
 	// FrankenPHP detection. If the project has signals we offer it as a
 	// choice in the wizard; default to whatever the existing config says.
@@ -291,10 +251,12 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 			}),
 	}
 	if lerdManagesNode() {
+		resolved, source := nodeDet.UnpinnedVersion(cwd)
+		nodeVersion = nodeVersionDefault(nodeVersion, resolved)
 		firstGroupFields = append(firstGroupFields,
 			huh.NewInput().
 				Title("Node version").
-				Description("Leave blank to skip").
+				Description(nodeVersionDescription(source)).
 				Value(&nodeVersion),
 		)
 	}
@@ -304,10 +266,7 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 			Title("Database").
 			Options(dbOptions...).
 			Value(&dbChoice),
-		huh.NewMultiSelect[string]().
-			Title("Services").
-			Options(huh.NewOptions(nonDBServiceOptions...)...).
-			Value(&nonDBSelected),
+		newMultiSelect("Services", "", nonDBServiceOptions, &nonDBSelected),
 	)
 
 	formGroups := []*huh.Group{huh.NewGroup(firstGroupFields...)}
@@ -331,11 +290,7 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 
 	if len(customWorkerNames) > 0 {
 		formGroups = append(formGroups, huh.NewGroup(
-			huh.NewMultiSelect[string]().
-				Title("Custom workers").
-				Description("Deselect to remove from .lerd.yaml").
-				Options(huh.NewOptions(customWorkerNames...)...).
-				Value(&keepCustomWorkers),
+			newMultiSelect("Custom workers", "Deselect to remove from .lerd.yaml", customWorkerNames, &keepCustomWorkers),
 		))
 	}
 
@@ -349,74 +304,23 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 		keptSet[name] = true
 	}
 
-	// Detect available workers from the framework definition.
-	// Workers with ConflictsWith suppress conflicted workers (e.g. horizon suppresses queue).
-	// Custom workers that were removed are excluded, and their conflict rules
-	// no longer apply — so previously suppressed workers become available again.
-	var workerOptions []string
-	if fw, ok := config.GetFrameworkForDir(framework, cwd); ok && fw.Workers != nil {
-		// First pass: identify which workers are removed custom workers.
-		removedCustom := map[string]bool{}
+	// Removed custom workers are excluded, and their conflict rules no longer
+	// apply, so a worker one of them suppressed becomes available again.
+	removedCustom := map[string]bool{}
+	if fw, ok := config.GetFrameworkForDir(framework, cwd); ok {
 		for name := range fw.Workers {
 			if defaults.CustomWorkers[name].Command != "" && !keptSet[name] {
 				removedCustom[name] = true
 			}
 		}
-		// Build suppression set only from workers that are NOT removed.
-		suppressed := map[string]bool{}
-		for name, wDef := range fw.Workers {
-			if removedCustom[name] {
-				continue
-			}
-			if wDef.Check != nil && !config.MatchesRule(cwd, *wDef.Check) {
-				continue
-			}
-			for _, c := range wDef.ConflictsWith {
-				suppressed[c] = true
-			}
-		}
-		for name, wDef := range fw.Workers {
-			if removedCustom[name] {
-				continue
-			}
-			if wDef.Check != nil && !config.MatchesRule(cwd, *wDef.Check) {
-				continue
-			}
-			if suppressed[name] {
-				continue
-			}
-			workerOptions = append(workerOptions, name)
-		}
-		sort.Strings(workerOptions)
 	}
-
-	// Stripe is not a framework worker but can be auto-started when
-	// STRIPE_SECRET is present in the project's .env.
-	if StripeSecretSet(cwd) {
-		workerOptions = append(workerOptions, "stripe")
-	}
-
-	// Remove any selected workers that are no longer available.
-	filtered := selectedWorkers[:0]
-	availableSet := make(map[string]bool, len(workerOptions))
-	for _, w := range workerOptions {
-		availableSet[w] = true
-	}
-	for _, w := range selectedWorkers {
-		if availableSet[w] {
-			filtered = append(filtered, w)
-		}
-	}
-	selectedWorkers = filtered
+	workerOptions := frameworkWorkerOptions(cwd, framework, removedCustom)
+	selectedWorkers = keepAvailable(selectedWorkers, workerOptions)
 
 	if len(workerOptions) > 0 {
 		workerGroups := []*huh.Group{
 			huh.NewGroup(
-				huh.NewMultiSelect[string]().
-					Title("Workers").
-					Description("Auto-start when linking").
-					Options(huh.NewOptions(workerOptions...)...).
-					Value(&selectedWorkers),
+				newMultiSelect("Workers", "Auto-start when linking", workerOptions, &selectedWorkers),
 			),
 		}
 		if err := huh.NewForm(workerGroups...).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin)).Run(); err != nil {
@@ -438,11 +342,7 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 		oracleCfg = cfg
 	}
 
-	// Recombine the database pick and the non-DB multi-select into a single
-	// services list for serialization. dbChoice is one of sqlite/mysql/postgres/oracle.
-	selectedServices := make([]string, 0, len(nonDBSelected)+1)
-	selectedServices = append(selectedServices, dbChoice)
-	selectedServices = append(selectedServices, nonDBSelected...)
+	selectedServices := persistedServices(dbChoice, nonDBSelected)
 
 	// Only embed the framework definition in .lerd.yaml for user-defined
 	// frameworks that aren't available from the store. Built-in (laravel) and
@@ -457,55 +357,7 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 		}
 	}
 
-	// Build an index of custom service definitions to embed in .lerd.yaml.
-	// Priority: existing inline definition in defaults > definition file on disk.
-	// Default-preset services are never embedded — they don't need to be.
-	// sqlite is treated as built-in here even though it's not a quadlet service.
-	defaultNames := knownServices()
-	builtIn := make(map[string]bool, len(defaultNames)+1)
-	for _, s := range defaultNames {
-		builtIn[s] = true
-	}
-	builtIn["sqlite"] = true
-	builtIn["oracle"] = true
-	inlineByName := map[string]*config.CustomService{}
-	for _, svc := range defaults.Services {
-		if svc.Custom != nil {
-			inlineByName[svc.Name] = svc.Custom
-		}
-	}
-
-	services := make([]config.ProjectService, len(selectedServices))
-	for i, name := range selectedServices {
-		if builtIn[name] {
-			services[i] = config.ProjectService{Name: name}
-			continue
-		}
-		// Prefer the on-disk service definition (it's freshest) and fall back
-		// to the inlined one in defaults for portability.
-		var loaded *config.CustomService
-		if svc, err := config.LoadCustomService(name); err == nil {
-			loaded = svc
-		} else if existing := inlineByName[name]; existing != nil {
-			loaded = existing
-		}
-		if loaded != nil && loaded.Preset != "" {
-			services[i] = config.ProjectService{
-				Name:          name,
-				Preset:        loaded.Preset,
-				PresetVersion: loaded.PresetVersion,
-			}
-			continue
-		}
-		// A bundled tool preset (e.g. phpmyadmin, pgadmin) selected but not yet
-		// installed has no on-disk custom service; record it as a preset so link
-		// installs it, rather than a bare name that resolves to nothing and warns.
-		if loaded == nil && config.PresetExists(name) && !config.IsDefaultPreset(name) {
-			services[i] = config.ProjectService{Name: name, Preset: name}
-			continue
-		}
-		services[i] = config.ProjectService{Name: name, Custom: loaded}
-	}
+	services := buildProjectServices(selectedServices, defaults)
 
 	// Resolve framework version from the definition that was used.
 	frameworkVersion := ""
@@ -558,7 +410,7 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 func runCustomContainerWizard(cwd string, defaults *config.ProjectConfig, gcfg *config.GlobalConfig) (*config.ProjectConfig, error) {
 	portStr := "3000"
 	containerfile := "Containerfile.lerd"
-	secured, httpsAvailable := resolveSecuredDefault(cwd, defaults.Secured, gcfg)
+	secured, httpsAvailable := resolveSecuredDefault(cwd, defaults, gcfg)
 
 	if defaults.Container != nil {
 		if defaults.Container.Port > 0 {
@@ -613,10 +465,7 @@ func runCustomContainerWizard(cwd string, defaults *config.ProjectConfig, gcfg *
 
 	if len(serviceOptions) > 0 {
 		if err := huh.NewForm(huh.NewGroup(
-			huh.NewMultiSelect[string]().
-				Title("Services").
-				Options(huh.NewOptions(serviceOptions...)...).
-				Value(&selectedServices),
+			newMultiSelect("Services", "", serviceOptions, &selectedServices),
 		)).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin)).Run(); err != nil {
 			return nil, err
 		}
@@ -634,11 +483,7 @@ func runCustomContainerWizard(cwd string, defaults *config.ProjectConfig, gcfg *
 		copy(keepCustomWorkers, customWorkerNames)
 
 		if err := huh.NewForm(huh.NewGroup(
-			huh.NewMultiSelect[string]().
-				Title("Custom workers").
-				Description("Deselect to remove from .lerd.yaml").
-				Options(huh.NewOptions(customWorkerNames...)...).
-				Value(&keepCustomWorkers),
+			newMultiSelect("Custom workers", "Deselect to remove from .lerd.yaml", customWorkerNames, &keepCustomWorkers),
 		)).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin)).Run(); err != nil {
 			return nil, err
 		}
@@ -672,6 +517,9 @@ func runCustomContainerWizard(cwd string, defaults *config.ProjectConfig, gcfg *
 		Container:     containerCfg,
 		AppURL:        defaults.AppURL,
 		Domains:       defaults.Domains,
+		// This wizard never asks about Node, so a pin the project carries is
+		// not its to drop.
+		NodeVersion: defaults.NodeVersion,
 	}, nil
 }
 
@@ -700,6 +548,10 @@ func buildProjectServices(selectedServices []string, defaults *config.ProjectCon
 	for _, s := range knownServices() {
 		builtIn[s] = true
 	}
+	// Oracle is an external database choice, not a service preset. Keeping it
+	// as a bare project service records the selection without trying to load or
+	// install a non-existent custom service.
+	builtIn["oracle"] = true
 	inlineByName := map[string]*config.CustomService{}
 	for _, svc := range defaults.Services {
 		if svc.Custom != nil {
@@ -784,7 +636,7 @@ func runHostProxyWizard(cwd string, defaults *config.ProjectConfig, gcfg *config
 		}
 	}
 	portStr := strconv.Itoa(port)
-	secured, httpsAvailable := resolveSecuredDefault(cwd, defaults.Secured, gcfg)
+	secured, httpsAvailable := resolveSecuredDefault(cwd, defaults, gcfg)
 
 	proxyFields := []huh.Field{
 		huh.NewInput().
@@ -825,10 +677,7 @@ func runHostProxyWizard(cwd string, defaults *config.ProjectConfig, gcfg *config
 	selectedServices := defaults.ServiceNames()
 	if len(serviceOptions) > 0 {
 		if err := huh.NewForm(huh.NewGroup(
-			huh.NewMultiSelect[string]().
-				Title("Services").
-				Options(huh.NewOptions(serviceOptions...)...).
-				Value(&selectedServices),
+			newMultiSelect("Services", "", serviceOptions, &selectedServices),
 		)).WithTheme(huh.ThemeFunc(huh.ThemeCatppuccin)).Run(); err != nil {
 			return nil, err
 		}
@@ -960,6 +809,33 @@ var dbFamilyLabels = map[string]string{
 
 // formatDBOptionLabel returns "MySQL (lerd-mysql)" for the canonical family
 // member or "MySQL 5.7 (lerd-mysql-5-7)" for a versioned alternate.
+// persistedServices recombines the database pick and the non-database
+// multi-select into the services list written to .lerd.yaml.
+//
+// SQLite is left out. It has no preset, no container and nothing to install, so
+// an entry for it is one every surface then has to explain away, down to a card
+// offering to install something that cannot exist. The project's own
+// configuration already says it is on SQLite, and that is what lerd reads to
+// answer which database a site uses.
+func persistedServices(dbChoice string, nonDB []string) []string {
+	out := make([]string, 0, len(nonDB)+1)
+	if dbChoice != "" && dbChoice != "sqlite" {
+		out = append(out, dbChoice)
+	}
+	return append(out, nonDB...)
+}
+
+// frameworkSupportsSQLite reports whether a framework can be wired to a file
+// database, which the definition says with its own sqlite wiring. A project
+// with no framework at all keeps the option: nothing has declared otherwise,
+// and lerd should not decide for it.
+func frameworkSupportsSQLite(fw *config.Framework) bool {
+	if fw == nil || !fw.HasEnvConfig() {
+		return true
+	}
+	return fw.Env.SQLite != nil
+}
+
 func formatDBOptionLabel(name string) string {
 	family := name
 	version := ""
@@ -984,9 +860,20 @@ func formatDBOptionLabel(name string) string {
 // service name that lives in a database family (so the Services multi-select
 // can filter them out). Always includes sqlite. Built-in mysql and postgres
 // are always present; alternates and mongo show up only when installed.
-func buildDatabaseOptions() ([]huh.Option[string], map[string]bool) {
-	nameSet := map[string]bool{"sqlite": true}
-	options := []huh.Option[string]{huh.NewOption("SQLite (no service)", "sqlite")}
+func buildDatabaseOptions(fw *config.Framework) ([]huh.Option[string], map[string]bool) {
+	nameSet := map[string]bool{}
+	var options []huh.Option[string]
+
+	// SQLite is offered where it means something: a framework declares the
+	// service it can be wired through, and a project lerd recognises no
+	// framework for keeps the option because there is no declaration to consult
+	// and a file database is a reasonable answer for it. Offering it to a
+	// framework that cannot use it is how a project ends up picking a database
+	// its application will never open.
+	if frameworkSupportsSQLite(fw) {
+		nameSet["sqlite"] = true
+		options = append(options, huh.NewOption("SQLite (no service)", "sqlite"))
+	}
 
 	for _, name := range []string{"mysql", "postgres"} {
 		nameSet[name] = true
@@ -1235,17 +1122,27 @@ func maybeCreateContainerfile(cwd, containerfile string, port int) {
 // resolveSecuredDefault computes a wizard's initial "secured" value and whether
 // the HTTPS prompt should be offered at all. HTTPS is only available when lerd
 // manages DNS; otherwise secured is forced off and the prompt is hidden so the
-// wizard never offers a choice that `lerd secure` would later refuse. When
-// available, an already-secured linked site seeds the default to on.
-func resolveSecuredDefault(cwd string, defaultsSecured bool, gcfg *config.GlobalConfig) (secured, httpsAvailable bool) {
-	httpsAvailable = gcfg.DNSManaged()
-	secured = defaultsSecured && httpsAvailable
-	if httpsAvailable && !secured {
-		if site, err := config.FindSiteByPath(cwd); err == nil && site.Secured {
-			secured = true
-		}
+// wizard never offers a choice that `lerd secure` would later refuse.
+//
+// A project with nothing committed is a new one, and a new site answers the
+// question with yes: the local CA is already trusted, so http is a choice worth
+// making deliberately rather than the one an unread prompt makes. A project that
+// is already configured keeps what it has, from .lerd.yaml or, when that never
+// recorded the field, from the site as it is registered today.
+func resolveSecuredDefault(cwd string, defaults *config.ProjectConfig, gcfg *config.GlobalConfig) (secured, httpsAvailable bool) {
+	if !gcfg.DNSManaged() {
+		return false, false
 	}
-	return secured, httpsAvailable
+	if defaults == nil || defaults.IsEmpty() {
+		return true, true
+	}
+	if defaults.Secured {
+		return true, true
+	}
+	if site, err := config.FindSiteByPath(cwd); err == nil && site.Secured {
+		return true, true
+	}
+	return false, true
 }
 
 // persistedSecured keeps the user's HTTPS intent in .lerd.yaml even when DNS is
@@ -1260,14 +1157,22 @@ func persistedSecured(chosen, httpsAvailable, committed bool) bool {
 	return committed
 }
 
-// appendHTTPSField adds the "Enable HTTPS?" confirm to a wizard's field list
+// appendHTTPSField adds the "Enable HTTPS?" question to a wizard's field list
 // only when HTTPS is available; in localhost mode the prompt is omitted. Shared
 // by all three wizards so the gating rule lives in one place.
+//
+// It is a vertical picker rather than a yes/no confirm. The confirm renders both
+// answers side by side as buttons and says which one is selected with background
+// colour alone, which reads as a pair of labels; the picker marks the answer with
+// a cursor, the way every other question in the wizard does.
 func appendHTTPSField(fields []huh.Field, httpsAvailable bool, secured *bool) []huh.Field {
 	if !httpsAvailable {
 		return fields
 	}
-	return append(fields, huh.NewConfirm().Title("Enable HTTPS?").Value(secured))
+	return append(fields, huh.NewSelect[bool]().
+		Title("Enable HTTPS?").
+		Options(huh.NewOption("Yes", true), huh.NewOption("No", false)).
+		Value(secured))
 }
 
 // validatePHPVersion checks that the input looks like a valid PHP version
@@ -1399,6 +1304,37 @@ func runSetupInit(cwd string, skipWizard bool) error {
 	return applyProjectConfig(cwd)
 }
 
+// settledRegistration returns the site registered for cwd when a link would
+// write exactly what the registry already holds, so there is nothing to apply.
+// The plan is resolved without a prompter: a question asked here would be asked
+// about a site that is already serving, and a framework detection that comes up
+// short simply reads as a change and lets the link run as before.
+func settledRegistration(cwd string) (config.Site, bool) {
+	existing, err := config.FindSiteByPath(cwd)
+	if err != nil || existing == nil {
+		return config.Site{}, false
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return config.Site{}, false
+	}
+	plan, err := linker.Resolve(cwd, cfg, linker.CLIPolicy("", false, nil))
+	if err != nil || !plan.MatchesRegistration(*existing) {
+		return config.Site{}, false
+	}
+	return *existing, true
+}
+
+// siteAddress is the URL a site answers on, for the line that reports a link
+// there was no need to run.
+func siteAddress(site config.Site) string {
+	scheme := "http"
+	if site.Secured {
+		scheme = "https"
+	}
+	return scheme + "://" + site.PrimaryDomain()
+}
+
 func applyProjectConfig(cwd string) error {
 	// Suppress the "Run lerd setup?" prompt and the link summary inside runLink —
 	// we're already in init/setup, the caller handles worker steps, and the
@@ -1418,25 +1354,34 @@ func applyProjectConfig(cwd string) error {
 	// already done, so re-running it would just repeat the same output.
 	ranLink := false
 	if !linkApplied {
-		// Install PHP FPM with a progress loader if the version is not yet installed.
-		// runLink handles everything else (framework restore, node-version, secure, services).
-		if proj.PHPVersion != "" && !phpPkg.IsInstalled(proj.PHPVersion) {
-			phpVersion := proj.PHPVersion
-			jobs := []BuildJob{{
-				Label: "PHP " + phpVersion + " FPM",
-				Run: func(w io.Writer) error {
-					return ensureFPMQuadletTo(phpVersion, w)
-				},
-			}}
-			if err := RunParallel(jobs); err != nil {
-				feedback.Warn("PHP %s FPM: %v", phpVersion, err)
+		// linkApplied above covers one command doing both halves; this covers two.
+		// A link that would write the registration the registry already holds has
+		// no work in it, and running it anyway repeats every provisioning step and
+		// the summary for a site that is already being served.
+		if site, settled := settledRegistration(cwd); settled {
+			feedback.Start("already linked").OK(feedback.Val(siteAddress(site)))
+			linkApplied = true
+		} else {
+			// Install PHP FPM with a progress loader if the version is not yet installed.
+			// runLink handles everything else (framework restore, node-version, secure, services).
+			if proj.PHPVersion != "" && !phpPkg.IsInstalled(proj.PHPVersion) {
+				phpVersion := proj.PHPVersion
+				jobs := []BuildJob{{
+					Label: "PHP " + phpVersion + " FPM",
+					Run: func(w io.Writer) error {
+						return ensureFPMQuadletTo(phpVersion, w)
+					},
+				}}
+				if err := RunParallel(jobs); err != nil {
+					feedback.Warn("PHP %s FPM: %v", phpVersion, err)
+				}
 			}
-		}
 
-		if err := runLink([]string{}); err != nil {
-			return err
+			if err := runLink([]string{}); err != nil {
+				return err
+			}
+			ranLink = true
 		}
-		ranLink = true
 	}
 
 	// Refresh .env so the user sees the site's URL wired up immediately after

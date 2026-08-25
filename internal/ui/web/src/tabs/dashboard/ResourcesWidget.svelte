@@ -61,7 +61,7 @@
       <div>
         <div class="flex items-baseline justify-between mb-1">
           <span class="text-[10px] uppercase tracking-wide text-gray-400 dark:text-gray-500">{m.dashboard_resources_cpu()}</span>
-          <span class="text-sm font-semibold text-gray-900 dark:text-white tabular-nums">{$stats.total_cpu_percent.toFixed(1)}%</span>
+          <span class="text-sm font-semibold text-gray-900 dark:text-white tabular-nums">{$stats.total_cpu_percent.toFixed(2)}%</span>
         </div>
         <div class="h-1.5 rounded-full bg-gray-100 dark:bg-white/5 overflow-hidden">
           <div class="h-full bg-emerald-500 transition-[width] duration-500 ease-out" style="width: {cpuBarWidth}%"></div>
@@ -109,7 +109,7 @@
             <div class="flex items-center gap-2 text-xs">
               <span class="flex-1 truncate text-gray-600 dark:text-gray-300">{shortName(c.name)}</span>
               <span class="shrink-0 font-mono tabular-nums text-gray-500 dark:text-gray-400 w-16 text-right">{formatBytes(c.mem_bytes)}</span>
-              <span class="shrink-0 font-mono tabular-nums text-gray-400 dark:text-gray-500 w-12 text-right">{c.cpu_percent.toFixed(1)}%</span>
+              <span class="shrink-0 font-mono tabular-nums text-gray-400 dark:text-gray-500 w-14 text-right">{c.cpu_percent.toFixed(2)}%</span>
             </div>
           {/each}
         </div>

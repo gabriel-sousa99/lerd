@@ -12,38 +12,7 @@ Run `lerd mcp:enable-global` once and your AI assistant (Claude Code, Cursor, Ju
 
 ---
 
-## 1. Register the WordPress framework definition (one-time)
-
-Save this as `~/.config/lerd/frameworks/wordpress.yaml`:
-
-```yaml
-# ~/.config/lerd/frameworks/wordpress.yaml
-name: wordpress
-label: WordPress
-detect:
-  - file: wp-login.php
-  - file: wp-config.php
-public_dir: .
-env:
-  fallback_file: wp-config.php
-  fallback_format: php-const
-composer: false
-npm: false
-```
-
-Then register it:
-
-```bash
-lerd framework add wordpress --from-file ~/.config/lerd/frameworks/wordpress.yaml
-```
-
-::: info Why no `.env`?
-WordPress stores configuration in `wp-config.php` as PHP constants, not in a `.env` file. The `fallback_file` / `fallback_format` settings tell lerd to read constants like `DB_HOST`, `WP_HOME`, and `WP_SITEURL` directly from `wp-config.php`. This means `lerd env` doesn't auto-inject database credentials the way it does for Laravel or Symfony; you'll wire them up by hand in step 5.
-:::
-
----
-
-## 2. Download WordPress
+## 1. Download WordPress
 
 ::: code-group
 
@@ -62,20 +31,28 @@ rm latest.tar.gz
 
 :::
 
----
-
-## 3. Register the site
+Then create the config file from the sample that ships with it:
 
 ```bash
 cd ~/Lerd/myblog
-lerd link
+cp wp-config-sample.php wp-config.php
 ```
 
-`lerd link` detects WordPress (via `wp-login.php` or `wp-config.php`), assigns `http://myblog.test`, and serves from the project root.
+Do this before linking. `wp-config.php` is where lerd writes WordPress's configuration, and it only writes into a file that already exists; a project without one gets a `.env` that WordPress never reads.
 
 ---
 
-## 4. Configure PHP and start MySQL
+## 2. Register the site
+
+```bash
+lerd link
+```
+
+`lerd link` detects WordPress (via `wp-login.php` or `wp-config.php`), assigns `http://myblog.test`, and serves from the project root. Detection reads the version out of `wp-includes/version.php` and pulls the matching definition, `wordpress@7` for a current download, from the [framework store](../usage/frameworks.md#framework-store). There is nothing to register by hand.
+
+---
+
+## 3. Configure PHP and start MySQL
 
 ```bash
 lerd init
@@ -83,23 +60,24 @@ lerd init
 
 ```
 ? PHP version: 8.3
-? Node version (leave blank to skip):
+? Node version (clear to follow the lerd default instead of pinning): 22
 ? Enable HTTPS? Yes
 ? Services: [mysql]
 Saved .lerd.yaml
 ```
 
-Workers are not shown; the WordPress framework definition declares none.
+Workers are not shown; the WordPress definition declares none.
 
----
+Picking MySQL is all the database setup there is. `lerd init` starts the container, creates `myblog` and `myblog_testing` inside it, and rewrites the connection constants in `wp-config.php`:
 
-## 5. Create the database
-
-```bash
-lerd db:create myblog
+```php
+define( 'DB_NAME',     'myblog' );
+define( 'DB_USER',     'root' );
+define( 'DB_PASSWORD', 'lerd' );
+define( 'DB_HOST',     'lerd-mysql' );
 ```
 
-This creates `myblog` and `myblog_testing` inside the lerd-mysql container.
+WordPress keeps its configuration as PHP constants rather than in a `.env`, so lerd reads and writes `wp-config.php` directly. That is also what tells lerd the site owns a database, which is what makes `lerd db:import`, `lerd db:shell` and the dashboard's database panel work against it.
 
 ::: info Database credentials
 | Setting | Value |
@@ -115,46 +93,34 @@ These come from the lerd built-in MySQL service. See [Services](../usage/service
 
 ---
 
-## 6. Configure `wp-config.php`
+## 4. Generate the salts
 
-Run the WordPress installer (browser at `http://myblog.test`) which will prompt for the values above, **or** copy `wp-config-sample.php` and edit it manually:
+`wp-config-sample.php` ships its authentication keys as placeholders, and because the file now exists WordPress goes straight to the installer without ever offering to write real ones. Replace that block yourself:
 
 ```bash
-cp wp-config-sample.php wp-config.php
+wp config shuffle-salts
 ```
 
-Then edit the `DB_*` constants:
-
-```php
-define( 'DB_NAME',     'myblog' );
-define( 'DB_USER',     'root' );
-define( 'DB_PASSWORD', 'lerd' );
-define( 'DB_HOST',     'lerd-mysql' );
-```
-
-Generate fresh authentication salts (the installer does this automatically; for the manual path, replace the placeholder block with output from <https://api.wordpress.org/secret-key/1.1/salt/>).
+Without wp-cli, paste the output of <https://api.wordpress.org/secret-key/1.1/salt/> over the placeholder block in `wp-config.php`.
 
 ---
 
-## 7. Enable HTTPS
+## 5. Finish the HTTPS wiring
 
-```bash
-lerd secure myblog
-```
+Answering yes to HTTPS in the wizard already issued a trusted local cert via mkcert, switched the vhost, and set `WP_HOME` in `wp-config.php` to `https://myblog.test`. On a site linked without it, `lerd secure myblog` does the same thing later.
 
-This issues a trusted local cert via mkcert and switches the vhost to HTTPS. WordPress also stores its canonical URL in two places, so update them too:
+WordPress keeps its canonical URL in a second constant that lerd leaves alone, so set that one yourself:
 
 ```php
 // wp-config.php
-define( 'WP_HOME',    'https://myblog.test' );
 define( 'WP_SITEURL', 'https://myblog.test' );
 ```
 
-(Or update the same values in **Settings > General** from the WordPress admin.)
+(Or update the same value in **Settings > General** from the WordPress admin.)
 
 ---
 
-## 8. Open it
+## 6. Open it
 
 ```bash
 lerd open
@@ -164,13 +130,13 @@ Walk through the five-minute install (admin user, site title, password). When yo
 
 ---
 
-## 9. Verify
+## 7. Verify
 
 ```bash
 lerd status
 ```
 
-`myblog` should be listed as `active` and `mysql` as `running`. Live nginx and PHP-FPM logs are in the [Web UI](../features/web-ui.md) at `http://127.0.0.1:7073`.
+`myblog` should be listed as `active` and `mysql` as `running`. Live nginx and PHP-FPM logs are in the [Web UI](../features/web-ui.md) at `http://127.0.0.1:7073`, and anything WordPress writes to `wp-content/debug.log` shows up under **App Logs**.
 
 ---
 
@@ -178,18 +144,16 @@ lerd status
 
 | Command | What it did |
 |---|---|
-| `lerd framework add wordpress` | Registered the YAML so WordPress projects are auto-detected |
-| `lerd link` | Assigned `myblog.test`, set document root to project root |
-| `lerd init` | Wrote `.lerd.yaml` with PHP 8.3 and the MySQL service |
-| `lerd db:create myblog` | Created `myblog` and `myblog_testing` inside lerd-mysql |
-| (manual) `wp-config.php` edits | Pointed WordPress at `lerd-mysql` and the new database |
-| `lerd secure myblog` | Issued mkcert TLS, switched vhost to HTTPS |
+| `lerd link` | Detected WordPress, fetched `wordpress@7` from the store, assigned `myblog.test`, set document root to project root |
+| `lerd init` | Wrote `.lerd.yaml` with PHP 8.3 and the MySQL service, created `myblog` and `myblog_testing` inside lerd-mysql |
+| `lerd env` (via init) | Wrote `DB_NAME`, `DB_USER`, `DB_PASSWORD` and `DB_HOST` into `wp-config.php` |
+| `lerd secure` (via init) | Issued mkcert TLS, switched the vhost to HTTPS, set `WP_HOME` |
 
 ---
 
 ## Next steps
 
-- [Frameworks & Workers](../usage/frameworks.md): extend `wordpress.yaml` to add log paths or custom workers (e.g. `wp cron event run`)
+- [Frameworks & Workers](../usage/frameworks.md): add log paths or custom workers (e.g. `wp cron event run`) with a user overlay
 - [Database](../usage/database.md): `lerd db:import` to load a production dump, `lerd db:shell` for quick queries
 - [Services](../usage/services.md): add a Mailpit service to capture outgoing mail in dev
 - [HTTPS](../features/https.md): wildcard certs for multi-site or git worktrees

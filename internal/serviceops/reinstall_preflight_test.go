@@ -36,7 +36,7 @@ func TestReinstallService_PreflightValidateFailure_LeavesYAMLIntact(t *testing.T
 
 	saveCustomServiceForReinstall(t, "myservice", "1.2.3")
 
-	err := ReinstallService("myservice", false, func(PhaseEvent) {})
+	err := ReinstallService("myservice", ReinstallOptions{}, func(PhaseEvent) {})
 	if err == nil || !strings.Contains(err.Error(), "unknown preset") {
 		t.Fatalf("expected pre-flight validate error, got %v", err)
 	}
@@ -57,7 +57,7 @@ func TestReinstallService_PreflightPullFailure_LeavesYAMLIntact(t *testing.T) {
 
 	saveCustomServiceForReinstall(t, "myservice", "1.2.3")
 
-	err := ReinstallService("myservice", false, func(PhaseEvent) {})
+	err := ReinstallService("myservice", ReinstallOptions{}, func(PhaseEvent) {})
 	if err == nil || !strings.Contains(err.Error(), "registry unreachable") {
 		t.Fatalf("expected pre-flight pull error, got %v", err)
 	}
@@ -97,7 +97,7 @@ func TestReinstallService_SuppressesFamilyRegenDuringRemove(t *testing.T) {
 		t.Fatalf("SaveCustomService: %v", err)
 	}
 
-	if err := ReinstallService("mariadb-10-11", false, func(PhaseEvent) {}); err != nil {
+	if err := ReinstallService("mariadb-10-11", ReinstallOptions{}, func(PhaseEvent) {}); err != nil {
 		t.Fatalf("ReinstallService: %v", err)
 	}
 	if regenCalls != 0 {
@@ -129,7 +129,7 @@ func TestReinstallService_DefaultPreset_TriggersExplicitFamilyRegen(t *testing.T
 		t.Fatalf("SaveCustomService: %v", err)
 	}
 
-	if err := ReinstallService("mysql", false, func(PhaseEvent) {}); err != nil {
+	if err := ReinstallService("mysql", ReinstallOptions{}, func(PhaseEvent) {}); err != nil {
 		t.Fatalf("ReinstallService: %v", err)
 	}
 	if len(rec.familyRegenCalls) != 1 || rec.familyRegenCalls[0] != "mysql" {
@@ -159,7 +159,7 @@ func TestReinstallService_InstallFailure_TriggersFamilyRegen(t *testing.T) {
 		t.Fatalf("SaveCustomService: %v", err)
 	}
 
-	err := ReinstallService("mariadb-10-11", false, func(PhaseEvent) {})
+	err := ReinstallService("mariadb-10-11", ReinstallOptions{}, func(PhaseEvent) {})
 	if err == nil {
 		t.Fatal("expected install failure to propagate")
 	}
@@ -189,7 +189,7 @@ func TestReinstallService_CustomServiceSuccess_NoExtraFamilyRegen(t *testing.T) 
 		t.Fatalf("SaveCustomService: %v", err)
 	}
 
-	if err := ReinstallService("mariadb-10-11", false, func(PhaseEvent) {}); err != nil {
+	if err := ReinstallService("mariadb-10-11", ReinstallOptions{}, func(PhaseEvent) {}); err != nil {
 		t.Fatalf("ReinstallService: %v", err)
 	}
 	if len(rec.familyRegenCalls) != 0 {
@@ -354,7 +354,7 @@ func TestReinstallService_ForwardsPresetNameToInstallSeam(t *testing.T) {
 	}
 	stubPodmanRemove(t)
 
-	if err := ReinstallService("mariadb-10-11", false, func(PhaseEvent) {}); err != nil {
+	if err := ReinstallService("mariadb-10-11", ReinstallOptions{}, func(PhaseEvent) {}); err != nil {
 		t.Fatalf("ReinstallService: %v", err)
 	}
 	if len(rec.installCalls) != 1 {

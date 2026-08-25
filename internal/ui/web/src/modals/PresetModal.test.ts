@@ -2,6 +2,7 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import PresetModal from './PresetModal.svelte';
 import { presets, presetsLoaded } from '$stores/presets';
+import { serviceIcons } from '$stores/serviceIcons';
 
 // onMount runs loadPresets() which hits /api/services/presets; make it fail so
 // the seeded store is preserved and the tests drive a known preset list.
@@ -23,6 +24,7 @@ describe('PresetModal search', () => {
     globalThis.fetch = realFetch;
     presets.set([]);
     presetsLoaded.set(false);
+    serviceIcons.set({});
   });
 
   it('lists every installable preset with no query', () => {
@@ -44,5 +46,40 @@ describe('PresetModal search', () => {
     const input = screen.getByPlaceholderText('Search presets…');
     await fireEvent.input(input, { target: { value: 'nothing-here' } });
     expect(screen.getByText('No presets match your search.')).toBeInTheDocument();
+  });
+});
+
+describe('PresetModal icons', () => {
+  const MARK = '<svg viewBox="0 0 24 24"><path d="M3 3h18v18H3z"/></svg>';
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('offline');
+    }) as unknown as typeof fetch;
+    presetsLoaded.set(true);
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    presets.set([]);
+    presetsLoaded.set(false);
+    serviceIcons.set({});
+  });
+
+  it('leads each row with the mark the preset ships, in its declared colour', () => {
+    serviceIcons.set({ redis: MARK });
+    presets.set([{ name: 'redis', category: 'cache', icon: 'cache', color: '#ff4438' }]);
+    const { container } = render(PresetModal);
+    expect(container.querySelector('.mark-glyph path')?.getAttribute('d')).toBe('M3 3h18v18H3z');
+    expect(container.querySelector('.mark-tint')?.getAttribute('style')).toContain(
+      '--mark-tint: #ff4438'
+    );
+  });
+
+  it('falls back to the declared glyph and category tint with no mark', () => {
+    presets.set([{ name: 'beanstalkd', category: 'messaging', icon: 'queue' }]);
+    const { container } = render(PresetModal);
+    expect(container.querySelector('.mark-glyph')).toBeNull();
+    expect(container.querySelector('.text-violet-600')).not.toBeNull();
   });
 });

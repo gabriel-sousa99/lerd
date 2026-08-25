@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/origin"
+
+	"github.com/gabriel-sousa99/lerd/internal/atomicfile"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -64,6 +66,42 @@ func autoFetchFramework(name, version string) (*config.Framework, error) {
 		return nil, err
 	}
 	return fw, nil
+}
+
+// fetchFrameworkIcon caches a framework's mark, <name>.svg beside the versioned
+// definitions it belongs to. The mark is per family rather than per version, so
+// it is fetched by name and shared by every version. Best effort throughout: a
+// framework that ships no mark, an unreachable store, or markup the sanitizer
+// refuses all leave the framework rendering as its label alone.
+func (c *Client) fetchFrameworkIcon(name string) {
+	if _, ok := config.FrameworkIcon(name); ok {
+		return
+	}
+	data, err := c.fetch(name + ".svg")
+	if err != nil {
+		return
+	}
+	_ = config.SaveStoreFrameworkIcon(name, data)
+}
+
+// fetchWorkerIcons caches the marks a definition's workers name, under
+// workers/<icon>.svg. A worker's icon is often one of the built-in glyphs and
+// not a mark at all, so a miss here is the normal case and costs one 404 per
+// icon per install. Best effort throughout, exactly like a framework's own mark.
+func (c *Client) fetchWorkerIcons(workers map[string]config.FrameworkWorker) {
+	for _, w := range workers {
+		if w.Icon == "" {
+			continue
+		}
+		if _, ok := config.WorkerIcon(w.Icon); ok {
+			continue
+		}
+		data, err := c.fetch("workers/" + w.Icon + ".svg")
+		if err != nil {
+			continue
+		}
+		_ = config.SaveStoreWorkerIcon(w.Icon, data)
+	}
 }
 
 // NewClient returns a store client with default settings.
@@ -120,6 +158,12 @@ func WatchIndex(interval time.Duration) {
 	}
 }
 
+// CachedIndex reads the locally cached store index without touching the network,
+// for callers that need the published catalogue and have not just fetched it.
+func CachedIndex() (*Index, error) {
+	return loadCachedIndex()
+}
+
 // loadCachedIndex reads and parses the locally cached store index.
 func loadCachedIndex() (*Index, error) {
 	data, err := os.ReadFile(config.StoreIndexFile())
@@ -133,30 +177,36 @@ func loadCachedIndex() (*Index, error) {
 	return &idx, nil
 }
 
-// writeCachedIndex persists the raw index bytes to the local cache atomically
-// (temp then rename) so an offline reader in another process, or a crash
-// mid-write, never sees a truncated file. Best effort: a cache we cannot write
-// just means the next read falls back to the network.
+// writeCachedIndex persists the raw index bytes to the local cache through a
+// uniquely named temp and a rename, so an offline reader in another process, or
+// a crash mid-write, never sees a truncated file. The unique name matters: a
+// fixed one lets two concurrent fetches truncate and fill the same temp, and the
+// rename then publishes their blend. Best effort: a cache we cannot write just
+// means the next read falls back to the network.
+// An unchanged index is still touched, because its mtime is what tells the
+// readers whether the cache still speaks for the store: skipping the touch ages
+// a catalogue that is refreshing perfectly well past the point where a version
+// missing from it counts as evidence, and every resolver starts asking for
+// versions the store does not publish again.
 func writeCachedIndex(data []byte) {
 	path := config.StoreIndexFile()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	wrote, err := atomicfile.WriteIfChanged(path, data, 0o644)
+	if err != nil || wrote {
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-	}
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
 }
 
 // FetchFramework downloads a framework definition from the store.
 // Always fetches from remote to ensure definitions are up to date.
 func (c *Client) FetchFramework(name, version string) (*config.Framework, error) {
 	if version == "" {
-		// Resolve latest from index
-		idx, err := c.FetchIndex()
+		// Resolve latest from the index, and keep the copy this pulls: the fetch
+		// that resolves a latest version is the one a machine with no cached index
+		// makes, and dropping it leaves offline detection blind until the watcher's
+		// first refresh hours later.
+		idx, err := c.RefreshIndex()
 		if err != nil {
 			return nil, err
 		}
@@ -188,6 +238,11 @@ func (c *Client) FetchFramework(name, version string) (*config.Framework, error)
 	if !config.ValidFrameworkVersion(fw.Version) {
 		return nil, fmt.Errorf("invalid framework definition for %s@%s: unsafe version %q", name, version, fw.Version)
 	}
+
+	// Every path that caches a remote definition comes through here, so the mark
+	// is pulled alongside it in one place rather than at each of the callers.
+	c.fetchFrameworkIcon(name)
+	c.fetchWorkerIcons(fw.Workers)
 
 	return &fw, nil
 }

@@ -96,9 +96,11 @@ DB_PASSWORD=mysecret
 LERD_EXTERNAL_SERVICES=postgres
 ```
 
-Use `host.containers.internal` for the host rather than `127.0.0.1`. The override is read inside the PHP-FPM container, where `127.0.0.1` is the container's own loopback, not your machine. lerd keeps a `host.containers.internal` entry in the container that resolves to the host, so a containerized app reaches a host MySQL, MariaDB or Postgres over it with no extra setup. For MySQL use `DB_PORT=3306`.
+Use `host.containers.internal` for the host rather than `127.0.0.1`. The override is read inside the PHP-FPM container, where `127.0.0.1` is the container's own loopback, not your machine. lerd keeps a `host.containers.internal` entry in the container that resolves to the host. For MySQL use `DB_PORT=3306`.
 
-The value is comma or space separated, so `LERD_EXTERNAL_SERVICES=postgres, redis` opts both out. The reserved key is consumed by lerd and is never written into `.env`.
+On macOS that is all it takes: the connection is delivered to the host's loopback, so a server bound to `127.0.0.1` with `'user'@'localhost'` grants accepts it unchanged. On Linux it arrives from a real, non-loopback address instead, so a distro package left at its defaults refuses it and the server needs to listen past loopback and grant from somewhere other than `localhost`. [Using a service you run on the host](../usage/services.md#using-a-service-you-run-on-the-host) has the per-platform detail.
+
+The value is comma or space separated, so `LERD_EXTERNAL_SERVICES=postgres, redis` opts both out. The reserved key is consumed by lerd and is never written into `.env`. The [site doctor](/features/web-ui) reads it too: a service you run yourself is never reported as missing, and never offered for install, however loudly your project declares it.
 
 The variables lerd writes for an external service are the ones your framework reads, since they are what the override file then overrides. An external MariaDB on Symfony gets the `DATABASE_URL` Doctrine reads, not the Laravel-shaped `DB_*` keys Symfony has no use for. A framework whose env file is a returned PHP array, as Magento's `app/etc/env.php` is, cannot take an override at all: its keys are dotted paths and `.env.lerd_override` is dotenv, so there is no key lerd could write that you would then point at your own instance. lerd writes nothing for it, tells you so, and leaves the connection in `env.php` to you.
 

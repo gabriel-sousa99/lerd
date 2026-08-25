@@ -30,6 +30,7 @@ The receiver's transport depends on the host:
     ![System Debug bridge detail](/assets/screenshots/system-dump-bridge.png)
 
   - The Sites list header has a small antenna toggle. Pulsing emerald dot when capturing, grey when off.
+  - Each dump entry carries the `file:line` it came from, shortened to its last three segments. Click it to open the file in your editor, or use the small copy button beside it to take the full path.
   - The System Health card on the dashboard shows the bridge state alongside DNS / nginx / watcher.
 - **TUI**: press **D** in `lerd tui` to swap the detail pane for the live dump feed (global).
 - **CLI**: `lerd dump tail` streams events to your terminal, with `--site` and `--ctx` filters.
@@ -58,6 +59,8 @@ Each event is one line of JSON. The shape is stable from v1 of the protocol:
   "text": "App\\Models\\User {#42 ...}"
 }
 ```
+
+`src` is the first frame that is not code the project installed, so it points at the line a developer wrote rather than the layer that happened to run it. Anything under a directory Composer installed a package into is skipped, read from the project's own `vendor/composer/installed.php`, which covers a framework whose core lives outside `vendor/`: Drupal core installs at `web/core`, so without that the source of every query was Drupal's PDO wrapper and never the module doing the querying. A request with no project code in the stack at all, a page served entirely by framework internals, keeps the first frame it found, since there is nothing better to name.
 
 `ctx.branch` is set when the dump came from a worktree, so a request to `feat-a.acme.test` carries `branch: "feat-a"` alongside the parent `site: "acme"`. It is plumbed end-to-end via the `LERD_SITE` and `LERD_BRANCH` fastcgi params on the worktree vhost. Because every worktree shares the parent's `site`, the branch is what separates a worktree's events from the parent's: request grouping keys on it (a worktree request never merges into the parent's group), every group is labelled `[site@branch]` in the dashboard and the TUI, the CLI tail prints `site@branch` in each event header, and the search box matches the branch name. To isolate a single worktree, filter by branch: `lerd dump tail --branch feat-a`, the `branch` query param on `/api/dumps`, or the `branch` argument to the `dumps_recent` MCP tool. Parent-site requests leave the field empty and render as plain `[site]`. Inside a site's own Debug tab the site name is dropped and only `[branch]` is shown, unlinked, since you are already on that site.
 

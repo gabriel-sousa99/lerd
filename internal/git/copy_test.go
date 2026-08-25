@@ -1,6 +1,8 @@
 package git
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -323,5 +325,130 @@ func TestCopyTree_CP(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(dst, "sub/file"))
 	if err != nil || string(got) != "x" {
 		t.Fatalf("copied file: got %q err %v", got, err)
+	}
+}
+
+// A no-op composer/npm install leaves the marker's mtime alone, so without a
+// stamp the staleness check stays true forever and the watcher's rescan
+// re-runs the install every minute for the life of the daemon. This is exactly
+// what a worktree seeded with a copied vendor/ looks like: the tree is correct
+// but its marker carries the main repo's older mtime.
+func TestStampInstallMarker_makesAConvergedTreeStopAskingForInstall(t *testing.T) {
+	dir := t.TempDir()
+	touch(t, filepath.Join(dir, "composer.json"))
+	touch(t, filepath.Join(dir, "composer.lock"))
+	touchAt(t, filepath.Join(dir, "vendor", "composer", "installed.json"), time.Now().Add(-30*24*time.Hour))
+
+	if !composerNeedsInstall(dir) {
+		t.Fatal("precondition: a stale marker must ask for an install")
+	}
+
+	stampInstallMarker(filepath.Join(dir, "vendor", "composer", "installed.json"))
+
+	if composerNeedsInstall(dir) {
+		t.Error("after stamping, the marker still reports an install is needed")
+	}
+}
+
+func TestStampInstallMarker_missingMarkerIsLeftAlone(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "vendor", "composer", "installed.json")
+
+	stampInstallMarker(marker) // must not create it
+
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Error("stamping created a marker that no install had written")
+	}
+}
+
+// jsProject writes the minimum for jsNeedsInstall to ask for an install, with
+// the given lockfile contents so tests can vary the digest the memo keys on.
+func jsProject(t *testing.T, lock string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(lock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// countJSInstalls replaces the JS installer with a stub that fails, and returns
+// a counter of how many times it was actually reached.
+func countJSInstalls(t *testing.T) *int {
+	t.Helper()
+	ResetJSInstallFailures()
+	prev := jsInstaller
+	attempts := 0
+	jsInstaller = func(string, io.Writer) error {
+		attempts++
+		return errors.New("npm ci: exit status 1")
+	}
+	t.Cleanup(func() {
+		jsInstaller = prev
+		ResetJSInstallFailures()
+	})
+	return &attempts
+}
+
+// A lockfile that npm refuses is the same lockfile in every worktree seeded
+// from it, and each attempt costs seconds. One bad package-lock.json must not
+// multiply into one failed install per worktree.
+func TestInstallDependencies_failedLockfileIsAttemptedOncePerPass(t *testing.T) {
+	attempts := countJSInstalls(t)
+
+	first := InstallDependencies(jsProject(t, `{"lockfileVersion":3}`), io.Discard)
+	second := InstallDependencies(jsProject(t, `{"lockfileVersion":3}`), io.Discard)
+
+	if *attempts != 1 {
+		t.Errorf("ran the install %d times for one failing lockfile, want 1", *attempts)
+	}
+	if first == nil || second == nil {
+		t.Error("both worktrees must report the failure; the skip is a shortcut, not a success")
+	}
+}
+
+// The memo keys on the lockfile, not the project, so a worktree whose branch
+// carries a different lockfile is still installed.
+func TestInstallDependencies_differentLockfileIsStillAttempted(t *testing.T) {
+	attempts := countJSInstalls(t)
+
+	InstallDependencies(jsProject(t, `{"lockfileVersion":3}`), io.Discard)
+	InstallDependencies(jsProject(t, `{"lockfileVersion":2}`), io.Discard)
+
+	if *attempts != 2 {
+		t.Errorf("ran the install %d times for two distinct lockfiles, want 2", *attempts)
+	}
+}
+
+// The memo lasts one reconcile pass. A fixed lockfile, or a failure that was
+// only the registry being unreachable, has to get another chance.
+func TestResetJSInstallFailures_rearmsTheNextPass(t *testing.T) {
+	attempts := countJSInstalls(t)
+
+	InstallDependencies(jsProject(t, `{"lockfileVersion":3}`), io.Discard)
+	ResetJSInstallFailures()
+	InstallDependencies(jsProject(t, `{"lockfileVersion":3}`), io.Discard)
+
+	if *attempts != 2 {
+		t.Errorf("ran the install %d times across two passes, want 2", *attempts)
+	}
+}
+
+// A genuinely stale tree must still be installed: stamping only ever happens
+// after an install has run, never as a way to silence the check.
+func TestStampInstallMarker_doesNotHideARealLockChange(t *testing.T) {
+	dir := t.TempDir()
+	touch(t, filepath.Join(dir, "composer.json"))
+	touchAt(t, filepath.Join(dir, "vendor", "composer", "installed.json"), time.Now().Add(-time.Hour))
+	stampInstallMarker(filepath.Join(dir, "vendor", "composer", "installed.json"))
+
+	// The lock is edited after the install, as a branch switch or a require does.
+	touch(t, filepath.Join(dir, "composer.lock"))
+
+	if !composerNeedsInstall(dir) {
+		t.Error("a lockfile written after the install must still require one")
 	}
 }

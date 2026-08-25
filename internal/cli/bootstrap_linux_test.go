@@ -5,17 +5,21 @@ package cli
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/gabriel-sousa99/lerd/internal/dns"
 )
 
 // stubBootstrapSystem redirects the three root actions runBootstrapSystem
 // performs so the test never touches /etc or the real login manager.
 func stubBootstrapSystem(t *testing.T) (*[][]string, *[]string) {
 	t.Helper()
-	origPath, origRunner, origSudoers := unprivPortDropIn, bootstrapRunner, writeDNSSudoers
+	origPath, origRunner, origSudoers, origOwns := unprivPortDropIn, bootstrapRunner, writeDNSSudoers, dns.HostOwnsResolver
 	t.Cleanup(func() {
 		unprivPortDropIn, bootstrapRunner, writeDNSSudoers = origPath, origRunner, origSudoers
+		dns.HostOwnsResolver = origOwns
 	})
 	unprivPortDropIn = filepath.Join(t.TempDir(), "99-lerd-ports.conf")
+	dns.HostOwnsResolver = func() bool { return false }
 
 	var runs [][]string
 	bootstrapRunner = func(name string, args ...string) error {
@@ -54,6 +58,24 @@ func TestRunBootstrapSystemSkipsSudoers(t *testing.T) {
 	}
 	if len(*users) != 0 {
 		t.Errorf("sudoers grant written despite --skip-sudoers: %v", *users)
+	}
+	if len(*runs) != 2 {
+		t.Errorf("commands = %v, want ports and linger still applied", *runs)
+	}
+}
+
+// NixOS owns systemd-resolved from configuration.nix. Writing the DNS sudoers
+// grant there lets a later start or watcher apply lerd0 and empty FallbackDNS
+// without a prompt, which takes down all name resolution.
+func TestRunBootstrapSystemSkipsSudoersOnNixOS(t *testing.T) {
+	runs, users := stubBootstrapSystem(t)
+	dns.HostOwnsResolver = func() bool { return true }
+
+	if err := runBootstrapSystem("george", false); err != nil {
+		t.Fatalf("runBootstrapSystem: %v", err)
+	}
+	if len(*users) != 0 {
+		t.Errorf("sudoers grant written on NixOS: %v", *users)
 	}
 	if len(*runs) != 2 {
 		t.Errorf("commands = %v, want ports and linger still applied", *runs)

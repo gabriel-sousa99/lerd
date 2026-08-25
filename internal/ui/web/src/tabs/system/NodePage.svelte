@@ -1,9 +1,9 @@
 <script lang="ts">
   import { status, loadStatus } from '$stores/status';
   import { nodeVersions, loadNodeVersions, setDefaultNode, removeNode, installNode, manageNode, unmanageNode, setNodeManager } from '$stores/nodeVersions';
-  import { sites, sitesByNode, openSiteInBrowser } from '$stores/sites';
-  import { goToTab } from '$stores/route';
+  import { sites, sitesByNode } from '$stores/sites';
   import DetailButton from '$components/DetailButton.svelte';
+  import SitesPopover from '$components/SitesPopover.svelte';
   import SegmentedControl from '$components/SegmentedControl.svelte';
   import { m } from '../../paraglide/messages.js';
 
@@ -84,8 +84,13 @@
     }
   }
 
+  // A site with no version of its own runs on the default, so the default's
+  // list owns it too. Only that card ever picks these up, and it is never
+  // removable, so the list can hold more than the removal guard's count.
   function sitesForVersion(v: string) {
-    return $sites.filter((s) => s.node_version === v || (!s.node_version && v === nodeDefault));
+    return $sites
+      .filter((s) => s.node_version === v || (!s.node_version && v === nodeDefault))
+      .map((s) => s.domain);
   }
 
   let manageBusy = $state(false);
@@ -211,7 +216,7 @@
       {/if}
       <div class="space-y-2">
         {#each $nodeVersions as v (v)}
-          {@const siteList = sitesForVersion(v)}
+          {@const siteDomains = sitesForVersion(v)}
           {@const siteCount = $sitesByNode.get(v) ?? 0}
           {@const isDefault = v === nodeDefault}
           {@const isSelected = v === selectedDefault}
@@ -241,10 +246,8 @@
               {#if isDefault}
                 <span class="text-[10px] font-medium text-lerd-red bg-red-50 dark:bg-red-900/20 px-1.5 py-0.5 rounded-sm">{m.common_default()}</span>
               {/if}
-              <span class="text-xs text-gray-400 dark:text-gray-500">
-                {siteCount} {siteCount === 1 ? m.common_site() : m.common_sites()}
-              </span>
-              <div class="ml-auto">
+              <div class="ml-auto flex items-center gap-2">
+                <SitesPopover domains={siteDomains} />
                 <DetailButton
                   tone="danger"
                   onclick={() => onRemove(v)}
@@ -260,27 +263,6 @@
                 >{m.common_remove()}</DetailButton>
               </div>
             </div>
-            {#if siteList.length > 0}
-              <div class="flex flex-wrap gap-1.5 mt-3">
-                {#each siteList as s (s.domain)}
-                  <a
-                    href={(s.tls ? 'https://' : 'http://') + s.domain}
-                    onclick={(e) => {
-                      e.preventDefault();
-                      goToTab('sites', s.domain);
-                    }}
-                    ondblclick={(e) => {
-                      e.preventDefault();
-                      openSiteInBrowser(s);
-                    }}
-                    class="inline-flex items-center gap-1.5 text-xs font-medium bg-gray-100 dark:bg-white/5 hover:bg-gray-200 dark:hover:bg-white/10 border border-gray-200 dark:border-lerd-border text-gray-700 dark:text-gray-300 rounded-full px-2.5 py-1 transition-colors"
-                  >
-                    <span class="w-1.5 h-1.5 rounded-full shrink-0 bg-gray-400"></span>
-                    {s.domain}
-                  </a>
-                {/each}
-              </div>
-            {/if}
             {#if removeError[v]}
               <p class="text-xs text-red-500 mt-2">{removeError[v]}</p>
             {/if}

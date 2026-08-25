@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -176,12 +177,27 @@ func TestGetFrameworkCustom_WithoutLogs(t *testing.T) {
 	}
 }
 
-// ── GetFrameworkOrFetch ──────────────────────────────────────────────────────
+// ── GetFrameworkForScaffold ──────────────────────────────────────────────────
+
+// installStoreFrameworkAged installs a store definition and back-dates it, so a
+// test can place one either inside or outside the store's refresh window.
+func installStoreFrameworkAged(t *testing.T, fw *Framework, age time.Duration) {
+	t.Helper()
+	installStoreFramework(t, fw)
+	path := filepath.Join(StoreFrameworksDir(), fw.Name+".yaml")
+	if fw.Version != "" {
+		path = filepath.Join(StoreFrameworksDir(), fw.Name+"@"+fw.Version+".yaml")
+	}
+	when := time.Now().Add(-age)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatalf("Chtimes(%s): %v", path, err)
+	}
+}
 
 // A framework the store publishes but the machine hasn't installed must be
 // fetched on demand, so `lerd new --framework=X` can scaffold a project type
 // you've never built before.
-func TestGetFrameworkOrFetch_FetchesUninstalled(t *testing.T) {
+func TestGetFrameworkForScaffold_FetchesUninstalled(t *testing.T) {
 	setConfigDir(t)
 
 	prev := frameworkFetchHook
@@ -197,9 +213,9 @@ func TestGetFrameworkOrFetch_FetchesUninstalled(t *testing.T) {
 		return fw, nil
 	}
 
-	got, ok := GetFrameworkOrFetch("codeigniter")
+	got, ok := GetFrameworkForScaffold("codeigniter", "")
 	if !ok {
-		t.Fatal("GetFrameworkOrFetch(codeigniter): not found after fetch")
+		t.Fatal("GetFrameworkForScaffold(codeigniter): not found after fetch")
 	}
 	if got.Label != "CodeIgniter" {
 		t.Errorf("Label = %q, want CodeIgniter", got.Label)
@@ -209,24 +225,61 @@ func TestGetFrameworkOrFetch_FetchesUninstalled(t *testing.T) {
 	}
 }
 
-// An installed framework resolves locally and must never reach for the store.
-func TestGetFrameworkOrFetch_SkipsFetchWhenInstalled(t *testing.T) {
+// A built-in name must still go to the store: the create command in the binary
+// is a snapshot, and scaffolding on a fresh install has to use the published one.
+func TestGetFrameworkForScaffold_PrefersStoreOverBuiltin(t *testing.T) {
+	setConfigDir(t)
+
+	prev := frameworkFetchHook
+	t.Cleanup(func() { frameworkFetchHook = prev })
+
+	const published = "composer create-project laravel/laravel --published"
+	frameworkFetchHook = func(name, version string) (*Framework, error) {
+		fw := &Framework{Name: name, Label: "Laravel", Version: "12", PublicDir: "public", Create: published}
+		if err := SaveStoreFramework(fw); err != nil {
+			return nil, err
+		}
+		return fw, nil
+	}
+
+	got, ok := GetFrameworkForScaffold("laravel", "")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel): not found")
+	}
+	if got.Create != published {
+		t.Errorf("Create = %q, want the store's %q", got.Create, published)
+	}
+}
+
+// A published definition with no create command must not cost a built-in name
+// the one it has. Store data reaches every binary within the day and nothing
+// gates it per version, so `lerd new laravel` has to keep working through a
+// definition that drops the field or renames it.
+func TestGetFrameworkForScaffold_BuiltinSurvivesADefinitionThatCannotScaffold(t *testing.T) {
 	setConfigDir(t)
 
 	prev := frameworkFetchHook
 	t.Cleanup(func() { frameworkFetchHook = prev })
 	frameworkFetchHook = func(name, version string) (*Framework, error) {
-		t.Fatalf("fetch hook called for an installed framework (%q)", name)
-		return nil, nil
+		fw := &Framework{Name: name, Label: "Laravel", Version: "13", PublicDir: "public"}
+		if err := SaveStoreFramework(fw); err != nil {
+			return nil, err
+		}
+		return fw, nil
 	}
 
-	if _, ok := GetFrameworkOrFetch("laravel"); !ok {
-		t.Fatal("GetFrameworkOrFetch(laravel): built-in not found")
+	got, ok := GetFrameworkForScaffold("laravel", "")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel): not found")
+	}
+	if got.Create != laravelFramework.Create {
+		t.Errorf("Create = %q, want the built-in %q", got.Create, laravelFramework.Create)
 	}
 }
 
-// A name the store doesn't publish keeps the original not-found result.
-func TestGetFrameworkOrFetch_UnknownStaysNotFound(t *testing.T) {
+// An unreachable store leaves the built-in as the scaffold definition, so
+// `lerd new` still works offline.
+func TestGetFrameworkForScaffold_FallsBackToBuiltin(t *testing.T) {
 	setConfigDir(t)
 
 	prev := frameworkFetchHook
@@ -235,8 +288,201 @@ func TestGetFrameworkOrFetch_UnknownStaysNotFound(t *testing.T) {
 		return nil, os.ErrNotExist
 	}
 
-	if _, ok := GetFrameworkOrFetch("nonexistent"); ok {
-		t.Error("GetFrameworkOrFetch(nonexistent) = true, want false")
+	got, ok := GetFrameworkForScaffold("laravel", "")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel): built-in not found")
+	}
+	if got.Create != laravelFramework.Create {
+		t.Errorf("Create = %q, want the built-in %q", got.Create, laravelFramework.Create)
+	}
+}
+
+// A definition installed inside the refresh window is already current, so a
+// repeat scaffold must not spend a store round trip on it.
+func TestGetFrameworkForScaffold_SkipsFetchWhenFresh(t *testing.T) {
+	setConfigDir(t)
+
+	installStoreFrameworkAged(t, &Framework{
+		Name: "laravel", Label: "Laravel", Version: "12", PublicDir: "public",
+		Create: "composer create-project laravel/laravel --fresh",
+	}, time.Minute)
+
+	prev := frameworkFetchHook
+	t.Cleanup(func() { frameworkFetchHook = prev })
+	frameworkFetchHook = func(name, version string) (*Framework, error) {
+		t.Fatalf("fetch hook called for a fresh definition (%q)", name)
+		return nil, nil
+	}
+
+	got, ok := GetFrameworkForScaffold("laravel", "")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel): not found")
+	}
+	if got.Create != "composer create-project laravel/laravel --fresh" {
+		t.Errorf("Create = %q, want the installed definition's", got.Create)
+	}
+}
+
+// A stale definition is re-fetched, and when the store cannot be reached the
+// stale copy still beats the built-in: it is the newer of the two.
+func TestGetFrameworkForScaffold_KeepsStaleWhenStoreUnreachable(t *testing.T) {
+	setConfigDir(t)
+
+	installStoreFrameworkAged(t, &Framework{
+		Name: "laravel", Label: "Laravel", Version: "12", PublicDir: "public",
+		Create: "composer create-project laravel/laravel --stale",
+	}, 48*time.Hour)
+
+	prev := frameworkFetchHook
+	t.Cleanup(func() { frameworkFetchHook = prev })
+	fetched := false
+	frameworkFetchHook = func(name, version string) (*Framework, error) {
+		fetched = true
+		return nil, os.ErrNotExist
+	}
+
+	got, ok := GetFrameworkForScaffold("laravel", "")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel): not found")
+	}
+	if !fetched {
+		t.Error("stale definition was not re-fetched")
+	}
+	if got.Create != "composer create-project laravel/laravel --stale" {
+		t.Errorf("Create = %q, want the installed definition's", got.Create)
+	}
+}
+
+// With several versions installed, the newest one scaffolds. Version numbers are
+// compared as numbers: as strings, @9 sorts above @12.
+func TestGetFrameworkForScaffold_PrefersHighestInstalledVersion(t *testing.T) {
+	setConfigDir(t)
+
+	installStoreFrameworkAged(t, &Framework{
+		Name: "laravel", Label: "Laravel", Version: "9", PublicDir: "public",
+		Create: "composer create-project laravel/laravel --nine",
+	}, time.Minute)
+	installStoreFrameworkAged(t, &Framework{
+		Name: "laravel", Label: "Laravel", Version: "12", PublicDir: "public",
+		Create: "composer create-project laravel/laravel --twelve",
+	}, time.Minute)
+
+	prev := frameworkFetchHook
+	t.Cleanup(func() { frameworkFetchHook = prev })
+	frameworkFetchHook = func(name, version string) (*Framework, error) {
+		t.Fatalf("fetch hook called for a fresh definition (%q)", name)
+		return nil, nil
+	}
+
+	got, ok := GetFrameworkForScaffold("laravel", "")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel): not found")
+	}
+	if got.Create != "composer create-project laravel/laravel --twelve" {
+		t.Errorf("Create = %q, want Laravel 12's", got.Create)
+	}
+}
+
+// A pinned major scaffolds that major's definition, not the newest one on disk.
+// Someone starting a project on an older release picked it deliberately.
+func TestGetFrameworkForScaffold_PinnedVersionWins(t *testing.T) {
+	setConfigDir(t)
+
+	installStoreFrameworkAged(t, &Framework{
+		Name: "laravel", Label: "Laravel", Version: "11", PublicDir: "public",
+		Create: "composer create-project laravel/laravel --eleven",
+	}, time.Minute)
+	installStoreFrameworkAged(t, &Framework{
+		Name: "laravel", Label: "Laravel", Version: "13", PublicDir: "public",
+		Create: "composer create-project laravel/laravel --thirteen",
+	}, time.Minute)
+
+	prev := frameworkFetchHook
+	t.Cleanup(func() { frameworkFetchHook = prev })
+	frameworkFetchHook = func(name, version string) (*Framework, error) {
+		t.Fatalf("fetch hook called for a fresh pinned definition (%q@%q)", name, version)
+		return nil, nil
+	}
+
+	got, ok := GetFrameworkForScaffold("laravel", "11")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel, 11): not found")
+	}
+	if got.Create != "composer create-project laravel/laravel --eleven" {
+		t.Errorf("Create = %q, want Laravel 11's", got.Create)
+	}
+}
+
+// A pinned major that is not installed is fetched by that version, so choosing
+// an older release in a wizard does not silently scaffold the latest.
+func TestGetFrameworkForScaffold_FetchesThePinnedVersion(t *testing.T) {
+	setConfigDir(t)
+
+	prev := frameworkFetchHook
+	t.Cleanup(func() { frameworkFetchHook = prev })
+	asked := ""
+	frameworkFetchHook = func(name, version string) (*Framework, error) {
+		asked = version
+		fw := &Framework{Name: name, Label: "Laravel", Version: version, PublicDir: "public",
+			Create: "composer create-project laravel/laravel --v" + version}
+		if err := SaveStoreFramework(fw); err != nil {
+			return nil, err
+		}
+		return fw, nil
+	}
+
+	got, ok := GetFrameworkForScaffold("laravel", "10")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel, 10): not found")
+	}
+	if asked != "10" {
+		t.Errorf("fetch hook asked for version %q, want 10", asked)
+	}
+	if got.Create != "composer create-project laravel/laravel --v10" {
+		t.Errorf("Create = %q, want the fetched Laravel 10 definition's", got.Create)
+	}
+}
+
+// A major nothing publishes resolves as if none had been pinned, rather than
+// reporting a framework lerd knows perfectly well as unknown.
+func TestGetFrameworkForScaffold_UnservedPinFallsBackToLatest(t *testing.T) {
+	setConfigDir(t)
+
+	prev := frameworkFetchHook
+	t.Cleanup(func() { frameworkFetchHook = prev })
+	frameworkFetchHook = func(name, version string) (*Framework, error) {
+		if version != "" {
+			return nil, os.ErrNotExist
+		}
+		fw := &Framework{Name: name, Label: "Laravel", Version: "13", PublicDir: "public",
+			Create: "composer create-project laravel/laravel --latest"}
+		if err := SaveStoreFramework(fw); err != nil {
+			return nil, err
+		}
+		return fw, nil
+	}
+
+	got, ok := GetFrameworkForScaffold("laravel", "99")
+	if !ok {
+		t.Fatal("GetFrameworkForScaffold(laravel, 99): not found")
+	}
+	if got.Create != "composer create-project laravel/laravel --latest" {
+		t.Errorf("Create = %q, want the latest definition's", got.Create)
+	}
+}
+
+// A name the store doesn't publish keeps the original not-found result.
+func TestGetFrameworkForScaffold_UnknownStaysNotFound(t *testing.T) {
+	setConfigDir(t)
+
+	prev := frameworkFetchHook
+	t.Cleanup(func() { frameworkFetchHook = prev })
+	frameworkFetchHook = func(name, version string) (*Framework, error) {
+		return nil, os.ErrNotExist
+	}
+
+	if _, ok := GetFrameworkForScaffold("nonexistent", ""); ok {
+		t.Error("GetFrameworkForScaffold(nonexistent) = true, want false")
 	}
 }
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/gabriel-sousa99/lerd/internal/cleanup"
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -118,17 +119,17 @@ func runCleanup(dryRun, yes, safe bool) error {
 	// stay behind for the live images that still reference them.
 	rows := make([][]string, 0, len(plan.Targets))
 	for _, t := range plan.Targets {
-		rows = append(rows, []string{t.ID, t.Desc, humanSize(t.Bytes)})
+		rows = append(rows, []string{targetLabel(t), t.Desc, humanSize(t.Bytes)})
 	}
-	feedback.Header("Reclaimable lerd images")
-	feedback.Table([]string{"IMAGE", "KIND", "RECLAIMABLE"}, rows)
-	feedback.Note(fmt.Sprintf("About %s across %d image(s).", humanSize(plan.ReclaimBytes()), len(plan.Targets)))
+	feedback.Header("Reclaimable lerd disk")
+	feedback.Table([]string{"TARGET", "KIND", "RECLAIMABLE"}, rows)
+	feedback.Note(fmt.Sprintf("About %s across %d item(s).", humanSize(plan.ReclaimBytes()), len(plan.Targets)))
 
 	if dryRun {
 		showHeldHint(plan)
 		return nil
 	}
-	if !yes && !feedback.Confirm("Remove these images?", false) {
+	if !yes && !feedback.Confirm("Remove these?", false) {
 		return nil
 	}
 
@@ -136,6 +137,16 @@ func runCleanup(dryRun, yes, safe bool) error {
 	feedback.Done(fmt.Sprintf("Freed about %s.", humanSize(freed)))
 	showHeldHint(plan)
 	return nil
+}
+
+// targetLabel is what the first column shows: an image ref as it is, and a
+// rendered-config directory as the tail of its path, since the leading
+// ~/.local/share/lerd is the same for every one of them.
+func targetLabel(t cleanup.Target) string {
+	if t.Kind == cleanup.KindFiles {
+		return filepath.Join("service-files", filepath.Base(t.ID))
+	}
+	return t.ID
 }
 
 // showHeldHint tells the user when reclaimable disk is locked behind running

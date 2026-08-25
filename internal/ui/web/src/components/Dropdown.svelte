@@ -8,6 +8,8 @@
 </script>
 
 <script lang="ts">
+  import type { Snippet } from 'svelte';
+
   interface Props {
     value: string;
     options: Array<string | DropdownOption>;
@@ -21,6 +23,9 @@
     width?: 'auto' | 'full'; // trigger sizing; 'full' fills container (form-style)
     minMenuWidth?: number;   // px; default 160
     align?: 'left' | 'right';
+    // Drawn before each option and before the trigger's label, given the
+    // option's value; used where the choice has a mark of its own (frameworks).
+    optionIcon?: Snippet<[string]>;
   }
   let {
     value,
@@ -34,7 +39,8 @@
     inheritedSuffix = '',
     width = 'auto',
     minMenuWidth = 160,
-    align = 'left'
+    align = 'left',
+    optionIcon
   }: Props = $props();
 
   let open = $state(false);
@@ -242,7 +248,10 @@
     aria-controls={menuId}
     class="{width === 'full' ? 'w-full' : ''} inline-flex items-center justify-between gap-1.5 h-7 px-2.5 rounded-md border bg-white dark:bg-lerd-card hover:border-lerd-red hover:text-lerd-red transition-colors text-xs font-medium text-gray-700 dark:text-gray-200 disabled:opacity-50 disabled:cursor-not-allowed {inherited ? 'border-dashed border-violet-300 dark:border-violet-700' : 'border-gray-200 dark:border-lerd-border'}"
   >
-    <span class="truncate text-left">{display}</span>
+    {#if optionIcon && value}
+      <span class="shrink-0 flex items-center justify-center w-4">{@render optionIcon(value)}</span>
+    {/if}
+    <span class="truncate text-left flex-1">{display}</span>
     <svg class="w-3 h-3 ml-0.5 shrink-0 transition-transform {open ? 'rotate-180' : ''}" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
     </svg>
@@ -274,6 +283,9 @@
               <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
             {/if}
           </span>
+          {#if optionIcon}
+            <span class="shrink-0 flex items-center justify-center w-4 mt-0.5">{@render optionIcon(opt.value)}</span>
+          {/if}
           <span class="flex-1 min-w-0">
             <span class="block truncate">{displayFor(opt)}{inherited && selected && inheritedSuffix ? ' ' + inheritedSuffix : ''}</span>
             {#if opt.description}

@@ -8,6 +8,9 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
+
+	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
+
 	"github.com/spf13/cobra"
 )
 
@@ -57,6 +60,9 @@ func runIsolate(_ *cobra.Command, args []string) error {
 		_ = config.SetProjectPHPVersion(cwd, version)
 		feedback.Begin()
 		feedback.Done("PHP pinned to " + feedback.Val(version))
+		if note := phpVersionNotInstalledNote(version); note != "" {
+			feedback.Note(note)
+		}
 		return nil
 	}
 
@@ -80,6 +86,18 @@ func runIsolate(_ *cobra.Command, args []string) error {
 		warnMissingExtensions(cwd, site.Name, res.Version, cfg)
 	}
 	return nil
+}
+
+// phpVersionNotInstalledNote describes a pin that names a PHP version this
+// machine does not have, and returns "" when it does. A pin is legitimate on its
+// own — link provisions the version when the directory becomes a site — but
+// saying only "pinned" left every command run there next failing on a version
+// the user was never told was missing.
+func phpVersionNotInstalledNote(version string) string {
+	if phpDet.IsInstalled(version) {
+		return ""
+	}
+	return "PHP " + version + " has no image yet; 'lerd link' provisions it here, or run 'lerd php:rebuild " + version + "' to add it now"
 }
 
 // reportImageGap surfaces what the new version's image is missing. Changing

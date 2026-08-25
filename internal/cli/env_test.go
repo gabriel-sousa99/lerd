@@ -169,7 +169,8 @@ image: docker.io/pgvector/pgvector:pg18
 	if err := os.WriteFile(filepath.Join(tmp, "lerd", "services", "postgres-pgvector.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write fake service: %v", err)
 	}
-	options, nameSet := buildDatabaseOptions()
+	// No framework, so nothing has declared that SQLite does not apply.
+	options, nameSet := buildDatabaseOptions(nil)
 	if !nameSet["sqlite"] || !nameSet["mysql"] || !nameSet["postgres"] {
 		t.Errorf("buildDatabaseOptions must always include the built-in trio, got %v", nameSet)
 	}
@@ -829,5 +830,63 @@ func TestWiredVarsFor_ExternalUnmappedKeepsThePresetKeys(t *testing.T) {
 	got := wiredVarsFor(fw, typesense, "", frameworkKnownKeys(fw), false, true, false)
 	if strings.Join(got, "\n") != "TYPESENSE_HOST=lerd-typesense" {
 		t.Errorf("got %v, want the preset's own keys", got)
+	}
+}
+
+// SQLite is deliberately absent from .lerd.yaml: it is a file the project owns,
+// not a service lerd runs. That left `lerd env` with no signal at all, so a
+// project that picked SQLite in the wizard got neither its database env vars nor
+// the file itself, and the first request 500'd on a database that was never
+// created. The project's own configuration is the signal instead.
+func TestProjectUsesSQLite(t *testing.T) {
+	laravelish := &config.Framework{Env: config.FrameworkEnvConf{
+		SQLite: &config.FrameworkServiceDef{
+			Detect: []config.FrameworkServiceDetect{{Key: "DB_CONNECTION", ValuePrefix: "sqlite"}},
+			Vars:   []string{"DB_CONNECTION=sqlite", "DB_DATABASE=database/database.sqlite"},
+		},
+		Services: map[string]config.FrameworkServiceDef{
+			"mysql": {
+				Detect: []config.FrameworkServiceDetect{{Key: "DB_CONNECTION", ValuePrefix: "mysql"}},
+				Vars:   []string{"DB_CONNECTION=mysql", "DB_HOST=lerd-mysql"},
+			},
+		},
+	}}
+	sqliteEnv := map[string]string{"DB_CONNECTION": "sqlite"}
+
+	for _, tc := range []struct {
+		name  string
+		yaml  map[string]bool
+		env   map[string]string
+		fw    *config.Framework
+		extDB bool
+		want  bool
+	}{
+		{"env says sqlite and nothing else was picked", map[string]bool{}, sqliteEnv, laravelish, false, true},
+		{"an older project still listing sqlite", map[string]bool{"sqlite": true}, map[string]string{}, laravelish, false, true},
+		{"a database service was picked instead", map[string]bool{"mysql": true}, sqliteEnv, laravelish, false, false},
+		{"the user runs their own database", map[string]bool{}, sqliteEnv, laravelish, true, false},
+		{"env names a server driver", map[string]bool{}, map[string]string{"DB_CONNECTION": "mysql"}, laravelish, false, false},
+		{"a framework with no sqlite wiring", map[string]bool{}, sqliteEnv, &config.Framework{}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := projectUsesSQLite(tc.yaml, tc.env, tc.fw, tc.extDB); got != tc.want {
+				t.Errorf("projectUsesSQLite = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// SQLite has no container, so the service loop must not try to start one: the
+// run ends with "could not start sqlite: custom service not found", which reads
+// as a broken project when nothing is wrong. The sqlite step owns the file and
+// the env vars; the loop leaves it alone.
+func TestShouldStartFrameworkService_neverForSQLite(t *testing.T) {
+	if startableFrameworkService("sqlite") {
+		t.Error("sqlite is a file the project owns, not a service to start")
+	}
+	for _, svc := range []string{"mysql", "postgres", "redis", "meilisearch"} {
+		if !startableFrameworkService(svc) {
+			t.Errorf("%s is a service lerd runs and must still be started", svc)
+		}
 	}
 }

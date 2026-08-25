@@ -8,8 +8,18 @@
 
   interface Props {
     site: Site;
+    compact?: boolean;
   }
-  let { site }: Props = $props();
+  let { site, compact = false }: Props = $props();
+
+  // Full static class strings for Tailwind. Compact is the dashboard widget's
+  // narrower column; the default is the Sites tab grid.
+  const CARD =
+    'group flex items-center border border-gray-200/80 dark:border-lerd-border bg-white dark:bg-lerd-card transition duration-150 hover:border-gray-300 dark:hover:border-white/15';
+  const VARIANT = {
+    full: 'gap-3 rounded-xl p-3 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5',
+    compact: 'gap-2.5 rounded-lg p-2.5 hover:shadow-sm'
+  };
 
   // Laravel sites carry an app_name (APP_NAME from .env); when present it reads
   // friendlier than the URL, so it becomes the tile title and the domain drops
@@ -32,11 +42,15 @@
 </script>
 
 <div
-  class="group flex items-center gap-3 rounded-xl border border-gray-200/80 dark:border-lerd-border bg-white dark:bg-lerd-card p-3 transition duration-150 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 hover:border-gray-300 dark:hover:border-white/15 {site.paused ? 'opacity-60' : ''}"
+  class="{CARD} {compact ? VARIANT.compact : VARIANT.full} {site.paused ? 'opacity-60' : ''}"
 >
   <button onclick={() => goToTab('sites', site.domain)} class="flex items-center gap-3 min-w-0 flex-1 text-left">
-    <span class="shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-lg bg-gray-100 dark:bg-white/5 transition-transform group-hover:scale-105">
-      <SiteIcon {site} size="w-5 h-5" />
+    <span
+      class="shrink-0 inline-flex items-center justify-center rounded-lg bg-gray-100 dark:bg-white/5 {compact
+        ? 'w-8 h-8'
+        : 'w-9 h-9 transition-transform group-hover:scale-105'}"
+    >
+      <SiteIcon {site} size={compact ? 'w-4 h-4' : 'w-5 h-5'} />
     </span>
     <div class="min-w-0 flex-1">
       <div class="flex items-center gap-1.5">

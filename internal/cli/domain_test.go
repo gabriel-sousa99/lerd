@@ -114,11 +114,15 @@ func TestRegenerateSiteVhost_removes_old_on_primary_change(t *testing.T) {
 // CollectRunningWorkerNames scans $XDG_CONFIG_HOME/systemd/user for orphaned
 // worker units, so without this it reads whatever lerd units the developer has
 // on their own machine and a stray lerd-<worker>-myapp.service fails the run.
+// HOME goes with them: macOS keeps its unit directory under ~/Library, which the
+// XDG vars do not cover, so a developer's own lerd-php84-fpm.plist would answer
+// a question about what this machine has installed.
 func isolateUnitDir(t *testing.T) {
 	t.Helper()
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("HOME", tmp)
 }
 
 func TestSetProjectWorkers_noop_without_file(t *testing.T) {

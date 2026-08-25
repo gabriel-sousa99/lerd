@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -257,8 +258,17 @@ func TestToolList_underSizeCeiling(t *testing.T) {
 	// surface at all: db `extension_list`/`extension_add`, service `entities`/
 	// `entity_action` (everything a preset declares that is not a database), and
 	// runtime `node_manager`. Description verbosity in the same three tools was
-	// trimmed to pay for part of it.
-	const ceiling = 22100
+	// trimmed to pay for part of it, then 22100 → 22450 for the worktree `wait`
+	// action and its `wait` / `timeout_seconds` properties, another capability
+	// with no MCP surface at all: without it an assistant cannot tell a finished
+	// install from a running one and races the watcher inside the tree. The
+	// worktree description was merged and trimmed to pay for half of it, then
+	// 22450 → 22900 for the `items` schema on every array-typed property
+	// (required by the MCP spec), then 22900 → 23050 for the `no_snapshot`
+	// property: a data wipe now snapshots the databases first and refuses when
+	// it cannot, so an assistant that does not know the flag reads a blocked
+	// remove as a broken service.
+	const ceiling = 23050
 	got, err := json.Marshal(toolList())
 	if err != nil {
 		t.Fatalf("marshal tool list: %v", err)
@@ -367,6 +377,9 @@ func TestExecServiceAdd_InitFlagPersists(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 	t.Setenv("XDG_DATA_HOME", tmp)
+	// Adding a service writes its unit, and on macOS that path follows HOME
+	// rather than the XDG vars.
+	t.Setenv("HOME", tmp)
 
 	resp, rpcErr := execServiceAdd(map[string]any{
 		"name":  "memcrash",
@@ -393,6 +406,7 @@ func TestExecServiceAdd_InitDefaultsFalse(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("HOME", tmp)
 
 	if _, rpcErr := execServiceAdd(map[string]any{
 		"name":  "redisish",
@@ -535,5 +549,26 @@ func TestExecServiceConfig_ReadHonoursInlineTuningSpec(t *testing.T) {
 	}
 	if !bytes.Contains(raw, []byte("user-defined memcached overrides")) {
 		t.Errorf("response missing inline template: %s", raw)
+	}
+}
+
+// An AI assistant running a framework command goes through the same host shell
+// as `lerd run` and the dashboard, so it needs lerd's shim dir on PATH too:
+// every framework command starts with `php`, which `lerd path:disable` takes
+// off the user's own PATH.
+func TestHostCommandEnv_PutsShimDirOnPath(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
+
+	var got string
+	for _, kv := range hostCommandEnv() {
+		if strings.HasPrefix(kv, "PATH=") {
+			got = strings.TrimPrefix(kv, "PATH=")
+		}
+	}
+	if !strings.HasPrefix(got, config.BinDir()+string(os.PathListSeparator)) {
+		t.Errorf("PATH = %q, want it to start with the shim dir %q", got, config.BinDir())
+	}
+	if !strings.HasSuffix(got, "/usr/bin:/bin") {
+		t.Errorf("PATH = %q, want the inherited entries kept", got)
 	}
 }

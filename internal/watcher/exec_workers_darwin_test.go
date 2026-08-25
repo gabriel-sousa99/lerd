@@ -193,3 +193,31 @@ func TestSweepOrphanWorkerArtifacts_KeepsArtifactsWhenPlistPresent(t *testing.T)
 		}
 	}
 }
+
+// TestHealPaused_StopIsNotDrift pins that the self-heal loop stands down while
+// lerd is intentionally stopped. The logout teardown runs inside this same
+// process and takes seconds to stop every worker; a tick landing in that window
+// would read the dead PIDs as drift and start them all back up, right as the
+// Podman Machine is going down.
+func TestHealPaused_StopIsNotDrift(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, ".local", "share"))
+
+	if healPaused() {
+		t.Fatal("a running lerd must heal exec workers")
+	}
+	if err := config.MarkStopped(); err != nil {
+		t.Fatalf("MarkStopped: %v", err)
+	}
+	if !healPaused() {
+		t.Error("self-heal must stand down while lerd is stopped, or it resurrects the teardown's workers")
+	}
+	if err := config.ClearStopped(); err != nil {
+		t.Fatalf("ClearStopped: %v", err)
+	}
+	if healPaused() {
+		t.Error("self-heal must resume once the stop marker is cleared")
+	}
+}

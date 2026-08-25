@@ -58,7 +58,9 @@ func defaultNotifyDaemon(domain, action string) error {
 //     for these, so even callers running inside the daemon hit the same
 //     HTTP endpoints; a tiny loopback roundtrip is the cost of having one
 //     identical post-toggle path.
-//  7. Cascade to the group secondaries when the site is a secured group main,
+//  7. Realign the generated dev server config, and any dev server running on
+//     the old scheme, with the site's new one.
+//  8. Cascade to the group secondaries when the site is a secured group main,
 //     and refuse to unsecure a secondary whose main is secured (see #811).
 func SetSecured(site *config.Site, secured bool) error {
 	_, err := SetSecuredCascade(site, secured)
@@ -97,8 +99,13 @@ func SetSecuredCascade(site *config.Site, secured bool) ([]string, error) {
 	if err := nginxReloadFn(); err != nil {
 		return nil, fmt.Errorf("reloading nginx: %w", err)
 	}
+	// The command prints the new URL as its result, so it must not return while
+	// the previous vhost is still answering: nginx reload is asynchronous, and
+	// opening that URL straight away is the obvious next thing to do.
+	waitSchemeServedFn(site.PrimaryDomain(), secured)
 	_ = notifyDaemonFn(site.PrimaryDomain(), "stripe:refresh")
 	_ = notifyDaemonFn(site.PrimaryDomain(), "lan:refresh")
+	RefreshDevServers(site)
 	if secured && site.IsGroupMain() {
 		return cascadeGroupSecondaries(site)
 	}

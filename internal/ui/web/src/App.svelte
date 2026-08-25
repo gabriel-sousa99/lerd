@@ -16,7 +16,11 @@
   import { loadSites } from '$stores/sites';
   import { loadServices } from '$stores/services';
   import { loadProxies } from '$stores/proxies';
+  import { loadServiceIcons } from '$stores/serviceIcons';
+  import { loadFrameworkMarks } from '$stores/frameworkMarks';
+  import { loadWorkerMarks } from '$stores/workerMarks';
   import { loadWorkerHealth } from '$stores/workerHealth';
+  import { watchActiveRun } from '$stores/wizard';
   import { connectWs, disconnectWs } from '$lib/ws';
   import { initDashboardRoute } from '$stores/dashboard';
   import '$stores/activity';
@@ -26,6 +30,7 @@
   import WorkerHealthBanner from '$components/WorkerHealthBanner.svelte';
   import NotifyBanner from '$components/NotifyBanner.svelte';
   import NotificationToasts from '$components/NotificationToasts.svelte';
+  import WizardBubble from '$components/WizardBubble.svelte';
   import CommandPalette from '$components/CommandPalette.svelte';
   import CommandRunModal from '$components/CommandRunModal.svelte';
   import { initNotify } from '$lib/notify';
@@ -56,7 +61,13 @@
     loadSites();
     loadServices();
     loadProxies();
+    loadServiceIcons();
+    loadFrameworkMarks();
+    loadWorkerMarks();
     loadWorkerHealth();
+    // A scaffold or setup the wizard sent to the background outlives the page,
+    // so the dashboard asks on load whether anything is still going.
+    watchActiveRun();
     connectWs();
     initDashboardRoute();
     initNotify();
@@ -154,6 +165,7 @@
   <WorkerHealthBanner />
   <NotifyBanner />
   <NotificationToasts />
+  <WizardBubble />
   <CommandPalette />
   <CommandRunModal />
 </div>
