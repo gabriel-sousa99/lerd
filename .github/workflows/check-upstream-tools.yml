@@ -53,9 +53,15 @@ jobs:
           done
 
       - name: Open bump PR
+        id: open_bump_pr
+        continue-on-error: true
         uses: peter-evans/create-pull-request@v6
         with:
           branch: chore/bump-tool-pins
           commit-message: 'chore: bump pinned host tool versions'
           title: 'chore: bump pinned host tool versions'
           body: 'Automated bump of the pinned composer, fnm and mkcert versions in internal/tools/tools.yaml to the current upstream releases. The resolved download URLs were verified to exist before this PR was opened. Merging publishes the new pins to every install through the fetched manifest, and the embedded fallback ships with the next release.'
+
+      - name: Warn when PR creation is blocked
+        if: steps.open_bump_pr.outcome == 'failure'
+        run: echo "::warning::Automated PR creation is blocked by repository settings. The bump branch was still updated if changes were detected."
