@@ -42,6 +42,11 @@ export default defineConfig(() => ({
   test: {
     globals: true,
     environment: 'jsdom',
-    setupFiles: ['./src/test-setup.ts']
+    setupFiles: ['./src/test-setup.ts'],
+    // A store test resets the module registry and re-imports, paying the
+    // transform cost again while every other file is transforming too, which
+    // outruns the 5s default on a loaded machine. The assertions themselves
+    // finish in milliseconds.
+    testTimeout: 20000
   }
 }));
