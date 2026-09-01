@@ -894,3 +894,62 @@ _undeletable_dir() {
   run run_with_tty "source '$INSTALLER'; ask proceed? && echo GOT_YES || echo GOT_NO"
   [[ "$output" == *"GOT_YES"* ]]
 }
+
+# ── saved_dns_mode / the DNS question on a re-install ─────────────────────────
+# `lerd install` settles the DNS mode once and honours the saved choice on every
+# later run, flipped afterwards with dns:enable / dns:disable. Re-running the
+# installer used to ask again and pass --dns, which is the one input that beats
+# the saved choice, so a .localhost machine was converted to managed DNS, in
+# silence where there was no terminal to show the question (#1647).
+
+_write_dns_config() {
+  mkdir -p "$LERD_CONFIG_DIR"
+  cat > "$LERD_CONFIG_DIR/config.yaml" <<EOF
+php:
+    default: "8.5"
+dns:
+    enabled: $1
+    tld: $2
+auto_cleanup: true
+EOF
+}
+
+@test "saved_dns_mode reads managed from an existing config" {
+  _write_dns_config true test
+  run saved_dns_mode
+  [ "$output" = "managed" ]
+}
+
+@test "saved_dns_mode reads localhost from an existing config" {
+  _write_dns_config false localhost
+  run saved_dns_mode
+  [ "$output" = "localhost" ]
+}
+
+@test "saved_dns_mode says nothing when there is no config" {
+  run saved_dns_mode
+  [ -z "$output" ]
+}
+
+@test "saved_dns_mode ignores an enabled key outside the dns block" {
+  mkdir -p "$LERD_CONFIG_DIR"
+  cat > "$LERD_CONFIG_DIR/config.yaml" <<EOF
+telemetry:
+    enabled: false
+dns:
+    enabled: true
+    tld: test
+EOF
+  run saved_dns_mode
+  [ "$output" = "managed" ]
+}
+
+@test "should_pass_dns_mode names the mode on a first install" {
+  run should_pass_dns_mode ""
+  [ "$status" -eq 0 ]
+}
+
+@test "should_pass_dns_mode leaves the saved choice alone when lerd is installed" {
+  run should_pass_dns_mode "1.33.0"
+  [ "$status" -ne 0 ]
+}

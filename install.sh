@@ -129,6 +129,28 @@ MISSING_PKGS=()
 # (certutil / nss-tools) when the user only wants .localhost.
 DNS_MODE="managed"
 
+# saved_dns_mode echoes the DNS mode already recorded in the config, or nothing
+# when there is no config to read. Scoped to the dns block so an enabled: key
+# belonging to some other section is never mistaken for this one.
+saved_dns_mode() {
+  local cfg="${LERD_CONFIG_DIR}/config.yaml"
+  [ -f "$cfg" ] || return 0
+  awk '
+    /^[^[:space:]#]/ { in_dns = ($0 ~ /^dns:/) }
+    in_dns && /^[[:space:]]+enabled:/ {
+      print ($0 ~ /false/) ? "localhost" : "managed"; exit
+    }
+  ' "$cfg"
+}
+
+# should_pass_dns_mode reports whether `lerd install` should be told the mode.
+# Only a first install names it: the binary settles the question once and
+# honours the saved choice on every run after that, and --dns is the one input
+# that overrides it. The argument is the version already installed, if any.
+should_pass_dns_mode() {
+  [ -z "${1:-}" ]
+}
+
 ask_dns_mode() {
   local _ans=""
   header "DNS mode"
@@ -624,7 +646,15 @@ cmd_install() {
     [ -f "$local_binary" ] || die "File not found: $local_binary"
   fi
 
-  ask_dns_mode
+  # Only a first install asks. A machine that already has lerd keeps the mode it
+  # settled on, read back here so the prerequisite check knows whether this run
+  # needs certutil, and left to the binary rather than forced with --dns.
+  if [ -z "$was_installed" ]; then
+    ask_dns_mode
+  else
+    DNS_MODE="$(saved_dns_mode)"
+    DNS_MODE="${DNS_MODE:-managed}"
+  fi
   check_prerequisites
 
   if ! command -v podman &>/dev/null; then
@@ -671,10 +701,16 @@ cmd_install() {
   # When this script is piped through `curl|bash`, our own stdin is the pipe
   # and lerd's prompts would silently hit EOF. Hand it /dev/tty when one is
   # available so [Y/n] questions reach the user.
+  # The +expansion keeps an empty array from tripping set -u on the bash 3.2
+  # macOS still ships.
+  local dns_args=()
+  if should_pass_dns_mode "$was_installed"; then
+    dns_args=(--dns "$DNS_MODE")
+  fi
   if have_tty; then
-    "${INSTALL_DIR}/${BINARY}" install --dns "$DNS_MODE" </dev/tty
+    "${INSTALL_DIR}/${BINARY}" install ${dns_args[@]+"${dns_args[@]}"} </dev/tty
   else
-    "${INSTALL_DIR}/${BINARY}" install --dns "$DNS_MODE"
+    "${INSTALL_DIR}/${BINARY}" install ${dns_args[@]+"${dns_args[@]}"}
   fi
 
   # Offer the desktop app on a fresh Linux install. Its own installer does the
