@@ -200,6 +200,9 @@ func handleDoctorDatabaseFix(w http.ResponseWriter, r *http.Request, site *confi
 			failed = fmt.Errorf("creating %s on %s: %w", t.Database, t.Service, err)
 			break
 		}
+		// lerd-ui outlives the request, so a stale list would answer the next
+		// check as well as this one's.
+		sitedoctor.ForgetDatabases(t.Service)
 		created = append(created, t.Database+" on "+t.Service)
 	}
 	streamHostAction(w, "created "+strings.Join(created, ", "), failed)

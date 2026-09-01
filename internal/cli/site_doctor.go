@@ -103,6 +103,9 @@ func createMissingDatabases(path string, quiet bool) (bool, error) {
 			return created, fmt.Errorf("creating %s on %s: %w", t.Database, t.Service, err)
 		}
 		created = true
+		// The re-check that follows runs inside the list cache's window, so
+		// without this it reads the engine's contents from before the create.
+		sitedoctor.ForgetDatabases(t.Service)
 		if !quiet {
 			fmt.Printf("  %s\n\n", feedback.Dim("created the "+t.Database+" database on "+t.Service))
 		}

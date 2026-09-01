@@ -29,10 +29,10 @@ var listDatabases = func(service string) ([]string, error) {
 func stubDatabaseLister(fn func(string) ([]string, error)) func() {
 	prev := listDatabases
 	listDatabases = fn
-	forgetDatabases()
+	ForgetDatabases("")
 	return func() {
 		listDatabases = prev
-		forgetDatabases()
+		ForgetDatabases("")
 	}
 }
 
@@ -68,10 +68,20 @@ func cachedDatabases(service string) ([]string, error) {
 	return names, err
 }
 
-func forgetDatabases() {
+// ForgetDatabases drops one engine's cached list, or every engine's when
+// service is empty. Anything that creates or removes a database has to call it:
+// the cache exists so a sweep does not ask the same engine once per site, and
+// the re-check that follows a fix runs well inside that window, so without this
+// it reads the list from before the create and reports the database it just
+// made as still missing.
+func ForgetDatabases(service string) {
 	dbListCache.Lock()
 	defer dbListCache.Unlock()
-	dbListCache.entries = map[string]dbListEntry{}
+	if service == "" {
+		dbListCache.entries = map[string]dbListEntry{}
+		return
+	}
+	delete(dbListCache.entries, service)
 }
 
 // checkServerDatabase fails when the site's database does not exist on the
