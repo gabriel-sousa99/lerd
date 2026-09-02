@@ -28,12 +28,12 @@ func TestMatchHostCommand(t *testing.T) {
 			got, ok := MatchHostCommand(fw, tc.argv)
 			if tc.want == "" {
 				if ok {
-					t.Fatalf("matched %q, want no match", got)
+					t.Fatalf("matched %q, want no match", got.Binary)
 				}
 				return
 			}
-			if !ok || got != tc.want {
-				t.Fatalf("got (%q, %v), want %q", got, ok, tc.want)
+			if !ok || got.Binary != tc.want {
+				t.Fatalf("got (%q, %v), want %q", got.Binary, ok, tc.want)
 			}
 		})
 	}
@@ -57,10 +57,50 @@ func TestMatchHostCommand_FirstMatchWins(t *testing.T) {
 		{Args: "artisan native:run", Binary: "first"},
 		{Args: "artisan native:*", Binary: "second"},
 	}}
-	if got, _ := MatchHostCommand(fw, []string{"artisan", "native:run"}); got != "first" {
-		t.Errorf("binary = %q, want first", got)
+	if got, _ := MatchHostCommand(fw, []string{"artisan", "native:run"}); got.Binary != "first" {
+		t.Errorf("binary = %q, want first", got.Binary)
 	}
-	if got, _ := MatchHostCommand(fw, []string{"artisan", "native:build"}); got != "second" {
-		t.Errorf("binary = %q, want second", got)
+	if got, _ := MatchHostCommand(fw, []string{"artisan", "native:build"}); got.Binary != "second" {
+		t.Errorf("binary = %q, want second", got.Binary)
+	}
+}
+
+// The binary and the command that installs it have to come from the same entry.
+// A project carrying both nativephp packages merges two declarations, and the
+// desktop installer does not put the mobile runtime on disk, so taking the
+// binary from one and the hint from another sends the user to a command that
+// cannot fix what they are looking at (#1651).
+func TestMatchHostCommand_InstallCommandComesFromTheMatchedEntry(t *testing.T) {
+	fw := &Framework{HostCommands: []HostCommand{
+		{Args: "artisan native:jump", Binary: "vendor/nativephp/php-bin/bin/host/php", InstallCommand: "native:install-mobile"},
+		{Args: "artisan native:*", Binary: "vendor/nativephp/electron/resources/js/resources/php/php", InstallCommand: "native:install"},
+	}}
+
+	got, ok := MatchHostCommand(fw, []string{"artisan", "native:jump"})
+	if !ok || got.InstallCommand != "native:install-mobile" {
+		t.Errorf("install command = %q, want native:install-mobile", got.InstallCommand)
+	}
+	if got.Binary != "vendor/nativephp/php-bin/bin/host/php" {
+		t.Errorf("binary = %q, want the mobile runtime", got.Binary)
+	}
+
+	got, ok = MatchHostCommand(fw, []string{"artisan", "native:run"})
+	if !ok || got.InstallCommand != "native:install" {
+		t.Errorf("install command = %q, want native:install", got.InstallCommand)
+	}
+}
+
+// A declaration published before install_command existed still matches, and
+// carries no hint rather than a wrong one.
+func TestMatchHostCommand_NoInstallCommandDeclared(t *testing.T) {
+	fw := &Framework{HostCommands: []HostCommand{
+		{Args: "artisan native:*", Binary: "vendor/bin/runtime"},
+	}}
+	got, ok := MatchHostCommand(fw, []string{"artisan", "native:run"})
+	if !ok {
+		t.Fatal("want a match")
+	}
+	if got.InstallCommand != "" {
+		t.Errorf("install command = %q, want empty", got.InstallCommand)
 	}
 }

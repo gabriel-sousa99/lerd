@@ -329,17 +329,24 @@ type FrameworkSetupCmd struct {
 // against the leading arguments as typed, so `artisan native:*` catches the
 // whole namespace whether it arrives via `lerd php artisan ...` or `lerd
 // artisan ...`. Binary is relative to the project root.
+// InstallCommand is declared per entry rather than per package because a
+// project can carry two packages whose runtimes are installed by differently
+// named commands: nativephp/mobile installs through native:install-mobile
+// precisely because the desktop package already owns native:install.
 type HostCommand struct {
-	Args   string `yaml:"args" json:"args"`
-	Binary string `yaml:"binary" json:"binary"`
+	Args           string `yaml:"args" json:"args"`
+	Binary         string `yaml:"binary" json:"binary"`
+	InstallCommand string `yaml:"install_command,omitempty" json:"install_command,omitempty"`
 }
 
-// MatchHostCommand reports the binary a framework declares for these arguments,
-// if any. The first declaration that matches wins, so a package merged over a
-// framework file is not shadowed by the pattern it replaces.
-func MatchHostCommand(fw *Framework, argv []string) (string, bool) {
+// MatchHostCommand reports the declaration a framework carries for these
+// arguments, if any. The first declaration that matches wins, so a package
+// merged over a framework file is not shadowed by the pattern it replaces, and
+// the whole entry comes back so the binary and the command that installs it can
+// never be taken from two different declarations.
+func MatchHostCommand(fw *Framework, argv []string) (HostCommand, bool) {
 	if fw == nil || len(argv) == 0 {
-		return "", false
+		return HostCommand{}, false
 	}
 	for _, hc := range fw.HostCommands {
 		if hc.Binary == "" {
@@ -357,10 +364,10 @@ func MatchHostCommand(fw *Framework, argv []string) (string, bool) {
 			}
 		}
 		if matched {
-			return hc.Binary, true
+			return hc, true
 		}
 	}
-	return "", false
+	return HostCommand{}, false
 }
 
 type FrameworkCommand struct {
