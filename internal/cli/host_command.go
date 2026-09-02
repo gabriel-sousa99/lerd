@@ -68,13 +68,15 @@ func frameworkForDir(dir string) *config.Framework {
 
 // hostCommandNodeVersion resolves the Node a re-routed command runs under, with
 // the same fallbacks a host worker uses: the project's own version, then the
-// machine default.
+// machine default. Empty is the version manager's own default alias, which is
+// the right answer for a machine that has expressed no preference and keeps
+// this off the platform-specific constants the worker units carry.
 func hostCommandNodeVersion(cwd string) string {
 	if v, err := nodeDet.DetectVersion(cwd); err == nil && v != "" {
 		return v
 	}
-	if cfg, _ := config.LoadGlobal(); cfg != nil && cfg.Node.DefaultVersion != "" {
+	if cfg, _ := config.LoadGlobal(); cfg != nil {
 		return cfg.Node.DefaultVersion
 	}
-	return defaultNodeVersion
+	return ""
 }
