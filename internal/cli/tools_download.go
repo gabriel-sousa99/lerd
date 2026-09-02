@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/geodro/lerd/internal/config"
 	"github.com/geodro/lerd/internal/download"
@@ -23,15 +24,22 @@ import (
 type pinnedTools struct{ m *tools.Manifest }
 
 func (p *pinnedTools) download(name, dest string, mode os.FileMode, w io.Writer) (string, error) {
+	return p.downloadCtx(context.Background(), name, dest, mode, w)
+}
+
+// downloadCtx is download under a caller's context, so a fetch that would
+// otherwise sit inside the retry loop for as long as the server keeps trickling
+// bytes has an end.
+func (p *pinnedTools) downloadCtx(ctx context.Context, name, dest string, mode os.FileMode, w io.Writer) (string, error) {
 	if p.m == nil {
-		p.m = tools.Load(context.Background())
+		p.m = tools.Load(ctx)
 	}
 	url, err := p.m.URL(name, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return "", err
 	}
 	digest := p.m.Digest(name, runtime.GOOS, runtime.GOARCH)
-	if err := download.Verified(context.Background(), url, dest, mode, digest, w); err != nil {
+	if err := download.Verified(ctx, url, dest, mode, digest, w); err != nil {
 		return "", err
 	}
 	return p.m.Tools[name].Version, nil
@@ -156,9 +164,11 @@ func ensureHostPHPBinary(w io.Writer, phpVersion string) (string, error) {
 	defer os.RemoveAll(stage)
 
 	archive := filepath.Join(stage, "php.tar.gz")
-	v, err := pins.download(tool, archive, 0644, w)
+	ctx, cancel := context.WithTimeout(context.Background(), hostPHPFetchTimeout)
+	defer cancel()
+	v, err := pins.downloadCtx(ctx, tool, archive, 0644, w)
 	if err != nil {
-		return "", fmt.Errorf("php download: %w", err)
+		return hostPHPFallback(dest, tools.InstalledVersion(tool), w, err)
 	}
 	extract := exec.Command("tar", "-xzf", archive, "-C", stage, "php")
 	extract.Stdout = w
@@ -171,5 +181,26 @@ func ensureHostPHPBinary(w io.Writer, phpVersion string) (string, error) {
 	}
 	os.Chmod(dest, 0755) //nolint:errcheck
 	_ = tools.WriteStamp(tool, v)
+	return dest, nil
+}
+
+// hostPHPFetchTimeout bounds the whole fetch. download.Verified already retries
+// a stalled attempt three times against a 60s idle watchdog, which on a server
+// that keeps trickling bytes is a wait with no end; a command a user is
+// watching needs one.
+const hostPHPFetchTimeout = 10 * time.Minute
+
+// hostPHPFallback answers a failed fetch with the copy already on disk when
+// there is one. A pin that moved is not worth failing a command over: the build
+// installed last time has the extensions the command needs just as much, and it
+// says so rather than running a version the user was not told about.
+func hostPHPFallback(dest, installed string, w io.Writer, cause error) (string, error) {
+	if _, err := os.Stat(dest); err != nil {
+		return "", fmt.Errorf("could not download the PHP this command needs: %w", cause)
+	}
+	if installed == "" {
+		installed = "the copy already installed"
+	}
+	feedback.WarnOn(w, "could not download the pinned PHP (%v), running with %s instead", cause, installed)
 	return dest, nil
 }

@@ -324,6 +324,7 @@ Lerd stands on a set of excellent open-source projects it bundles or fetches to 
 - [php-spx](https://github.com/NoiseByNorthwest/php-spx) - the profiler behind the SPX flame graphs
 - [mkcert](https://github.com/FiloSottile/mkcert) - the local CA that backs `.test` HTTPS
 - [fnm](https://github.com/Schniz/fnm) - the per-project Node version manager
+- [static-php-cli](https://github.com/crazywhalecc/static-php-cli) - the prebuilt static PHP binaries lerd falls back to when a project's own bundled runtime is missing an extension a command needs
 - [Composer](https://getcomposer.org) - fetched on the host for dependency operations
 - [Starship](https://starship.rs) - the prompt in the container shell drop-in
 - [Simple Icons](https://simpleicons.org) - the service marks in the dashboard, CC0

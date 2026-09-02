@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,5 +157,36 @@ func TestJoinAnd(t *testing.T) {
 		if got := joinAnd(items); got != want {
 			t.Errorf("joinAnd(%v) = %q, want %q", items, got, want)
 		}
+	}
+}
+
+// A pin that moved is not worth failing the command over: the build installed
+// last time carries the extensions the command needs just as much, so a fetch
+// that fails falls back to it and says which version is actually running.
+func TestHostPHPFallback_usesTheCopyOnDiskAndSaysSo(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "php-host-8.4")
+	if err := os.WriteFile(dest, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+
+	got, err := hostPHPFallback(dest, "8.4.20", &out, errors.New("dial tcp: timeout"))
+
+	if err != nil || got != dest {
+		t.Fatalf("fallback = (%q, %v), want the installed binary", got, err)
+	}
+	if !strings.Contains(out.String(), "8.4.20") || !strings.Contains(out.String(), "timeout") {
+		t.Errorf("warning = %q, want the version it fell back to and why", out.String())
+	}
+}
+
+// With nothing on disk there is nothing to fall back to, and the command cannot
+// run at all, so the failure names what could not be fetched rather than
+// surfacing three layers away as a missing extension.
+func TestHostPHPFallback_failsWhenNothingIsInstalled(t *testing.T) {
+	_, err := hostPHPFallback(filepath.Join(t.TempDir(), "absent"), "", io.Discard, errors.New("HTTP 503"))
+
+	if err == nil || !strings.Contains(err.Error(), "503") {
+		t.Errorf("err = %v, want it to carry the download failure", err)
 	}
 }
