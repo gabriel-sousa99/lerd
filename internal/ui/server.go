@@ -5764,6 +5764,20 @@ func terminalScriptCandidates(script string) []terminalCmd {
 
 // openTerminalCommand opens the user's terminal emulator and runs the given
 // shell script in it.
+// terminalEnv is what a spawned terminal runs with: the graphical session keys
+// it needs to reach the display, and lerd's bin directory on PATH. A store
+// command that calls php or lerd has to resolve them the same way it does
+// through `lerd run` and the dashboard's own runner, both of which set this
+// PATH; without it the emulator inherits whatever the user's service manager
+// happened to import and a declared command can fail as not found.
+func terminalEnv() []string {
+	env := os.Environ()
+	if runtime.GOOS != "darwin" {
+		env = graphicalEnv()
+	}
+	return append(env, "PATH="+config.PathWithBinDir())
+}
+
 func openTerminalCommand(script string) error {
 	for _, t := range terminalScriptCandidates(script) {
 		bin, err := exec.LookPath(t.bin)
@@ -5771,9 +5785,7 @@ func openTerminalCommand(script string) error {
 			continue
 		}
 		cmd := exec.Command(bin, t.args...)
-		if runtime.GOOS != "darwin" {
-			cmd.Env = graphicalEnv()
-		}
+		cmd.Env = terminalEnv()
 		if err := cmd.Start(); err != nil {
 			return err
 		}

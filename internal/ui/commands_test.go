@@ -558,3 +558,23 @@ func TestTerminalCommandScript_survivesInterruptWithoutIgnoringIt(t *testing.T) 
 		t.Errorf("script = %q, want the window to hold its output", script)
 	}
 }
+
+// A declared command reaches `php` and `lerd` through lerd's own bin directory,
+// which `lerd run` and the dashboard runner both put on PATH. A terminal
+// command has to resolve them the same way rather than inheriting whatever the
+// service manager imported, or a store command fails as not found on one
+// machine and works on the next.
+func TestTerminalEnv_carriesLerdsBinDirOnPath(t *testing.T) {
+	var path string
+	for _, kv := range terminalEnv() {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	if path == "" {
+		t.Fatal("terminal env sets no PATH")
+	}
+	if !strings.Contains(path, config.BinDir()) {
+		t.Errorf("PATH = %q, want lerd's bin dir %q in it", path, config.BinDir())
+	}
+}
