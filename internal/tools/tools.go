@@ -45,6 +45,9 @@ type Tool struct {
 	URL     string            `yaml:"url"`
 	Assets  map[string]string `yaml:"assets"`
 	Digests map[string]string `yaml:"digests,omitempty"`
+	// Sizes is the asset's byte count per GOOS/GOARCH, so a command can say what
+	// it is about to fetch before it starts. Optional, like Digests.
+	Sizes map[string]int64 `yaml:"sizes,omitempty"`
 }
 
 // Manifest is the parsed tools.yaml.
@@ -100,6 +103,11 @@ func (t Tool) valid() bool {
 			return false
 		}
 	}
+	for _, n := range t.Sizes {
+		if n < 0 {
+			return false
+		}
+	}
 	return true
 }
 
@@ -107,6 +115,12 @@ func (t Tool) valid() bool {
 // pins none for this platform.
 func (m *Manifest) Digest(name, goos, goarch string) string {
 	return m.Tools[name].Digests[goos+"/"+goarch]
+}
+
+// Size returns the published byte count for an asset, zero when the manifest
+// pins none for this platform.
+func (m *Manifest) Size(name, goos, goarch string) int64 {
+	return m.Tools[name].Sizes[goos+"/"+goarch]
 }
 
 // Load returns the pinned tool manifest: the embedded copy, overlaid with

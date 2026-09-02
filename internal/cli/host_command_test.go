@@ -190,3 +190,17 @@ func TestHostPHPFallback_failsWhenNothingIsInstalled(t *testing.T) {
 		t.Errorf("err = %v, want it to carry the download failure", err)
 	}
 }
+
+// Nothing lerd fetches starts before the user has seen how big it is, the same
+// promise the image pull disclosure makes. A manifest that pins no size for a
+// platform still announces the download rather than saying nothing.
+func TestHostPHPDownloadLabel_disclosesTheSize(t *testing.T) {
+	with := hostPHPDownloadLabel("8.5.8", 12931817)
+	if !strings.Contains(with, "8.5.8") || !strings.Contains(with, "MiB") {
+		t.Errorf("label = %q, want the version and a human size", with)
+	}
+	without := hostPHPDownloadLabel("8.5.8", 0)
+	if !strings.Contains(without, "8.5.8") || strings.Contains(without, "(") {
+		t.Errorf("label = %q, want no size when the manifest pins none", without)
+	}
+}

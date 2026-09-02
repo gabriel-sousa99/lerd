@@ -15,6 +15,7 @@ import (
 	"github.com/geodro/lerd/internal/config"
 	"github.com/geodro/lerd/internal/download"
 	"github.com/geodro/lerd/internal/feedback"
+	"github.com/geodro/lerd/internal/imagepull"
 	"github.com/geodro/lerd/internal/tools"
 )
 
@@ -152,9 +153,10 @@ func ensureHostPHPBinary(w io.Writer, phpVersion string) (string, error) {
 	if _, err := os.Stat(dest); err == nil && tools.InstalledVersion(tool) == pins.m.Tools[tool].Version {
 		return dest, nil
 	}
+	version := pins.m.Tools[tool].Version
 	on := feedback.ColorFor(w)
-	fmt.Fprintf(w, "%s%s lerd downloads PHP %s for this command\n", feedback.Prefix,
-		feedback.DimIf(on, feedback.GlyphDownload), pins.m.Tools[tool].Version)
+	fmt.Fprintf(w, "%s%s %s\n", feedback.Prefix, feedback.DimIf(on, feedback.GlyphDownload),
+		hostPHPDownloadLabel(version, pins.m.Size(tool, runtime.GOOS, runtime.GOARCH)))
 	// Extracted through a directory of its own: the archive's member is called
 	// "php", and unpacking that straight into BinDir would land on the shim.
 	stage, err := os.MkdirTemp(config.BinDir(), "php-host-")
@@ -166,10 +168,16 @@ func ensureHostPHPBinary(w io.Writer, phpVersion string) (string, error) {
 	archive := filepath.Join(stage, "php.tar.gz")
 	ctx, cancel := context.WithTimeout(context.Background(), hostPHPFetchTimeout)
 	defer cancel()
-	v, err := pins.downloadCtx(ctx, tool, archive, 0644, w)
+	// The downloader draws its own bar, which is a stream of frames anywhere
+	// that is not a terminal. The step spinner is the one lerd uses everywhere
+	// else and stays a single line either way, so the bar goes to the bin.
+	step := feedback.StartOn(w, "fetching php "+version)
+	v, err := pins.downloadCtx(ctx, tool, archive, 0644, io.Discard)
 	if err != nil {
+		step.Fail(err)
 		return hostPHPFallback(dest, tools.InstalledVersion(tool), w, err)
 	}
+	step.OK("downloaded")
 	extract := exec.Command("tar", "-xzf", archive, "-C", stage, "php")
 	extract.Stdout = w
 	extract.Stderr = w
@@ -203,4 +211,15 @@ func hostPHPFallback(dest, installed string, w io.Writer, cause error) (string, 
 	}
 	feedback.WarnOn(w, "could not download the pinned PHP (%v), running with %s instead", cause, installed)
 	return dest, nil
+}
+
+// hostPHPDownloadLabel says what is about to be fetched and how big it is, so a
+// command that pauses to download tens of megabytes discloses that first, the
+// way an image pull does.
+func hostPHPDownloadLabel(version string, size int64) string {
+	label := "lerd downloads PHP " + version + " for this command"
+	if size > 0 {
+		label += " (" + imagepull.Human(size) + ")"
+	}
+	return label
 }

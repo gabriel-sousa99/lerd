@@ -504,6 +504,9 @@ func TestEmbeddedManifest_hostPHPIsPinnedAndDigestedEverywhere(t *testing.T) {
 			if d := m.Digest(name, p.goos, p.goarch); !sha256Re.MatchString(d) {
 				t.Errorf("%s %s/%s digest = %q, want a sha256", name, p.goos, p.goarch, d)
 			}
+			if n := m.Size(name, p.goos, p.goarch); n <= 0 {
+				t.Errorf("%s %s/%s size = %d, want the byte count the download discloses", name, p.goos, p.goarch, n)
+			}
 		}
 		if v := m.Tools[name].Version; !strings.HasPrefix(v, strings.TrimPrefix(name, "php-host-")+".") {
 			t.Errorf("%s pins version %q, want a patch of that minor", name, v)
