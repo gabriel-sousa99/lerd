@@ -20,18 +20,22 @@ import (
 //
 // A declared binary that is not there yet is an error rather than a fall back
 // into the container, which is the failure the declaration exists to prevent.
+//
+// The project-supplied host command consent gate is deliberately not consulted:
+// this declaration is store data, like the vite host worker, and a runtime that
+// cannot live in a container does not work at all when it is refused.
 func runDeclaredHostCommand(cwd string, argv []string, extraEnv []string) (int, bool, error) {
 	fw := frameworkForDir(cwd)
-	rel, ok := config.MatchHostCommand(fw, argv)
+	hc, ok := config.MatchHostCommand(fw, argv)
 	if !ok {
 		return 0, false, nil
 	}
-	bin := rel
+	bin := hc.Binary
 	if !filepath.IsAbs(bin) {
-		bin = filepath.Join(cwd, rel)
+		bin = filepath.Join(cwd, hc.Binary)
 	}
 	if _, err := os.Stat(bin); err != nil {
-		return 0, true, fmt.Errorf("%s runs on the host and needs %s, which is not installed yet.\nInstall the runtime first: lerd run native:install", argv[0], rel)
+		return 0, true, errors.New(hostCommandMissingMsg(argv[0], hc))
 	}
 	// The command shells out to npm, so it needs the project's Node the same way
 	// a host worker does. Unmanaged Node is left to the caller's PATH, which is
@@ -53,6 +57,20 @@ func runDeclaredHostCommand(cwd string, argv []string, extraEnv []string) (int, 
 		return 0, true, err
 	}
 	return 0, true, nil
+}
+
+// hostCommandMissingMsg reports what to do about a declared host binary the
+// project has not installed yet. The command that installs it comes off the
+// declaration rather than being written here, because two packages that both
+// escape the container do not install the same way: nativephp/mobile installs
+// through native:install-mobile precisely because the desktop package already
+// owns native:install. A declaration naming none is not guessed at.
+func hostCommandMissingMsg(argv0 string, hc config.HostCommand) string {
+	msg := fmt.Sprintf("%s runs on the host and needs %s, which is not installed yet.", argv0, hc.Binary)
+	if hc.InstallCommand == "" {
+		return msg + "\nInstall the runtime it needs, then run it again."
+	}
+	return msg + "\nInstall the runtime first: lerd run " + hc.InstallCommand
 }
 
 // frameworkForDir resolves the framework a directory's commands run under,

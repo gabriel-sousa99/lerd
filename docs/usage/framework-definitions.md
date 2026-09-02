@@ -304,10 +304,14 @@ console: bin/console
 # `lerd artisan native:run` alike; `binary` is relative to the project root. The
 # first match wins, so a package declaration is never shadowed by the framework
 # file it merges over, and a binary that is not installed is an error rather than
-# a fall back into the container.
+# a fall back into the container. `install_command` names the `lerd run` command
+# that puts that binary on disk, and belongs to the entry rather than to the
+# package, since a project can carry two packages installed by differently named
+# commands. An entry declaring none says so rather than naming another's.
 host_commands:
   - args: artisan native:*
     binary: vendor/nativephp/electron/resources/js/resources/php/php
+    install_command: native:install
 
 # Background workers
 workers:
