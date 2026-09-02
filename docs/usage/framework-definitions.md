@@ -308,10 +308,23 @@ console: bin/console
 # that puts that binary on disk, and belongs to the entry rather than to the
 # package, since a project can carry two packages installed by differently named
 # commands. An entry declaring none says so rather than naming another's.
+# `requires_extensions` names the PHP extensions that binary has to carry for the
+# command to work. Bundled runtimes are trimmed static builds with dynamic
+# loading compiled out, so a missing extension cannot be added to one. lerd asks
+# the binary itself, and when it is short an extension the command needs, runs
+# that command with lerd's own pinned PHP, downloaded to ~/.local/share/lerd/bin
+# the first time a project needs it. The build matches the project's own PHP
+# version, since the command runs project code against a composer.lock resolved
+# for it, and falls back to the nearest pinned minor when lerd pins none.
+# Everything else about the command is unchanged: same host, same working
+# directory, same environment.
 host_commands:
   - args: artisan native:*
     binary: vendor/nativephp/electron/resources/js/resources/php/php
     install_command: native:install
+  - args: artisan native:jump
+    binary: vendor/nativephp/php-bin/bin/host/php
+    requires_extensions: [posix, pcntl]
 
 # Background workers
 workers:

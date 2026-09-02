@@ -31,7 +31,7 @@ var platforms = []struct{ goos, goarch string }{
 func TestEmbedded_ResolvesEveryToolOnEveryPlatform(t *testing.T) {
 	offline(t)
 	m := Load(context.Background())
-	for _, name := range []string{"composer", "fnm", "mkcert"} {
+	for _, name := range []string{"composer", "fnm", "mkcert", "php-host-8.3", "php-host-8.4", "php-host-8.5"} {
 		tool, ok := m.Tools[name]
 		if !ok {
 			t.Fatalf("embedded manifest is missing %s", name)
@@ -481,5 +481,35 @@ func TestInstalledVersion_ComposerPrefersTheStamp(t *testing.T) {
 	}
 	if v := InstalledVersion("composer"); v != "2.9.9" {
 		t.Errorf("InstalledVersion = %q, want the stamped 2.9.9", v)
+	}
+}
+
+// The fallback PHP is pinned for every platform lerd runs on, with a digest for
+// each: it is the one tool downloaded from outside GitHub, and it is fetched
+// only when a project's own runtime has already turned out to be incomplete.
+func TestEmbeddedManifest_hostPHPIsPinnedAndDigestedEverywhere(t *testing.T) {
+	m := embeddedManifest()
+	for _, name := range []string{"php-host-8.3", "php-host-8.4", "php-host-8.5"} {
+		for _, p := range []struct{ goos, goarch string }{
+			{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "amd64"}, {"darwin", "arm64"},
+		} {
+			url, err := m.URL(name, p.goos, p.goarch)
+			if err != nil {
+				t.Errorf("URL(%s, %s/%s): %v", name, p.goos, p.goarch, err)
+				continue
+			}
+			if !strings.HasPrefix(url, "https://dl.static-php.dev/") {
+				t.Errorf("%s %s/%s URL = %q", name, p.goos, p.goarch, url)
+			}
+			if d := m.Digest(name, p.goos, p.goarch); !sha256Re.MatchString(d) {
+				t.Errorf("%s %s/%s digest = %q, want a sha256", name, p.goos, p.goarch, d)
+			}
+			if n := m.Size(name, p.goos, p.goarch); n <= 0 {
+				t.Errorf("%s %s/%s size = %d, want the byte count the download discloses", name, p.goos, p.goarch, n)
+			}
+		}
+		if v := m.Tools[name].Version; !strings.HasPrefix(v, strings.TrimPrefix(name, "php-host-")+".") {
+			t.Errorf("%s pins version %q, want a patch of that minor", name, v)
+		}
 	}
 }

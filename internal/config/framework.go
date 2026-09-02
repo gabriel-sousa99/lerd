@@ -337,6 +337,11 @@ type HostCommand struct {
 	Args           string `yaml:"args" json:"args"`
 	Binary         string `yaml:"binary" json:"binary"`
 	InstallCommand string `yaml:"install_command,omitempty" json:"install_command,omitempty"`
+	// RequiresExtensions names the PHP extensions the declared binary must carry
+	// for the command to work at all. The runtimes projects bundle are trimmed
+	// builds, so a binary short one of them cannot run the command and lerd runs
+	// it in the PHP container on the host's network instead.
+	RequiresExtensions []string `yaml:"requires_extensions,omitempty" json:"requires_extensions,omitempty"`
 }
 
 // MatchHostCommand reports the declaration a framework carries for these

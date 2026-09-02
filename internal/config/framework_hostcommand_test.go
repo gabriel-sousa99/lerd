@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
 
 // A package whose command has to escape the container declares which arguments
 // mean that and the binary to use. Without it `php artisan native:run` reaches
@@ -102,5 +106,32 @@ func TestMatchHostCommand_NoInstallCommandDeclared(t *testing.T) {
 	}
 	if got.InstallCommand != "" {
 		t.Errorf("install command = %q, want empty", got.InstallCommand)
+	}
+}
+
+// A declaration can say which extensions the binary it names has to have. The
+// runtimes projects bundle are trimmed builds, and one that is short an
+// extension the command needs cannot run it, so lerd needs the requirement in
+// the store rather than a guess in Go.
+func TestHostCommand_RequiresExtensionsParseAndTravelWithTheEntry(t *testing.T) {
+	var fw Framework
+	if err := yaml.Unmarshal([]byte(`
+host_commands:
+  - args: "artisan native:jump"
+    binary: vendor/nativephp/php-bin/bin/host/php
+    requires_extensions: [posix, pcntl]
+  - args: "artisan native:*"
+    binary: vendor/nativephp/php-bin/bin/host/php
+`), &fw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got, ok := MatchHostCommand(&fw, []string{"artisan", "native:jump"})
+	if !ok || len(got.RequiresExtensions) != 2 || got.RequiresExtensions[0] != "posix" {
+		t.Fatalf("requires_extensions = %v, want [posix pcntl]", got.RequiresExtensions)
+	}
+
+	if got, _ := MatchHostCommand(&fw, []string{"artisan", "native:run"}); len(got.RequiresExtensions) != 0 {
+		t.Errorf("requires_extensions = %v, want none on the entry that declares none", got.RequiresExtensions)
 	}
 }
