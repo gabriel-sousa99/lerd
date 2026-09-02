@@ -298,6 +298,17 @@ npm: auto
 # Console command (without 'php' prefix)
 console: bin/console
 
+# Console commands that cannot run in the container and the binary that runs them
+# on the host (optional). `args` is a space-separated glob matched against the
+# arguments as typed, so one entry covers `lerd php artisan native:run` and
+# `lerd artisan native:run` alike; `binary` is relative to the project root. The
+# first match wins, so a package declaration is never shadowed by the framework
+# file it merges over, and a binary that is not installed is an error rather than
+# a fall back into the container.
+host_commands:
+  - args: artisan native:*
+    binary: vendor/nativephp/electron/resources/js/resources/php/php
+
 # Background workers
 workers:
   messenger:

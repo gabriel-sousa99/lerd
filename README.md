@@ -45,6 +45,8 @@ Lerd is built for PHP developers on Linux who want frictionless local developmen
 
 - ⚡ **FrankenPHP runtime.** Per site, as an alternative to shared PHP-FPM, with Laravel Octane and Symfony Runtime worker mode.
 
+- 📱 **NativePHP, desktop and mobile.** The Electron app runs as a host worker and the mobile build reaches an emulator, a simulator or a device. A console command whose runtime cannot live in a container is declared as one that has to run on the host, so `native:run` opens its window instead of dying inside the PHP container two seconds after the shim sent it there.
+
 - 📦 **Node.js isolation.** Node 22 or 24 per project, through the bundled fnm or an nvm you already have, switchable from the dashboard. Or **bun** as the JS runtime on the host and, opt-in, inside the container.
 
 - 🪄 **No per-framework setup.** Workers, env values and the nginx vhost are configured for you when you link a project. "Env" means whatever file your framework actually reads: a `.env`, WordPress's `wp-config.php`, Magento's `env.php` or Drupal's `settings.php`, written in place. A worker's start command, its flags and their defaults come from the same definition, and the queues and limits you answer with are committed to the project's `.lerd.yaml` instead of being retyped on every start.
@@ -162,6 +164,8 @@ Update later with:
 ```bash
 lerd update
 ```
+
+Betas are published as prereleases, which the plain installer skips, so `bash -s -- --beta` is how you ask for one, on a first install or on an update.
 
 <details>
 <summary>Install via apt instead (Ubuntu/Debian)</summary>

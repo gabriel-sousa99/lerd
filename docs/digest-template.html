@@ -287,6 +287,7 @@
   /* ---------- cards ---------- */
   .cards { margin-top: 26px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
   .cards.three { grid-template-columns: repeat(3, 1fr); }
+  .cards.one { grid-template-columns: 1fr; }
   .card {
     border: 1px solid var(--line); border-radius: 12px;
     background: var(--panel); padding: 20px;
@@ -496,7 +497,7 @@
       pills: .pill.feat .pill.fix .pill.sec .pill.brk .pill.ref .pill.ui
     .flow-wrap(.flow-title) > .flow > .fnode[.hot|.ok|.warn](.t,.v,.d) + .farr  + .flow-note
     .flow-wrap > .pipe > .pipe-step[.hot](.pipe-n,.pipe-b>h5+p)   vertical pipeline
-    .cards[.three] > .card(.card-pills>.pill, h4>a.pr, p, ul>li, .file)
+    .cards[.three|.one] > .card(.card-pills>.pill, h4>a.pr, p, ul>li, .file)
     .code(.code-bar>.lang) > pre   spans: .k .s .c .f .t .del .add
     .tbl-wrap > table(thead/tbody)   td b / td code / td .mini
     .groups > .group-chip(.g,.a)     5-up tool grid
