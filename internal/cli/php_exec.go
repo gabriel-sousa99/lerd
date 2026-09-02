@@ -122,6 +122,11 @@ func RunPHPCaptureEnv(cwd string, args []string, extraEnv []string) (int, error)
 // framework supports, since the empty parent directory would otherwise resolve
 // to the machine default and break composer's platform check.
 func RunPHPVersionCaptureEnv(cwd, version string, args []string, extraEnv []string) (int, error) {
+	// Some console commands cannot work in the container at all, and the
+	// framework says which. Checked before anything starts a container for them.
+	if code, took, err := runDeclaredHostCommand(cwd, args, extraEnv); took {
+		return code, err
+	}
 	recordCwdActivity(cwd) // keep the site awake under idle-suspend while you work in the terminal
 	// The CLI SAPI ignores a project's .user.ini, so a framework declaring
 	// php.cli_ini gets it as -d on every PHP process lerd starts for it.
