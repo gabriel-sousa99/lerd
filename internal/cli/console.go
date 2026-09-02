@@ -48,6 +48,19 @@ func runConsole(_ *cobra.Command, args []string) error {
 		return err
 	}
 
+	// `lerd artisan native:run` has to reach the same host binary `lerd php
+	// artisan native:run` does, so the console name is put back in front of the
+	// arguments and the declaration is matched on the command as typed.
+	if code, took, err := runDeclaredHostCommand(cwd, append([]string{consoleCmd}, args...), nil); took {
+		if err != nil {
+			return err
+		}
+		if code != 0 {
+			os.Exit(code)
+		}
+		return nil
+	}
+
 	version, err := phpVersionForDir(cwd)
 	if err != nil {
 		return err

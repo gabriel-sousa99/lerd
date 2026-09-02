@@ -68,6 +68,9 @@ type Framework struct {
 	// dropdown. See FrameworkCommand for the schema. Projects extend or
 	// override this list in .lerd.yaml; use ResolveCommands to merge.
 	Commands []FrameworkCommand `yaml:"commands,omitempty"`
+	// HostCommands names the console commands that must run on the host rather
+	// than in the container, and the binary that runs them. See HostCommand.
+	HostCommands []HostCommand `yaml:"host_commands,omitempty"`
 	// CacheCommand is the console subcommand that clears the framework's
 	// compiled caches, run through Console the way key generation is. lerd runs it after rewriting a project's connection: a
 	// framework caches the container definitions built from that configuration,
@@ -318,6 +321,48 @@ type FrameworkSetupCmd struct {
 // ships canonical defaults; projects extend or override them by name in
 // .lerd.yaml. Distinct from FrameworkWorker (long-running) and
 // FrameworkSetupCmd (install-time only).
+// HostCommand declares that some of a framework's console commands cannot run
+// in the PHP-FPM container and names the binary that must run them instead.
+// The case it exists for is a desktop runtime: `php artisan native:run` opens a
+// window, and on a lerd machine `php` is the shim into the container, where
+// there is no Electron and no display. Args is a space-separated glob matched
+// against the leading arguments as typed, so `artisan native:*` catches the
+// whole namespace whether it arrives via `lerd php artisan ...` or `lerd
+// artisan ...`. Binary is relative to the project root.
+type HostCommand struct {
+	Args   string `yaml:"args" json:"args"`
+	Binary string `yaml:"binary" json:"binary"`
+}
+
+// MatchHostCommand reports the binary a framework declares for these arguments,
+// if any. The first declaration that matches wins, so a package merged over a
+// framework file is not shadowed by the pattern it replaces.
+func MatchHostCommand(fw *Framework, argv []string) (string, bool) {
+	if fw == nil || len(argv) == 0 {
+		return "", false
+	}
+	for _, hc := range fw.HostCommands {
+		if hc.Binary == "" {
+			continue
+		}
+		pattern := strings.Fields(hc.Args)
+		if len(pattern) == 0 || len(pattern) > len(argv) {
+			continue
+		}
+		matched := true
+		for i, tok := range pattern {
+			if ok, err := filepath.Match(tok, argv[i]); err != nil || !ok {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return hc.Binary, true
+		}
+	}
+	return "", false
+}
+
 type FrameworkCommand struct {
 	Name        string         `yaml:"name" json:"name"`                                   // stable identifier, also the `lerd run` argument
 	Label       string         `yaml:"label" json:"label"`                                 // human label shown in the UI

@@ -46,8 +46,11 @@ type FrameworkPackage struct {
 	Frameworks []FrameworkPackageScope    `yaml:"frameworks,omitempty"`
 	Workers    map[string]FrameworkWorker `yaml:"workers,omitempty"`
 	Commands   []FrameworkCommand         `yaml:"commands,omitempty"`
-	Setup      []FrameworkSetupCmd        `yaml:"setup,omitempty"`
-	Doctor     *FrameworkDoctor           `yaml:"doctor,omitempty"`
+	// HostCommands are the console commands this package's runtime cannot run
+	// inside the container, and the binary that runs them instead.
+	HostCommands []HostCommand       `yaml:"host_commands,omitempty"`
+	Setup        []FrameworkSetupCmd `yaml:"setup,omitempty"`
+	Doctor       *FrameworkDoctor    `yaml:"doctor,omitempty"`
 	// Removes takes entries away from the resolved framework, for a major of the
 	// package that dropped a command or a worker. Declaring an entry is how a
 	// package replaces one, and this is how it deletes one, which it cannot do by
@@ -193,6 +196,9 @@ func applyPackage(fw *Framework, pkg *FrameworkPackage) {
 	for _, cmd := range pkg.Commands {
 		fw.Commands = upsertCommand(fw.Commands, cmd)
 	}
+	// Prepended, so a package's routing is consulted before a framework file's
+	// and the first match still wins.
+	fw.HostCommands = append(append([]HostCommand(nil), pkg.HostCommands...), fw.HostCommands...)
 	// A setup step has no name to key on, so the command it runs is its identity:
 	// the framework files still carry the copies this package was lifted out of,
 	// and matching on the command is what keeps a project from being offered the

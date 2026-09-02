@@ -39,6 +39,8 @@ lerd run native:install
 
 `native:install` is doing more than the artisan command of the same name. lerd runs every framework command on your host, but `php` on the host is lerd's shim, which routes straight back into the container, and the container has no display for Electron to draw into. So the command installs Electron's JavaScript dependencies on the host, unpacks the PHP binary NativePHP ships for your platform, and then runs `artisan native:install` through *that* binary. From there the platform-specific parts of NativePHP behave exactly as they do outside lerd.
 
+You can still type the commands the NativePHP documentation gives you. The framework definition declares that the `native:` commands have to leave the container and which binary runs them, so `lerd artisan native:run` and `php artisan native:run` both reach that binary on your host rather than the shim, under the Node version your site is on. If the runtime is not installed yet they say so and name `native:install` instead of failing somewhere inside a container.
+
 Start the app:
 
 ```bash
