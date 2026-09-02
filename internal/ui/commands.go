@@ -241,7 +241,7 @@ func handleCommandRun(w http.ResponseWriter, r *http.Request, site *config.Site,
 	// running inside, then return immediately. The UI handles this by
 	// skipping the modal and showing a toast.
 	if target.Output == config.CommandOutputTerminal {
-		script := "cd " + podman.ShellQuote(cwd) + " && " + target.Command + "\nprintf '\\n[press any key to close]'\nread -n 1 -s -r 2>/dev/null || read"
+		script := terminalCommandScript(cwd, target.Command)
 		if err := openTerminalCommand(script); err != nil {
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
@@ -395,4 +395,19 @@ func streamHostAction(w http.ResponseWriter, line string, actionErr error) {
 	}
 	body, _ := json.Marshal(map[string]any{"exit": exit, "durationMs": 0})
 	send("done", string(body))
+}
+
+// terminalCommandScript is what the spawned terminal runs: the command in the
+// project directory, then a pause so the window holds its output.
+//
+// The trap is what keeps ctrl+c usable. A non-interactive shell dies on SIGINT
+// with the command it is waiting on, so interrupting a long-running one left
+// the terminal reporting a crashed shell instead of the command's own goodbye
+// and the pause below. It is a handler rather than an ignore on purpose: an
+// ignored SIGINT is inherited by every child, and the command would stop
+// answering ctrl+c at all.
+func terminalCommandScript(cwd, command string) string {
+	return "trap 'true' INT\n" +
+		"cd " + podman.ShellQuote(cwd) + " && " + command +
+		"\nprintf '\\n[press any key to close]'\nread -n 1 -s -r 2>/dev/null || read"
 }

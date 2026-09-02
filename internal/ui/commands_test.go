@@ -536,3 +536,25 @@ commands:
 		t.Errorf("three must stay unpinned: %v", got)
 	}
 }
+
+// Ctrl+c on a terminal command used to take the shell with it: a
+// non-interactive sh dies on SIGINT alongside the command it is waiting on, and
+// the window ended up reporting a crashed shell rather than showing the
+// command's own shutdown and the pause. The trap has to be a handler, since an
+// ignored SIGINT is inherited and the command itself would stop answering it.
+func TestTerminalCommandScript_survivesInterruptWithoutIgnoringIt(t *testing.T) {
+	script := terminalCommandScript("/home/u/my app", "php artisan native:jump")
+
+	if !strings.HasPrefix(script, "trap 'true' INT\n") {
+		t.Errorf("script = %q, want it to trap INT before running anything", script)
+	}
+	if strings.Contains(script, "trap '' INT") {
+		t.Error("script ignores INT, which children inherit and ctrl+c stops working")
+	}
+	if !strings.Contains(script, "cd '/home/u/my app' && php artisan native:jump") {
+		t.Errorf("script = %q, want the quoted directory and the command", script)
+	}
+	if !strings.Contains(script, "[press any key to close]") {
+		t.Errorf("script = %q, want the window to hold its output", script)
+	}
+}
