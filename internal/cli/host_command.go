@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/geodro/lerd/internal/config"
+	"github.com/geodro/lerd/internal/feedback"
 	nodeDet "github.com/geodro/lerd/internal/node"
 )
 
@@ -36,6 +38,13 @@ func runDeclaredHostCommand(cwd string, argv []string, extraEnv []string) (int, 
 	}
 	if _, err := os.Stat(bin); err != nil {
 		return 0, true, errors.New(hostCommandMissingMsg(argv[0], hc))
+	}
+	if missing := missingPHPExtensions(bin, hc.RequiresExtensions); len(missing) > 0 {
+		full, err := managedHostPHP(cwd, hc.Binary, missing)
+		if err != nil {
+			return 0, true, err
+		}
+		bin = full
 	}
 	// The command shells out to npm, so it needs the project's Node the same way
 	// a host worker does. Unmanaged Node is left to the caller's PATH, which is
@@ -97,4 +106,69 @@ func hostCommandNodeVersion(cwd string) string {
 		return cfg.Node.DefaultVersion
 	}
 	return ""
+}
+
+// missingPHPExtensions reports which of the extensions a declaration requires
+// the binary does not have, asking the binary itself rather than trusting a
+// version number. A probe that cannot run reports nothing: a failed question is
+// no reason to move a command into a container the declaration never asked for,
+// and a binary that will not answer `php -m` fails loudly when it runs.
+func missingPHPExtensions(bin string, want []string) []string {
+	if len(want) == 0 {
+		return nil
+	}
+	out, err := exec.Command(bin, "-m").Output()
+	if err != nil {
+		return nil
+	}
+	loaded := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		loaded[strings.ToLower(strings.TrimSpace(line))] = true
+	}
+	var missing []string
+	for _, ext := range want {
+		if !loaded[strings.ToLower(ext)] {
+			missing = append(missing, ext)
+		}
+	}
+	return missing
+}
+
+// managedHostPHP resolves a PHP that has what the declared binary is missing,
+// downloading lerd's own pinned build the first time a project needs it. The
+// runtimes projects bundle are trimmed static builds with dynamic loading
+// compiled out, so an extension one lacks cannot be added to it and the only
+// way to run the command is a fuller PHP.
+func managedHostPHP(cwd, declaredBin string, missing []string) (string, error) {
+	lacks := joinAnd(missing)
+	feedback.WarnOn(os.Stderr, "%s is missing %s, so lerd runs this command with its own PHP", declaredBin, lacks)
+	// The project's own PHP version, not the newest lerd pins: the command runs
+	// the project's code against a composer.lock resolved for that version.
+	version, err := phpVersionForDir(cwd)
+	if err != nil {
+		return "", err
+	}
+	php, err := ensureHostPHPBinary(os.Stderr, version)
+	if err != nil {
+		return "", fmt.Errorf("this command needs a PHP with %s and %s does not have it: %w", lacks, declaredBin, err)
+	}
+	// Fail here rather than inside the command: a pin that lost an extension
+	// would otherwise surface as whatever the command does when it is missing,
+	// which in Jump's case is a websocket bridge that dies in a log file.
+	if still := missingPHPExtensions(php, missing); len(still) > 0 {
+		return "", fmt.Errorf("lerd's PHP at %s is itself missing %s, so this command cannot run", php, strings.Join(still, ", "))
+	}
+	return php, nil
+}
+
+// joinAnd reads a short list the way the sentence around it does: "posix and
+// pcntl" rather than a bare comma list.
+func joinAnd(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }

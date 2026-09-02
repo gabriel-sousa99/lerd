@@ -63,6 +63,7 @@ var (
 // what every host downloads and marks executable. Extendable through
 // LERD_TOOLS_HOSTS for the same reason LERD_TOOLS_URL exists.
 var downloadHosts = []string{
+	"dl.static-php.dev",
 	"getcomposer.org",
 	"github.com",
 	"objects.githubusercontent.com",

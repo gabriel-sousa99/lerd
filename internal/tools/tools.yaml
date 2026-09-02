@@ -13,6 +13,50 @@ tools:
       linux/arm64: fnm-arm64.zip
       darwin/amd64: fnm-macos.zip
       darwin/arm64: fnm-macos.zip
+  # The PHP a host command falls back to when the runtime a project bundles is
+  # short an extension it needs. Full static builds rather than trimmed ones, one
+  # per PHP minor because the command runs a project's own code and its
+  # composer.lock was resolved against that version. Kept out of Names() because
+  # only a project that asks for one ever downloads it.
+  php-host-8.3:
+    version: "8.3.32"
+    url: https://dl.static-php.dev/static-php-cli/common/{asset}
+    assets:
+      linux/amd64: php-{version}-cli-linux-x86_64.tar.gz
+      linux/arm64: php-{version}-cli-linux-aarch64.tar.gz
+      darwin/amd64: php-{version}-cli-macos-x86_64.tar.gz
+      darwin/arm64: php-{version}-cli-macos-aarch64.tar.gz
+    digests:
+      linux/amd64: d7ff2bc40846f4efed2757e5929f7469c96f672fbf33eb4bb80cd695534750fe
+      linux/arm64: e7644c646a62c44627d00e3deff498eeb943814adcc948b3de42a8ebfe07aaf2
+      darwin/amd64: aad1365eb29a6788c59494d39bc71ef5f72a8a384495b0d6004007a768449f8b
+      darwin/arm64: 1cc8148750bd1722031daba1618825a8b7d0a3830bb92c50d8dd844a1dcfb306
+  php-host-8.4:
+    version: "8.4.23"
+    url: https://dl.static-php.dev/static-php-cli/common/{asset}
+    assets:
+      linux/amd64: php-{version}-cli-linux-x86_64.tar.gz
+      linux/arm64: php-{version}-cli-linux-aarch64.tar.gz
+      darwin/amd64: php-{version}-cli-macos-x86_64.tar.gz
+      darwin/arm64: php-{version}-cli-macos-aarch64.tar.gz
+    digests:
+      linux/amd64: 1aeed5bc7967977ca5b1da7163acd91bf9ba3ac56037045d4e91ee2ff2712bb7
+      linux/arm64: 0978d89157292bcc9268a34a73a4d5d2793f8dff1403b5138a94d2af6b7a09b0
+      darwin/amd64: bd1c20f355e73a9f807b24ba62fd98f3a57bc08d063ebb3aa6393909e01ce89e
+      darwin/arm64: bba286e442796dbd420d778a016e2817b31d5036d11b3ba316d19a60de912cdc
+  php-host-8.5:
+    version: "8.5.8"
+    url: https://dl.static-php.dev/static-php-cli/common/{asset}
+    assets:
+      linux/amd64: php-{version}-cli-linux-x86_64.tar.gz
+      linux/arm64: php-{version}-cli-linux-aarch64.tar.gz
+      darwin/amd64: php-{version}-cli-macos-x86_64.tar.gz
+      darwin/arm64: php-{version}-cli-macos-aarch64.tar.gz
+    digests:
+      linux/amd64: 517a18e0f0874de35669fe134eb3c52508e128a6d1da5bf890760cb800ada410
+      linux/arm64: af995ef6b3187b39932a00714dfb97e44bfa40a9243c4c29f61f19d583950753
+      darwin/amd64: 05751000c6643f82e8377ed19d55bc159f84bbed46ace1fcc6f62be9866c787c
+      darwin/arm64: cba9bd8b38b51ef2c7cebf02af689e4481bbd07f65edc0b63d3a43b04e0c9db7
   mkcert:
     version: v1.4.4
     url: https://github.com/FiloSottile/mkcert/releases/download/{version}/{asset}
