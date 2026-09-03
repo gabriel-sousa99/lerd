@@ -327,17 +327,13 @@ func execArtisan(args map[string]any) (any, *rpcError) {
 		return toolErr("args is required and must be a non-empty array"), nil
 	}
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return toolErr("failed to detect PHP version: " + err.Error()), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr(err.Error()), nil
 	}
 
 	short := strings.ReplaceAll(phpVersion, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, short, container); errBody != nil {
 		return errBody, nil
 	}
@@ -575,9 +571,10 @@ func execReverbStart(args map[string]any) (any, *rpcError) {
 	if detected, err := phpDet.DetectVersion(site.Path); err == nil && detected != "" {
 		phpVersion = detected
 	}
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
+	// A custom-FPM site runs its own image, so the unit binds to and execs into
+	// the per-site container rather than the shared one it is never served by.
+	fpmUnit := podman.FPMContainerName(*site, phpVersion)
+	container := fpmUnit
 	unitName := "lerd-reverb-" + siteName
 
 	unit := fmt.Sprintf(`[Unit]
@@ -642,9 +639,10 @@ func execHorizonStart(args map[string]any) (any, *rpcError) {
 	if detected, err := phpDet.DetectVersion(site.Path); err == nil && detected != "" {
 		phpVersion = detected
 	}
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
+	// A custom-FPM site runs its own image, so the unit binds to and execs into
+	// the per-site container rather than the shared one it is never served by.
+	fpmUnit := podman.FPMContainerName(*site, phpVersion)
+	container := fpmUnit
 	unitName := "lerd-horizon-" + siteName
 
 	unit := fmt.Sprintf(`[Unit]
@@ -704,9 +702,10 @@ func execScheduleStart(args map[string]any) (any, *rpcError) {
 	if detected, err := phpDet.DetectVersion(site.Path); err == nil && detected != "" {
 		phpVersion = detected
 	}
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
+	// A custom-FPM site runs its own image, so the unit binds to and execs into
+	// the per-site container rather than the shared one it is never served by.
+	fpmUnit := podman.FPMContainerName(*site, phpVersion)
+	container := fpmUnit
 	unitName := "lerd-schedule-" + siteName
 
 	unit := fmt.Sprintf(`[Unit]
@@ -884,17 +883,13 @@ func execComposer(args map[string]any) (any, *rpcError) {
 		return toolErr("args is required and must be a non-empty array"), nil
 	}
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return toolErr("failed to detect PHP version: " + err.Error()), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr(err.Error()), nil
 	}
 
 	short := strings.ReplaceAll(phpVersion, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, short, container); errBody != nil {
 		return errBody, nil
 	}
@@ -963,17 +958,13 @@ func execVendorRun(args map[string]any) (any, *rpcError) {
 	}
 	binArgs := strSliceArg(args, "args")
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return toolErr("failed to detect PHP version: " + err.Error()), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr(err.Error()), nil
 	}
 
 	short := strings.ReplaceAll(phpVersion, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, short, container); errBody != nil {
 		return errBody, nil
 	}
@@ -3793,15 +3784,11 @@ func runComposerInstallIfNeeded(projectPath string, out *bytes.Buffer) error {
 		return nil
 	}
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil || phpVersion == "" {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil || cfg == nil {
-			return fmt.Errorf("could not determine PHP version: %w", err)
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return fmt.Errorf("could not determine PHP version: %w", err)
 	}
-	container := "lerd-php" + strings.ReplaceAll(phpVersion, ".", "") + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 
 	out.WriteString("\n\n--- composer install ---\n")
 	cmd := podman.Cmd("exec", "-w", projectPath, "--env", composer.ProcessTimeoutEnv(), container, "composer", "install", "--no-interaction")
@@ -3836,15 +3823,11 @@ func execSetup(args map[string]any) (any, *rpcError) {
 		return toolErr(fmt.Sprintf("framework %q is not defined", fwName)), nil
 	}
 
-	phpVersion, phpErr := phpDet.DetectVersion(projectPath)
+	phpVersion, phpErr := phpDet.VersionForDir(projectPath)
 	if phpErr != nil || phpVersion == "" {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil || cfg == nil {
-			return toolErr("could not determine PHP version"), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr("could not determine PHP version"), nil
 	}
-	container := "lerd-php" + strings.ReplaceAll(phpVersion, ".", "") + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, strings.ReplaceAll(phpVersion, ".", ""), container); errBody != nil {
 		return errBody, nil
 	}

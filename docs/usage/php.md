@@ -470,7 +470,7 @@ container:
   containerfile: Containerfile.lerd
 ```
 
-Then `lerd link`. lerd builds `lerd-custom-myapp:local`, runs a dedicated FPM container `lerd-cfpm-myapp`, and points nginx fastcgi at it. The per-site container reuses every lerd mount, so xdebug, dumps, the debug bridge, the profiler, and `lerd shell` all work exactly as on a normal PHP site, and `lerd php`, `artisan`, `composer`, `tinker`, and queue/horizon workers all run inside it. Toggling xdebug for that PHP version restarts the per-site container too.
+Then `lerd link`. lerd builds `lerd-custom-myapp:local`, runs a dedicated FPM container `lerd-cfpm-myapp`, and points nginx fastcgi at it. The per-site container reuses every lerd mount, so xdebug, dumps, the debug bridge, the profiler, and `lerd shell` all work exactly as on a normal PHP site, and `lerd php`, `artisan`, `composer`, `tinker`, queue/horizon workers, and the commands an AI assistant runs through the MCP server all run inside it. Toggling xdebug for that PHP version restarts the per-site container too.
 
 The PHP version is fixed by the `FROM` line, not by `.php-version` or the dashboard, so the version selector is shown read-only for these sites. To change the version, edit the `FROM` and relink.
 
