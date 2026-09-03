@@ -57,7 +57,9 @@ doctor:
 
 Workers, commands, post-link setup steps and doctor checks are the whole schema, because that is what the duplication was made of. A `removes:` block takes entries away again, which is what a new major of the package needs (see below). Env wiring, detection and services stay with the framework, which is where they belong.
 
-The layer is merged onto the resolved definition when the project requires the package in its `composer.json`, and only for the frameworks the `frameworks:` list names. An empty list means every framework, which is right for a queue driver and wrong for `nativephp/electron`; `min` and `max` bound the framework majors it applies to, and are compared against the project's own major, so a Laravel 14 project still gets a package that declares `min: "11"`. The package wins any name collision: it is where the entry is maintained now, so a copy left behind in a version file is replaced rather than shadowing it, and the replacement keeps the position the definition listed it in. Your user overlay and a project's `.lerd.yaml` are merged after the package layer and still sit above it.
+The layer is merged onto the resolved definition when the project has the package, and only for the frameworks the `frameworks:` list names. An empty list means every framework, which is right for a queue driver and wrong for `nativephp/electron`; `min` and `max` bound the framework majors it applies to, and are compared against the project's own major, so a Laravel 14 project still gets a package that declares `min: "11"`. The package wins any name collision: it is where the entry is maintained now, so a copy left behind in a version file is replaced rather than shadowing it, and the replacement keeps the position the definition listed it in. Your user overlay and a project's `.lerd.yaml` are merged after the package layer and still sit above it.
+
+Having the package means composer installed it, not that the project named it. The manifest is read first, and then `composer.lock`, which is the only place a dependency that arrived under a meta-package shows up, and the only place a package that another one `replace`s or `provide`s exists at all: `tempest/framework` stands in for `tempest/database`, so a stock Tempest project has that code installed while its `composer.json` names neither. A `check:` on a worker, command, setup step or doctor check is answered the same way, since what it is really asking is whether the thing it runs is there. Detection is the exception and reads the manifest alone: a library repo testing against Laravel has `laravel/framework` in its lock, and that must not make it a Laravel site.
 
 ### When a package major changes what lerd runs
 
@@ -365,7 +367,8 @@ workers:
                                   # `*:0/5`, `Mon..Fri *-*-* 02:00:00`). Linux only; on
                                   # macOS scheduled workers currently log a warning and skip.
     check:                        # only shown when check passes (optional)
-      composer: symfony/messenger
+      composer: symfony/messenger # matches a package composer installed, not
+                                  # only one composer.json names
     conflicts_with:               # workers to stop before starting (optional)
       - other-worker
     proxy:                        # nginx proxy config (optional)

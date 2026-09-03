@@ -267,7 +267,7 @@ func (c *Client) DetectFromStore(dir string) (*IndexEntry, string, bool) {
 
 	for i, entry := range idx.Frameworks {
 		for _, rule := range entry.Detect {
-			if config.MatchesRule(dir, rule) {
+			if config.MatchesDetectRule(dir, rule) {
 				version := c.resolveVersion(dir, &entry)
 				return &idx.Frameworks[i], version, true
 			}

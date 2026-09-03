@@ -391,3 +391,37 @@ func TestPackageAppliesTo_scopes(t *testing.T) {
 		})
 	}
 }
+
+// The package layer asks whether the project has the package, and a project can
+// have one it never named: a framework that replaces its own split packages is
+// the only entry composer writes, so the manifest alone shows nothing.
+func TestGetFrameworkForDir_packageMergedFromTheLock(t *testing.T) {
+	_, project := packageSandbox(t, []string{`{"name":"acme/electron"}`})
+	writePackage(t, "acme-electron", electronPackage)
+	writeLock(t, project, `{"packages": [{"name": "acme/framework", "version": "v11.2.0",
+	  "replace": {"acme/electron": "self.version"}}]}`)
+
+	fw, _ := GetFrameworkForDir("acme", project)
+	if _, has := fw.Workers["native"]; !has {
+		t.Error("a package the lock installed must contribute its worker")
+	}
+}
+
+// Which file serves the project follows the version composer resolved, not the
+// constraint, which a project tracking a branch does not have one of.
+func TestGetFrameworkForDir_packageVersionPrefersTheLock(t *testing.T) {
+	_, project := packageSandbox(t, []string{`{"name":"acme/electron","versions":["5","6"],"latest":"6"}`})
+	if err := os.WriteFile(filepath.Join(project, "composer.json"),
+		[]byte(`{"require": {"acme/framework": "^11.0", "acme/electron": "*"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeLock(t, project, `{"packages": [{"name": "acme/electron", "version": "5.4.0"}]}`)
+	writePackage(t, "acme-electron", packageAtVersion("", "php acme base"))
+	writePackage(t, "acme-electron@5", packageAtVersion("5", "php acme five"))
+	writePackage(t, "acme-electron@6", packageAtVersion("6", "php acme six"))
+
+	fw, _ := GetFrameworkForDir("acme", project)
+	if got := fw.Workers["native"].Command; got != "php acme five" {
+		t.Errorf("worker command = %q, want the file for the locked major", got)
+	}
+}

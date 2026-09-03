@@ -128,7 +128,7 @@ func mergeStorePackages(fw *Framework, projectDir string) *Framework {
 		return fw
 	}
 	for _, entry := range cachedStorePackages() {
-		if !ComposerHasPackage(projectDir, entry.Name) {
+		if !ComposerHasInstalled(projectDir, entry.Name) {
 			continue
 		}
 		pkg := resolveStorePackage(entry, projectDir)
@@ -318,7 +318,7 @@ func pickPackageVersion(projectDir string, entry StorePackageEntry) string {
 	if len(entry.Versions) == 0 {
 		return ""
 	}
-	detected, err := strconv.Atoi(detectVersionFromComposer(projectDir, []FrameworkRule{{Composer: entry.Name}}))
+	detected, err := strconv.Atoi(installedMajor(projectDir, entry.Name))
 	if err != nil {
 		return entry.Latest
 	}
@@ -418,7 +418,7 @@ func ListStorePackages(projectDir string) []StorePackageInfo {
 	for _, entry := range entries {
 		info := StorePackageInfo{Name: entry.Name}
 		if projectDir != "" {
-			info.Required = ComposerHasPackage(projectDir, entry.Name)
+			info.Required = ComposerHasInstalled(projectDir, entry.Name)
 		}
 		info.Version = pickPackageVersion(projectDir, entry)
 		if pkg := loadPackageYAML(StorePackageFile(entry.Name, info.Version)); pkg != nil {
