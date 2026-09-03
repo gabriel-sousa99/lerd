@@ -7,16 +7,7 @@ import "testing"
 // A session with no notification daemon still runs the work; the progress popup
 // is what degrades, not the start behind it.
 func TestStartProgress_withoutABusIsANoop(t *testing.T) {
-	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/lerd-test-bus")
-	busMu.Lock()
-	prev := busConn
-	busConn = nil
-	busMu.Unlock()
-	defer func() {
-		busMu.Lock()
-		busConn = prev
-		busMu.Unlock()
-	}()
+	withoutSessionBus(t)
 
 	p := StartProgress("Starting Lerd", "Preparing")
 	p.Step("lerd-mysql")
@@ -30,6 +21,10 @@ func TestStartProgress_withoutABusIsANoop(t *testing.T) {
 // The bar is a percentage of the units the run announced, capped so a run that
 // starts more than it counted cannot overshoot.
 func TestBusProgress_percentIsCappedAndIgnoresAnUnknownTotal(t *testing.T) {
+	// Percent pushes, and a bus left connected here posts a real popup on the
+	// desktop of whoever runs the suite, replacing an id that is not theirs.
+	withoutSessionBus(t)
+
 	p := &busProgress{id: 1}
 	p.Percent(1, 4)
 	if p.percent != 25 {
@@ -58,4 +53,21 @@ func TestBusProgress_closeIsIdempotent(t *testing.T) {
 	if p.body != "" {
 		t.Errorf("body = %q, want a closed popup to ignore updates", p.body)
 	}
+}
+
+// withoutSessionBus points the package at a bus that cannot be dialled, so a
+// test that reaches push() degrades instead of talking to the session running
+// the suite. The cached connection is cleared and put back afterwards.
+func withoutSessionBus(t *testing.T) {
+	t.Helper()
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/lerd-test-bus")
+	busMu.Lock()
+	prev := busConn
+	busConn = nil
+	busMu.Unlock()
+	t.Cleanup(func() {
+		busMu.Lock()
+		busConn = prev
+		busMu.Unlock()
+	})
 }
