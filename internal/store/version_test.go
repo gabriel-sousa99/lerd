@@ -123,3 +123,20 @@ func TestDetectFrameworkVersion_FlexRequire(t *testing.T) {
 		t.Errorf("DetectFrameworkVersionWithKey() = %q, want %q", got, "7")
 	}
 }
+
+// The store resolves a version the way the rest of lerd does, so a project whose
+// constraint spans two majors is placed on the one composer installed.
+func TestDetectFrameworkVersion_prefersTheLock(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "composer.json"),
+		[]byte(`{"require":{"laravel/framework":"^11.0 || ^12.0"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "composer.lock"),
+		[]byte(`{"packages":[{"name":"laravel/framework","version":"v12.4.1"}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := DetectFrameworkVersion(dir, "laravel/framework"); got != "12" {
+		t.Errorf("DetectFrameworkVersion() = %q, want 12", got)
+	}
+}

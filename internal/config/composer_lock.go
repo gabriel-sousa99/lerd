@@ -98,14 +98,37 @@ func ComposerHasInstalled(dir, pkg string, extraSections ...string) bool {
 	return ok
 }
 
-// installedMajor is the major of pkg this project has, taken from the lock
-// composer resolved and falling back to the constraint the manifest declares,
-// which is all a project that has never been installed can offer.
-func installedMajor(dir, pkg string) string {
-	if v := lockPackages(dir)[pkg]; v != "" {
-		if major := extractMajorFromConstraint(v); major != "" {
-			return major
-		}
+// DetectPackageMajor is the major of a composer package a project has: the
+// version composer resolved for it, and failing that the constraint the manifest
+// declares, which is all a project that has never been installed can offer. A
+// constraint is a claim about what would be installed, and a poor one where it
+// spans two majors, so the lock answers first wherever there is one.
+//
+// versionKey and extraSections belong to the manifest fallback: a dot-path to
+// read when the constraint carries no digits, and the sections to look in beyond
+// require and require-dev.
+func DetectPackageMajor(dir, pkg, versionKey string, extraSections ...string) string {
+	if major := lockedMajor(dir, pkg); major != "" {
+		return major
 	}
-	return detectVersionFromComposer(dir, []FrameworkRule{{Composer: pkg}})
+	return detectVersionFromComposer(dir, []FrameworkRule{{
+		Composer:         pkg,
+		VersionKey:       versionKey,
+		ComposerSections: extraSections,
+	}})
+}
+
+// lockedMajor is the major composer resolved for pkg, empty when the project has
+// no lock or the lock does not carry the package.
+func lockedMajor(dir, pkg string) string {
+	if v := lockPackages(dir)[pkg]; v != "" {
+		return extractMajorFromConstraint(v)
+	}
+	return ""
+}
+
+// installedMajor is DetectPackageMajor for a package named plainly, which is how
+// the package layer's own files are named.
+func installedMajor(dir, pkg string) string {
+	return DetectPackageMajor(dir, pkg, "")
 }

@@ -49,8 +49,8 @@ Use --check to compare local definitions against the store and show update statu
 func runFrameworkList(check bool) error {
 	frameworks := config.ListFrameworksDetailed()
 
-	// Try to resolve versions from composer.lock in cwd for frameworks
-	// that don't have a static version (e.g. built-in laravel).
+	// Try to resolve versions from the project in cwd for frameworks that don't
+	// have a static version (e.g. built-in laravel).
 	cwd, _ := os.Getwd()
 
 	// Fetch store index if --check is requested.

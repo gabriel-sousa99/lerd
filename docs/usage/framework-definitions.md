@@ -99,9 +99,13 @@ Only the packages listed under `packages` in the store index are ever looked up,
 
 When loading a framework definition for a project, the version is resolved in order:
 
-1. `composer.lock`: the actual installed version (source of truth)
-2. `.lerd.yaml` `framework_version`: pinned version (fallback when no `composer.lock`)
-3. Latest available in store
+1. `composer.lock`: the version composer resolved for the framework's own package (source of truth)
+2. `composer.json`: the major read out of the declared constraint, for a project with no lock
+3. A `version_file` regex, for a framework that ships no composer package
+4. `.lerd.yaml` `framework_version`: the pinned version
+5. Latest available in store
+
+The lock leads because a constraint only says what would be installed: `"^11.0 || ^12.0"` carries two majors and is read as the older one, and `dev-main` carries none at all.
 
 When `composer.lock` shows a different version than `.lerd.yaml`, the pinned version is auto-updated.
 
