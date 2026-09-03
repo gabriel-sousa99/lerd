@@ -139,6 +139,7 @@ func ensurePortsAvailable() {
 }
 
 func runInstall(cmd *cobra.Command, _ []string) error {
+	markInstallInProgress()
 	feedback.Header("Installing Lerd")
 
 	noIPv6, _ := cmd.Flags().GetBool("no-ipv6")
