@@ -2393,8 +2393,23 @@ func (fw *Framework) DetectProxy(dir string) (*WorkerProxy, string) {
 	return nil, ""
 }
 
-// MatchesRule returns true if the given rule matches the project directory.
+// MatchesRule returns true if the given rule matches the project directory. It
+// is the check gate: a worker, command, setup step or doctor check asking
+// whether what it runs is there, so a composer rule counts a package composer
+// installed as well as one the project declares.
 func MatchesRule(dir string, rule FrameworkRule) bool {
+	return matchesRule(dir, rule, ComposerHasInstalled)
+}
+
+// MatchesDetectRule is the same rule against the question detection asks, which
+// is what the project is rather than what is installed under it. A composer rule
+// reads the manifest alone here: a library repo testing against Laravel has
+// laravel/framework in its lock, and that must not make it a Laravel site.
+func MatchesDetectRule(dir string, rule FrameworkRule) bool {
+	return matchesRule(dir, rule, ComposerHasPackage)
+}
+
+func matchesRule(dir string, rule FrameworkRule, hasPackage func(string, string, ...string) bool) bool {
 	if rule.File != "" {
 		if _, err := os.Stat(filepath.Join(dir, rule.File)); err == nil {
 			return true
@@ -2409,7 +2424,7 @@ func MatchesRule(dir string, rule FrameworkRule) bool {
 		}
 	}
 	if rule.Composer != "" {
-		if ComposerHasPackage(dir, rule.Composer, rule.ComposerSections...) {
+		if hasPackage(dir, rule.Composer, rule.ComposerSections...) {
 			return true
 		}
 	}
@@ -2421,7 +2436,7 @@ func matchesFramework(dir string, fw *Framework) bool {
 		return false
 	}
 	for _, rule := range fw.Detect {
-		if MatchesRule(dir, rule) {
+		if MatchesDetectRule(dir, rule) {
 			return true
 		}
 	}
