@@ -135,3 +135,22 @@ func TestIsSetUpFollowsTheGlobalConfig(t *testing.T) {
 		t.Error("isSetUp() = false with a global config on disk")
 	}
 }
+
+// `lerd install` shells out to itself for php:rebuild, and the version stamp is
+// only written once the install finishes, so without this guard the child reads
+// the install it is part of as a pending upgrade and reapplies the whole
+// environment from inside it, rebuilding every PHP image twice over.
+func TestShouldApplyUpgradeSkipsAChildOfARunningInstall(t *testing.T) {
+	t.Setenv(installInProgressEnv, "1")
+	if shouldApplyUpgrade("php:rebuild", "1.32.0", "1.31.0", true, true) {
+		t.Error("a process spawned by a running install should not reapply the environment")
+	}
+}
+
+func TestMarkInstallInProgressIsInheritedByChildren(t *testing.T) {
+	t.Setenv(installInProgressEnv, "")
+	markInstallInProgress()
+	if os.Getenv(installInProgressEnv) == "" {
+		t.Error("the install should mark its process tree so children skip the reapply")
+	}
+}
