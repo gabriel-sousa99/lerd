@@ -1,11 +1,12 @@
 package store
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/geodro/lerd/internal/config"
 )
 
 // DetectFrameworkVersion reads composer.json in dir and returns the major version
@@ -18,66 +19,11 @@ func DetectFrameworkVersion(dir string, composerPackageName string, extraSection
 
 // DetectFrameworkVersionWithKey is like DetectFrameworkVersion but also accepts a
 // versionKey (dot-path into composer.json) as a fallback when the constraint is "*".
+// The answer comes from config, which reads what composer resolved before what
+// the manifest asked for, so the store resolves a version the same way the rest
+// of lerd does rather than from a second copy of the manifest walk.
 func DetectFrameworkVersionWithKey(dir string, composerPackageName string, versionKey string, extraSections ...string) string {
-	data, err := os.ReadFile(filepath.Join(dir, "composer.json"))
-	if err != nil {
-		return ""
-	}
-
-	var raw map[string]json.RawMessage
-	if json.Unmarshal(data, &raw) != nil {
-		return ""
-	}
-
-	sections := append([]string{"require", "require-dev"}, extraSections...)
-	for _, section := range sections {
-		chunk, ok := raw[section]
-		if !ok {
-			continue
-		}
-		var m map[string]string
-		if json.Unmarshal(chunk, &m) != nil {
-			continue
-		}
-		constraint, found := m[composerPackageName]
-		if !found {
-			continue
-		}
-		if v := extractMajorFromConstraint(constraint); v != "" {
-			return v
-		}
-		if versionKey != "" {
-			if v := resolveJSONPath(raw, versionKey); v != "" {
-				return extractMajorFromConstraint(v)
-			}
-		}
-	}
-	return ""
-}
-
-// resolveJSONPath walks a dot-separated path through nested JSON objects.
-func resolveJSONPath(raw map[string]json.RawMessage, path string) string {
-	parts := strings.Split(path, ".")
-	current := raw
-	for i, part := range parts {
-		chunk, ok := current[part]
-		if !ok {
-			return ""
-		}
-		if i == len(parts)-1 {
-			var s string
-			if json.Unmarshal(chunk, &s) == nil {
-				return s
-			}
-			return ""
-		}
-		var next map[string]json.RawMessage
-		if json.Unmarshal(chunk, &next) != nil {
-			return ""
-		}
-		current = next
-	}
-	return ""
+	return config.DetectPackageMajor(dir, composerPackageName, versionKey, extraSections...)
 }
 
 // extractMajorFromConstraint extracts the major version from a composer constraint.

@@ -1279,7 +1279,7 @@ func mergeUserOverlay(base *Framework) *Framework {
 }
 
 // GetFrameworkForDir is like GetFramework but auto-detects the framework version
-// from composer.lock in projectDir. If a version-specific store definition exists
+// from projectDir, preferring what composer.lock resolved. If a version-specific store definition exists
 // it is preferred over an unversioned one. User overlay workers are always merged.
 // When a version is detected but no local definition exists, it attempts to fetch
 // the definition from the store automatically.
@@ -2476,7 +2476,19 @@ func DetectMajorVersion(projectDir, frameworkName string) string {
 		return ""
 	}
 
-	// Try composer.json-based detection first.
+	// What composer resolved comes first: a constraint is only a claim about
+	// what would be installed, and one spanning two majors ("^11.0 || ^12.0")
+	// reads as the older of them however new the project actually is.
+	for _, rule := range rules {
+		if rule.Composer == "" {
+			continue
+		}
+		if v := lockedMajor(projectDir, rule.Composer); v != "" {
+			return v
+		}
+	}
+
+	// Then the manifest, which is all a project with no lock has.
 	if v := detectVersionFromComposer(projectDir, rules); v != "" {
 		return v
 	}

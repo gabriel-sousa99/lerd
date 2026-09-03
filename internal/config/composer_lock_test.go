@@ -89,3 +89,27 @@ func TestMatchesDetectRule_readsTheManifestAlone(t *testing.T) {
 		t.Error("a check asks what is installed, and it is")
 	}
 }
+
+// A constraint spanning two majors reads as the older one, so the version the
+// project actually runs has to come from the lock.
+func TestDetectMajorVersion_prefersWhatComposerResolved(t *testing.T) {
+	setConfigDir(t)
+	dir := composerProject(t,
+		`{"require": {"laravel/framework": "^11.0 || ^12.0"}}`,
+		`{"packages": [{"name": "laravel/framework", "version": "v12.4.1"}]}`)
+
+	if v := DetectMajorVersion(dir, "laravel"); v != "12" {
+		t.Errorf("major = %q, want the 12 composer installed", v)
+	}
+}
+
+// A project that has never been installed has only its constraint, and that is
+// what it was served before.
+func TestDetectMajorVersion_withoutALockReadsTheConstraint(t *testing.T) {
+	setConfigDir(t)
+	dir := composerProject(t, `{"require": {"laravel/framework": "^11.0"}}`, "")
+
+	if v := DetectMajorVersion(dir, "laravel"); v != "11" {
+		t.Errorf("major = %q, want 11 from the constraint", v)
+	}
+}
