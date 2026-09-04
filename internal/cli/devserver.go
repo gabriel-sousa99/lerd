@@ -395,3 +395,26 @@ func rewriteDevServerWrapper(sitePath string, tool *config.DevServerTool, addr d
 	}
 	return true
 }
+
+// devServerCommand appends the dev server flags to a host worker's command, so
+// every path that writes a worker unit points the tool at the generated config
+// and the pinned port. Anything the mechanism cannot apply cleanly leaves the
+// command as it was.
+func devServerCommand(siteName, sitePath, command string, host bool) string {
+	if !host {
+		return command
+	}
+	tool := config.DevServerToolFor(sitePath, command)
+	if tool == nil {
+		return command
+	}
+	args, err := devServerSetup(siteName, sitePath, tool)
+	if err != nil {
+		feedback.Warn("dev server stays on its own port: %v", err)
+		return command
+	}
+	if args == "" {
+		return command
+	}
+	return command + " " + args
+}
