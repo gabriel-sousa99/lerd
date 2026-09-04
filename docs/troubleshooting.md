@@ -39,7 +39,7 @@ If you need help on the [issue tracker](https://github.com/lerd-env/lerd/issues)
 lerd bug-report
 ```
 
-This writes a single plain-text file (default: `./lerd-bug-report-<timestamp>.txt`) containing the full `lerd doctor` output, your `config.yaml` and `sites.yaml`, the state of every `lerd-*` systemd unit, recent journal and container logs for lerd's own infra units, listening sockets on the lerd ports, and a curated set of environment variables.
+This writes a single plain-text file (default: `./lerd-bug-report-<timestamp>.txt`) containing the full `lerd doctor` output, your `config.yaml`, `sites.yaml` and every linked site's `.lerd.yaml`, the state of every `lerd-*` systemd unit, recent journal and container logs for lerd's own infra units, listening sockets on the lerd ports, and a curated set of environment variables.
 
 What gets filtered before it lands on disk:
 
