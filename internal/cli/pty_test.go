@@ -133,3 +133,32 @@ func TestPTYHelperProgressThenPrompt(t *testing.T) {
 	fmt.Printf("first=%v\n", confirmInstallPromptDefault("first question", false))
 	fmt.Printf("second=%v\n", confirmInstallPromptDefault("second question", false))
 }
+
+// TestKeysStillWatchedAfterAnInteractiveStep guards the other half of the
+// terminal handover: the view gives the terminal up for the interactive step
+// and has to take it back afterwards. It renders and stays in raw mode for the
+// rest of the run, and raw mode is what stops Ctrl+C reaching the process as a
+// signal, so a view that is no longer watching leaves nothing at all able to
+// interrupt it.
+func TestKeysStillWatchedAfterAnInteractiveStep(t *testing.T) {
+	s := startPTY(t, "TestPTYHelperInteractiveThenKeys")
+
+	if !s.waitFor("interactive done", 30*time.Second) {
+		t.Fatalf("the interactive step never ran; terminal held:\n%s", s.output())
+	}
+	if !s.waitFor("watching=true", 15*time.Second) {
+		t.Fatalf("the view stopped watching the terminal after the interactive step; terminal held:\n%s", s.output())
+	}
+}
+
+// TestPTYHelperInteractiveThenKeys is the child driven by the test above.
+func TestPTYHelperInteractiveThenKeys(t *testing.T) {
+	if os.Getenv(ptyHelperEnv) == "" {
+		return
+	}
+	r := NewStepRunner()
+	r.RunInteractive("interactive", func() error { return nil }) //nolint:errcheck
+	fmt.Println("interactive done")
+	fmt.Printf("watching=%v\n", r.keys != nil)
+	r.Close()
+}

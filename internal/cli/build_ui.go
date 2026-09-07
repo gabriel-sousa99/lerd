@@ -268,6 +268,26 @@ type StepRunner struct {
 
 // NewStepRunner creates and starts a StepRunner.
 // Call Close() when all steps are done to restore the terminal.
+// handleKey acts on the keypresses the view watches for. Raw mode is what stops
+// Ctrl+C reaching the process as a signal, so while the view owns the terminal
+// this is the only thing that can interrupt it.
+func (r *StepRunner) handleKey(b byte) {
+	switch b {
+	case 0x0F: // Ctrl+O
+		r.showOutput.Store(!r.showOutput.Load())
+	case 0x03: // Ctrl+C
+		r.restore()
+		fmt.Print("\r\n")
+		os.Exit(1)
+	}
+}
+
+// watchKeys starts watching the terminal, replacing any previous reader.
+func (r *StepRunner) watchKeys() {
+	r.keys.stop()
+	r.keys = startKeyReader(int(os.Stdin.Fd()), r.handleKey)
+}
+
 func NewStepRunner() *StepRunner {
 	r := &StepRunner{
 		stopRender: make(chan struct{}),
@@ -298,16 +318,7 @@ func NewStepRunner() *StepRunner {
 		os.Exit(1)
 	}()
 
-	r.keys = startKeyReader(int(os.Stdin.Fd()), func(b byte) {
-		switch b {
-		case 0x0F: // Ctrl+O
-			r.showOutput.Store(!r.showOutput.Load())
-		case 0x03: // Ctrl+C
-			r.restore()
-			fmt.Print("\r\n")
-			os.Exit(1)
-		}
-	})
+	r.watchKeys()
 
 	go func() {
 		defer close(r.renderDone)
@@ -384,6 +395,9 @@ func (r *StepRunner) RunInteractive(label string, fn func() error) error {
 	if oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd())); rawErr == nil {
 		r.restore = func() { term.Restore(int(os.Stdin.Fd()), oldState) } //nolint:errcheck
 	}
+	// The view is rendering in raw mode again, so it has to be watching again
+	// too: nothing else turns Ctrl+C into an exit while raw mode is on.
+	r.watchKeys()
 	r.paused.Store(false)
 
 	return err
