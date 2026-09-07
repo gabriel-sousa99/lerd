@@ -125,34 +125,21 @@ func runParallelTUI(jobs []BuildJob) error {
 		os.Exit(1)
 	}()
 
-	// Read keypresses from a duplicated stdin fd so we can stop the goroutine
-	// on return by closing the dup. Otherwise the lingering Read races sudo's
-	// /dev/tty read for the same TTY buffer and eats password bytes.
-	stdinDupFd, dupErr := syscall.Dup(int(os.Stdin.Fd()))
-	var stdinDup *os.File
-	if dupErr == nil {
-		stdinDup = os.NewFile(uintptr(stdinDupFd), "lerd-runparallel-stdin")
-		defer stdinDup.Close() //nolint:errcheck
-	}
-	go func() {
-		if stdinDup == nil {
-			return
+	// Watch for keypresses through a reader that can be called off, so nothing
+	// is left reading the terminal once the view is done. A leftover reader
+	// races the next thing to read stdin, be that sudo's password prompt on
+	// /dev/tty or an install question, and eats the bytes typed at it.
+	keys := startKeyReader(int(os.Stdin.Fd()), func(b byte) {
+		switch b {
+		case 0x0F: // Ctrl+O — toggle output
+			showOutput.Store(!showOutput.Load())
+		case 0x03: // Ctrl+C
+			restore()
+			fmt.Print("\r\n")
+			os.Exit(1)
 		}
-		b := make([]byte, 1)
-		for {
-			if _, err := stdinDup.Read(b); err != nil {
-				return
-			}
-			switch b[0] {
-			case 0x0F: // Ctrl+O — toggle output
-				showOutput.Store(!showOutput.Load())
-			case 0x03: // Ctrl+C
-				restore()
-				fmt.Print("\r\n")
-				os.Exit(1)
-			}
-		}
-	}()
+	})
+	defer keys.stop()
 
 	termWidth := 120
 	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
@@ -274,7 +261,7 @@ type StepRunner struct {
 	stopRender chan struct{}
 	renderDone chan struct{}
 	restore    func()
-	stdinDup   *os.File
+	keys       *keyReader
 	termWidth  int
 	isTTY      bool
 }
@@ -311,28 +298,16 @@ func NewStepRunner() *StepRunner {
 		os.Exit(1)
 	}()
 
-	if stdinDupFd, err := syscall.Dup(int(os.Stdin.Fd())); err == nil {
-		r.stdinDup = os.NewFile(uintptr(stdinDupFd), "lerd-steprunner-stdin")
-	}
-	go func() {
-		if r.stdinDup == nil {
-			return
+	r.keys = startKeyReader(int(os.Stdin.Fd()), func(b byte) {
+		switch b {
+		case 0x0F: // Ctrl+O
+			r.showOutput.Store(!r.showOutput.Load())
+		case 0x03: // Ctrl+C
+			r.restore()
+			fmt.Print("\r\n")
+			os.Exit(1)
 		}
-		b := make([]byte, 1)
-		for {
-			if _, err := r.stdinDup.Read(b); err != nil {
-				return
-			}
-			switch b[0] {
-			case 0x0F: // Ctrl+O
-				r.showOutput.Store(!r.showOutput.Load())
-			case 0x03: // Ctrl+C
-				r.restore()
-				fmt.Print("\r\n")
-				os.Exit(1)
-			}
-		}
-	}()
+	})
 
 	go func() {
 		defer close(r.renderDone)
@@ -397,10 +372,8 @@ func (r *StepRunner) RunInteractive(label string, fn func() error) error {
 	r.paused.Store(true)
 	time.Sleep(90 * time.Millisecond)
 	r.restore()
-	if r.stdinDup != nil {
-		r.stdinDup.Close() //nolint:errcheck
-		r.stdinDup = nil
-	}
+	r.keys.stop()
+	r.keys = nil
 
 	feedback.Line(label)
 	err := fn()
@@ -424,10 +397,8 @@ func (r *StepRunner) Close() {
 	close(r.stopRender)
 	<-r.renderDone
 	r.restore()
-	if r.stdinDup != nil {
-		r.stdinDup.Close() //nolint:errcheck
-		r.stdinDup = nil
-	}
+	r.keys.stop()
+	r.keys = nil
 	fmt.Println()
 }
 
