@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// TestKeyReaderReportsKeys checks the reader forwards what is typed while it runs.
-func TestKeyReaderReportsKeys(t *testing.T) {
+// TestHotkeysReportKeys checks the reader forwards what is typed while it runs.
+func TestHotkeysReportKeys(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -16,9 +16,9 @@ func TestKeyReaderReportsKeys(t *testing.T) {
 	defer w.Close() //nolint:errcheck
 
 	got := make(chan byte, 4)
-	k := startKeyReader(int(r.Fd()), func(b byte) { got <- b })
+	k := startHotkeys(int(r.Fd()), func(b byte) { got <- b })
 	if k == nil {
-		t.Fatal("startKeyReader returned nil")
+		t.Fatal("startHotkeys returned nil")
 	}
 	defer k.stop()
 
@@ -35,10 +35,10 @@ func TestKeyReaderReportsKeys(t *testing.T) {
 	}
 }
 
-// TestKeyReaderLeavesInputAfterStop is the regression guard for the install
+// TestHotkeysLeaveInputAfterStop is the regression guard for the install
 // freeze: a stopped reader must not still be queued on the terminal, or the
 // shim prompt that follows loses the answer typed at it.
-func TestKeyReaderLeavesInputAfterStop(t *testing.T) {
+func TestHotkeysLeaveInputAfterStop(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -46,9 +46,9 @@ func TestKeyReaderLeavesInputAfterStop(t *testing.T) {
 	defer r.Close() //nolint:errcheck
 	defer w.Close() //nolint:errcheck
 
-	k := startKeyReader(int(r.Fd()), func(byte) {})
+	k := startHotkeys(int(r.Fd()), func(byte) {})
 	if k == nil {
-		t.Fatal("startKeyReader returned nil")
+		t.Fatal("startHotkeys returned nil")
 	}
 	k.stop()
 

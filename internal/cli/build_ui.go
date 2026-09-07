@@ -129,7 +129,7 @@ func runParallelTUI(jobs []BuildJob) error {
 	// is left reading the terminal once the view is done. A leftover reader
 	// races the next thing to read stdin, be that sudo's password prompt on
 	// /dev/tty or an install question, and eats the bytes typed at it.
-	keys := startKeyReader(int(os.Stdin.Fd()), func(b byte) {
+	keys := startHotkeys(int(os.Stdin.Fd()), func(b byte) {
 		switch b {
 		case 0x0F: // Ctrl+O — toggle output
 			showOutput.Store(!showOutput.Load())
@@ -261,13 +261,11 @@ type StepRunner struct {
 	stopRender chan struct{}
 	renderDone chan struct{}
 	restore    func()
-	keys       *keyReader
+	keys       *hotkeyReader
 	termWidth  int
 	isTTY      bool
 }
 
-// NewStepRunner creates and starts a StepRunner.
-// Call Close() when all steps are done to restore the terminal.
 // handleKey acts on the keypresses the view watches for. Raw mode is what stops
 // Ctrl+C reaching the process as a signal, so while the view owns the terminal
 // this is the only thing that can interrupt it.
@@ -285,9 +283,11 @@ func (r *StepRunner) handleKey(b byte) {
 // watchKeys starts watching the terminal, replacing any previous reader.
 func (r *StepRunner) watchKeys() {
 	r.keys.stop()
-	r.keys = startKeyReader(int(os.Stdin.Fd()), r.handleKey)
+	r.keys = startHotkeys(int(os.Stdin.Fd()), r.handleKey)
 }
 
+// NewStepRunner creates and starts a StepRunner.
+// Call Close() when all steps are done to restore the terminal.
 func NewStepRunner() *StepRunner {
 	r := &StepRunner{
 		stopRender: make(chan struct{}),

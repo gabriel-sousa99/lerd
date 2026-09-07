@@ -21,7 +21,7 @@ var terminalInputPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`fmt\.Fscan[a-z]*\(os\.Stdin`),
 	regexp.MustCompile(`os\.Stdin\.Read`),
 	regexp.MustCompile(`Dup\(int\(os\.Stdin`),
-	regexp.MustCompile(`startKeyReader\(`),
+	regexp.MustCompile(`startHotkeys\(`),
 	regexp.MustCompile(`"/dev/tty"`),
 }
 
@@ -35,7 +35,7 @@ var terminalInputOwners = map[string]bool{
 	"internal/cli/fpm_ensure.go":           true,
 	"internal/cli/framework.go":            true,
 	"internal/cli/install.go":              true,
-	"internal/cli/keyreader.go":            true,
+	"internal/cli/hotkeys.go":              true,
 	"internal/cli/machine_reset_darwin.go": true,
 	"internal/cli/remote_control.go":       true,
 	"internal/cli/setup.go":                true,
