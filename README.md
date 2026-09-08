@@ -3,8 +3,9 @@
 > Fork do [`lerd-env/lerd`](https://github.com/lerd-env/lerd) com **suporte a
 > Oracle Database embutido em todas as imagens PHP** — Oracle Instant
 > Client 21.18 (LTS) + `oci8` + memcached + amqp já compilados, prontos
-> para PHP 5.6 → 8.5. Drop-in replacement: todo comando `lerd` existente
-> funciona igual.
+> para PHP 5.6 → 8.5. No PHP 8.6, ainda em prerelease, só o `oci8` entra:
+> amqp e memcached não compilam contra ele. Drop-in replacement: todo
+> comando `lerd` existente funciona igual.
 
 > [!IMPORTANT]
 > Este fork mantém o mesmo binário `lerd` (compatibilidade total) e
@@ -17,9 +18,9 @@
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Flerd-ff2d20?logo=reddit)](https://reddit.com/r/lerd)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/5JK54s7xCC)
 
-[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.33.1-blue)](https://github.com/lerd-env/lerd)
+[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.34.3-blue)](https://github.com/lerd-env/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
-[![PHP](https://img.shields.io/badge/PHP-5.6%20%E2%80%93%208.5-777BB4)]()
+[![PHP](https://img.shields.io/badge/PHP-5.6%20%E2%80%93%208.6-777BB4)]()
 
 ---
 
@@ -52,7 +53,7 @@
 
 ### PHP, Node and runtimes
 
-- 🐘 **Per-project PHP version.** 8.1 to 8.5, plus a frozen 7.4 / 8.0 legacy tier for projects on the old stack, switched with one click. Custom extensions and Alpine packages are declared once and applied to every image lerd builds.
+- 🐘 **Per-project PHP version.** 8.1 to 8.6, plus a frozen 7.4 / 8.0 legacy tier for projects on the old stack, switched with one click. Custom extensions and Alpine packages are declared once and applied to every image lerd builds.
 
 - ⚡ **FrankenPHP runtime.** Per site, as an alternative to shared PHP-FPM, with Laravel Octane and Symfony Runtime worker mode.
 
@@ -119,7 +120,7 @@
 > Recursos herdados do upstream (`lerd-env/lerd`), todos presentes nesta fork:
 >
 > - 🌐 **Domínios `.test` automáticos** com TLS em um comando, ou [desative o DNS gerenciado pelo lerd](https://lerd.sh/features/dns/) e use `*.localhost` (sem dnsmasq, sem mexer no resolver do sistema, sem sudo na parte de DNS); o DNS é ciente de VPN e re-sincroniza os resolvers dos containers em menos de um segundo quando um túnel conecta/desconecta
-> - 🐘 **Versão de PHP por projeto** (8.1–8.5, mais uma faixa legacy congelada 7.4 / 8.0 para projetos em stack antigo), troca com um clique
+> - 🐘 **Versão de PHP por projeto** (8.1–8.6, mais uma faixa legacy congelada 7.4 / 8.0 para projetos em stack antigo), troca com um clique
 > - ⚡ **Runtime FrankenPHP** por site como alternativa ao PHP-FPM compartilhado, com modo worker do Laravel Octane e Symfony Runtime
 > - 📦 **Isolamento de Node.js** por projeto (Node 22, 24) pelo fnm embutido ou por um **nvm** que você já tenha, alternável pelo dashboard, ou **bun** como runtime JS no host e, opt-in, dentro do container
 > - 🖥️ **Web UI embutida** com dashboard raiz, widgets ao vivo, command palette global (Cmd+K), instalar/remover versões de PHP e Node pela página System, e quatorze idiomas de dashboard
@@ -153,7 +154,7 @@ Esta fork adiciona, por cima de tudo isso:
 | `tnsnames.ora` / wallet Autonomous | n/a                          | **`$TNS_ADMIN` montado read-only** de `~/.config/lerd/oracle/network/admin` |
 | `memcached` / `amqp`               | precisa `lerd php:ext`       | **pré-instaladas**                                                  |
 | `openssh-client` no container      | ausente (composer ssh falha) | **instalado** + `$HOME/.ssh` montado em `/root/.ssh`                |
-| Suporte PHP                        | 7.4 → 8.5                    | **5.6 → 8.5** (5.6 legacy com libresolv shim)                       |
+| Suporte PHP                        | 7.4 → 8.6                    | **5.6 → 8.6** (5.6 legacy com libresolv shim)                       |
 | `lerd init`/`link` → Database      | sqlite / mysql / postgres    | **+ Oracle (externo)**, bloco `oracle:` no `.lerd.yaml`             |
 | DNS padrão                         | `lerd-dns` + `.test` (sudo)  | **off, `.localhost`** (sem sudo, RFC 6761)                          |
 | Comandos destrutivos no dashboard  | um clique                    | **filtrados em 2 camadas** (lista + HTTP 403)                       |
@@ -197,7 +198,7 @@ Nada aqui depende de Docker Desktop, banco externo ou pacote do sistema além de
 
 | Linha      | Versões         | Notas                                                                       |
 | ---------- | --------------- | --------------------------------------------------------------------------- |
-| Suportadas | 7.4 → 8.5       | Build próprio FPM (Alpine), com `oci8` específico por versão                |
+| Suportadas | 7.4 → 8.6       | Build próprio FPM (Alpine), com `oci8` específico por versão                |
 | Legacy     | 5.6             | Build estendido com `libresolv` shim                                        |
 | Sob demanda| qualquer        | `lerd php:install <X.Y>` puxa, builda quadlet, registra no `php:list`       |
 | FrankenPHP | 8.2 / 8.3 / 8.4 | Runtime worker, via `.lerd.yaml: runtime: frankenphp`                       |
@@ -537,7 +538,7 @@ dashboard em **System → Debug & Troubleshoot**.
 | `lerd secure` / `unsecure`            | Liga / desliga HTTPS via mkcert (+ reload do nginx)                     |
 | `lerd lan` / `remote-control`         | Expõe sites no LAN / acesso ao dashboard via LAN                        |
 | `lerd mcp:enable-global`              | Registra MCP server para Claude / IDE / agentes                         |
-| `lerd php:install <ver>`              | **(fork)** Provisiona versão (5.6 → 8.5): build + quadlet + start       |
+| `lerd php:install <ver>`              | **(fork)** Provisiona versão (5.6 → 8.6): build + quadlet + start       |
 | `lerd php:rebuild [ver]`              | Reconstrói image FPM                                                    |
 | `lerd php:ext add <ext> [ver]`        | Instala extensão via PECL + apk-deps                                    |
 | `lerd php:ini <ver>`                  | Edita `98-user.ini` (com validação)                                     |
