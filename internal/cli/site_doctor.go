@@ -37,7 +37,7 @@ func NewSiteDoctorCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output the report as JSON")
-	cmd.Flags().BoolVar(&fix, "fix", false, "Apply the findings lerd can resolve on its own (a drifted nginx vhost), then re-check")
+	cmd.Flags().BoolVar(&fix, "fix", false, "Apply the findings lerd can resolve on its own (a drifted nginx vhost, a stale worker unit), then re-check")
 	return cmd
 }
 
@@ -94,9 +94,31 @@ func readyDeclaredServices(path string, fw *config.Framework, quiet bool) (bool,
 	return changed, nil
 }
 
+// createMissingDatabases creates the databases the project points at that their
+// engine does not hold, which is what a missing schema needs before migrations
+// have anywhere to run. It reports whether anything was created and stops at the
+// first failure rather than working through an engine that just refused.
+func createMissingDatabases(path string, quiet bool) (bool, error) {
+	created := false
+	for _, t := range sitedoctor.MissingDatabases(path) {
+		if _, err := serviceops.CreateDatabase(t.Service, t.Database); err != nil {
+			return created, fmt.Errorf("creating %s on %s: %w", t.Database, t.Service, err)
+		}
+		created = true
+		// The re-check that follows runs inside the list cache's window, so
+		// without this it reads the engine's contents from before the create.
+		sitedoctor.ForgetDatabases(t.Service)
+		if !quiet {
+			fmt.Printf("  %s\n\n", feedback.Dim("created the "+t.Database+" database on "+t.Service))
+		}
+	}
+	return created, nil
+}
+
 // applySiteDoctorFixes resolves the findings lerd can act on by itself and
-// returns a fresh report: a drifted vhost is rewritten, and a service picked but
-// not wired has its connection written. The composer and npm ones are left out;
+// returns a fresh report: a drifted vhost is rewritten, a database the engine
+// does not hold is created, and a service picked but not wired has its
+// connection written. The composer and npm ones are left out;
 // they run in the site's container behind a run lock and stream their output,
 // which belongs to the surfaces that can show it.
 func applySiteDoctorFixes(path, fwName string, resp sitedoctor.Response, quiet bool) sitedoctor.Response {
@@ -119,6 +141,29 @@ func applySiteDoctorFixes(path, fwName string, resp sitedoctor.Response, quiet b
 				feedback.Warn("%v", err)
 			}
 			if ready {
+				fixed = true
+			}
+		case sitedoctor.FixStaleWorkers:
+			site, err := config.FindSiteByPath(path)
+			if err != nil || site == nil {
+				continue
+			}
+			n, err := RemoveStaleWorkerUnits(*site)
+			if err != nil {
+				feedback.Warn("removing stale worker units: %v", err)
+			}
+			if n > 0 {
+				if !quiet {
+					fmt.Printf("  %s\n\n", feedback.Dim(fmt.Sprintf("removed %d stale worker unit(s)", n)))
+				}
+				fixed = true
+			}
+		case sitedoctor.FixCreateDatabase:
+			created, err := createMissingDatabases(path, quiet)
+			if err != nil {
+				feedback.Warn("%v", err)
+			}
+			if created {
 				fixed = true
 			}
 		case sitedoctor.FixEnvSync:
@@ -179,7 +224,8 @@ func printSiteDoctor(resp sitedoctor.Response, label string) {
 	fmt.Println()
 	switch {
 	case resp.Failures > 0 || resp.Warnings > 0:
-		fmt.Printf("  %s\n", feedback.Dim(fmt.Sprintf("%d failing · %d warning", resp.Failures, resp.Warnings)))
+		fmt.Printf("  %s\n", feedback.Dim(fmt.Sprintf("%d failing · %d %s", resp.Failures, resp.Warnings,
+			sitedoctor.Plural(resp.Warnings, "warning", "warnings"))))
 	default:
 		fmt.Printf("  %s\n", feedback.Green("all checks pass"))
 	}

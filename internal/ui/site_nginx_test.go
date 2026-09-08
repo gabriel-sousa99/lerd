@@ -222,7 +222,7 @@ func TestHandleSiteNginx_postWithBackupRollsExisting(t *testing.T) {
 	if !resp.OK || resp.BackupName == "" {
 		t.Fatalf("want ok with backup name, got %+v", resp)
 	}
-	if !siteops.ValidNginxBackupName("acme.test", resp.BackupName) {
+	if !siteops.ValidNginxBackupName("acme.test", siteops.NginxServerScope, resp.BackupName) {
 		t.Errorf("backup name shape: %q", resp.BackupName)
 	}
 	// The backup must live OUTSIDE custom.d/ so the include glob does not
@@ -721,5 +721,64 @@ func TestHandleSiteNginxRestore_reloadFailurePreservesBackup(t *testing.T) {
 	// Backup must NOT have been removed; the user needs it to retry.
 	if _, err := os.Stat(filepath.Join(bkpDir, name)); err != nil {
 		t.Errorf("backup must survive reload failure: %v", err)
+	}
+}
+
+func TestHandleSiteNginx_scopeParamSelectsTheLocationFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	stubNginxReload(t)
+	stubNginxTest(t, "test is successful", nil)
+
+	if err := config.AddSite(config.Site{Name: "acme", Path: t.TempDir(), Domains: []string{"acme.test"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := bytes.NewBufferString(`{"content":"fastcgi_param SERVER_NAME $host;\n","backup":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/sites/acme.test/nginx?scope=location", body)
+	rec := httptest.NewRecorder()
+	handleSiteAction(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/sites/acme.test/nginx?scope=location", nil)
+	rec = httptest.NewRecorder()
+	handleSiteAction(rec, req)
+	var resp SiteNginxReadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.HasSuffix(resp.Path, "/custom.d/acme.test.location.conf") {
+		t.Errorf("path: got %q want the location file", resp.Path)
+	}
+	if !resp.Exists || !strings.Contains(resp.Content, "SERVER_NAME") {
+		t.Errorf("expected the saved location override, got %+v", resp)
+	}
+
+	// The server-scope file must be untouched by a location-scope save.
+	req = httptest.NewRequest(http.MethodGet, "/api/sites/acme.test/nginx", nil)
+	rec = httptest.NewRecorder()
+	handleSiteAction(rec, req)
+	resp = SiteNginxReadResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Exists {
+		t.Errorf("server-scope override should not exist, got %+v", resp)
+	}
+}
+
+func TestHandleSiteNginx_unknownScopeIsRejected(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := config.AddSite(config.Site{Name: "acme", Path: t.TempDir(), Domains: []string{"acme.test"}}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/sites/acme.test/nginx?scope=http", nil)
+	rec := httptest.NewRecorder()
+	handleSiteAction(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400: %s", rec.Code, rec.Body.String())
 	}
 }

@@ -17,7 +17,7 @@ func TestWriteWorkerUnitFileWritesTheDescription(t *testing.T) {
 
 	if _, err := writeWorkerUnitFile(
 		"lerd-queue-mysite", "Queue Worker", "mysite", t.TempDir(), "8.4",
-		"php artisan queue:work", "always", "", "lerd-php84-fpm", false,
+		"php artisan queue:work", "always", "", "lerd-php84-fpm", "", false,
 	); err != nil {
 		t.Fatalf("writeWorkerUnitFile: %v", err)
 	}

@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -22,7 +24,7 @@ func TestNginxShow_printsSavedOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := siteops.ReadCustomNginx(resolveNginxTestDomain(t, "acme", ""))
+	got, err := siteops.ReadCustomNginx(resolveNginxTestDomain(t, "acme", ""), siteops.NginxServerScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,4 +75,46 @@ func resolveNginxTestDomain(t *testing.T, name, branch string) string {
 		t.Fatal(err)
 	}
 	return domain
+}
+
+func TestNginxShow_locationFlagTargetsTheLocationOverride(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := config.AddSite(config.Site{Name: "acme", Path: t.TempDir(), Domains: []string{"acme.test"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(config.NginxCustomD(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config.NginxCustomD(), "acme.test.location.conf"), []byte("# only-in-location\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runNginxCmd(t, "show", "acme", "--location")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "# only-in-location\n" {
+		t.Fatalf("got %q, want the location override", out)
+	}
+	out, err = runNginxCmd(t, "show", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "only-in-location") {
+		t.Fatalf("server scope must not read the location file, got %q", out)
+	}
+}
+
+// runNginxCmd drives the real cobra command so the --location flag wiring is
+// exercised, not just the siteops call underneath it.
+func runNginxCmd(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	cmd := NewNginxCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return out.String(), err
 }

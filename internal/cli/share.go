@@ -356,7 +356,13 @@ func buildTunnelCommand(tool *shareTool, tunnelName string, target shareTarget, 
 			return nil, nil, fmt.Errorf("starting local proxy: %w", err)
 		}
 		stop = stopProxy
-		cmd = exec.Command(hostbin.Path("expose"), "share", fmt.Sprintf("http://127.0.0.1:%d", proxyPort))
+		args := []string{"share", fmt.Sprintf("http://127.0.0.1:%d", proxyPort)}
+		// Expose derives the subdomain from the shared host, which here is the
+		// throwaway proxy port, so the site's own label has to be asked for.
+		if sub := shareHostLabel(target.domain, ""); isDNSLabel(sub) {
+			args = append(args, "--subdomain="+sub)
+		}
+		cmd = exec.Command(hostbin.Path("expose"), args...)
 	case shareModeCloudflare:
 		proxyPort, stopProxy, err := startHostProxy(target.domain, httpPort, httpsPort, target.secured)
 		if err != nil {

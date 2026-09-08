@@ -12,3 +12,10 @@ export function formatBytes(n: number): string {
   const rounded = unit === 0 ? Math.round(value).toString() : value.toFixed(1);
   return `${rounded} ${units[unit]}`;
 }
+
+// pullSize renders the download size disclosed alongside an image pull, and
+// nothing at all when the registry did not answer with one.
+export function pullSize(n?: number): string {
+  if (!n || n <= 0) return '';
+  return ' (~' + formatBytes(n) + ')';
+}

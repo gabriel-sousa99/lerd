@@ -426,7 +426,7 @@ func migrateMysql(name, targetImage string, emit func(PhaseEvent)) error {
 		return abortMigrate(unit, name, "", nil, err)
 	}
 
-	emit(PhaseEvent{Phase: "pulling_image", Image: targetImage})
+	discloseImagePull(targetImage, emit)
 	if err := podman.PullImageWithProgress(targetImage, func(line string) {
 		emit(PhaseEvent{Phase: "pulling_image", Message: line})
 	}); err != nil {
@@ -490,7 +490,7 @@ func migratePostgres(name, targetImage string, emit func(PhaseEvent)) error {
 		return abortMigrate(unit, name, "", nil, err)
 	}
 
-	emit(PhaseEvent{Phase: "pulling_image", Image: targetImage})
+	discloseImagePull(targetImage, emit)
 	if err := podman.PullImageWithProgress(targetImage, func(line string) {
 		emit(PhaseEvent{Phase: "pulling_image", Message: line})
 	}); err != nil {

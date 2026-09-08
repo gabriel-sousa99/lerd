@@ -21,7 +21,7 @@
     busy = true;
     error = '';
     try {
-      const res = await resetSiteNginx(target.domain);
+      const res = await resetSiteNginx(target.domain, target.scope);
       if (!res.ok) {
         error = res.error || m.nginxEditor_resetFailed();
         return;

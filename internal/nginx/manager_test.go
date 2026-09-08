@@ -120,7 +120,7 @@ func TestGenerateVhost_honoursSitePublicDir(t *testing.T) {
 
 func TestResolveRequestTimeout_DefaultsTo60(t *testing.T) {
 	setupConfD(t)
-	if got := resolveRequestTimeout("/srv/nonexistent"); got != 60 {
+	if got := resolveRequestTimeout("/srv/nonexistent", "8.4"); got != 60 {
 		t.Errorf("resolveRequestTimeout = %d, want 60 (nginx default)", got)
 	}
 }
@@ -135,7 +135,7 @@ func TestResolveRequestTimeout_GlobalConfigWins(t *testing.T) {
 	if err := config.SaveGlobal(cfg); err != nil {
 		t.Fatalf("SaveGlobal: %v", err)
 	}
-	if got := resolveRequestTimeout("/srv/nonexistent"); got != 120 {
+	if got := resolveRequestTimeout("/srv/nonexistent", "8.4"); got != 120 {
 		t.Errorf("resolveRequestTimeout = %d, want 120 (global config)", got)
 	}
 }
@@ -154,7 +154,7 @@ func TestResolveRequestTimeout_ProjectOverrideWins(t *testing.T) {
 	if err := config.SaveProjectConfig(projectDir, &config.ProjectConfig{RequestTimeout: 300}); err != nil {
 		t.Fatalf("SaveProjectConfig: %v", err)
 	}
-	if got := resolveRequestTimeout(projectDir); got != 300 {
+	if got := resolveRequestTimeout(projectDir, "8.4"); got != 300 {
 		t.Errorf("resolveRequestTimeout = %d, want 300 (.lerd.yaml override)", got)
 	}
 }
@@ -350,6 +350,54 @@ func TestGenerateVhost_proxyWithoutPathIsNotProxied(t *testing.T) {
 	content := readConf(t, filepath.Join(confD, "app.test.conf"))
 	if strings.Contains(content, "proxy_pass http://$proxybackend") {
 		t.Errorf("expected no proxy location for a proxy with no path, got:\n%s", content)
+	}
+}
+
+// A worker whose server answers on more than one path needs a location for
+// each: Reverb serves its WebSocket on /app and the HTTP broadcasting API on
+// /apps, and a path left unproxied falls through to PHP and 404s.
+func TestGenerateVhost_proxyPathsRendersEveryPath(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Paths: []string{"/app", "/apps"}, DefaultPort: 6001})
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	for _, want := range []string{`location ~ ^/app(/|$) {`, `location ~ ^/apps(/|$) {`} {
+		if !strings.Contains(content, want) {
+			t.Errorf("expected %s in:\n%s", want, content)
+		}
+	}
+	if strings.Count(content, "proxy_pass http://$proxybackend:6001;") != 2 {
+		t.Errorf("expected one proxy_pass per declared path, got:\n%s", content)
+	}
+}
+
+func TestGenerateSSLVhost_proxyPathsRendersEveryPath(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Paths: []string{"/app", "/apps"}, DefaultPort: 6001})
+	if err := GenerateSSLVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateSSLVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test-ssl.conf"))
+	for _, want := range []string{`location ~ ^/app(/|$) {`, `location ~ ^/apps(/|$) {`} {
+		if !strings.Contains(content, want) {
+			t.Errorf("expected %s in:\n%s", want, content)
+		}
+	}
+}
+
+// The single-path form stays the fallback, not a path the list is added to:
+// a definition carries both so binaries too old to read paths keep proxying.
+func TestGenerateVhost_proxyPathsSupersedeSinglePath(t *testing.T) {
+	confD := setupConfD(t)
+	site := proxySite(t, "app", &config.WorkerProxy{Path: "/app", Paths: []string{"/app", "/apps"}, DefaultPort: 6001})
+	if err := GenerateVhost(site, "8.4"); err != nil {
+		t.Fatalf("GenerateVhost: %v", err)
+	}
+	content := readConf(t, filepath.Join(confD, "app.test.conf"))
+	if got := strings.Count(content, `location ~ ^/app(/|$) {`); got != 1 {
+		t.Errorf("expected /app proxied once, got %d:\n%s", got, content)
 	}
 }
 
@@ -1816,5 +1864,58 @@ func TestRepairVhosts_stillRemovesAVhostNoSiteOwns(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(confD, "gone.test.conf")); !os.IsNotExist(err) {
 		t.Error("an unowned SSL vhost with no certificate should be removed")
+	}
+}
+
+// includedInsideLocation reports whether the location-scope include sits inside
+// the block opened by the given header line rather than merely somewhere in the
+// file. Nginx drops the server-level fastcgi_param and proxy_set_header sets as
+// soon as a location declares one, so an include placed at server scope cannot
+// override them and the position is the whole point of the hook.
+func includedInsideLocation(content, header, include string) bool {
+	start := strings.Index(content, header)
+	if start < 0 {
+		return false
+	}
+	end := strings.Index(content[start:], "\n    }")
+	if end < 0 {
+		return false
+	}
+	return strings.Contains(content[start:start+end], include)
+}
+
+func TestGenerateVhost_includesLocationScopedCustomD(t *testing.T) {
+	confD := setupConfD(t)
+	site := config.Site{Name: "fwd", Domains: []string{"fwd.test"}, Path: "/srv/fwd"}
+	if err := GenerateVhost(site, "8.3"); err != nil {
+		t.Fatal(err)
+	}
+	content := readConf(t, filepath.Join(confD, "fwd.test.conf"))
+	if !includedInsideLocation(content, "location ~ \\.php$ {", "include /etc/nginx/custom.d/fwd.test.location.conf*;") {
+		t.Errorf("expected the location-scope include inside the php location, got:\n%s", content)
+	}
+}
+
+func TestGenerateSSLVhost_includesLocationScopedCustomD(t *testing.T) {
+	confD := setupConfD(t)
+	site := config.Site{Name: "fwd", Domains: []string{"fwd.test"}, Path: "/srv/fwd"}
+	if err := GenerateSSLVhost(site, "8.3"); err != nil {
+		t.Fatal(err)
+	}
+	content := readConf(t, filepath.Join(confD, "fwd.test-ssl.conf"))
+	if !includedInsideLocation(content, "location ~ \\.php$ {", "include /etc/nginx/custom.d/fwd.test.location.conf*;") {
+		t.Errorf("expected the location-scope include inside the php location, got:\n%s", content)
+	}
+}
+
+func TestGenerateCustomVhost_includesLocationScopedCustomD(t *testing.T) {
+	confD := setupConfD(t)
+	site := config.Site{Name: "nestapp", Domains: []string{"nestapp.test"}, ContainerPort: 3000}
+	if err := GenerateCustomVhost(site); err != nil {
+		t.Fatal(err)
+	}
+	content := readConf(t, filepath.Join(confD, "nestapp.test.conf"))
+	if !includedInsideLocation(content, "location / {", "include /etc/nginx/custom.d/nestapp.test.location.conf*;") {
+		t.Errorf("expected the location-scope include inside location /, got:\n%s", content)
 	}
 }

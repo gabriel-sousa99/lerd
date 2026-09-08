@@ -12,17 +12,23 @@ Each worktree is served on its own subdomain (`{branch}.{primary}.test`) with it
 
 ## From the CLI and MCP
 
-The same override is reachable without the web UI, which is handy for scripting or from an agent. `lerd nginx show [site]` prints the current override (`--path` prints just the file path), `lerd nginx edit [site]` opens it in `$EDITOR` and then validates with `nginx -t` and reloads on save, and `lerd nginx reset [site]` deletes it and falls back to the bundled defaults. Add `--branch <name>` to any of them to target a worktree's override instead of the main branch's. The MCP `site_nginx` tool mirrors this with `action: read | write | reset`, an optional `site`, an optional `branch`, and `content` for writes; writes run the same `nginx -t` validation, backup, and reload as the web editor. All three surfaces go through one shared edit service, so validation, backups, and reload behave identically whichever one you use.
+The same override is reachable without the web UI, which is handy for scripting or from an agent. `lerd nginx show [site]` prints the current override (`--path` prints just the file path), `lerd nginx edit [site]` opens it in `$EDITOR` and then validates with `nginx -t` and reloads on save, and `lerd nginx reset [site]` deletes it and falls back to the bundled defaults. Add `--branch <name>` to any of them to target a worktree's override instead of the main branch's, and `--location` to target the location-scope file described below instead of the server-block one. The MCP `site_nginx` tool mirrors this with `action: read | write | reset`, an optional `site`, an optional `branch`, an optional `scope` (`server` or `location`), and `content` for writes; writes run the same `nginx -t` validation, backup, and reload as the web editor. All three surfaces go through one shared edit service, so validation, backups, and reload behave identically whichever one you use.
 
 ## How it works
 
-Every generated site vhost ends with:
+Every generated site vhost carries two includes. One at the end of the `server { }` block:
 
 ```nginx
 include /etc/nginx/custom.d/{your-domain}.conf*;
 ```
 
-The trailing `*` makes the include a glob, so nginx treats a missing override file as empty (no 500). The directory is bind-mounted read-only into the `lerd-nginx` container and is never touched by lerd after creation.
+and one at the end of the block that actually serves the site, `location ~ \.php$` on an FPM site and `location /` on a proxied one:
+
+```nginx
+include /etc/nginx/custom.d/{your-domain}.location.conf*;
+```
+
+The trailing `*` makes each include a glob, so nginx treats a missing override file as empty (no 500). The directory is bind-mounted read-only into the `lerd-nginx` container and is never touched by lerd after creation.
 
 ## Request timeouts
 
@@ -65,6 +71,8 @@ That's it. The snippet is merged into the generated server block for `bigapp.tes
 
 Lines you put in `custom.d/{domain}.conf` land inside the site's `server { ... }` block, so you can use anything nginx allows at server level: `client_max_body_size`, `add_header`, extra `location` blocks, `proxy_pass` overrides, `rewrite`, and so on.
 
+`fastcgi_param` and `proxy_set_header` are the exception, and they are why there is a second file. Nginx resolves both per location, and the moment a location declares one of its own it ignores the entire inherited set, so a `fastcgi_param SERVER_NAME $host;` written at server level never reaches PHP. Put those in `custom.d/{domain}.location.conf` instead: it is included at the very end of the block that serves the site, after everything lerd sets, so a repeated directive wins. In the web UI it is the **Location** tab of the same editor; from the CLI it is `lerd nginx show|edit|reset --location`. Save, backup, `nginx -t` validation, restore, and reset all work exactly the same on both files, and both survive vhost regeneration, worktree seeding, and a domain rename.
+
 Two things there cannot be redeclared, because the generated vhost already carries them and nginx rejects the repeat rather than overriding it. Setting `root` fails with `"root" directive is duplicate`; lerd derives the docroot from the linked site, so change it with `lerd link` rather than from a snippet. Repeating a `location` lerd emits (`/`, `~ \.php$`, `~ /\.ht`) fails with `duplicate location`; add a differently scoped location such as `/media` instead of restating one of those. Both failures surface in the editor before anything is committed, so the site keeps serving on its previous config.
 
 If you need directives at `http {}` level (gzip, proxy buffers, a global `client_max_body_size`, a new `map`), edit the **global override** from the web UI: open **System → Nginx** and pick the **Config** tab. It edits `~/.local/share/lerd/nginx/http.d/zz-lerd-user.conf`, which the generated `nginx.conf` includes last inside its `http {}` block, after lerd's own settings. The editor is the same surface as the per-site one: Save runs `nginx -t` before the new bytes are committed, there is an optional backup-first checkbox with a **Restore** button, and **Reset** drops the file back to empty. The `http.d` directory is bind-mounted read-only into the `lerd-nginx` container and lerd never writes into it itself.
@@ -93,3 +101,12 @@ The generated vhosts already set the `X-Forwarded-*` family for you so tools lik
 | `HTTP_X_REAL_IP`, `HTTP_X_FORWARDED_FOR` | `$remote_addr` |
 
 The fallbacks are declared once in `conf.d/_forwarded.conf` (generated by lerd at install time) via two `map` blocks that produce `$real_forwarded_host` and `$real_forwarded_proto`. Direct browser requests without `X-Forwarded-*` headers keep seeing the real host and scheme; tunneled requests see the public hostname the tunnel received. PHP apps that call `url()` or read `$_SERVER['HTTP_HOST']` get correct absolute URLs in both paths without any app-side changes.
+
+Some codebases want the opposite: the local hostname even when the request arrived through a tunnel, because they compare `SERVER_NAME` against their own configuration. Opt one site out in its location-scope override, `custom.d/{domain}.location.conf`:
+
+```nginx
+fastcgi_param SERVER_NAME $host;
+fastcgi_param HTTP_HOST $host;
+```
+
+The `map` blocks in `_forwarded.conf` stay as they are; they only define variables, and this simply stops using them for those two parameters. `HTTP_X_FORWARDED_HOST` still carries the tunnel hostname, so nothing that needs the public name loses it.

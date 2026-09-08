@@ -202,6 +202,28 @@ func TestDesiredDomains(t *testing.T) {
 			siteName:  "shop",
 			want:      []string{"shop.test"},
 		},
+		{
+			// The docs ask for the name alone, but .lerd.yaml is where people
+			// paste the hostname they want to reach, and appending to that
+			// produced main.test.test, an alias nothing resolves (#1632).
+			name:     "a project domain written with the TLD is not doubled",
+			proj:     &config.ProjectConfig{Domains: []string{"main.test", "subone.test", "subtwo"}},
+			siteName: "myapp",
+			want:     []string{"main.test", "subone.test", "subtwo.test"},
+		},
+		{
+			name:     "a project domain keeps a deeper name intact",
+			proj:     &config.ProjectConfig{Domains: []string{"shop.acme.test"}},
+			siteName: "myapp",
+			want:     []string{"shop.acme.test"},
+		},
+		{
+			name:      "an explicit name written with the TLD is not doubled",
+			proj:      &config.ProjectConfig{Domains: []string{"shop", "admin"}},
+			requested: "admin.test",
+			siteName:  "admin",
+			want:      []string{"admin.test", "shop.test"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

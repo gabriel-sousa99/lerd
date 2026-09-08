@@ -11,17 +11,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
-// ExtraDirs lists the install prefixes a daemon's PATH leaves out: both
-// Homebrew prefixes on macOS (Apple Silicon and Intel), and the equivalents on
-// Linux. Ordered the way a login shell would see them. A var so tests can point
+// ExtraDirs lists the install prefixes a daemon's PATH leaves out: lerd's own
+// bin dir, both Homebrew prefixes on macOS (Apple Silicon and Intel), and the
+// equivalents on Linux. Ordered the way a login shell would see them. A var so tests can point
 // it at a fixture instead of depending on what the host has installed.
 var ExtraDirs = func() []string {
+	// lerd's own bin dir comes first: a tool dropped in there is on the user's
+	// PATH only through `lerd path:enable`, which a daemon never inherits.
+	dirs := []string{config.BinDir()}
 	if runtime.GOOS == "darwin" {
-		return []string{"/opt/homebrew/bin", "/usr/local/bin"}
+		return append(dirs, "/opt/homebrew/bin", "/usr/local/bin")
 	}
-	return []string{"/usr/local/bin", "/snap/bin", "/home/linuxbrew/.linuxbrew/bin"}
+	return append(dirs, "/usr/local/bin", "/snap/bin", "/home/linuxbrew/.linuxbrew/bin")
 }
 
 // Look resolves name to an absolute path: PATH first, then the extra dirs.

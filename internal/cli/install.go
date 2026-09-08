@@ -13,8 +13,11 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/desktopapp"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
@@ -23,13 +26,10 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/gabriel-sousa99/lerd/internal/shims"
 	"github.com/gabriel-sousa99/lerd/internal/siteops"
+	"github.com/gabriel-sousa99/lerd/internal/store"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/gabriel-sousa99/lerd/internal/tray"
-
-	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
-	"github.com/gabriel-sousa99/lerd/internal/store"
 	"github.com/gabriel-sousa99/lerd/internal/version"
-
 	"github.com/spf13/cobra"
 )
 
@@ -139,6 +139,7 @@ func ensurePortsAvailable() {
 }
 
 func runInstall(cmd *cobra.Command, _ []string) error {
+	markInstallInProgress()
 	feedback.Header("Installing Lerd")
 
 	noIPv6, _ := cmd.Flags().GetBool("no-ipv6")
@@ -667,34 +668,25 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// Then restore quadlets for any additional PHP versions and services from registered sites.
 	{
 		cfg, _ := config.LoadGlobal()
-		seenPHP := map[string]bool{}
 		seenSvc := map[string]bool{}
 
-		if cfg != nil && cfg.PHP.DefaultVersion != "" {
-			seenPHP[cfg.PHP.DefaultVersion] = true
-			if err := ensureFPMQuadlet(cfg.PHP.DefaultVersion); err != nil {
-				fmt.Printf("  WARN: default PHP %s FPM quadlet: %v\n", cfg.PHP.DefaultVersion, err)
-			}
+		defaultPHP := ""
+		if cfg != nil {
+			defaultPHP = cfg.PHP.DefaultVersion
 		}
 
 		reg, regErr := config.LoadSites()
+		var sites []config.Site
+		if regErr == nil {
+			sites = reg.Sites
+		}
+		ensureFPMQuadlets(fpmVersionsToEnsure(defaultPHP, sites))
+
 		if regErr == nil {
 
 			for _, s := range reg.Sites {
 				if s.Paused || s.Ignored {
 					continue
-				}
-
-				// Restore FPM quadlet.
-				v := s.PHPVersion
-				if v == "" && cfg != nil {
-					v = cfg.PHP.DefaultVersion
-				}
-				if v != "" && !seenPHP[v] {
-					seenPHP[v] = true
-					if err := ensureFPMQuadlet(v); err != nil {
-						fmt.Printf("  WARN: PHP %s FPM quadlet: %v\n", v, err)
-					}
 				}
 
 				// Restore service quadlets from .lerd.yaml.
@@ -758,20 +750,22 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// resolver. On macOS ConfigureResolver() redirects .test queries through
 	// lerd-dns; doing pulls first ensures the system DNS is intact for all
 	// registry traffic (docker.io, ghcr.io, etc.).
+	// The nginx image is declared once, in the quadlet template.
+	nginxImage := podman.ServiceImage("lerd-nginx")
 	pullJobs := []BuildJob{
 		{
-			Label: "Pulling nginx:alpine",
+			Label: "Pulling " + nginxImage,
 			Run: func(w io.Writer) error {
-				cmd := podman.Cmd("pull", "docker.io/library/nginx:alpine")
-				cmd.Stdout = w
-				cmd.Stderr = w
-				return cmd.Run()
+				return podman.PullImageTo(nginxImage, w)
 			},
 		},
 	}
+	plan := imagepull.Plan{imagepull.Pull(nginxImage, "the lerd web server image")}
 	if wantDNS {
 		pullJobs = append(pullJobs, pullDNSImages()...)
+		plan = append(plan, dnsImagePlan()...)
 	}
+	plan.Fill().Report(os.Stdout)
 	for _, job := range pullJobs {
 		step(job.Label)
 		if err := job.Run(io.Discard); err != nil {
@@ -952,13 +946,25 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		if missing := tray.MissingLibs(tray.HelperPath()); len(missing) > 0 {
 			disableTrayUnit()
 			feedback.Note("system tray unavailable: this host has no " + strings.Join(missing, ", "))
-		} else if autostartOn {
+		} else if autostartOn && trayEnabled() {
 			if err := services.Mgr.Enable("lerd-tray"); err != nil {
 				fmt.Printf("    WARN: %v\n", err)
 			}
 		}
 	}
 	ok()
+
+	// The clickable launcher, so starting lerd and opening the dashboard needs
+	// no terminal: an app bundle in ~/Applications on macOS, a desktop entry on
+	// Linux. `lerd update` re-execs this install, which is what repoints an
+	// entry written by an older version at the binary that is live now.
+	if desktopapp.Path() != "" {
+		step("Writing the " + desktopapp.Name + " launcher")
+		if _, err := desktopapp.Install(); err != nil {
+			fmt.Printf("    WARN: %v\n", err)
+		}
+		ok()
+	}
 
 	// Restore worker / queue / schedule unit FILES from .lerd.yaml so the
 	// systemd state is repaired regardless of the autostart setting — the
@@ -1057,12 +1063,8 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 
 	killTray()
-	if services.Mgr.IsEnabled("lerd-tray") {
-		_ = services.Mgr.Start("lerd-tray")
-	} else {
-		if exe, err := os.Executable(); err == nil {
-			_ = exec.Command(exe, "tray").Start()
-		}
+	if trayEnabled() {
+		_ = launchTray()
 	}
 
 	installAutostart()
@@ -1099,6 +1101,14 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// Record which version this environment is set up for, so a binary a
 	// package manager swaps underneath it is recognised on the next command.
 	writeInstalledVersion(version.Version)
+
+	// Every other step still reports success when this one build fails, so the
+	// install reads as complete while lerd-dns crash-loops on a missing image
+	// and no .test name ever resolves (#1537). Say so instead.
+	if wantDNS && isDNSContainerUnit() && !podman.ImageExists(podman.DNSMasqImage) {
+		feedback.Begin()
+		feedback.Warn("the dnsmasq image did not build, so lerd-dns cannot start and .test names will not resolve. Check the container's network access with `lerd doctor`, then run `lerd install` again")
+	}
 
 	feedback.Begin()
 	feedback.Done("lerd installation complete")
@@ -1583,8 +1593,7 @@ func detectNvm() bool {
 	return nodeDet.ScriptPresent()
 }
 
-// confirmInstallPrompt asks a [Y/n] question. Must be called before any
-// RunParallel invocation, which leaves a goroutine reading from os.Stdin.
+// confirmInstallPrompt asks a [Y/n] question.
 func confirmInstallPrompt(question string) bool {
 	return confirmInstallPromptDefault(question, true)
 }

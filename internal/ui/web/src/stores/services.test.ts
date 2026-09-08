@@ -12,6 +12,29 @@ describe('services store', () => {
     globalThis.fetch = realFetch;
   });
 
+  // update, migrate, rollback and reinstall all funnel through
+  // streamServiceAction, so declining the download has to stop every one of
+  // them before the request goes out.
+  it('streamServiceAction does not run the action when the download is declined', async () => {
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify({ image: 'mysql:8.4', bytes: 4096, local: false }), {
+        status: 200
+      });
+    }) as unknown as typeof fetch;
+    const { streamServiceAction } = await import('./services');
+    const { downloadConfirm, answerDownloadConfirm } = await import('./downloadConfirm');
+
+    const pending = streamServiceAction('mysql', 'update');
+    await vi.waitFor(() => expect(get(downloadConfirm).open).toBe(true));
+    answerDownloadConfirm(false);
+
+    expect((await pending).ok).toBe(false);
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain('/api/image-estimate');
+  });
+
   it('splits services into core and worker groups', async () => {
     const { services, coreServices, workerGroups } = await import('./services');
     services.set([

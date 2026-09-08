@@ -17,21 +17,55 @@ type cachedStoreEntry struct {
 	Detect   []FrameworkRule `json:"detect"`
 }
 
-// loadCachedStoreEntries reads the locally cached framework store index. Returns
+// StorePackageEntry is one composer package the store publishes declarations
+// for. Versions lists the package's own majors that have a file of their own;
+// a package whose declarations hold across every major publishes none and is
+// served by a single unversioned file.
+type StorePackageEntry struct {
+	Name     string   `json:"name"`
+	Versions []string `json:"versions,omitempty"`
+	Latest   string   `json:"latest,omitempty"`
+}
+
+// cachedStoreIndex mirrors the store index fields the config package reads.
+type cachedStoreIndex struct {
+	Frameworks []cachedStoreEntry  `json:"frameworks"`
+	Packages   []StorePackageEntry `json:"packages"`
+}
+
+// loadCachedStoreIndex reads the locally cached framework store index. Returns
 // nil when the cache is absent or unreadable (e.g. a fresh machine that has not
 // reached the store yet), so callers fall back to the built-in adapters.
-func loadCachedStoreEntries() []cachedStoreEntry {
+func loadCachedStoreIndex() *cachedStoreIndex {
 	data, err := os.ReadFile(StoreIndexFile())
 	if err != nil {
 		return nil
 	}
-	var idx struct {
-		Frameworks []cachedStoreEntry `json:"frameworks"`
-	}
+	var idx cachedStoreIndex
 	if json.Unmarshal(data, &idx) != nil {
 		return nil
 	}
+	return &idx
+}
+
+func loadCachedStoreEntries() []cachedStoreEntry {
+	idx := loadCachedStoreIndex()
+	if idx == nil {
+		return nil
+	}
 	return idx.Frameworks
+}
+
+// cachedStorePackages returns the composer packages the store publishes a
+// definition for. Only these are ever looked up for a project, so a project's
+// own dependency list is never turned into a fetch for a file the store does
+// not have.
+func cachedStorePackages() []StorePackageEntry {
+	idx := loadCachedStoreIndex()
+	if idx == nil {
+		return nil
+	}
+	return idx.Packages
 }
 
 // projectOwnsFramework reports whether a framework name belongs to the projects

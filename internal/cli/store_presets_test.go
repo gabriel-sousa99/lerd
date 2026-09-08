@@ -32,6 +32,9 @@ func TestRefreshStorePresets_CachesInstalledServicePresets(t *testing.T) {
 
 	fetched := false
 	mux := http.NewServeMux()
+	mux.HandleFunc("/index.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"services":[{"name":"pgadmin"}]}`))
+	})
 	mux.HandleFunc("/pgadmin.yaml", func(w http.ResponseWriter, _ *http.Request) {
 		fetched = true
 		_, _ = w.Write([]byte("name: pgadmin\nimage: docker.io/dpage/pgadmin4:latest\ndescription: fresh-from-store\n"))
@@ -81,5 +84,87 @@ func TestRefreshStorePresets_SkipsPresetlessServices(t *testing.T) {
 
 	if reached {
 		t.Error("refreshStorePresets fetched from the store for a presetless service")
+	}
+}
+
+// The built-in presets ship embedded and were never published to the service
+// store, so asking the store for one is a guaranteed 404 that surfaces on every
+// update as a failed step. Only presets the store index lists may be fetched.
+func TestRefreshStorePresets_SkipsPresetsTheStoreDoesNotPublish(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	for _, svc := range []*config.CustomService{
+		{Name: "postgres", Image: "docker.io/library/postgres:18", Preset: "postgres"},
+		{Name: "pgadmin", Image: "docker.io/dpage/pgadmin4:latest", Preset: "pgadmin"},
+	} {
+		if err := config.SaveCustomService(svc); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var asked []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"services":[{"name":"pgadmin"}]}`))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, strings.TrimPrefix(r.URL.Path, "/"))
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/pgadmin.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		asked = append(asked, "pgadmin.yaml")
+		_, _ = w.Write([]byte("name: pgadmin\nimage: docker.io/dpage/pgadmin4:latest\n"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Setenv("LERD_SERVICES_BASE_URL", srv.URL)
+
+	refreshStorePresets()
+
+	for _, path := range asked {
+		if path == "postgres.yaml" {
+			t.Error("refreshStorePresets asked the store for a preset it does not publish")
+		}
+	}
+	if len(asked) == 0 || asked[0] != "pgadmin.yaml" {
+		t.Errorf("expected the published preset to be fetched, got %v", asked)
+	}
+}
+
+// With the store index unreachable there is no way to tell a published preset
+// from a built-in, so the refresh does nothing rather than guess and fail. The
+// cached and embedded copies keep serving.
+func TestRefreshStorePresets_SkipsRefreshWhenTheIndexIsUnreachable(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	if err := config.SaveCustomService(&config.CustomService{
+		Name:   "pgadmin",
+		Image:  "docker.io/dpage/pgadmin4:latest",
+		Preset: "pgadmin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	presetAsked := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/pgadmin.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		presetAsked = true
+		_, _ = w.Write([]byte("name: pgadmin\nimage: docker.io/dpage/pgadmin4:latest\n"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Setenv("LERD_SERVICES_BASE_URL", srv.URL)
+
+	refreshStorePresets()
+
+	if presetAsked {
+		t.Error("refreshStorePresets fetched presets without an index to check them against")
 	}
 }

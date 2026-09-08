@@ -6,12 +6,19 @@
     enableNotifications,
     dismissNotifyBanner
   } from '$lib/notify';
+  import { onFallbackOrigin } from '$lib/vhost';
   import { m } from '../paraglide/messages.js';
 
   // The banner asks for browser notification permission, which is meaningless
-  // when the daemon is delivering natively, so it only shows on the browser sink.
+  // when the daemon is delivering natively, so it only shows on the browser
+  // sink. It also stays away from the loopback fallback origin: permission is
+  // per-origin, and that page hands over to the vhost as soon as nginx is back,
+  // so granting it there would leave a second browser subscribed for good.
   const visible = $derived(
-    $permissionState === 'default' && !$dismissed && $notifyDelivery !== 'native'
+    $permissionState === 'default' &&
+      !$dismissed &&
+      $notifyDelivery !== 'native' &&
+      !onFallbackOrigin()
   );
 
   async function onEnable() {

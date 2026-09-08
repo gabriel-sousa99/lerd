@@ -91,6 +91,12 @@ type ProjectConfig struct {
 	// reload while another stays in standard mode. Laravel's horizon worker is
 	// currently the only worker with a reload variant.
 	ReloadWorkers []string `yaml:"reload_workers,omitempty"`
+	// WorkerOptions persists the values substituted into a worker's tune_command
+	// placeholders, keyed by worker name then placeholder. A project whose queue
+	// worker serves several queues commits them here, so every later start (the
+	// dashboard toggle, `lerd start` after a reinstall, a fresh clone) runs the
+	// same command instead of the definition's defaults.
+	WorkerOptions map[string]map[string]string `yaml:"worker_options,omitempty"`
 	// Commands extends or overrides the framework's command set. Entries with
 	// a Name matching a framework command replace it (set Disabled: true to
 	// suppress instead). Entries with a new Name are appended. See
@@ -157,7 +163,8 @@ func (c *ProjectConfig) IsEmpty() bool {
 		c.JSRuntime == "" &&
 		c.Framework == "" && c.FrameworkVersion == "" && c.FrameworkDef == nil &&
 		c.PublicDir == "" && len(c.Services) == 0 &&
-		len(c.Workers) == 0 && len(c.CustomWorkers) == 0 && len(c.ReloadWorkers) == 0 && len(c.Commands) == 0 && !c.Secured &&
+		len(c.Workers) == 0 && len(c.CustomWorkers) == 0 && len(c.ReloadWorkers) == 0 &&
+		len(c.WorkerOptions) == 0 && len(c.Commands) == 0 && !c.Secured &&
 		c.AppURL == "" && c.DB.Service == "" && c.DB.Database == "" &&
 		c.Oracle == nil &&
 		c.Container == nil && c.Proxy == nil && c.Runtime == "" && !c.RuntimeWorker &&
@@ -193,6 +200,23 @@ func ProjectReloadsWorker(dir, name string) bool {
 		return false
 	}
 	return cfg.ReloadsWorker(name)
+}
+
+// WorkerOptionsFor returns the tune-command values the project persisted for
+// the named worker, or nil when it has none.
+func (c *ProjectConfig) WorkerOptionsFor(name string) map[string]string {
+	return c.WorkerOptions[name]
+}
+
+// ProjectWorkerOptions returns the tune-command values the project at dir
+// persisted for the named worker. Nil when .lerd.yaml is absent or unreadable,
+// which runs the worker exactly as its definition declares it.
+func ProjectWorkerOptions(dir, name string) map[string]string {
+	cfg, err := LoadProjectConfig(dir)
+	if err != nil || cfg == nil {
+		return nil
+	}
+	return cfg.WorkerOptionsFor(name)
 }
 
 // ServiceNames returns the name of every service in the config, for callers
@@ -378,7 +402,7 @@ func LoadProjectConfig(dir string) (*ProjectConfig, error) {
 			projectConfigCacheMu.Unlock()
 			return &ProjectConfig{}, nil
 		}
-		return nil, statErr
+		return &ProjectConfig{}, statErr
 	}
 
 	data, err := os.ReadFile(path)
@@ -386,11 +410,14 @@ func LoadProjectConfig(dir string) (*ProjectConfig, error) {
 		if os.IsNotExist(err) {
 			return &ProjectConfig{}, nil
 		}
-		return nil, err
+		return &ProjectConfig{}, err
 	}
 	var cfg ProjectConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, err
+		// Most callers read this config with the error discarded, so hand them an
+		// empty one rather than a nil they would dereference, and name the file
+		// for the few that do report it.
+		return &ProjectConfig{}, fmt.Errorf("%s: %w", path, err)
 	}
 
 	if err := ValidatePublicDir(cfg.PublicDir); err != nil {
@@ -446,6 +473,16 @@ func cloneProjectConfig(in *ProjectConfig) *ProjectConfig {
 		out.CustomWorkers = make(map[string]FrameworkWorker, len(in.CustomWorkers))
 		for k, v := range in.CustomWorkers {
 			out.CustomWorkers[k] = v
+		}
+	}
+	if in.WorkerOptions != nil {
+		out.WorkerOptions = make(map[string]map[string]string, len(in.WorkerOptions))
+		for k, v := range in.WorkerOptions {
+			opts := make(map[string]string, len(v))
+			for ok, ov := range v {
+				opts[ok] = ov
+			}
+			out.WorkerOptions[k] = opts
 		}
 	}
 	if in.EnvOverrides != nil {

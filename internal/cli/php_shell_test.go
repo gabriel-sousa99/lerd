@@ -3,6 +3,8 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -55,5 +57,34 @@ func TestShellWorkDir_PlainSiteOpensTheSiteRoot(t *testing.T) {
 
 	if got := shellWorkDir(sub); got != site {
 		t.Errorf("shellWorkDir = %q, want the site root %q", got, site)
+	}
+}
+
+// A version shell has no project, so pinning the container to a working
+// directory would drop it somewhere arbitrary; the image's own default is right.
+func TestPhpShellExecArgs_OmitsWorkDirWhenThereIsNoProject(t *testing.T) {
+	args := phpShellExecArgs("lerd-php86-fpm", "")
+	for i, a := range args {
+		if a == "-w" {
+			t.Fatalf("args = %v, want no -w for a project-less shell (found at %d)", args, i)
+		}
+	}
+	if args[len(args)-3] != "sh" || args[len(args)-2] != "-c" {
+		t.Errorf("args = %v, want the container script last", args)
+	}
+
+	withDir := phpShellExecArgs("lerd-php86-fpm", "/srv/app")
+	if !slices.Contains(withDir, "-w") || !slices.Contains(withDir, "/srv/app") {
+		t.Errorf("args = %v, want the project directory kept", withDir)
+	}
+}
+
+// The container script prepends to the container's own PATH. It must reach
+// podman as one argv element: anything that runs it through a host shell first
+// expands $PATH there, and $HOME is bind mounted, so the host's php shim would
+// win over the container's own binary.
+func TestPhpShellInnerScript_LeavesPathToTheContainer(t *testing.T) {
+	if !strings.Contains(phpShellInnerScript(), `"/root/.bun/bin:$PATH"`) {
+		t.Errorf("inner script = %q, want the container's own $PATH kept", phpShellInnerScript())
 	}
 }

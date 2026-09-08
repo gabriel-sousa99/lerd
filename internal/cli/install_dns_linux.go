@@ -4,10 +4,10 @@ package cli
 
 import (
 	"io"
-	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
 )
@@ -23,13 +23,17 @@ func writeDNSUnit(_ io.Writer) error {
 
 // ensureDNSImageForStart ensures the lerd-dnsmasq container image exists on Linux.
 func ensureDNSImageForStart() {
-	// Build the dnsmasq image if it doesn't exist. Ignore errors — the image
-	// will be pulled/built during RunParallel if missing.
-	containerfile := "FROM docker.io/library/alpine:latest\nRUN apk add --no-cache dnsmasq\n"
-	if !podman.ImageExists("lerd-dnsmasq:local") {
-		cmd := podman.Cmd("build", "-t", "lerd-dnsmasq:local", "-")
-		cmd.Stdin = strings.NewReader(containerfile)
-		cmd.Run() //nolint:errcheck
+	// Ignore errors — the image will be built again during RunParallel if missing.
+	if !podman.ImageExists(podman.DNSMasqImage) {
+		_ = podman.BuildDNSMasqImage(io.Discard, dns.ReadUpstreamDNS())
+	}
+}
+
+// dnsImagePlan discloses what pullDNSImages downloads. The dnsmasq build adds
+// only apk packages on top of the base, so the base pull is the whole of it.
+func dnsImagePlan() imagepull.Plan {
+	return imagepull.Plan{
+		imagepull.Pull(podman.DNSMasqBaseImage, "base for the lerd-dns image"),
 	}
 }
 
@@ -39,21 +43,13 @@ func pullDNSImages() []BuildJob {
 		{
 			Label: "Pulling alpine:latest",
 			Run: func(w io.Writer) error {
-				cmd := podman.Cmd("pull", "docker.io/library/alpine:latest")
-				cmd.Stdout = w
-				cmd.Stderr = w
-				return cmd.Run()
+				return podman.PullImageTo(podman.DNSMasqBaseImage, w)
 			},
 		},
 		{
 			Label: "Building dnsmasq image",
 			Run: func(w io.Writer) error {
-				containerfile := "FROM docker.io/library/alpine:latest\nRUN apk add --no-cache dnsmasq\n"
-				cmd := podman.Cmd("build", "-t", "lerd-dnsmasq:local", "-")
-				cmd.Stdin = strings.NewReader(containerfile)
-				cmd.Stdout = w
-				cmd.Stderr = w
-				return cmd.Run()
+				return podman.BuildDNSMasqImage(w, dns.ReadUpstreamDNS())
 			},
 		},
 	}

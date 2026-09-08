@@ -5,6 +5,7 @@
     getSiteNginx,
     loadSiteNginxBackups,
     loadSiteNginxBackupContent,
+    type NginxScope,
     type Site,
     type SiteNginxBackup
   } from '$stores/sites';
@@ -16,10 +17,13 @@
     /** Domain whose override to edit. Defaults to the site's primary domain;
      *  pass a worktree's domain to edit that worktree's override instead. */
     domain?: string;
+    /** Which override file to edit: the server block one, or the one included
+     *  inside the block that serves the site. */
+    scope?: NginxScope;
     /** Called after a successful save so the host can close the editor. */
     onSaved?: () => void;
   }
-  let { site, domain, onSaved = () => {} }: Props = $props();
+  let { site, domain, scope = 'server', onSaved = () => {} }: Props = $props();
 
   let original = $state<string>('');
   let text = $state<string>('');
@@ -68,7 +72,7 @@
     text = '';
     path = '';
     backups = [];
-    Promise.all([getSiteNginx(domain), loadSiteNginxBackups(domain)])
+    Promise.all([getSiteNginx(domain, scope), loadSiteNginxBackups(domain, scope)])
       .then(([res, listRes]) => {
         if (currentDomain !== domain) return;
         original = res.content;
@@ -117,8 +121,8 @@
   async function refreshAfterAction(domain: string) {
     try {
       const [res, listRes] = await Promise.all([
-        getSiteNginx(domain),
-        loadSiteNginxBackups(domain)
+        getSiteNginx(domain, scope),
+        loadSiteNginxBackups(domain, scope)
       ]);
       if (currentDomain !== domain) return;
       original = res.content;
@@ -151,10 +155,11 @@
     try {
       const restoredDomain = currentDomain;
       const restoredName = latestBackup.name;
-      const backupContent = await loadSiteNginxBackupContent(restoredDomain, restoredName);
+      const backupContent = await loadSiteNginxBackupContent(restoredDomain, scope, restoredName);
       openNginxRestoreModal(
         {
           domain: restoredDomain,
+          scope,
           current: original,
           backupName: restoredName,
           backup: backupContent
@@ -164,7 +169,7 @@
           original = backupContent;
           text = backupContent;
           exists = true;
-          const listRes = await loadSiteNginxBackups(restoredDomain);
+          const listRes = await loadSiteNginxBackups(restoredDomain, scope);
           if (currentDomain !== restoredDomain) return;
           if (listRes.ok) {
             backups = listRes.list;
@@ -197,7 +202,7 @@
   // bundled-template state with exists=false.
   function reset() {
     const resetDomain = currentDomain;
-    openNginxResetModal({ domain: resetDomain, path }, () => refreshAfterAction(resetDomain));
+    openNginxResetModal({ domain: resetDomain, scope, path }, () => refreshAfterAction(resetDomain));
   }
 
   function save() {
@@ -208,7 +213,7 @@
     // remounts and reloads the saved file from disk, so there's no stale
     // dirty/backup state to refresh.
     openNginxSaveModal(
-      { domain: savedDomain, content: text, original, exists },
+      { domain: savedDomain, scope, content: text, original, exists },
       () => onSaved()
     );
   }

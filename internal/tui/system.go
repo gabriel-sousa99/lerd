@@ -57,12 +57,9 @@ func (m *Model) systemRows() []systemRow {
 
 	// DNS
 	header("DNS")
-	tld := "test"
+	tld := dns.ConfiguredTLD()
 	dnsEnabled := true
 	if cfg != nil {
-		if cfg.DNS.TLD != "" {
-			tld = cfg.DNS.TLD
-		}
 		dnsEnabled = cfg.DNS.Enabled
 	}
 	info("TLD", tld)

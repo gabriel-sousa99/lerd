@@ -350,6 +350,7 @@ onBeforeUnmount(() => {
             <a class="strip-item" :href="withBase('/getting-started/symfony')"><span class="gl" data-bare data-logo="symfony"></span> Symfony</a>
             <a class="strip-item" :href="withBase('/getting-started/wordpress')"><span class="gl" data-bare data-logo="wordpress"></span> WordPress</a>
             <a class="strip-item" :href="withBase('/getting-started/drupal')"><span class="gl" data-bare data-logo="drupal"></span> Drupal</a>
+            <a class="strip-item" :href="withBase('/getting-started/typo3')"><span class="gl" data-bare data-logo="typo3"></span> TYPO3</a>
             <a class="strip-item" :href="withBase('/getting-started/magento')"><span class="gl" data-bare data-logo="magento"></span> Magento</a>
             <a class="strip-item" :href="withBase('/getting-started/cakephp')"><span class="gl" data-bare data-logo="cake"></span> CakePHP</a>
             <a class="strip-item" :href="withBase('/getting-started/statamic')"><span class="gl" data-bare data-logo="statamic"></span> Statamic</a>
@@ -528,11 +529,11 @@ onBeforeUnmount(() => {
 
       <!-- ============ DEV DIGEST BANNER ============ -->
       <div class="wrap">
-        <a class="digest" :href="withBase('/digest/v1.33.0.html')" target="_blank" rel="noopener">
+        <a class="digest" :href="withBase('/digest/v1.34.0.html')" target="_blank" rel="noopener">
           <span class="digest-pill">NEW</span>
           <span class="digest-body">
-            <span class="digest-title">v1.33.0 dev digest</span>
-            <span class="digest-sub">Every framework's own config file read and written where it lives, a dashboard that creates a project and takes it through setup, and marks and brand colours that ship from the store.</span>
+            <span class="digest-title">v1.34.0 dev digest</span>
+            <span class="digest-sub">NativePHP end to end, a worker declared once instead of once per framework major, and three ways into lerd that are not a terminal.</span>
           </span>
           <span class="digest-cta">Read the digest&nbsp;→</span>
         </a>

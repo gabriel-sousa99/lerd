@@ -5,6 +5,7 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -110,5 +111,43 @@ func TestPhpExtAdd_keepsAnAlreadyDeclaredExtensionWhenTheRebuildFails(t *testing
 	}
 	if !slices.Contains(cfg.GetExtensions(), "leveldb") {
 		t.Error("a failed re-add removed the extension that was already declared and working")
+	}
+}
+
+// Declaring an extension the image already ships makes the build rebuild it
+// generically on top of the base image, which drops the configure flags the
+// base build gave it (ftp lost FTPS that way, #1576). Reject it up front.
+func TestPhpExtAdd_rejectsABundledExtension(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+
+	orig := rebuildFPMImage
+	t.Cleanup(func() { rebuildFPMImage = orig })
+	rebuilt := false
+	rebuildFPMImage = func(string, bool) error { rebuilt = true; return nil }
+
+	cmd := newPhpExtAddCmd()
+	cmd.SetArgs([]string{"ftp"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("adding a bundled extension must fail")
+	}
+	if !strings.Contains(err.Error(), "already ships") {
+		t.Errorf("error should say the image already ships it, got: %v", err)
+	}
+	if rebuilt {
+		t.Error("a rejected add must not rebuild the image")
+	}
+
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if slices.Contains(cfg.GetExtensions(), "ftp") {
+		t.Errorf("a rejected add must not declare the extension: %v", cfg.GetExtensions())
 	}
 }

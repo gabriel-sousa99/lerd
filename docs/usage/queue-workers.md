@@ -11,7 +11,27 @@ Lerd can run framework-defined workers as persistent systemd user services. Work
 | `lerd queue start` | Same as `queue:start` (subcommand form) |
 | `lerd queue stop` | Same as `queue:stop` (subcommand form) |
 
-Works for any framework that defines a `queue` worker: Laravel (`php artisan queue:work`, built-in) and CodeIgniter (`php spark queue:work`, once `codeigniter4/queue` is installed). The `--queue`, `--tries`, and `--timeout` flags are rendered into each framework's own syntax, so `lerd queue:start --queue emails --tries 5` runs the right command either way.
+These commands are generated from the framework definition, so they exist for any framework that defines a `queue` worker: Laravel (`php artisan queue:work`) and CodeIgniter (`php spark queue:work`, once `codeigniter4/queue` is installed). The flags come from the definition too and are rendered into each framework's own syntax, so `lerd queue:start --queue emails --tries 5` runs the right command either way. The same holds for every other worker a framework declares, `schedule`, `reverb`, `horizon` and whatever the store adds next.
+
+### Worker options
+
+A project that runs several queues sets them once rather than on every start. Whatever you pass to a worker's start command is written to `worker_options` in the project's `.lerd.yaml`, and every later start reads it back: the dashboard toggle, the restore `lerd start` performs after a reinstall, and a colleague who clones the repository and runs `lerd link`.
+
+```bash
+lerd queue:start --queue high,default,low --tries 5
+```
+
+```yaml
+# .lerd.yaml
+worker_options:
+  queue:
+    queue: high,default,low
+    tries: "5"
+```
+
+The keys are the placeholders the framework definition declares in the worker's `tune_command`, so Laravel's queue worker offers `queue`, `tries` and `timeout` while CodeIgniter's offers `queue` and `tries`. A value that matches the definition's own default is not stored, which keeps a later store update to that default in play. Values are interpolated into the command the worker's unit runs, so whitespace is refused; a list of queues is comma separated, exactly as the framework expects it.
+
+The dashboard offers the same knobs: a worker whose definition declares options gets a gear next to its toggle, with one field per option prefilled with what the project committed and showing the definition's default as the placeholder. Saving writes `.lerd.yaml` and restarts the worker when it is running, so the new command takes effect without touching the toggle. `lerd_worker` and the MCP worker tool write to the same place; arguments they leave out keep whatever the project already runs. The MCP tool derives its knobs from the definition too rather than naming any of them itself: `worker(action: "list")` reports each worker's `options` with the definition's default and the project's value, and `start` takes them back as `options: ["queue=emails", "tries=5"]`, so a definition that makes another worker tunable reaches an assistant with no new argument.
 
 ---
 
@@ -81,20 +101,24 @@ Workers are defined in framework YAML definitions at `~/.config/lerd/frameworks/
 
 ## Options for `queue:start`
 
+The flags come from the framework's own `tune_command`, one per placeholder, with the defaults read out of the command the definition already runs. For Laravel that is:
+
 | Flag | Default | Description |
 |---|---|---|
 | `--queue` | `default` | Queue name to process |
 | `--tries` | `3` | Max attempts before marking a job as failed |
 | `--timeout` | `60` | Seconds a job may run before timing out |
 
+CodeIgniter takes the queue positionally and has no per-job timeout, so there `queue:start` offers `--queue` and `--tries` only. Run `lerd queue:start --help` to see what your project's framework declares.
+
 ---
 
 ## Redis requirement
 
-If `QUEUE_CONNECTION=redis` is set in the project's `.env`, lerd verifies that `lerd-redis` is running before starting the worker. If it is not, you will see:
+Laravel's queue worker declares that it needs the `redis` service when the project's `.env` sets `QUEUE_CONNECTION=redis`, so lerd checks `lerd-redis` before starting it. If it is not running, you will see:
 
 ```
-queue worker requires Redis (QUEUE_CONNECTION=redis in .env) but lerd-redis is not running
+worker "queue" needs the redis service, which is not running
 Start it first: lerd services start redis
 ```
 

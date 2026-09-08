@@ -92,14 +92,10 @@ export default defineConfig({
   ],
 
   transformPageData(pageData, { siteConfig }) {
-    const canonicalUrl = `${SITE_URL}/${pageData.relativePath.replace(/\.md$/, "").replace(/index$/, "")}`;
-    const description =
-      pageData.frontmatter.description ??
-      pageData.description ??
-      siteConfig.site.description;
-    const title =
-      pageData.frontmatter.title ?? pageData.title ?? siteConfig.site.title;
-    pageData.frontmatter.head ??= [];
+    const canonicalUrl = `${SITE_URL}/${pageData.relativePath.replace(/\.md$/, '').replace(/index$/, '')}`
+    const description = pageData.frontmatter.description ?? pageData.description ?? siteConfig.site.description
+    const title = pageData.frontmatter.title ?? pageData.title ?? siteConfig.site.title
+    pageData.frontmatter.head ??= []
     pageData.frontmatter.head.push(
       ['link', { rel: 'canonical', href: canonicalUrl }],
       ['meta', { name: 'description', content: description }],
@@ -112,42 +108,56 @@ export default defineConfig({
   },
 
   themeConfig: {
-    logo: "/assets/logo.svg",
-    siteTitle: "Lerd",
+    logo: '/assets/logo.svg',
+    siteTitle: 'Lerd',
 
     nav: [
-      { text: "Getting Started", link: "/getting-started/requirements" },
-      { text: "Usage", link: "/usage/sites" },
-      { text: "Features", link: "/features/web-ui" },
-      { text: "Configuration", link: "/configuration" },
-      { text: "Reference", link: "/reference/commands" },
-      { text: "Contributing", link: "/contributing/building" },
-      { text: "Changelog", link: "/changelog" },
+      { text: 'Getting Started', link: '/getting-started/requirements' },
+      { text: 'Usage', link: '/usage/sites' },
+      { text: 'Features', link: '/features/web-ui' },
+      { text: 'Configuration', link: '/configuration' },
+      { text: 'Reference', link: '/reference/commands' },
+      { text: 'Contributing', link: '/contributing/building' },
+      { text: 'Changelog', link: '/changelog' },
     ],
 
     sidebar: {
-      "/getting-started/": [
+      '/getting-started/': [
         {
-          text: "Getting Started",
+          text: 'Start here',
           items: [
             { text: 'Requirements', link: '/getting-started/requirements' },
             { text: 'Installation', link: '/getting-started/installation' },
-            { text: 'Updating from before 1.26', link: '/getting-started/updating-from-pre-1.26' },
-            { text: 'Windows (WSL2, beta)', link: '/getting-started/wsl2' },
-            { text: 'NixOS', link: '/getting-started/nixos' },
             { text: 'Quick Start', link: '/getting-started/quick-start' },
-            { text: 'Comparison', link: '/getting-started/comparison' },
-            { text: 'Laravel Herd for Linux', link: '/getting-started/herd-linux' },
-            { text: 'Laragon for Linux', link: '/getting-started/laragon-linux' },
+            { text: 'Updating from before 1.26', link: '/getting-started/updating-from-pre-1.26' },
           ],
         },
         {
-          text: "Framework walkthroughs",
+          text: 'Platform guides',
+          items: [
+            { text: 'Omarchy', link: '/getting-started/omarchy' },
+            { text: 'NixOS', link: '/getting-started/nixos' },
+            { text: 'Windows (WSL2, beta)', link: '/getting-started/wsl2' },
+          ],
+        },
+        {
+          text: 'Coming from another tool',
+          items: [
+            { text: 'Comparison', link: '/getting-started/comparison' },
+            { text: 'Laravel Herd for Linux', link: '/getting-started/herd-linux' },
+            { text: 'Laragon for Linux', link: '/getting-started/laragon-linux' },
+            { text: 'Laradock alternative', link: '/getting-started/laradock' },
+            { text: 'Laravel Sail alternative', link: '/getting-started/sail' },
+          ],
+        },
+        {
+          text: 'Framework walkthroughs',
           items: [
             { text: 'Laravel', link: '/getting-started/laravel' },
             { text: 'Symfony', link: '/getting-started/symfony' },
             { text: 'WordPress', link: '/getting-started/wordpress' },
             { text: 'Drupal', link: '/getting-started/drupal' },
+            { text: 'TYPO3', link: '/getting-started/typo3' },
             { text: 'CakePHP', link: '/getting-started/cakephp' },
             { text: 'CodeIgniter', link: '/getting-started/codeigniter' },
             { text: 'Statamic', link: '/getting-started/statamic' },
@@ -157,24 +167,22 @@ export default defineConfig({
           ],
         },
         {
-          text: "Add-ons",
+          text: 'Add-ons',
           items: [
-            {
-              text: "Services (MongoDB, phpMyAdmin, …)",
-              link: "/getting-started/services",
-            },
+            { text: 'Services (MongoDB, phpMyAdmin, …)', link: '/getting-started/services' },
+            { text: 'NativePHP (desktop & mobile)', link: '/getting-started/nativephp' },
           ],
         },
       ],
-      "/usage/": [
+      '/usage/': [
         {
-          text: "Lifecycle",
+          text: 'Lifecycle',
           items: [
-            { text: "Start, Stop & Autostart", link: "/usage/lifecycle" },
+            { text: 'Start, Stop & Autostart', link: '/usage/lifecycle' },
           ],
         },
         {
-          text: "Sites & Runtimes",
+          text: 'Sites & Runtimes',
           items: [
             { text: 'Site Management', link: '/usage/sites' },
             { text: 'Domains', link: '/usage/domains' },
@@ -189,7 +197,7 @@ export default defineConfig({
           ],
         },
         {
-          text: "Services & Data",
+          text: 'Services & Data',
           items: [
             { text: 'Services', link: '/usage/services' },
             { text: 'Service updates', link: '/usage/service-updates' },
@@ -200,7 +208,7 @@ export default defineConfig({
           ],
         },
         {
-          text: "Frameworks & Workers",
+          text: 'Frameworks & Workers',
           items: [
             { text: 'Frameworks', link: '/usage/frameworks' },
             { text: 'Framework Workers', link: '/usage/framework-workers' },
@@ -214,7 +222,7 @@ export default defineConfig({
           ],
         },
         {
-          text: "Integrations & Migration",
+          text: 'Integrations & Migration',
           items: [
             { text: 'Stripe', link: '/usage/stripe' },
             { text: 'Sharing Sites', link: '/usage/sharing' },
@@ -224,13 +232,14 @@ export default defineConfig({
           ],
         },
       ],
-      "/features/": [
+      '/features/': [
         {
           text: 'Interfaces',
           items: [
             { text: 'Web UI', link: '/features/web-ui' },
             { text: 'Terminal Dashboard', link: '/features/tui' },
             { text: 'System Tray', link: '/features/system-tray' },
+            { text: 'Omarchy Bar Widget', link: '/features/omarchy-glance' },
             { text: 'AI Integration (MCP)', link: '/features/mcp' },
           ],
         },
@@ -258,64 +267,65 @@ export default defineConfig({
           ],
         },
       ],
-      "/configuration": [
+      '/configuration': [
         {
-          text: "Configuration",
+          text: 'Configuration',
           items: [
-            { text: "Overview", link: "/configuration" },
-            {
-              text: "Per-project (.lerd.yaml)",
-              link: "/configuration#per-project-config-lerdyaml",
-            },
+            { text: 'Overview', link: '/configuration' },
+            { text: 'Per-project (.lerd.yaml)', link: '/configuration#per-project-config-lerd-yaml' },
           ],
         },
       ],
-      "/reference/": [
+      '/reference/': [
         {
-          text: "Reference",
+          text: 'Reference',
           items: [
-            { text: "Command Reference", link: "/reference/commands" },
-            { text: "Configuration", link: "/configuration" },
+            { text: 'Command Reference', link: '/reference/commands' },
+            { text: 'Configuration', link: '/configuration' },
           ],
         },
         {
-          text: "Internals",
+          text: 'Internals',
           items: [
-            { text: "Directory Layout", link: "/reference/directory-layout" },
-            { text: "Architecture", link: "/reference/architecture" },
+            { text: 'Directory Layout', link: '/reference/directory-layout' },
+            { text: 'Architecture', link: '/reference/architecture' },
           ],
         },
         {
-          text: "Help",
-          items: [{ text: "Troubleshooting", link: "/troubleshooting" }],
+          text: 'Help',
+          items: [
+            { text: 'Troubleshooting', link: '/troubleshooting' },
+          ],
         },
       ],
-      "/troubleshooting": [
+      '/troubleshooting': [
         {
-          text: "Reference",
+          text: 'Reference',
           items: [
-            { text: "Command Reference", link: "/reference/commands" },
-            { text: "Configuration", link: "/configuration" },
+            { text: 'Command Reference', link: '/reference/commands' },
+            { text: 'Configuration', link: '/configuration' },
           ],
         },
         {
-          text: "Internals",
+          text: 'Internals',
           items: [
-            { text: "Directory Layout", link: "/reference/directory-layout" },
-            { text: "Architecture", link: "/reference/architecture" },
+            { text: 'Directory Layout', link: '/reference/directory-layout' },
+            { text: 'Architecture', link: '/reference/architecture' },
           ],
         },
         {
-          text: "Help",
-          items: [{ text: "Troubleshooting", link: "/troubleshooting" }],
+          text: 'Help',
+          items: [
+            { text: 'Troubleshooting', link: '/troubleshooting' },
+          ],
         },
       ],
-      "/contributing/": [
+      '/contributing/': [
         {
-          text: "Contributing",
+          text: 'Contributing',
           items: [
-            { text: "Building from Source", link: "/contributing/building" },
-            { text: "Pull Requests", link: "/contributing/pull-requests" },
+            { text: 'Building from Source', link: '/contributing/building' },
+            { text: 'Pull Requests', link: '/contributing/pull-requests' },
           ],
         },
       ],
@@ -333,12 +343,12 @@ export default defineConfig({
     ],
 
     footer: {
-      message: "Released under the MIT License.",
-      copyright: "Lerd",
+      message: 'Released under the MIT License.',
+      copyright: 'Lerd',
     },
 
     search: {
-      provider: "local",
+      provider: 'local',
     },
 
     editLink: {
@@ -346,4 +356,4 @@ export default defineConfig({
       text: 'Edit this page on GitHub',
     },
   },
-});
+})

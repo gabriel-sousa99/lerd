@@ -60,7 +60,7 @@ func realPrefetchImage(image string, emit func(PhaseEvent)) error {
 		emit(PhaseEvent{Phase: "preflight_image_ok", Image: image})
 		return nil
 	}
-	emit(PhaseEvent{Phase: "pulling_image", Image: image})
+	discloseImagePull(image, emit)
 	if err := podman.PullImageWithProgress(image, func(line string) {
 		emit(PhaseEvent{Phase: "pulling_image", Message: line})
 	}); err != nil {
@@ -270,7 +270,7 @@ func realReinstallInstall(name string, spec reinstallSpec, emit func(PhaseEvent)
 		// Pull the pinned image up-front so a missing/unreachable registry
 		// surfaces here as a clear error instead of a 60s WaitReady timeout.
 		if spec.image != "" && !podman.ImageExists(spec.image) {
-			emit(PhaseEvent{Phase: "pulling_image", Image: spec.image})
+			discloseImagePull(spec.image, emit)
 			if err := podman.PullImageWithProgress(spec.image, func(line string) {
 				emit(PhaseEvent{Phase: "pulling_image", Message: line})
 			}); err != nil {

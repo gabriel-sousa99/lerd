@@ -168,6 +168,22 @@ wget -qO- https://raw.githubusercontent.com/gabriel-sousa99/lerd/oracle-oci8-sup
 
 :::
 
+Betas are published as GitHub prereleases, which the plain installer skips, so `--beta` is how you ask for one:
+
+::: code-group
+
+```bash [curl]
+curl -fsSL https://lerd.sh/install.sh | bash -s -- --beta
+```
+
+```bash [wget]
+wget -qO- https://lerd.sh/install.sh | bash -s -- --beta
+```
+
+:::
+
+It works on a first install and alongside `--update`, and it takes the newest release of either kind, so once the stable version overtakes the beta line `--beta` installs the stable one. Running the installer without it on a machine already on a prerelease asks before moving you back to stable, rather than downgrading silently.
+
 ::: warning Running something older than 1.26?
 `lerd update` fails on builds from before the project moved to the lerd-env organisation, with an error about an unexpected release URL. [Updating from a version before 1.26](./updating-from-pre-1.26) gets you across in one step.
 :::
@@ -231,6 +247,7 @@ The same installer powers Linux and macOS. On macOS it will:
 - Download the latest `darwin` binary for your architecture (amd64 / arm64)
 - Install it to `~/.local/bin/lerd` and add that directory to your `PATH`
 - Automatically run `lerd install`, which starts Podman Machine, mkcert, DNS, and nginx
+- Put a **Lerd** app in `~/Applications` (see [Lerd in the app list](#lerd-in-the-app-list))
 
 ::: info Homebrew is only used for Podman
 The installer itself doesn't require Homebrew. It's used only to install the `podman` dependency when it isn't already present, so you can also install Podman by any other means beforehand.
@@ -257,7 +274,21 @@ lerd update
 
 If you installed via Homebrew instead, update with `brew upgrade lerd`. The `lerd install` that finishes an update is applied for you by the first lerd command you run at a terminal afterwards, and running it yourself does no harm.
 
-If you're running a local development build (a `git describe` version like `1.25.0-6-g7d03`), the one-line installer and `--update` detect it and ask before replacing it with a release binary, so an ahead-of-release build isn't overwritten silently. Decline to keep your build, or reinstall one explicitly with `install.sh --local <path>`.
+If you're running a local development build (a `git describe` version like `1.25.0-6-g7d03`), the one-line installer and `--update` detect it and ask before replacing it with a release binary, so an ahead-of-release build isn't overwritten silently. Decline to keep your build, or reinstall one explicitly with `install.sh --local <path>`. A beta is not a development build and is left alone by that check; it has its own prompt, and `--beta` skips it by saying which line you want.
+
+### Lerd in the app list
+
+`lerd install` writes a small **Lerd** app to `~/Applications`, so lerd shows up in Launchpad, Spotlight and Finder alongside everything else. Clicking it starts lerd if it isn't running and then opens the dashboard, which means the environment can be brought up without ever opening a terminal. If lerd is already serving it goes straight to the dashboard.
+
+A start takes the better part of a minute, so the app shows a native progress window while it runs, naming each unit as it comes up and counting them off against the total. It waits for the start to actually finish rather than for nginx to answer, because the vhost is up well before the databases behind it and a dashboard opened at that moment shows sites returning 500. Nothing about it is a browser window: it is a real application, built at install time with the `osacompile` that ships with macOS.
+
+It is a launcher, not a second copy of lerd: it drives the same start the CLI does and hands the opening to `lerd dashboard`. Every `lerd install` and `lerd update` rebuilds it so it keeps pointing at the binary that is live, and `lerd uninstall` removes it.
+
+On **Linux** the same thing is a desktop entry at `~/.local/share/applications/lerd.desktop`, listed as **Lerd** in whatever your desktop uses to show applications. If you also have the Lerd desktop app, which ships an entry under that name of its own, this one is listed as **Start Lerd** instead so you are not looking at two identical icons. The app's entry is left alone rather than replaced, because it owns the `lerd://` association that lerd uses to open it. The name is decided when the entry is written, so installing the app afterwards is worth a `lerd install` to settle it. Clicking it behaves the same way: the environment starts if it is down, and then the Lerd desktop app opens if you have it installed, or your browser on the dashboard if you do not. Progress is reported through a desktop notification that rewrites itself as each unit comes up, which uses the same session bus lerd already posts its other notifications on rather than a dialog tool your desktop may not ship. A session with no notification daemon still starts normally, just without the progress popup.
+
+::: tip Not showing up in Spotlight?
+The install registers the app with LaunchServices, so it appears in Launchpad and Finder immediately. Spotlight is a separate index, and if nothing under your home directory is searchable (check with `mdls ~/Applications/Lerd.app`, which prints nothing when the volume has no index) the fix is to rebuild it with `sudo mdutil -E /`, not to reinstall lerd.
+:::
 
 ### Uninstall
 

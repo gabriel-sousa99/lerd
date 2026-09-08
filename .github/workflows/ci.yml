@@ -27,6 +27,9 @@ jobs:
       - name: Build UI
         run: make build-ui
 
+      - name: Test UI
+        run: make test-ui
+
       - name: Install tray build dependencies
         run: |
           sudo apt-get update

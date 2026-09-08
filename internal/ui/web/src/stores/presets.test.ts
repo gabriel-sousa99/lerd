@@ -115,7 +115,11 @@ describe('presets store', () => {
       '{"phase":"starting_unit"}\n',
       '{"phase":"done","name":"mysql"}\n'
     ]);
-    globalThis.fetch = vi.fn(async () => new Response(body, { status: 200 })) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(async (url: unknown) =>
+      String(url).includes('/api/image-estimate')
+        ? new Response(JSON.stringify({ image: 'mysql:8', bytes: 0, local: true }), { status: 200 })
+        : new Response(body, { status: 200 })
+    ) as unknown as typeof fetch;
     const { installPreset } = await import('./presets');
     const r = await installPreset({ name: 'mysql', site_count: 0 } as never);
     expect(r.ok).toBe(true);
@@ -124,11 +128,38 @@ describe('presets store', () => {
 
   it('installPreset surfaces error from final event', async () => {
     const body = readerFrom(['{"phase":"error","error":"boom"}\n']);
-    globalThis.fetch = vi.fn(async () => new Response(body, { status: 200 })) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(async (url: unknown) =>
+      String(url).includes('/api/image-estimate')
+        ? new Response(JSON.stringify({ image: 'bad:1', bytes: 0, local: true }), { status: 200 })
+        : new Response(body, { status: 200 })
+    ) as unknown as typeof fetch;
     const { installPreset } = await import('./presets');
     const r = await installPreset({ name: 'bad' } as never);
     expect(r.ok).toBe(false);
     expect(r.error).toBe('boom');
+  });
+
+  // Declining the download must abort before the install POST, and must not
+  // leave the card stuck on its spinner.
+  it('installPreset does not install when the download is declined', async () => {
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify({ image: 'mysql:8', bytes: 1024, local: false }), {
+        status: 200
+      });
+    }) as unknown as typeof fetch;
+    const { installPreset, presets } = await import('./presets');
+    const { downloadConfirm, answerDownloadConfirm } = await import('./downloadConfirm');
+    presets.set([{ name: 'mysql' } as never]);
+
+    const pending = installPreset({ name: 'mysql' } as never);
+    await vi.waitFor(() => expect(get(downloadConfirm).open).toBe(true));
+    answerDownloadConfirm(false);
+
+    expect((await pending).ok).toBe(false);
+    expect(urls.every((u) => u.includes('/api/image-estimate'))).toBe(true);
+    expect(get(presets)[0].installing).toBe(false);
   });
 
   it('installPreset short-circuits when missing_deps is non-empty', async () => {

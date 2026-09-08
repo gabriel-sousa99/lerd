@@ -7,11 +7,11 @@
   import MobileBackBar from '$components/MobileBackBar.svelte';
   import { tab, routeRest } from '$stores/route';
   import { loadVersion } from '$stores/version';
-  import { loadAccessMode } from '$stores/accessMode';
-  import { loadStatus } from '$stores/status';
+  import { loadAccessMode, accessMode } from '$stores/accessMode';
+  import { loadStatus, statusLoaded, allCoreRunning } from '$stores/status';
   import { loadPhpVersions } from '$stores/phpVersions';
   import { loadNodeVersions } from '$stores/nodeVersions';
-  import { loadAutostart } from '$stores/autostart';
+  import { loadAutostart, startOnDashboardOpen } from '$stores/autostart';
   import { loadIdle } from '$stores/idle';
   import { loadSites } from '$stores/sites';
   import { loadServices } from '$stores/services';
@@ -23,6 +23,8 @@
   import { watchActiveRun } from '$stores/wizard';
   import { connectWs, disconnectWs } from '$lib/ws';
   import { initDashboardRoute } from '$stores/dashboard';
+  import { autoStartOnce } from '$stores/lerdLifecycle';
+  import { handOverToVhost } from '$lib/vhost';
   import '$stores/activity';
   import { mobileView } from '$stores/mobileView';
   import ModalHost from './modals/ModalHost.svelte';
@@ -72,11 +74,24 @@
     initDashboardRoute();
     initNotify();
     window.addEventListener('pagehide', handlePageHide);
+    // 127.0.0.1:7073 is the fallback for a stopped stack. Once the vhost is
+    // back, move onto it rather than settle on a second origin that would ask
+    // for its own notification permission and push subscription.
+    void handOverToVhost();
   });
 
   onDestroy(() => {
     window.removeEventListener('pagehide', handlePageHide);
     disconnectWs();
+  });
+
+  // With "start when the dashboard opens" on, finding the stack down is what
+  // brings it up, so opening the app is enough and no terminal is needed.
+  // autoStartOnce keeps this to a single attempt per page load.
+  $effect(() => {
+    if ($startOnDashboardOpen && $accessMode.localControl && $statusLoaded && !$allCoreRunning) {
+      void autoStartOnce();
+    }
   });
 
   // On mobile, show the detail pane once an item is selected (routeRest non-empty).

@@ -1,6 +1,6 @@
 # Importing from Laravel Sail
 
-`lerd import sail` migrates a Laravel Sail project into lerd in one command, database and S3/MinIO storage included.
+`lerd import sail` migrates a Laravel Sail project into lerd in one command, database and S3/MinIO storage included. For the wider picture, why you would move and what changes day to day, see the [Laravel Sail alternative](../getting-started/sail.md) guide.
 
 ```bash
 cd ~/Projects/myapp   # the Sail project root

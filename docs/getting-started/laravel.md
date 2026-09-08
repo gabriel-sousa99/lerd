@@ -26,7 +26,7 @@ laravel new myapp
 ```bash [lerd new]
 cd ~/Lerd
 lerd new myapp
-# runs: composer create-project laravel/laravel ./myapp
+# runs: composer create-project laravel/laravel:^13.0 ./myapp
 ```
 
 ```bash [existing repo]

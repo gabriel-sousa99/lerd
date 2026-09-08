@@ -30,7 +30,7 @@ func TestWriteWorkerUnitFileQuotesSitePathWithSpaces(t *testing.T) {
 			if _, err := writeWorkerUnitFile(
 				tc.unitName, "Queue Worker", "spatnik",
 				sitePath, "8.5", "php artisan queue:work",
-				"always", tc.schedule, "lerd-php85-fpm", false,
+				"always", tc.schedule, "lerd-php85-fpm", "", false,
 			); err != nil {
 				t.Fatalf("writeWorkerUnitFile: %v", err)
 			}

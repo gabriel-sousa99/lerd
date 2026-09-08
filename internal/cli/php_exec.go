@@ -70,19 +70,10 @@ func phpVersionForDir(dir string) (string, error) {
 	return phpDet.VersionForDir(dir)
 }
 
-// fpmContainerForDir resolves the FPM container an exec in dir should target:
-// the per-site container for custom-FPM sites, otherwise the shared
-// lerd-php<version>-fpm container. It resolves the site the same way version
-// detection does, so a worktree beside its project reaches the parent's custom
-// image rather than falling through to the shared container its vhost never uses.
+// fpmContainerForDir resolves the FPM container an exec in dir should target.
+// The rules live in internal/php so the CLI and the MCP server cannot drift.
 func fpmContainerForDir(dir, version string) string {
-	if _, parent, ok := phpDet.WorktreeRootFor(dir); ok {
-		return podman.FPMContainerName(*parent, version)
-	}
-	if site, _ := config.FindSiteByPath(phpDet.SiteRootFor(dir)); site != nil {
-		return podman.FPMContainerName(*site, version)
-	}
-	return "lerd-php" + strings.ReplaceAll(version, ".", "") + "-fpm"
+	return phpDet.FPMContainerForDir(dir, version)
 }
 
 // debugSiteEnvArgs returns the LERD_SITE exec flag for a CLI run in dir, so the
@@ -124,6 +115,11 @@ func RunPHPCaptureEnv(cwd string, args []string, extraEnv []string) (int, error)
 // framework supports, since the empty parent directory would otherwise resolve
 // to the machine default and break composer's platform check.
 func RunPHPVersionCaptureEnv(cwd, version string, args []string, extraEnv []string) (int, error) {
+	// Some console commands cannot work in the container at all, and the
+	// framework says which. Checked before anything starts a container for them.
+	if code, took, err := runDeclaredHostCommand(cwd, args, extraEnv); took {
+		return code, err
+	}
 	recordCwdActivity(cwd) // keep the site awake under idle-suspend while you work in the terminal
 	// The CLI SAPI ignores a project's .user.ini, so a framework declaring
 	// php.cli_ini gets it as -d on every PHP process lerd starts for it.

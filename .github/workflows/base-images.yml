@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+        php: ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"]
         # amd64 only. Oracle publishes no linux.arm64 Instant Client for 21.x
         # (19.x is the newest ARM build), so oci8 cannot link on aarch64 —
         # every arm64 cell failed with "skipping incompatible libclntsh.so".
@@ -62,10 +62,15 @@ jobs:
         run: |
           python3 - "${{ matrix.php }}" <<'EOF'
           import sys
+          # Prereleases have no plain <version>-fpm-alpine tag until GA, so they
+          # build FROM the -rc tag. Mirrors config.UpstreamPHPTag; drop the
+          # version from PRERELEASE on release day.
+          PRERELEASE = {'8.6'}
           version = sys.argv[1]
+          tag = version + '-rc' if version in PRERELEASE else version
           with open('internal/podman/quadlets/lerd-php-fpm.Containerfile') as f:
               content = f.read()
-          content = content.replace('{{.Version}}', version)
+          content = content.replace('{{.Version}}', tag)
           content = content.replace('{{.CustomExtensions}}', '')
           content = content.replace('{{.CustomExtensionsRuntime}}', '')
           content = content.replace('{{.CustomPackages}}', '')
@@ -132,6 +137,13 @@ jobs:
           fi
           docker run --rm "$IMG" php -r 'exit(count(PDO::getAvailableDrivers()) >= 3 ? 0 : 1);'
           docker run --rm "$IMG" composer --version >/dev/null
+          # ext-ftp loads happily without FTPS, so `php -m` cannot see #1576.
+          # Only a built-feature probe can: ftp_ssl_connect is the whole point
+          # of building ftp against OpenSSL.
+          if ! docker run --rm "$IMG" php -r 'exit(function_exists("ftp_ssl_connect") ? 0 : 1);'; then
+            echo "::error::PHP ${{ matrix.php }} built ext-ftp without OpenSSL (ftp_ssl_connect missing)"
+            exit 1
+          fi
 
       - name: Set up Go
         if: steps.check.outputs.exists != 'true'
@@ -164,7 +176,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+        php: ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"]
 
     steps:
       - uses: actions/checkout@v4
@@ -320,6 +332,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Stable only: a prerelease is newer than these release tags, so no
+        # binary they built ever asks for its base image.
         php: ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
         # amd64 only, same reason as the main matrix: Oracle ships no
         # linux.arm64 Instant Client for 21.x, so oci8 cannot link on aarch64.

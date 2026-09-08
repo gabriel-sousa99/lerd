@@ -13,6 +13,7 @@ export interface Command {
   confirm?: boolean;
   icon?: string;
   cwd?: string;
+  pinned?: boolean;
 }
 
 // Maps a command's declared icon name to an SVG path. Shared by the commands
@@ -40,6 +41,18 @@ export async function loadCommands(domain: string, branch = ''): Promise<Command
   const q = branch ? `?branch=${encodeURIComponent(branch)}` : '';
   const data = await apiJson<{ commands?: Command[] }>(path + q);
   return data.commands ?? [];
+}
+
+// setCommandPinned toggles whether a command draws its own button on the site's
+// control row. The server caps how many can be pinned and answers with an error
+// when the cap is reached, which the caller surfaces as a toast.
+export async function setCommandPinned(domain: string, name: string, on: boolean): Promise<{ ok: boolean; error?: string }> {
+  const path = `/api/sites/${encodeURIComponent(domain)}/commands/${encodeURIComponent(name)}/pin?on=${on ? 1 : 0}`;
+  const res = await apiFetch(path, { method: 'POST' });
+  if (!res.ok) return { ok: false, error: `${res.status} ${res.statusText}` };
+  const payload = await res.json().catch(() => ({}));
+  if (payload?.error) return { ok: false, error: String(payload.error) };
+  return { ok: true };
 }
 
 export interface RunCallbacks {

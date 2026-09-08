@@ -131,7 +131,7 @@ func (m *Model) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.closePicker()
 		return m, nil
-	case "enter", " ":
+	case "enter", "space":
 		return m, m.applyPicker()
 	case "up", "k":
 		m.movePickerCursor(-1)

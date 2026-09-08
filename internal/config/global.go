@@ -197,6 +197,11 @@ type GlobalConfig struct {
 		// every existing install — users who never touch the toggle
 		// see no change.
 		Disabled bool `yaml:"disabled,omitempty" mapstructure:"disabled"`
+		// OnDashboardOpen brings the stack up when the dashboard is opened on a
+		// stopped lerd, so a browser or the desktop app is enough to start it
+		// and no terminal is needed. Opt-in: the zero value leaves the start to
+		// the button on the dashboard's own "core services down" banner.
+		OnDashboardOpen bool `yaml:"on_dashboard_open,omitempty" mapstructure:"on_dashboard_open"`
 	} `yaml:"autostart,omitempty" mapstructure:"autostart"`
 	Shims struct {
 		// PathDisabled stops lerd from writing its bin dir (the php/composer/
@@ -300,6 +305,10 @@ type GlobalConfig struct {
 		// zero value keeps the theme-adaptive icon; toggled via `lerd tray icon`
 		// and the tray menu.
 		HighContrastIcon bool `yaml:"high_contrast_icon,omitempty" mapstructure:"high_contrast_icon"`
+		// Disabled keeps the tray applet out of start and install, for desktops
+		// that already show lerd's state elsewhere or have no tray host at all.
+		// Inverted so the zero value keeps the tray, as every install had it.
+		Disabled bool `yaml:"disabled,omitempty" mapstructure:"disabled"`
 	} `yaml:"tray,omitempty" mapstructure:"tray"`
 	HostProxy struct {
 		// Disabled refuses to set up or start any host-proxy dev-server unit,
@@ -413,6 +422,25 @@ func (c *GlobalConfig) WorkerExecMode() string {
 // predicate the install wizard, `lerd secure`, and the cert layer all share.
 func (c *GlobalConfig) DNSManaged() bool {
 	return c == nil || c.DNS.Enabled
+}
+
+// NginxPorts returns the host ports nginx should publish, falling back to the
+// defaults when the config is unreadable or names no port. Every caller that
+// binds, probes or reports those ports reads them here, so the unit and the
+// checks against it can't drift apart.
+func NginxPorts() (httpPort, httpsPort int) {
+	httpPort, httpsPort = 80, 443
+	cfg, err := LoadGlobal()
+	if err != nil || cfg == nil {
+		return httpPort, httpsPort
+	}
+	if cfg.Nginx.HTTPPort > 0 {
+		httpPort = cfg.Nginx.HTTPPort
+	}
+	if cfg.Nginx.HTTPSPort > 0 {
+		httpsPort = cfg.Nginx.HTTPSPort
+	}
+	return httpPort, httpsPort
 }
 
 func defaultConfig() *GlobalConfig {
@@ -536,6 +564,11 @@ func ServiceEntryOrphaned(name string) bool {
 	return !IsDefaultPreset(name) && !CustomServiceExists(name)
 }
 
+// XdebugClientPort is the port Xdebug connects back to on the host, written into
+// every PHP image's ini by the image build. It is reserved against every host
+// port lerd hands out, since the debugger and the IDE have to meet there.
+const XdebugClientPort = 9003
+
 // ReservedHostPorts returns every host port a lerd service may bind: each
 // configured service entry's effective ports (HostPorts), every bundled preset's
 // default ports (including optional presets not in the default set), and every
@@ -547,6 +580,10 @@ func ServiceEntryOrphaned(name string) bool {
 // and customs.
 func ReservedHostPorts() map[int]bool {
 	reserved := map[int]bool{}
+	// The IDE listens on the Xdebug port, so no container may publish it: one
+	// that did would answer the debugger's connect-back itself and the IDE would
+	// simply never see a session (#1555).
+	reserved[XdebugClientPort] = true
 	cfg, _ := LoadGlobal()
 	add := func(n int) {
 		if n > 0 {
@@ -1220,6 +1257,17 @@ func (c *GlobalConfig) IsHighContrastTrayIcon() bool {
 // SaveGlobal; the tray re-reads it on every poll.
 func (c *GlobalConfig) SetHighContrastTrayIcon(enabled bool) {
 	c.Tray.HighContrastIcon = enabled
+}
+
+// IsTrayEnabled reports whether lerd should run the tray applet at all. Stored
+// inverted, so a config that never mentions the tray keeps it.
+func (c *GlobalConfig) IsTrayEnabled() bool {
+	return c == nil || !c.Tray.Disabled
+}
+
+// SetTrayEnabled turns the tray applet on or off. Persist via SaveGlobal.
+func (c *GlobalConfig) SetTrayEnabled(enabled bool) {
+	c.Tray.Disabled = !enabled
 }
 
 // NodeManagedPref returns the persisted Node-management choice. set is false

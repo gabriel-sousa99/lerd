@@ -12,18 +12,18 @@ import (
 // The declared set is what drives a version's image content, so its fingerprint
 // must move when the set does and stay put when it doesn't.
 func TestCustomSetHash_tracksTheDeclaredSet(t *testing.T) {
-	base := customSetHash([]string{"mongodb"}, map[string][]string{"mongodb": {"openssl-dev"}}, []string{"chromium"})
+	base := customSetHash("8.5", []string{"ssh2"}, map[string][]string{"ssh2": {"libssh2-dev"}}, []string{"chromium"})
 
-	if got := customSetHash([]string{"mongodb"}, map[string][]string{"mongodb": {"openssl-dev"}}, []string{"chromium"}); got != base {
+	if got := customSetHash("8.5", []string{"ssh2"}, map[string][]string{"ssh2": {"libssh2-dev"}}, []string{"chromium"}); got != base {
 		t.Error("the same declared set produced a different hash")
 	}
 	for _, tc := range []struct {
 		name string
 		hash string
 	}{
-		{"added extension", customSetHash([]string{"mongodb", "imagick"}, map[string][]string{"mongodb": {"openssl-dev"}}, []string{"chromium"})},
-		{"added package", customSetHash([]string{"mongodb"}, map[string][]string{"mongodb": {"openssl-dev"}}, []string{"chromium", "jq"})},
-		{"changed apk deps", customSetHash([]string{"mongodb"}, map[string][]string{"mongodb": {"krb5-dev"}}, []string{"chromium"})},
+		{"added extension", customSetHash("8.5", []string{"ssh2", "yaml"}, map[string][]string{"ssh2": {"libssh2-dev"}}, []string{"chromium"})},
+		{"added package", customSetHash("8.5", []string{"ssh2"}, map[string][]string{"ssh2": {"libssh2-dev"}}, []string{"chromium", "jq"})},
+		{"changed apk deps", customSetHash("8.5", []string{"ssh2"}, map[string][]string{"ssh2": {"krb5-dev"}}, []string{"chromium"})},
 	} {
 		if tc.hash == base {
 			t.Errorf("%s did not drift the hash", tc.name)
@@ -34,8 +34,8 @@ func TestCustomSetHash_tracksTheDeclaredSet(t *testing.T) {
 // The set is a set: the order the user happened to add entries in must not
 // rebuild every image.
 func TestCustomSetHash_ignoresDeclarationOrder(t *testing.T) {
-	a := customSetHash([]string{"mongodb", "imagick"}, nil, []string{"chromium", "jq"})
-	b := customSetHash([]string{"imagick", "mongodb"}, nil, []string{"jq", "chromium"})
+	a := customSetHash("8.5", []string{"ssh2", "yaml"}, nil, []string{"chromium", "jq"})
+	b := customSetHash("8.5", []string{"yaml", "ssh2"}, nil, []string{"jq", "chromium"})
 	if a != b {
 		t.Error("declaration order changed the hash, which would rebuild images for nothing")
 	}
@@ -45,8 +45,27 @@ func TestCustomSetHash_ignoresDeclarationOrder(t *testing.T) {
 // label existed carry no label, which reads back as "": a user with no custom
 // extensions must not have every image rebuilt on upgrade for nothing.
 func TestCustomSetHash_emptySetIsEmpty(t *testing.T) {
-	if got := customSetHash(nil, nil, nil); got != "" {
+	if got := customSetHash("8.5", nil, nil, nil); got != "" {
 		t.Errorf("customSetHash(empty) = %q, want empty so unlabelled images still match", got)
+	}
+}
+
+// The build skips a declared extension the image already ships, so it must not
+// fingerprint the image either. An install that declared ftp before #1576 keeps
+// the label it was built with, so dropping the name from the fingerprint is what
+// makes that image read as stale once and rebuild onto the base image's own ftp.
+func TestCustomSetHash_ignoresBundledExtensions(t *testing.T) {
+	if got := customSetHash("8.5", []string{"ftp"}, map[string][]string{"ftp": {"openssl-dev"}}, nil); got != "" {
+		t.Errorf("a set of nothing but bundled extensions must fingerprint as empty, got %q", got)
+	}
+	withBundled := customSetHash("8.5", []string{"ftp", "yaml"}, nil, nil)
+	withoutBundled := customSetHash("8.5", []string{"yaml"}, nil, nil)
+	if withBundled != withoutBundled {
+		t.Error("a bundled extension alongside a custom one changed the fingerprint, so the image tracks something it never builds")
+	}
+	// The version gate still holds: 8.1's image has no ext/random to preserve.
+	if customSetHash("8.1", []string{"random"}, nil, nil) == "" {
+		t.Error("random is a real custom extension on 8.1 and must still fingerprint the image")
 	}
 }
 

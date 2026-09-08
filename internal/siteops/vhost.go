@@ -74,32 +74,47 @@ func RegenerateSiteVhost(site *config.Site, oldPrimary string) error {
 }
 
 // MoveCustomNginxConfig follows a site's hand-authored nginx overrides across a
-// primary-domain rename. The main snippet lives at custom.d/{primary}.conf and
-// each worktree's at custom.d/{branch}.{primary}.conf; the generated vhosts
-// include them by name, so without this they are orphaned and the renamed site
-// (and its worktrees) silently lose their custom config. Timestamped backups in
-// custom.d.bkp/ are keyed the same way and moved too so the UI restore dropdown
-// keeps working. Missing files are not an error; renames far outnumber edits.
+// primary-domain rename. Each scope's main snippet lives at custom.d/{primary}
+// plus the scope suffix and each worktree's at custom.d/{branch}.{primary}
+// plus it; the generated vhosts include them by name, so without this they are
+// orphaned and the renamed site (and its worktrees) silently lose their custom
+// config. Timestamped backups in custom.d.bkp/ are keyed the same way and moved
+// too so the UI restore dropdown keeps working. Missing files are not an error;
+// renames far outnumber edits.
 func MoveCustomNginxConfig(oldPrimary, newPrimary string) error {
 	if oldPrimary == newPrimary {
 		return nil
 	}
+	var firstErr error
+	for _, scope := range nginxScopes {
+		if err := moveCustomNginxScope(oldPrimary, newPrimary, scope.suffix()); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// moveCustomNginxScope moves one scope's live override and backups. The suffix
+// is the scope's filename tail (".conf" or ".location.conf"); the two never
+// collide because no name ending in ".location.conf" also ends in ".conf"
+// preceded by the primary domain.
+func moveCustomNginxScope(oldPrimary, newPrimary, suffix string) error {
 	live := config.NginxCustomD()
 	// The main override is keyed solely by primary domain, so any file already
 	// at the new name can only be a stale orphan from a prior rename (active
 	// sites cannot share a primary), hence clobber=true.
 	if err := moveFile(
-		filepath.Join(live, oldPrimary+".conf"),
-		filepath.Join(live, newPrimary+".conf"),
+		filepath.Join(live, oldPrimary+suffix),
+		filepath.Join(live, newPrimary+suffix),
 		true,
 	); err != nil {
 		return err
 	}
 	var firstErr error
-	// Worktree overrides ({branch}.{oldPrimary}.conf) must rewrite the primary
+	// Worktree overrides ({branch}.{oldPrimary}{suffix}) must rewrite the primary
 	// suffix while preserving the branch prefix, else the renamed worktree loses
 	// its config and re-inherits the main one on the next daemon resync.
-	wtSuffix := "." + oldPrimary + ".conf"
+	wtSuffix := "." + oldPrimary + suffix
 	if liveEntries, err := os.ReadDir(live); err == nil {
 		for _, e := range liveEntries {
 			name := e.Name()
@@ -115,7 +130,7 @@ func MoveCustomNginxConfig(oldPrimary, newPrimary string) error {
 			}
 			if err := moveFile(
 				filepath.Join(live, name),
-				filepath.Join(live, branch+"."+newPrimary+".conf"),
+				filepath.Join(live, branch+"."+newPrimary+suffix),
 				true,
 			); err != nil && firstErr == nil {
 				firstErr = err
@@ -133,11 +148,11 @@ func MoveCustomNginxConfig(oldPrimary, newPrimary string) error {
 		}
 		return err
 	}
-	// Move both main ({oldPrimary}.conf.bkp.*) and worktree
-	// ({branch}.{oldPrimary}.conf.bkp.*) backups, never clobbering so a
+	// Move both main ({oldPrimary}{suffix}.bkp.*) and worktree
+	// ({branch}.{oldPrimary}{suffix}.bkp.*) backups, never clobbering so a
 	// same-second collision can't destroy recoverable history.
-	mainPrefix := oldPrimary + ".conf.bkp."
-	wtMarker := "." + oldPrimary + ".conf.bkp."
+	mainPrefix := oldPrimary + suffix + ".bkp."
+	wtMarker := "." + oldPrimary + suffix + ".bkp."
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -146,7 +161,7 @@ func MoveCustomNginxConfig(oldPrimary, newPrimary string) error {
 		var newName string
 		switch {
 		case strings.HasPrefix(name, mainPrefix):
-			newName = newPrimary + ".conf.bkp." + strings.TrimPrefix(name, mainPrefix)
+			newName = newPrimary + suffix + ".bkp." + strings.TrimPrefix(name, mainPrefix)
 		case strings.Contains(name, wtMarker):
 			idx := strings.Index(name, wtMarker)
 			if idx <= 0 {
@@ -155,7 +170,7 @@ func MoveCustomNginxConfig(oldPrimary, newPrimary string) error {
 			if _, err := config.FindSiteByDomain(name[:idx] + "." + oldPrimary); err == nil {
 				continue // sibling site's backup, not our worktree's
 			}
-			newName = name[:idx] + "." + newPrimary + ".conf.bkp." + name[idx+len(wtMarker):]
+			newName = name[:idx] + "." + newPrimary + suffix + ".bkp." + name[idx+len(wtMarker):]
 		default:
 			continue
 		}

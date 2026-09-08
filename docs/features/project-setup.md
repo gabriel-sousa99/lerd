@@ -118,7 +118,7 @@ This directory isn't linked to lerd. Link it now? [Y/n]
 
 Accepting runs `lerd link` (which cascades into `lerd init` when there is no `.lerd.yaml`), then the original command continues, so a single command is enough rather than a link, init, retry sequence. In a non-interactive context (a script or CI) the command returns a single clear error and does nothing else.
 
-See [Configuration](../configuration.md#per-project-config-lerdyaml) for the full field reference including inline service definitions and custom frameworks.
+See [Configuration](../configuration.md#per-project-config-lerd-yaml) for the full field reference including inline service definitions and custom frameworks.
 
 ---
 

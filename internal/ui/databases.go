@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dbview"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
-	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
 // dbEngineResponse is one database engine with the databases it holds.
@@ -48,130 +47,26 @@ type dbEntryResponse struct {
 
 // testingDBSuffix names the paired testing database lerd creates alongside every
 // project database.
-const testingDBSuffix = "_testing"
+const testingDBSuffix = dbview.TestingSuffix
 
-// dbOwner is the site a database belongs to: the parent site's domain, plus the
-// worktree branch when the database is that branch's isolated one. The branch is
-// what turns "astrolov_staging" into staging.astrolov.test in the UI.
-type dbOwner struct {
-	domain string
-	branch string
-}
+// databaseSiteIndexes maps each engine to the databases owned in it. Both this
+// surface and the TUI's Databases pane read the same index from dbview.
+func databaseSiteIndexes() map[string]map[string]dbview.Owner { return dbview.SiteIndexes() }
 
-// databaseSiteIndexes maps each engine to the databases owned in it, keyed by
-// database name, resolved through each site's framework declaration and from
-// the isolated databases worktrees have registered. A "<db>_testing" database
-// maps to the same owner as "<db>", so both link to the same place. When a group
-// shares one database across a main site and its secondaries, the database
-// belongs to the group main, so a secondary that merely shares it never wins
-// over the main.
-//
-// Every engine is answered from one pass over the sites: resolving a site's
-// targets detects its framework, which is far too much work to repeat per
-// engine on every poll of the Databases tab.
-func databaseSiteIndexes() map[string]map[string]dbOwner {
-	reg, err := config.LoadSites()
-	if err != nil {
-		return nil
-	}
-	byService := map[string]map[string]dbOwner{}
-	idxFor := func(service string) map[string]dbOwner {
-		if byService[service] == nil {
-			byService[service] = map[string]dbOwner{}
-		}
-		return byService[service]
-	}
-	// authoritative[db] is true once db is claimed by a site that owns it rather
-	// than a secondary sharing the group's database.
-	authoritative := map[string]map[string]bool{}
-	claim := func(service, db string, owner dbOwner, owns bool) {
-		idx := idxFor(service)
-		if authoritative[service] == nil {
-			authoritative[service] = map[string]bool{}
-		}
-		if _, seen := idx[db]; !seen || (!authoritative[service][db] && owns) {
-			idx[db] = owner
-			authoritative[service][db] = owns
-		}
-	}
-	domains := map[string]string{}
-	for _, s := range reg.Sites {
-		if s.Ignored {
-			continue
-		}
-		domains[s.Name] = s.PrimaryDomain()
-		owns := !(s.IsGroupSecondary() && s.GroupSharedDB)
-		owner := dbOwner{domain: s.PrimaryDomain()}
-		for _, t := range config.DBTargetsFor(s.Path) {
-			if t.Database == "" {
-				continue
-			}
-			claim(t.Service, t.Database, owner, owns)
-			claim(t.Service, t.Database+testingDBSuffix, owner, owns)
-		}
-	}
-	entries, err := config.LoadWorktreeDBRegistry()
-	if err != nil {
-		return byService
-	}
-	for _, e := range entries {
-		domain := domains[e.Site]
-		if e.DBName == "" || domain == "" {
-			continue
-		}
-		owner := dbOwner{domain: domain, branch: e.Branch}
-		claim(e.Service, e.DBName, owner, true)
-		claim(e.Service, e.DBName+testingDBSuffix, owner, true)
-	}
-	return byService
-}
+// isDatabaseEngine reports whether a service belongs on the Databases surface.
+func isDatabaseEngine(name string) bool { return dbview.IsEngine(name) }
 
-// isDatabaseEngine reports whether a service belongs on the Databases surface: a
-// family lerd wires as a project database, or any engine whose preset declares
-// databases it can enumerate. The second half is what lets the store publish an
-// engine outside the wired families (an analytics column store, say) and have it
-// appear with the operations it declares.
-func isDatabaseEngine(name string) bool {
-	return config.IsDBServiceName(name) || serviceops.DeclaresDatabases(name)
-}
-
-// installedDBEngines returns the installed database-engine service names, both
-// default-stack (mysql, postgres) and add-on (mariadb, mongo, postgres-pgvector).
-// sqlite is a file-based engine with no container, so it is excluded.
-func installedDBEngines() []string {
-	seen := map[string]bool{}
-	var names []string
-	add := func(name string) {
-		if name == "sqlite" || seen[name] || !isDatabaseEngine(name) {
-			return
-		}
-		if !serviceops.ServiceInstalled(name) {
-			return
-		}
-		seen[name] = true
-		names = append(names, name)
-	}
-	for _, name := range siteinfo.KnownServices() {
-		add(name)
-	}
-	if customs, err := config.ListCustomServices(); err == nil {
-		for _, svc := range customs {
-			add(svc.Name)
-		}
-	}
-	sort.Strings(names)
-	return names
-}
+// installedDBEngines returns the installed database-engine service names.
+func installedDBEngines() []string { return dbview.InstalledEngines() }
 
 // databaseEngine builds one engine's response, introspecting its databases and
 // snapshots only when the container is running.
-func databaseEngine(name string, siteIndex map[string]dbOwner) dbEngineResponse {
+func databaseEngine(name string, siteIndex map[string]dbview.Owner) dbEngineResponse {
 	base := buildServiceResponse(name)
-	family := config.FamilyOfName(name)
-	snapOps := serviceops.SnapshotSupported(name, false)
+	view := dbview.Load(name, siteIndex)
 	eng := dbEngineResponse{
 		Service:          name,
-		Family:           family,
+		Family:           view.Family,
 		Status:           base.Status,
 		Port:             base.Port,
 		Icon:             base.Icon,
@@ -180,37 +75,22 @@ func databaseEngine(name string, siteIndex map[string]dbOwner) dbEngineResponse 
 		SupportsDrop:     serviceops.DatabaseActionDeclared(name, "drop"),
 		SupportsExport:   serviceops.DatabaseActionDeclared(name, "export"),
 		SupportsImport:   serviceops.DatabaseActionDeclared(name, "import"),
-		SupportsSnapshot: snapOps,
+		SupportsSnapshot: view.SupportsSnapshot,
 		DumpFormat:       serviceops.DatabaseDumpFormat(name),
 		Databases:        []dbEntryResponse{},
+		Error:            view.Error,
 	}
-	if base.Status != "active" {
-		return eng
-	}
-	command := serviceops.IntrospectCommand(name)
-	if command == "" {
-		return eng
-	}
-	dbs, err := serviceops.ListDatabases(name, command)
-	if err != nil {
-		eng.Error = err.Error()
-		return eng
-	}
-	for _, db := range dbs {
-		owner := siteIndex[db.Name]
+	for _, db := range view.Databases {
 		entry := dbEntryResponse{
 			Name:      db.Name,
 			SizeBytes: db.SizeBytes,
-			Site:      owner.domain,
-			Branch:    owner.branch,
+			Site:      db.Owner.Domain,
+			Branch:    db.Owner.Branch,
+			// A database with no snapshots must serialize as a list, not null.
 			Snapshots: []serviceops.Snapshot{},
 		}
-		if snapOps {
-			// Only on a non-empty result: ListSnapshots returns nil when a
-			// database has none, which would send null where the UI expects a list.
-			if snaps, sErr := serviceops.ListSnapshots(name, db.Name, false); sErr == nil && snaps != nil {
-				entry.Snapshots = snaps
-			}
+		if len(db.Snapshots) > 0 {
+			entry.Snapshots = db.Snapshots
 		}
 		eng.Databases = append(eng.Databases, entry)
 	}

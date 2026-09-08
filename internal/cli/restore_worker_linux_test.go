@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -89,5 +91,75 @@ func TestRestoreWorker_worktreePath_writesSuffixedUnit(t *testing.T) {
 	// can tell parent and worktree units apart in journalctl / systemctl.
 	if !strings.Contains(mgr.writes[0].content, "ws/main") {
 		t.Errorf("expected ws/main label in unit content for worktree, got %q", mgr.writes[0].content)
+	}
+}
+
+// TestRestoreWorker_autostartDisabled_doesNotArmBoot pins issue #1531: a worker
+// unit written while autostart is off must not be enabled. Enabling drops the
+// default.target.wants symlink back in, so the next boot starts the worker with
+// no lerd services behind it and systemd restarts it forever.
+func TestRestoreWorker_autostartDisabled_doesNotArmBoot(t *testing.T) {
+	registerSite(t, "ws", "/p/ws")
+	setAutostart(t, false)
+	mgr := &captureWriteMgr{writeChange: true}
+	swapServiceMgr(t, mgr)
+
+	restoreWorker("ws", "/p/ws", "8.4", "horizon", config.FrameworkWorker{Command: "php artisan horizon"})
+
+	if len(mgr.enabled) != 0 {
+		t.Errorf("enabled %v, want nothing enabled while autostart is off", mgr.enabled)
+	}
+}
+
+// The gate must not swallow the normal case: with autostart on, a freshly
+// written worker unit is still armed for login start.
+func TestRestoreWorker_autostartEnabled_armsBoot(t *testing.T) {
+	registerSite(t, "ws", "/p/ws")
+	setAutostart(t, true)
+	mgr := &captureWriteMgr{writeChange: true}
+	swapServiceMgr(t, mgr)
+
+	restoreWorker("ws", "/p/ws", "8.4", "horizon", config.FrameworkWorker{Command: "php artisan horizon"})
+
+	if len(mgr.enabled) != 1 || mgr.enabled[0] != "lerd-horizon-ws" {
+		t.Errorf("enabled %v, want [lerd-horizon-ws]", mgr.enabled)
+	}
+}
+
+// TestRestoreWorker_devServer_keepsTheGeneratedConfig pins issue #1685: the
+// unit `lerd start` rewrites must carry the dev server flags, or the worker
+// comes back on its own port with no generated config and the site's page is
+// refused every asset it asks for.
+func TestRestoreWorker_devServer_keepsTheGeneratedConfig(t *testing.T) {
+	site := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(site, "node_modules", "vite"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"vite.config.js": "export default {};\n",
+		"package.json":   `{"scripts":{"dev":"vite"}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(site, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registerSite(t, "ws", site)
+	mgr := &captureWriteMgr{writeChange: true}
+	swapServiceMgr(t, mgr)
+
+	w := config.FrameworkWorker{Command: "npm run dev", Host: true, Label: "Vite"}
+	restoreWorker("ws", site, "8.4", "vite", w)
+
+	if len(mgr.writes) == 0 {
+		t.Fatal("expected at least one WriteServiceUnitIfChanged call")
+	}
+	content := mgr.writes[0].content
+	for _, want := range []string{"--config node_modules/.lerd/vite.config.mjs", "--port ", "--strictPort"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("expected %q in unit content, got %q", want, content)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(site, "node_modules", ".lerd", "vite.config.mjs")); err != nil {
+		t.Errorf("expected the generated config on disk: %v", err)
 	}
 }

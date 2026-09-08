@@ -231,6 +231,7 @@ func Start(currentVersion string) error {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	mux.HandleFunc("/api/image-estimate", withCORS(handleImageEstimate))
 	mux.HandleFunc("/api/services/presets", withCORS(handleServicePresets))
 	mux.HandleFunc("/api/services/icons", withCORS(handleServiceIcons))
 	mux.HandleFunc("/api/frameworks/marks", withCORS(handleFrameworkMarks))
@@ -305,6 +306,8 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/watcher/start", withCORS(handleWatcherStart))
 	mux.HandleFunc("/api/settings", withCORS(handleSettings))
 	mux.HandleFunc("/api/settings/autostart", withCORS(handleSettingsAutostart))
+	mux.HandleFunc("/api/settings/tray", withCORS(handleSettingsTray))
+	mux.HandleFunc("/api/settings/start-on-open", withCORS(handleSettingsStartOnOpen))
 	mux.HandleFunc("/api/settings/worker-mode", withCORS(handleSettingsWorkerMode))
 	mux.HandleFunc("/api/settings/idle-suspend", withCORS(publishAfter(handleSettingsIdleSuspend, eventbus.KindSites)))
 	mux.HandleFunc("/api/settings/dns-upstream", withCORS(handleSettingsDNSUpstream))
@@ -550,10 +553,58 @@ func terminalDirCandidates(dir string) []terminalCmd {
 	candidates := []terminalCmd{}
 
 	if t := os.Getenv("TERMINAL"); t != "" {
-		candidates = append(candidates, terminalCmd{t, []string{}})
+		candidates = append(candidates, namedTerminal(t, dir))
 	}
 
-	candidates = append(candidates,
+	// A terminal the user picked in System Settings outranks one that merely
+	// happens to be on PATH, so it goes ahead of the list rather than after it.
+	if bundle := macDefaultTerminal(); bundle != "" {
+		candidates = append(candidates, terminalCmd{"open", []string{"-b", bundle, dir}})
+	}
+	// The same on Linux, where the choice lives in the freedesktop launcher, the
+	// distribution's alternatives link, or the desktop's own setting.
+	if t := linuxDefaultTerminal(); t != "" {
+		candidates = append(candidates, namedTerminal(t, dir))
+	}
+
+	candidates = append(candidates, knownTerminals(dir)...)
+
+	if runtime.GOOS == "darwin" {
+		// `open -a Terminal dir` opens a new window at dir without echoing any
+		// command — cleaner than `do script "cd ... && exec $SHELL"` which types
+		// the command visibly into the shell. iTerm2 supports the same via open.
+		// Warp registers public.folder, so it takes the directory the same way
+		// the other two do and needs none of its warp:// URI scheme.
+		if _, err := os.Stat("/Applications/Warp.app"); err == nil {
+			candidates = append(candidates, terminalCmd{"open", []string{"-a", "Warp", dir}})
+		}
+		if _, err := os.Stat("/Applications/iTerm.app"); err == nil {
+			candidates = append(candidates, terminalCmd{"open", []string{"-a", "iTerm", dir}})
+		}
+		candidates = append(candidates, terminalCmd{"open", []string{"-a", "Terminal", dir}})
+	}
+
+	return candidates
+}
+
+// namedTerminal builds the invocation for a terminal named by the user or the
+// desktop. Its own flags are used when lerd knows them, since the generic
+// `-e sh -c` form several emulators do not accept: kitty and ghostty take the
+// program directly, and a chosen kitty would otherwise fail and fall through to
+// whatever happened to be next on PATH.
+func namedTerminal(name, dir string) terminalCmd {
+	for _, t := range knownTerminals(dir) {
+		if t.bin == filepath.Base(name) {
+			return terminalCmd{name, t.args}
+		}
+	}
+	return terminalCmd{name, []string{"-e", "sh", "-c", `cd "$0" && exec "$SHELL"`, dir}}
+}
+
+// knownTerminals is the fallback list, and the source of the flags namedTerminal
+// reuses when the chosen terminal is one of them.
+func knownTerminals(dir string) []terminalCmd {
+	return []terminalCmd{
 		terminalCmd{"kitty", []string{"--directory", dir}},
 		terminalCmd{"foot", []string{"--working-directory", dir}},
 		terminalCmd{"alacritty", []string{"--working-directory", dir}},
@@ -568,19 +619,7 @@ func terminalDirCandidates(dir string) []terminalCmd {
 		terminalCmd{"tilix", []string{"--working-directory", dir}},
 		terminalCmd{"terminator", []string{"--working-directory", dir}},
 		terminalCmd{"xterm", []string{"-e", "sh", "-c", `cd "$0" && exec "$SHELL"`, dir}},
-	)
-
-	if runtime.GOOS == "darwin" {
-		// `open -a Terminal dir` opens a new window at dir without echoing any
-		// command — cleaner than `do script "cd ... && exec $SHELL"` which types
-		// the command visibly into the shell. iTerm2 supports the same via open.
-		if _, err := os.Stat("/Applications/iTerm.app"); err == nil {
-			candidates = append(candidates, terminalCmd{"open", []string{"-a", "iTerm", dir}})
-		}
-		candidates = append(candidates, terminalCmd{"open", []string{"-a", "Terminal", dir}})
 	}
-
-	return candidates
 }
 
 // openTerminalAt opens the user's preferred terminal emulator in dir.
@@ -591,12 +630,7 @@ func openTerminalAt(dir string) error {
 		if err != nil {
 			continue
 		}
-		args := t.args
-		// For $TERMINAL with no preset args, just pass the dir via cd wrapper
-		if t.bin == os.Getenv("TERMINAL") && len(args) == 0 {
-			args = []string{"-e", "sh", "-c", `cd "$0" && exec "$SHELL"`, dir}
-		}
-		cmd := exec.Command(bin, args...)
+		cmd := exec.Command(bin, t.args...)
 		cmd.Dir = dir
 		if runtime.GOOS != "darwin" {
 			cmd.Env = graphicalEnv()
@@ -705,6 +739,10 @@ type StatusResponse struct {
 	// image for, so the UI can limit a FrankenPHP site's version dropdown to
 	// the ones it can actually run (intersected client-side with installed).
 	FrankenPHPVersions []string `json:"frankenphp_php_versions"`
+	// PrereleasePHPVersions are the supported versions upstream has not released
+	// yet, so every picker can label them rather than offering a beta as an
+	// ordinary choice.
+	PrereleasePHPVersions []string `json:"prerelease_php_versions"`
 	// Home is the user's home directory, so the UI can shorten displayed paths
 	// under it to a leading ~ without shipping the absolute path in the label.
 	Home string `json:"home"`
@@ -755,10 +793,9 @@ func handleStatus(w http.ResponseWriter, _ *http.Request) {
 
 func buildStatus() StatusResponse {
 	cfg, _ := config.LoadGlobal()
-	tld := "test"
+	tld := dns.ConfiguredTLD()
 	dnsEnabled := true
 	if cfg != nil {
-		tld = cfg.DNS.TLD
 		dnsEnabled = cfg.DNS.Enabled
 	}
 
@@ -812,23 +849,24 @@ func buildStatus() StatusResponse {
 		workspaces = []string{}
 	}
 	return StatusResponse{
-		DNS:                DNSStatus{OK: dnsStatus == dns.StatusOK, Status: string(dnsStatus), VPN: dns.VPNActive(), Enabled: dnsEnabled, TLD: tld},
-		Nginx:              ServiceCheck{Running: nginxRunning},
-		PHPFPMs:            phpStatuses,
-		PHPDefault:         phpDefault,
-		NodeDefault:        nodeDefault,
-		NodeManagedByLerd:  nodeManagedByLerd,
-		NodeManager:        nodeManager,
-		NvmAvailable:       lerdNode.ManagerByName("nvm").Available(),
-		BunAvailable:       bunAvailable,
-		BunVersion:         bunVersion,
-		UsingSystemBun:     usingSystemBun,
-		WatcherRunning:     watcherRunning,
-		FrankenPHPVersions: config.FrankenPHPVersions(),
-		Home:               homeDir,
-		Workspaces:         workspaces,
-		Instance:           serverInstance,
-		Tools:              toolStatuses,
+		DNS:                   DNSStatus{OK: dnsStatus == dns.StatusOK, Status: string(dnsStatus), VPN: dns.VPNActive(), Enabled: dnsEnabled, TLD: tld},
+		Nginx:                 ServiceCheck{Running: nginxRunning},
+		PHPFPMs:               phpStatuses,
+		PHPDefault:            phpDefault,
+		NodeDefault:           nodeDefault,
+		NodeManagedByLerd:     nodeManagedByLerd,
+		NodeManager:           nodeManager,
+		NvmAvailable:          lerdNode.ManagerByName("nvm").Available(),
+		BunAvailable:          bunAvailable,
+		BunVersion:            bunVersion,
+		UsingSystemBun:        usingSystemBun,
+		WatcherRunning:        watcherRunning,
+		FrankenPHPVersions:    config.FrankenPHPVersions(),
+		PrereleasePHPVersions: config.PrereleasePHPVersions,
+		Home:                  homeDir,
+		Workspaces:            workspaces,
+		Instance:              serverInstance,
+		Tools:                 toolStatuses,
 	}
 }
 
@@ -929,10 +967,14 @@ type SiteResponse struct {
 	HasQueueWorker     bool           `json:"has_queue_worker"`
 	HasScheduleWorker  bool           `json:"has_schedule_worker"`
 	FrameworkWorkers   []WorkerStatus `json:"framework_workers,omitempty"`
-	HasAppLogs         bool           `json:"has_app_logs"`
-	HasFavicon         bool           `json:"has_favicon"`
-	HasEnv             bool           `json:"has_env"`
-	Paused             bool           `json:"paused"`
+	// WorkerOptions maps a worker name to the values its framework definition
+	// lets a project change, so the dashboard can offer the same knobs the
+	// `lerd <worker>:start` flags expose. Only tunable workers appear.
+	WorkerOptions map[string][]config.WorkerTuneOption `json:"worker_options,omitempty"`
+	HasAppLogs    bool                                 `json:"has_app_logs"`
+	HasFavicon    bool                                 `json:"has_favicon"`
+	HasEnv        bool                                 `json:"has_env"`
+	Paused        bool                                 `json:"paused"`
 	// Pinned excludes the site from idle-suspend (kept always-warm).
 	Pinned bool `json:"pinned,omitempty"`
 	// LastActive is the unix-seconds time the site last saw a request, from the
@@ -1205,6 +1247,7 @@ func buildSites() ([]SiteResponse, error) {
 			HasQueueWorker:       e.HasQueueWorker,
 			HasScheduleWorker:    e.HasScheduleWorker,
 			FrameworkWorkers:     fwWorkers,
+			WorkerOptions:        e.WorkerOptions,
 			HasAppLogs:           e.HasAppLogs,
 			HasFavicon:           e.HasFavicon,
 			HasEnv:               siteHasEnv(e.FrameworkName, e.Path),
@@ -1935,6 +1978,38 @@ func handleWorkerMarks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, config.WorkerMarks())
 }
 
+// handleImageEstimate reports what a service or PHP operation would download,
+// so the
+// dashboard can disclose the size and let the user decline before any bytes
+// move. An operation that downloads nothing answers with an empty image.
+func handleImageEstimate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	var (
+		out podman.PendingDownload
+		err error
+	)
+	switch {
+	case q.Get("preset") != "":
+		out, err = serviceops.PresetDownload(q.Get("preset"), q.Get("version"))
+	case q.Get("service") != "":
+		out, err = serviceops.ActionDownload(q.Get("service"), q.Get("action"), q.Get("tag"))
+	case q.Get("php") != "":
+		out = podman.PHPDownload(q.Get("php"))
+	default:
+		http.Error(w, "preset, service or php is required", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, out)
+}
+
 // handleServicePresetInstall installs a bundled preset and streams per-phase
 // progress as NDJSON so the UI can show what step is active and surface the
 // podman pull output instead of one opaque spinner.
@@ -2452,11 +2527,7 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		var targetImage string
 		if targetTag != "" {
 			if avail, err := serviceops.CheckUpdateAvailable(name); err == nil && avail.CurrentImage != "" {
-				if at := strings.LastIndex(avail.CurrentImage, ":"); at > 0 {
-					targetImage = avail.CurrentImage[:at] + ":" + targetTag
-				} else {
-					targetImage = avail.CurrentImage + ":" + targetTag
-				}
+				targetImage = serviceops.RetagImage(avail.CurrentImage, targetTag)
 			}
 		}
 		writeLine, _ := startNDJSONStream(w, r)
@@ -2534,7 +2605,7 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	if !isCustom && strings.HasPrefix(name, "schedule-") {
 		siteName := strings.TrimPrefix(name, "schedule-")
 		if action == "stop" {
-			opErr := cli.ScheduleStopForSite(siteName)
+			opErr := cli.StopFrameworkWorker(siteName, "schedule")
 			resp := ServiceActionResponse{
 				ServiceResponse: ServiceResponse{Name: name, Status: "inactive", EnvVars: map[string]string{}, ScheduleWorkerSite: siteName},
 				OK:              opErr == nil,
@@ -2554,7 +2625,7 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	if !isCustom && strings.HasPrefix(name, "horizon-") {
 		siteName := strings.TrimPrefix(name, "horizon-")
 		if action == "stop" {
-			opErr := cli.HorizonStopForSite(siteName)
+			opErr := cli.StopFrameworkWorker(siteName, "horizon")
 			resp := ServiceActionResponse{
 				ServiceResponse: ServiceResponse{Name: name, Status: "inactive", EnvVars: map[string]string{}, HorizonSite: siteName},
 				OK:              opErr == nil,
@@ -2574,7 +2645,7 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	if !isCustom && strings.HasPrefix(name, "reverb-") {
 		siteName := strings.TrimPrefix(name, "reverb-")
 		if action == "stop" {
-			opErr := cli.ReverbStopForSite(siteName)
+			opErr := cli.StopFrameworkWorker(siteName, "reverb")
 			resp := ServiceActionResponse{
 				ServiceResponse: ServiceResponse{Name: name, Status: "inactive", EnvVars: map[string]string{}, ReverbSite: siteName},
 				OK:              opErr == nil,
@@ -3615,6 +3686,17 @@ type SiteNginxRestoreResponse struct {
 	Content  string `json:"content,omitempty"`
 }
 
+// nginxScopeParam reads the ?scope= query param. Absent means the server-scope
+// override, so older clients and bookmarked URLs keep hitting the same file.
+func nginxScopeParam(w http.ResponseWriter, r *http.Request) (siteops.NginxScope, bool) {
+	scope, err := siteops.ParseNginxScope(r.URL.Query().Get("scope"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return "", false
+	}
+	return scope, true
+}
+
 // handleSiteNginx reads (GET) or saves (POST) a site's custom.d nginx override.
 // The override is bind-mounted into lerd-nginx and included at the end of the
 // site's server block; saving reloads nginx so the change takes effect. The
@@ -3625,8 +3707,12 @@ func handleSiteNginx(w http.ResponseWriter, r *http.Request, domain string) {
 		http.Error(w, "site not found", http.StatusNotFound)
 		return
 	}
+	scope, ok := nginxScopeParam(w, r)
+	if !ok {
+		return
+	}
 	if r.Method == http.MethodGet {
-		got, err := siteops.ReadCustomNginx(domain)
+		got, err := siteops.ReadCustomNginx(domain, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -3641,7 +3727,7 @@ func handleSiteNginx(w http.ResponseWriter, r *http.Request, domain string) {
 		writeJSON(w, SiteNginxWriteResponse{OK: false, Error: "invalid body: " + err.Error()})
 		return
 	}
-	res, err := siteops.SaveCustomNginx(domain, req.Content, req.Backup)
+	res, err := siteops.SaveCustomNginx(domain, scope, req.Content, req.Backup)
 	if err != nil {
 		writeJSON(w, SiteNginxWriteResponse{OK: false, Error: err.Error()})
 		return
@@ -3660,7 +3746,11 @@ func handleSiteNginxBackups(w http.ResponseWriter, r *http.Request, domain strin
 		http.NotFound(w, r)
 		return
 	}
-	list, err := siteops.ListCustomNginxBackups(domain)
+	scope, ok := nginxScopeParam(w, r)
+	if !ok {
+		return
+	}
+	list, err := siteops.ListCustomNginxBackups(domain, scope)
 	if err != nil {
 		http.Error(w, "listing backups: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -3683,7 +3773,11 @@ func handleSiteNginxBackupContent(w http.ResponseWriter, r *http.Request, domain
 		http.NotFound(w, r)
 		return
 	}
-	data, err := siteops.ReadCustomNginxBackup(domain, name)
+	scope, ok := nginxScopeParam(w, r)
+	if !ok {
+		return
+	}
+	data, err := siteops.ReadCustomNginxBackup(domain, scope, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.NotFound(w, r)
@@ -3719,7 +3813,11 @@ func handleSiteNginxReset(w http.ResponseWriter, r *http.Request, domain string)
 		http.NotFound(w, r)
 		return
 	}
-	if err := siteops.ResetCustomNginx(domain); err != nil {
+	scope, ok := nginxScopeParam(w, r)
+	if !ok {
+		return
+	}
+	if err := siteops.ResetCustomNginx(domain, scope); err != nil {
 		writeJSON(w, SiteNginxResetResponse{OK: false, Error: err.Error()})
 		return
 	}
@@ -3743,6 +3841,10 @@ func handleSiteNginxRestore(w http.ResponseWriter, r *http.Request, domain strin
 		http.NotFound(w, r)
 		return
 	}
+	scope, ok := nginxScopeParam(w, r)
+	if !ok {
+		return
+	}
 	var req SiteNginxRestoreRequest
 	// Body is optional (empty name means newest); only a malformed envelope
 	// is refused.
@@ -3752,7 +3854,7 @@ func handleSiteNginxRestore(w http.ResponseWriter, r *http.Request, domain strin
 			return
 		}
 	}
-	res, err := siteops.RestoreCustomNginx(domain, req.Name)
+	res, err := siteops.RestoreCustomNginx(domain, scope, req.Name)
 	if err != nil {
 		writeJSON(w, SiteNginxRestoreResponse{OK: false, Error: err.Error()})
 		return
@@ -4093,17 +4195,17 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
 			phpVersion = detected
 		}
-		go cli.HorizonStartForSite(site.Name, site.Path, phpVersion) //nolint:errcheck
+		go cli.StartFrameworkWorker(site.Name, site.Path, phpVersion, "horizon") //nolint:errcheck
 		go syncLerdYAMLWorkersDelayed(site)
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
 	case "horizon:stop":
-		if err := cli.HorizonStopForSite(site.Name); err != nil {
+		if err := cli.StopFrameworkWorker(site.Name, "horizon"); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
 		if !site.Paused {
-			_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
+			_ = config.SetProjectWorkers(site.Path, cli.CollectDeclaredWorkerNames(site))
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
@@ -4113,7 +4215,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
 			phpVersion = detected
 		}
-		if err := cli.ApplyHorizonReload(site.Name, site.Path, phpVersion, enabled); err != nil {
+		if err := cli.ApplyWorkerReload(site.Name, site.Path, phpVersion, "horizon", enabled); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
@@ -4150,17 +4252,17 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
 			phpVersion = detected
 		}
-		go cli.QueueStartForSite(site.Name, site.Path, phpVersion) //nolint:errcheck
+		go cli.StartFrameworkWorker(site.Name, site.Path, phpVersion, "queue") //nolint:errcheck
 		go syncLerdYAMLWorkersDelayed(site)
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
 	case "queue:stop":
-		if err := cli.QueueStopForSite(site.Name); err != nil {
+		if err := cli.StopFrameworkWorker(site.Name, "queue"); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
 		if !site.Paused {
-			_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
+			_ = config.SetProjectWorkers(site.Path, cli.CollectDeclaredWorkerNames(site))
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
@@ -4179,7 +4281,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !site.Paused {
-			_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
+			_ = config.SetProjectWorkers(site.Path, cli.CollectDeclaredWorkerNames(site))
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
@@ -4200,17 +4302,17 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
 			phpVersion = detected
 		}
-		go cli.ScheduleStartForSite(site.Name, site.Path, phpVersion) //nolint:errcheck
+		go cli.StartFrameworkWorker(site.Name, site.Path, phpVersion, "schedule") //nolint:errcheck
 		go syncLerdYAMLWorkersDelayed(site)
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
 	case "schedule:stop":
-		if err := cli.ScheduleStopForSite(site.Name); err != nil {
+		if err := cli.StopFrameworkWorker(site.Name, "schedule"); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
 		if !site.Paused {
-			_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
+			_ = config.SetProjectWorkers(site.Path, cli.CollectDeclaredWorkerNames(site))
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
@@ -4219,17 +4321,17 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
 			phpVersion = detected
 		}
-		go cli.ReverbStartForSite(site.Name, site.Path, phpVersion) //nolint:errcheck
+		go cli.StartFrameworkWorker(site.Name, site.Path, phpVersion, "reverb") //nolint:errcheck
 		go syncLerdYAMLWorkersDelayed(site)
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
 	case "reverb:stop":
-		if err := cli.ReverbStopForSite(site.Name); err != nil {
+		if err := cli.StopFrameworkWorker(site.Name, "reverb"); err != nil {
 			writeJSON(w, SiteActionResponse{Error: err.Error()})
 			return
 		}
 		if !site.Paused {
-			_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
+			_ = config.SetProjectWorkers(site.Path, cli.CollectDeclaredWorkerNames(site))
 		}
 		writeJSON(w, SiteActionResponse{OK: true})
 		return
@@ -4478,9 +4580,9 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		// project's .lerd.yaml as a conflict-filtered entry. Remove it from
 		// .lerd.yaml only — no registry, vhost, or cert work needed.
 		if !site.HasDomain(fullDomain) {
-			suffix := "." + cfg.DNS.TLD
-			declared := strings.TrimSuffix(fullDomain, suffix)
-			// Check if domain exists in .lerd.yaml before removing.
+			declared := config.ProjectDomainKey(fullDomain, cfg.DNS.TLD)
+			// Check if domain exists in .lerd.yaml before removing. A project may
+			// have written the entry with the TLD, so both sides are normalised.
 			proj, projErr := config.LoadProjectConfig(site.Path)
 			if projErr != nil || proj == nil {
 				writeJSON(w, SiteActionResponse{Error: "site does not have domain " + fullDomain})
@@ -4488,7 +4590,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			}
 			found := false
 			for _, d := range proj.Domains {
-				if strings.EqualFold(d, declared) {
+				if config.ProjectDomainKey(d, cfg.DNS.TLD) == declared {
 					found = true
 					break
 				}
@@ -4497,7 +4599,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, SiteActionResponse{Error: "site does not have domain " + fullDomain})
 				return
 			}
-			if err := config.RemoveProjectDomain(site.Path, declared); err != nil {
+			if err := config.RemoveProjectDomain(site.Path, declared, cfg.DNS.TLD); err != nil {
 				writeJSON(w, SiteActionResponse{Error: "updating .lerd.yaml: " + err.Error()})
 				return
 			}
@@ -4653,6 +4755,27 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 		// lerd-<wname>-<site>-<wtBase> instead of the parent's lerd-<wname>-<site>.
 		if strings.HasPrefix(action, "worker:") {
 			parts := strings.SplitN(action, ":", 3)
+			// worker:{name}:options saves the values for the worker's
+			// tune_command placeholders to .lerd.yaml and restarts it if running.
+			if len(parts) == 3 && parts[2] == "options" {
+				var body struct {
+					Values map[string]string `json:"values"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					writeJSON(w, SiteActionResponse{Error: "invalid request body"})
+					return
+				}
+				phpVersion := site.PHPVersion
+				if detected, err := phpPkg.DetectVersion(site.Path); err == nil && detected != "" {
+					phpVersion = detected
+				}
+				if err := cli.ApplyWorkerOptions(site.Name, site.Path, phpVersion, parts[1], body.Values); err != nil {
+					writeJSON(w, SiteActionResponse{Error: err.Error()})
+					return
+				}
+				writeJSON(w, SiteActionResponse{OK: true})
+				return
+			}
 			if len(parts) == 3 && (parts[2] == "start" || parts[2] == "stop") {
 				workerName := parts[1]
 				branch := r.URL.Query().Get("branch")
@@ -4694,7 +4817,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					if branch == "" && !site.Paused {
-						_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
+						_ = config.SetProjectWorkers(site.Path, cli.CollectDeclaredWorkerNames(site))
 					}
 				} else {
 					fwN := site.Framework
@@ -4758,6 +4881,26 @@ func hostProxyAppLifecycleOp(isHostProxy bool, workerName, branch, op string) (s
 		return "unpause", true
 	}
 	return "", false
+}
+
+// containerRunning is the seam tests replace so the container-shell action can
+// be driven without a live podman, the way openTerminal stands in for a real
+// terminal emulator.
+var containerRunning = podman.Cache.Running
+
+// phpShellScript is what the spawned terminal runs: lerd's own shell command,
+// not a hand-built podman exec. The container script it ends up running
+// contains "$PATH", which the host shell would expand on the way through,
+// putting the host's bin directories (and lerd's php shim, since $HOME is bind
+// mounted) ahead of the container's own. Letting lerd build the exec keeps the
+// script an argv element that no shell ever parses. The absolute path is used
+// because the spawned shell does not load the user's interactive PATH.
+func phpShellScript(version string) string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "lerd"
+	}
+	return podman.ShellQuote(exe) + " shell " + podman.ShellQuote(version)
 }
 
 func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
@@ -4885,6 +5028,16 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 		short := strings.ReplaceAll(version, ".", "")
 		unit := "lerd-php" + short + "-fpm"
 		if err := podman.StopUnit(unit); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	case "shell":
+		if !containerRunning(podman.SharedFPMContainerName(version)) {
+			writeJSON(w, map[string]any{"ok": false, "error": "PHP " + version + " is not running"})
+			return
+		}
+		if err := openTerminal(phpShellScript(version)); err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -5051,10 +5204,10 @@ func handlePHPInstall(w http.ResponseWriter, r *http.Request) {
 		done(map[string]any{"ok": false, "error": err.Error(), "version": version})
 		return
 	}
-	// Refresh the container cache before signalling done so the client's
-	// follow-up status load (and the publishAfter broadcast) report the
-	// freshly-started FPM as running instead of a stale not-running snapshot.
-	podman.Cache.PollNow()
+	// Refresh before signalling done so the client's follow-up status load
+	// (and the publishAfter broadcast) report the freshly-started FPM as
+	// running, with the patch read out of the image it just built.
+	refreshAfterPHPBuild(version)
 	done(map[string]any{"ok": true, "version": version})
 }
 
@@ -5063,12 +5216,12 @@ var (
 	refreshPHPPatchFn = podman.RefreshFPMPHPVersion
 )
 
-// refreshAfterPHPRebuild brings back what a finished rebuild made stale: the
-// container states, the PHP patch probed out of the old image, and the cached
-// status snapshot built from both. It runs before the done event because the
-// client loads status the moment the modal closes, ahead of publishAfter's own
-// invalidation.
-func refreshAfterPHPRebuild(version string) {
+// refreshAfterPHPBuild brings back what a finished install or rebuild made
+// stale: the container states, the PHP patch probed out of the image that was
+// replaced, and the cached status snapshot built from both. It runs before the
+// done event because the client loads status the moment the modal closes,
+// ahead of publishAfter's own invalidation.
+func refreshAfterPHPBuild(version string) {
 	pollContainersFn()
 	refreshPHPPatchFn(version)
 	snapshots.Invalidate(eventbus.KindStatus)
@@ -5107,7 +5260,7 @@ func handlePHPRebuild(w http.ResponseWriter, r *http.Request, version string) {
 		done(map[string]any{"ok": false, "error": err.Error(), "version": version})
 		return
 	}
-	refreshAfterPHPRebuild(version)
+	refreshAfterPHPBuild(version)
 	done(map[string]any{"ok": true, "version": version})
 }
 
@@ -5318,11 +5471,15 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-var allowedQueueUnit = regexp.MustCompile(`^[a-z0-9-]+$`)
+// allowedQueueUnit validates a site or worker segment of a log stream path.
+// Custom worker names in .lerd.yaml and site handles are free-form apart from
+// whitespace, so underscores and capitals have to pass or their logs 404.
+var allowedQueueUnit = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // SettingsResponse is the response for GET /api/settings.
 type SettingsResponse struct {
 	AutostartOnLogin          bool     `json:"autostart_on_login"`
+	StartOnDashboardOpen      bool     `json:"start_on_dashboard_open"`
 	WorkerExecMode            string   `json:"worker_exec_mode"`
 	WorkerModeApplies         bool     `json:"worker_mode_applies"` // true on macOS only
 	IdleSuspendEnabled        bool     `json:"idle_suspend_enabled"`
@@ -5330,6 +5487,7 @@ type SettingsResponse struct {
 	DNSEnabled                bool     `json:"dns_enabled"`
 	DNSUpstream               []string `json:"dns_upstream"`          // pinned upstreams, empty = auto-detect
 	DNSUpstreamDetected       []string `json:"dns_upstream_detected"` // what auto-detection currently sees
+	TrayEnabled               bool     `json:"tray_enabled"`
 }
 
 func handleSettings(w http.ResponseWriter, _ *http.Request) {
@@ -5338,6 +5496,8 @@ func handleSettings(w http.ResponseWriter, _ *http.Request) {
 	idleEnabled := false
 	idleMinutes := int(config.DefaultIdleSuspendTimeout / time.Minute)
 	dnsEnabled := true
+	startOnOpen := false
+	trayEnabled := true
 	var dnsUpstream []string
 	if cfg != nil {
 		mode = cfg.WorkerExecMode()
@@ -5345,9 +5505,12 @@ func handleSettings(w http.ResponseWriter, _ *http.Request) {
 		idleMinutes = int(cfg.IdleSuspendTimeout() / time.Minute)
 		dnsEnabled = cfg.DNSManaged()
 		dnsUpstream = cfg.DNS.Upstream
+		startOnOpen = cfg.Autostart.OnDashboardOpen
+		trayEnabled = cfg.IsTrayEnabled()
 	}
 	writeJSON(w, SettingsResponse{
 		AutostartOnLogin:          lerdSystemd.IsAutostartEnabled(),
+		StartOnDashboardOpen:      startOnOpen,
 		WorkerExecMode:            mode,
 		WorkerModeApplies:         runtime.GOOS == "darwin",
 		IdleSuspendEnabled:        idleEnabled,
@@ -5355,6 +5518,7 @@ func handleSettings(w http.ResponseWriter, _ *http.Request) {
 		DNSEnabled:                dnsEnabled,
 		DNSUpstream:               dnsUpstream,
 		DNSUpstreamDetected:       dns.ReadUpstreamDNS(),
+		TrayEnabled:               trayEnabled,
 	})
 }
 
@@ -5532,16 +5696,77 @@ func handleSettingsAutostart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "autostart_on_login": body.Enabled})
 }
 
+// handleSettingsTray turns the system tray applet on or off, applet and
+// autostart unit included, for desktops that show lerd's state elsewhere.
+func handleSettingsTray(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if _, err := cli.ApplyTray(body.Enabled); err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "tray_enabled": body.Enabled})
+}
+
+// handleSettingsStartOnOpen records whether opening the dashboard on a stopped
+// lerd should start it. Config only: the dashboard is what acts on the flag.
+func handleSettingsStartOnOpen(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil || cfg == nil {
+		writeJSON(w, map[string]any{"ok": false, "error": "loading config"})
+		return
+	}
+	cfg.Autostart.OnDashboardOpen = body.Enabled
+	if err := config.SaveGlobal(cfg); err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "start_on_dashboard_open": body.Enabled})
+}
+
+// uiUnit is the unit this process runs as, and runStart is cli.RunStart
+// indirected so a test can assert the dashboard never asks the start to restart
+// it: that boots this process out of launchd half way through the sequence.
+const uiUnit = "lerd-ui"
+
+var runStart = cli.RunStart
+
+// handleLerdStart runs the same start as the CLI and streams its progress, so
+// the dashboard's start button reports each stage and unit rather than hanging
+// on a request that can take minutes.
+//
+// lerd-ui is skipped: starting a unit boots it out of launchd first, which is a
+// SIGTERM to this very process, so asking for our own unit would kill the start
+// half way and leave the dashboard down behind a 502.
 func handleLerdStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := cli.RunStart(); err != nil {
-		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
-		return
+	writeLine, _ := startNDJSONStream(w, r)
+	if err := runStart(func(evt cli.StartEvent) { writeLine(evt) }, uiUnit); err != nil {
+		writeLine(cli.StartEvent{Phase: "failed", Error: err.Error()})
 	}
-	writeJSON(w, map[string]any{"ok": true})
 }
 
 func handleLerdStop(w http.ResponseWriter, r *http.Request) {
@@ -5595,53 +5820,93 @@ func buildUpdateScript(executable string) string {
 	return podman.ShellQuote(executable) + ` update; echo; read -rp "Press Enter to close..."`
 }
 
-// openTerminalCommand opens the user's terminal emulator and runs the given
-// shell script in it. Mirrors openTerminalAt's candidate list — the two
-// could merge later but the arg shapes diverge enough that keeping them
-// separate is clearer for now.
-func openTerminalCommand(script string) error {
-	type termCmd struct {
-		bin  string
-		args []string
-	}
+// knownTerminalCommands is the fallback list for running a script, and the
+// source of the flags namedTerminalCommand reuses when the chosen terminal is
+// one of them.
+func knownTerminalCommands(script string) []terminalCmd {
 	combined := "sh -c " + podman.ShellQuote(script)
-	candidates := []termCmd{}
-	// $TERMINAL leads, matching openTerminalAt and the error message below.
-	if t := os.Getenv("TERMINAL"); t != "" {
-		candidates = append(candidates, termCmd{t, []string{"-e", "sh", "-c", script}})
+	return []terminalCmd{
+		{"kitty", []string{"sh", "-c", script}},
+		{"foot", []string{"sh", "-c", script}},
+		{"alacritty", []string{"-e", "sh", "-c", script}},
+		{"wezterm", []string{"start", "--", "sh", "-c", script}},
+		{"ghostty", []string{"-e", combined}},
+		{"ptyxis", []string{"--", "sh", "-c", script}},
+		{"konsole", []string{"--separate", "-e", "sh", "-c", script}},
+		{"gnome-terminal", []string{"--", "sh", "-c", script}},
+		{"xfce4-terminal", []string{"-e", combined}},
+		{"tilix", []string{"-e", combined}},
+		{"terminator", []string{"-e", combined}},
+		{"xterm", []string{"-e", "sh", "-c", script}},
 	}
-	candidates = append(candidates,
-		termCmd{"kitty", []string{"sh", "-c", script}},
-		termCmd{"foot", []string{"sh", "-c", script}},
-		termCmd{"alacritty", []string{"-e", "sh", "-c", script}},
-		termCmd{"wezterm", []string{"start", "--", "sh", "-c", script}},
-		termCmd{"ghostty", []string{"-e", combined}},
-		termCmd{"ptyxis", []string{"--", "sh", "-c", script}},
-		termCmd{"konsole", []string{"--separate", "-e", "sh", "-c", script}},
-		termCmd{"gnome-terminal", []string{"--", "sh", "-c", script}},
-		termCmd{"xfce4-terminal", []string{"-e", combined}},
-		termCmd{"tilix", []string{"-e", combined}},
-		termCmd{"terminator", []string{"-e", combined}},
-		termCmd{"xterm", []string{"-e", "sh", "-c", script}},
-	)
+}
+
+// namedTerminalCommand builds the invocation for a terminal named by the user
+// or the desktop, the script counterpart of namedTerminal. The flags lerd
+// already knows win over the generic `-e sh -c`, which kitty and foot reject.
+func namedTerminalCommand(name, script string) terminalCmd {
+	for _, t := range knownTerminalCommands(script) {
+		if t.bin == filepath.Base(name) {
+			return terminalCmd{name, t.args}
+		}
+	}
+	return terminalCmd{name, []string{"-e", "sh", "-c", script}}
+}
+
+// defaultTerminal is the seam tests replace to stand in for the desktop's own
+// setting, which is read off the host.
+var defaultTerminal = linuxDefaultTerminal
+
+// terminalScriptCandidates returns the ordered emulator candidates for running
+// a script. Same precedence as terminalDirCandidates: $TERMINAL, then the
+// terminal the desktop is set to use, then the fixed list. macOS is absent from
+// the middle step because its chosen terminal is a bundle id, and `open -b`
+// takes a file rather than a command to run.
+func terminalScriptCandidates(script string) []terminalCmd {
+	candidates := []terminalCmd{}
+	if t := os.Getenv("TERMINAL"); t != "" {
+		candidates = append(candidates, namedTerminalCommand(t, script))
+	}
+	if t := defaultTerminal(); t != "" {
+		candidates = append(candidates, namedTerminalCommand(t, script))
+	}
+	candidates = append(candidates, knownTerminalCommands(script)...)
 
 	if runtime.GOOS == "darwin" {
 		if _, err := os.Stat("/Applications/iTerm.app"); err == nil {
 			as := "tell application \"iTerm2\"\n\tcreate window with default profile\n\ttell current session of current window\n\t\twrite text " + appleScriptStr(script) + "\n\tend tell\nend tell"
-			candidates = append(candidates, termCmd{"osascript", []string{"-e", as}})
+			candidates = append(candidates, terminalCmd{"osascript", []string{"-e", as}})
 		}
 		as := "tell application \"Terminal\"\n\tdo script " + appleScriptStr(script) + "\n\tactivate\nend tell"
-		candidates = append(candidates, termCmd{"osascript", []string{"-e", as}})
+		candidates = append(candidates, terminalCmd{"osascript", []string{"-e", as}})
 	}
-	for _, t := range candidates {
+	return candidates
+}
+
+// openTerminalCommand opens the user's terminal emulator and runs the given
+// shell script in it.
+// terminalEnv is what a spawned terminal runs with: the graphical session keys
+// it needs to reach the display, and lerd's bin directory on PATH. A store
+// command that calls php or lerd has to resolve them the same way it does
+// through `lerd run` and the dashboard's own runner, both of which set this
+// PATH; without it the emulator inherits whatever the user's service manager
+// happened to import and a declared command can fail as not found.
+func terminalEnv() []string {
+	env := os.Environ()
+	if runtime.GOOS != "darwin" {
+		env = graphicalEnv()
+	}
+	return append(env, "PATH="+config.PathWithBinDir())
+}
+
+func openTerminalCommand(script string) error {
+	for _, t := range terminalScriptCandidates(script) {
 		bin, err := exec.LookPath(t.bin)
 		if err != nil {
 			continue
 		}
 		cmd := exec.Command(bin, t.args...)
-		if runtime.GOOS != "darwin" {
-			cmd.Env = graphicalEnv()
-		}
+		cmd.Env = terminalEnv()
 		if err := cmd.Start(); err != nil {
 			return err
 		}
@@ -6273,6 +6538,6 @@ func handleSiteWorktreeAdd(w http.ResponseWriter, r *http.Request) {
 func syncLerdYAMLWorkersDelayed(site *config.Site) {
 	time.Sleep(2 * time.Second)
 	if !site.Paused {
-		_ = config.SetProjectWorkers(site.Path, cli.CollectRunningWorkerNames(site))
+		_ = config.SetProjectWorkers(site.Path, cli.CollectDeclaredWorkerNames(site))
 	}
 }

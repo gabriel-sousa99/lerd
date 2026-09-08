@@ -12,6 +12,7 @@ export const LOGOS = {
   symfony:  { ch: 'S', c: '#cbd5e1' },
   wordpress:{ ch: 'W', c: '#38bdf8' },
   drupal:   { ch: 'D', c: '#60a5fa' },
+  typo3:    { ch: 'T', c: '#ff8700' },
   cake:     { ch: 'C', c: '#f87171' },
   magento:  { ch: 'M', c: '#f46f25' },
   statamic: { ch: 'S', c: '#a78bfa' },

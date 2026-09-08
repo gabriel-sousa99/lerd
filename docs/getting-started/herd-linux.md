@@ -80,13 +80,13 @@ Unlike Herd, lerd also ships as real distro packages: install it through an [apt
 | `herd link`, serve the current directory | `lerd link`, plus framework detection and PHP version picked from `composer.json` |
 | Automatic `.test` domains through the native resolver | Automatic `.test` domains through a dnsmasq container wired into your system resolver, no `/etc/hosts` edits |
 | The Secure Site toggle | `lerd secure`, a real mkcert certificate trusted by your system and browsers |
-| `herd isolate php@8.4`, PHP version per site | `lerd isolate 8.4`, or auto-detected, PHP 7.4 and 8.0 to 8.5 |
-| `herd php`, `herd composer`, always the site's version | `lerd php`, `lerd composer`, `lerd php:shell`, on the version that site is registered on |
+| `herd isolate php@8.4`, PHP version per site | `lerd isolate 8.4`, or auto-detected, PHP 7.4 and 8.0 to 8.5, plus the 8.6 prerelease |
+| `herd php`, `herd composer`, always the site's version | `lerd php`, `lerd composer`, `lerd shell`, on the version that site is registered on |
 | Services, MySQL, PostgreSQL, Redis, Mailpit | `lerd service start mysql`, plus PostgreSQL, Redis, Meilisearch, MongoDB, RustFS (S3) and Mailpit, shared across every site |
 | The database inspector, log viewer and dumps window in Herd Pro | The same surfaces in the [web dashboard](/features/web-ui), free: databases, [live logs](/features/logs), the [dump viewer](/features/dumps) and the [query viewer](/features/queries) |
 | The Xdebug toggle | `lerd xdebug:on`, a tray toggle and a dashboard switch |
 | `herd share`, expose a site publicly | `lerd share`, over ngrok, cloudflared, Expose, serveo or localhost.run, or on your LAN with a QR code |
-| `herd.yml` committed to the repo | [`.lerd.yaml`](/configuration#per-project-config-lerdyaml) committed to the repo, covering PHP, Node, framework, services, workers and custom containers |
+| `herd.yml` committed to the repo | [`.lerd.yaml`](/configuration#per-project-config-lerd-yaml) committed to the repo, covering PHP, Node, framework, services, workers and custom containers |
 | The Herd desktop app | A [web dashboard](/features/web-ui) at `127.0.0.1:7073`, a [system tray](/features/system-tray) and a [terminal dashboard](/features/tui) |
 | Octane, run manually alongside Herd | `lerd runtime frankenphp --worker`, FrankenPHP and Octane worker mode per site |
 | Queue workers, run with supervisor or by hand | `lerd worker start queue` and `schedule`, as systemd user services, with self-heal |
@@ -193,7 +193,7 @@ No. It uses rootless Podman, which has no daemon, and it never asks for Docker D
 Yes. MIT licensed, with no paid tier and no Pro subscription.
 
 **Does my `herd.yml` still work?**
-It keeps working in Herd. Lerd reads [`.lerd.yaml`](/configuration#per-project-config-lerdyaml), which covers the same ground and adds services, workers and Node, so both files can live in the repo.
+It keeps working in Herd. Lerd reads [`.lerd.yaml`](/configuration#per-project-config-lerd-yaml), which covers the same ground and adds services, workers and Node, so both files can live in the repo.
 
 ## Next steps
 

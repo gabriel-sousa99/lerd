@@ -812,3 +812,68 @@ func TestDNSQuadletHasNoStartRateLimit(t *testing.T) {
 		t.Errorf("StartLimitIntervalSec must sit in [Unit], not a later section:\n%s", tpl)
 	}
 }
+
+// --- StripIPv6Binds ---
+
+func TestStripIPv6Binds_dropsPairedV6Lines(t *testing.T) {
+	// A host without ::1 cannot bind the v6 line, and rootlessport treats
+	// that as fatal, so the IPv4 twin has to carry the unit alone (#1634).
+	in := "[Container]\nNetwork=lerd\nPublishPort=127.0.0.1:80:80\nPublishPort=[::1]:80:80\nPublishPort=127.0.0.1:443:443\nPublishPort=[::1]:443:443\n"
+	out := StripIPv6Binds(in)
+	if strings.Contains(out, "[::1]") {
+		t.Errorf("expected no v6 binds, got:\n%s", out)
+	}
+	for _, want := range []string{"PublishPort=127.0.0.1:80:80", "PublishPort=127.0.0.1:443:443"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %s to survive, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestStripIPv6Binds_rewritesLoneV6Lines(t *testing.T) {
+	in := "Network=lerd\nPublishPort=[::1]:5300:5300/udp\nPublishPort=[::]:80:80\n"
+	out := StripIPv6Binds(in)
+	if !strings.Contains(out, "PublishPort=127.0.0.1:5300:5300/udp") {
+		t.Errorf("expected lone [::1] rewritten to 127.0.0.1, got:\n%s", out)
+	}
+	if !strings.Contains(out, "PublishPort=80:80") {
+		t.Errorf("expected lone [::] rewritten to the bare LAN form, got:\n%s", out)
+	}
+	if strings.Contains(out, "[::") {
+		t.Errorf("expected no v6 binds, got:\n%s", out)
+	}
+}
+
+func TestStripIPv6Binds_idempotent(t *testing.T) {
+	in := "Network=lerd\nPublishPort=127.0.0.1:80:80\nPublishPort=[::1]:80:80\nPublishPort=[::]:443:443\n"
+	once := StripIPv6Binds(in)
+	twice := StripIPv6Binds(once)
+	if once != twice {
+		t.Errorf("StripIPv6Binds is not idempotent:\nonce:\n%s\ntwice:\n%s", once, twice)
+	}
+}
+
+func TestStripIPv6Binds_preservesOperatorOverrides(t *testing.T) {
+	in := "Network=lerd\nPublishPort=192.168.1.10:80:80\nPublishPort=[fe80::1%eth0]:80:80\n"
+	out := StripIPv6Binds(in)
+	if out != in {
+		t.Errorf("operator overrides should be preserved verbatim:\nin:\n%s\nout:\n%s", in, out)
+	}
+}
+
+func TestApplyIPv6BindPolicy_followsHostLoopback(t *testing.T) {
+	in := "[Container]\nNetwork=lerd\nPublishPort=127.0.0.1:3306:3306\n"
+
+	old := hostIPv6LoopbackFn
+	defer func() { hostIPv6LoopbackFn = old }()
+
+	hostIPv6LoopbackFn = func() bool { return true }
+	if got := applyIPv6BindPolicy(in); !strings.Contains(got, "PublishPort=[::1]:3306:3306") {
+		t.Errorf("host with ::1 should get the v6 pair, got:\n%s", got)
+	}
+
+	hostIPv6LoopbackFn = func() bool { return false }
+	if got := applyIPv6BindPolicy(in); strings.Contains(got, "[::1]") {
+		t.Errorf("host without ::1 must not get a v6 bind, got:\n%s", got)
+	}
+}

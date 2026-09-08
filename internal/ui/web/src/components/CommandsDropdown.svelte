@@ -1,6 +1,15 @@
 <script lang="ts">
   import { m } from '../paraglide/messages.js';
-  import { loadCommands, launchCommand, runningName, commandIconPath, type Command } from '$stores/commands';
+  import {
+    loadCommands,
+    launchCommand,
+    setCommandPinned,
+    runningName,
+    commandIconPath,
+    type Command
+  } from '$stores/commands';
+  import { openErrorModal } from '$stores/modals';
+  import { tooltip } from '$lib/tooltip';
 
   interface Props {
     domain: string;
@@ -55,6 +64,21 @@
     menuOpen = true;
   }
 
+  // The commands a project runs constantly sit on the row itself as their own
+  // buttons; the cap matches the server's, which is what actually enforces it.
+  const MAX_PINNED = 2;
+  const pinned = $derived(commands.filter((c) => c.pinned));
+  const rowFull = $derived(pinned.length >= MAX_PINNED);
+
+  async function togglePin(cmd: Command) {
+    const res = await setCommandPinned(domain, cmd.name, !cmd.pinned);
+    if (!res.ok) {
+      openErrorModal(res.error || '');
+      return;
+    }
+    await refresh();
+  }
+
   function pick(cmd: Command) {
     menuOpen = false;
     launchCommand(domain, cmd, { branch });
@@ -106,7 +130,26 @@
 </script>
 
 {#if hasCommands}
-<div class="relative inline-block">
+<div class="flex items-center gap-2">
+  {#each pinned as c (c.name)}
+    <button
+      type="button"
+      onclick={() => launchCommand(domain, c, { branch })}
+      disabled={$runningName !== null}
+      use:tooltip={(c.description ?? '') || c.command}
+      class="shrink-0 inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-gray-200 dark:border-lerd-border bg-white dark:bg-lerd-card hover:border-lerd-red hover:text-lerd-red transition-colors text-xs font-medium text-gray-700 dark:text-gray-200 disabled:opacity-40"
+    >
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d={commandIconPath(c.icon)} />
+      </svg>
+      <span>{c.label || c.name}</span>
+      {#if c.confirm}
+        <span class="shrink-0 w-1.5 h-1.5 rounded-full bg-amber-500" title={m.cmd_asksBeforeRunning()}></span>
+      {/if}
+    </button>
+  {/each}
+
+  <div class="relative inline-block">
   <button
     bind:this={triggerEl}
     type="button"
@@ -139,29 +182,48 @@
       class="z-50 rounded-lg border border-gray-200 dark:border-lerd-border bg-white dark:bg-lerd-card shadow-xl ring-1 ring-black/5 py-1 max-h-96 overflow-y-auto"
     >
       {#each commands as c (c.name)}
-        <button
-          type="button"
-          onclick={() => pick(c)}
-          title={(c.description ?? '') + (c.description ? '\n\n' : '') + '$ ' + c.command}
-          class="group w-full flex items-start gap-2.5 px-3 py-2 hover:bg-gray-50 dark:hover:bg-white/5 text-left transition-colors"
-        >
-          <span class="shrink-0 mt-0.5 w-5 h-5 rounded bg-gray-100 dark:bg-white/5 flex items-center justify-center text-gray-500 dark:text-gray-400 group-hover:text-lerd-red">
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d={commandIconPath(c.icon)} />
-            </svg>
-          </span>
-          <span class="flex-1 min-w-0">
-            <span class="flex items-center gap-1.5">
-              <span class="text-xs font-medium text-gray-900 dark:text-gray-100">{c.label || c.name}</span>
-              {#if c.confirm}
-                <span class="shrink-0 w-1.5 h-1.5 rounded-full bg-amber-500" title={m.cmd_asksBeforeRunning()}></span>
-              {/if}
+        <div class="group flex items-start hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
+          <button
+            type="button"
+            onclick={() => pick(c)}
+            title={(c.description ?? '') + (c.description ? '\n\n' : '') + '$ ' + c.command}
+            class="flex-1 min-w-0 flex items-start gap-2.5 pl-3 py-2 text-left"
+          >
+            <span class="shrink-0 mt-0.5 w-5 h-5 rounded bg-gray-100 dark:bg-white/5 flex items-center justify-center text-gray-500 dark:text-gray-400 group-hover:text-lerd-red">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d={commandIconPath(c.icon)} />
+              </svg>
             </span>
-            <span class="block text-[10px] text-gray-500 dark:text-gray-400 font-mono truncate">{c.command}</span>
-          </span>
-        </button>
+            <span class="flex-1 min-w-0">
+              <span class="flex items-center gap-1.5">
+                <span class="text-xs font-medium text-gray-900 dark:text-gray-100">{c.label || c.name}</span>
+                {#if c.confirm}
+                  <span class="shrink-0 w-1.5 h-1.5 rounded-full bg-amber-500" title={m.cmd_asksBeforeRunning()}></span>
+                {/if}
+              </span>
+              <span class="block text-[10px] text-gray-500 dark:text-gray-400 font-mono truncate">{c.command}</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            onclick={() => togglePin(c)}
+            disabled={!c.pinned && rowFull}
+            aria-pressed={Boolean(c.pinned)}
+            aria-label={c.pinned ? m.cmd_unpin() : m.cmd_pin()}
+            title={c.pinned ? m.cmd_unpin() : rowFull ? m.cmd_pinRowFull({ count: MAX_PINNED }) : m.cmd_pin()}
+            class="shrink-0 self-stretch px-2.5 flex items-center transition-colors {c.pinned
+              ? 'text-lerd-red'
+              : 'text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400'} disabled:opacity-40 disabled:hover:text-gray-300 dark:disabled:hover:text-gray-600"
+          >
+            <svg class="w-3.5 h-3.5" fill={c.pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 4h6l-1 5.5 3 3V15H7v-2.5l3-3L9 4z" />
+              <path stroke-linecap="round" d="M12 15v5" />
+            </svg>
+          </button>
+        </div>
       {/each}
     </div>
   {/if}
+  </div>
 </div>
 {/if}

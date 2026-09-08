@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1200,7 +1199,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	// the plugin is present but chromium isn't baked into the FPM image yet.
 	if config.ComposerHasPackage(cwd, "pestphp/pest-plugin-browser") {
 		if v, derr := phpDet.DetectVersion(cwd); derr == nil && pestBrowserSupportedVersion(v) == nil {
-			if gcfg, cerr := config.LoadGlobal(); cerr == nil && !slices.Contains(gcfg.GetPackages(), pestBrowserPkg) {
+			if gcfg, cerr := config.LoadGlobal(); cerr == nil && len(missingPestBrowserPkgs(gcfg)) > 0 {
 				envInfo("  Detected pest-plugin-browser — run `lerd pest:browser install` to enable in-container browser testing\n")
 			}
 		}
@@ -1451,7 +1450,9 @@ func ensureServiceRunning(name string) error {
 	unit := "lerd-" + name
 	status, _ := podman.UnitStatus(unit)
 	if status != "active" {
-		envInterrupt(func() { fmt.Printf("  Starting %s...\n", name) })
+		// stderr: a passthrough child (php/console, e.g. a framework MCP server)
+		// owns stdout, and a progress line there corrupts its protocol stream.
+		envInterrupt(func() { fmt.Fprintf(os.Stderr, "  Starting %s...\n", name) })
 	}
 	return serviceops.EnsureServiceRunning(name)
 }

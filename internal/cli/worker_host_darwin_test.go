@@ -209,3 +209,42 @@ func (e errFakeWriter) Error() string { return string(e) }
 
 // silence linter — services package import is reachable through swapMgr.
 var _ services.ServiceManager = (*trackingHostMgr)(nil)
+
+// A host worker that launches a process tree (npm → electron-vite → Electron)
+// leaves the grandchildren alive when launchd signals only the job leader, so
+// the guard records its own pid as the group leader and the stop path gets a
+// reap sidecar that tears the whole group down.
+func TestWriteWorkerHostUnit_writesProcessGroupReap(t *testing.T) {
+	tmp := withTempXDGAndBin(t)
+	swapMgr(t, &trackingHostMgr{})
+	swapDaemonReload(t)
+
+	sitePath := filepath.Join(tmp, "site")
+	if err := os.MkdirAll(sitePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeWorkerHostUnit("lerd-native-mysite", sitePath, "php artisan native:serve", "on-failure"); err != nil {
+		t.Fatalf("writeWorkerHostUnit: %v", err)
+	}
+
+	workersDir := filepath.Join(config.RunDir(), "workers")
+	pidFile := filepath.Join(workersDir, "lerd-native-mysite.pid")
+
+	guard, err := os.ReadFile(filepath.Join(workersDir, "lerd-native-mysite.sh"))
+	if err != nil {
+		t.Fatalf("reading guard script: %v", err)
+	}
+	if !strings.Contains(string(guard), "echo $$ > '"+pidFile+"'") {
+		t.Errorf("guard script must record its pid at %s:\n%s", pidFile, guard)
+	}
+
+	reap, err := os.ReadFile(filepath.Join(workersDir, "lerd-native-mysite.reap"))
+	if err != nil {
+		t.Fatalf("reading reap sidecar: %v", err)
+	}
+	for _, want := range []string{"'" + pidFile + "'", `kill -TERM -"$pg"`, `kill -KILL -"$pg"`} {
+		if !strings.Contains(string(reap), want) {
+			t.Errorf("reap sidecar missing %q:\n%s", want, reap)
+		}
+	}
+}

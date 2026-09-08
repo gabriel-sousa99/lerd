@@ -180,9 +180,13 @@ func (m *Model) renderBody(topH int) string {
 
 	listPane := m.renderSites
 	listZone := "pane:sites"
-	if m.activeTab == tabServices {
+	switch m.activeTab {
+	case tabServices:
 		listPane = m.renderServices
 		listZone = "pane:services"
+	case tabDatabases:
+		listPane = m.renderDatabases
+		listZone = "pane:databases"
 	}
 
 	if m.width < narrowWidth {
@@ -389,6 +393,11 @@ func (m *Model) renderFooter() string {
 			nav("ctrl+←→", "tabs"), nav("↑↓", "nav"), nav("/", "filter"),
 			act("s", "start"), act("x", "stop"), act("r", "restart"), act("u", "update"), act("b", "rollback"),
 			act("t", "shell"), act("O", "open"), nav("?", "help"), act("q", "quit"),
+		}
+	case tabDatabases:
+		chips = []footChip{
+			nav("ctrl+←→", "tabs"), nav("tab", "panes"), nav("↑↓", "nav"),
+			act("n", "snapshot"), act("R", "refresh"), nav("?", "help"), act("q", "quit"),
 		}
 	default: // tabSites
 		chips = []footChip{
@@ -826,6 +835,14 @@ func renderServiceRow(selected bool, s ServiceRow, paneW int) string {
 	meta := ""
 	if s.Version != "" {
 		meta = dimStyle.Render(s.Version)
+	}
+	// A service that exposes a browser dashboard is marked here, so the list
+	// itself answers "what can I open?" without walking into every detail pane.
+	if s.Dashboard != "" {
+		if meta != "" {
+			meta += "  "
+		}
+		meta += accentStyle.Render("web")
 	}
 	if s.Pinned {
 		meta += "  " + accentStyle.Render("pinned")

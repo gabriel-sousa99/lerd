@@ -18,6 +18,10 @@ const unitCacheTTL = 3 * time.Second
 type UnitMeta struct {
 	ActiveEnter time.Time
 	WorkingDir  string
+	// Restart is the unit's Restart= policy. A worker whose command ends when the
+	// user closes what it was running exits cleanly, and only an always-restart
+	// unit sitting inactive is drift rather than a finished run.
+	Restart string
 }
 
 type unitCache struct {
@@ -70,7 +74,7 @@ func defaultUnitShow(units []string) (string, error) {
 	if len(units) == 0 {
 		return "", nil
 	}
-	args := append([]string{"--user", "show", "--timestamp=unix", "-p", "Id", "-p", "ActiveEnterTimestamp", "-p", "WorkingDirectory"}, units...)
+	args := append([]string{"--user", "show", "--timestamp=unix", "-p", "Id", "-p", "ActiveEnterTimestamp", "-p", "WorkingDirectory", "-p", "Restart"}, units...)
 	out, err := exec.Command("systemctl", args...).Output()
 	if err == nil {
 		return string(out), nil
@@ -78,7 +82,7 @@ func defaultUnitShow(units []string) (string, error) {
 	// --timestamp=unix predates every systemd that can run a quadlet, but if it is
 	// ever rejected, fall back to the properties that always parse rather than lose
 	// WorkingDirectory (which pins a worktree's worker) along with the timestamp.
-	args = append([]string{"--user", "show", "-p", "Id", "-p", "WorkingDirectory"}, units...)
+	args = append([]string{"--user", "show", "-p", "Id", "-p", "WorkingDirectory", "-p", "Restart"}, units...)
 	out, err = exec.Command("systemctl", args...).Output()
 	return string(out), err
 }
@@ -115,6 +119,8 @@ func parseUnitMeta(raw string) map[string]UnitMeta {
 			id = val
 		case "WorkingDirectory":
 			m.WorkingDir = val
+		case "Restart":
+			m.Restart = val
 		case "ActiveEnterTimestamp":
 			// `--timestamp=unix` renders it as @<epoch seconds>.
 			if sec, err := strconv.ParseInt(strings.TrimPrefix(val, "@"), 10, 64); err == nil && sec > 0 {

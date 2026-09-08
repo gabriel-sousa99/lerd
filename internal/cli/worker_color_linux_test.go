@@ -30,7 +30,7 @@ func TestWriteWorkerUnitFileForcesColour(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := writeWorkerUnitFile(
 				tc.unitName, "Queue Worker", "alpha", sitePath, "8.4",
-				"php artisan queue:work", "always", tc.schedule, "lerd-php84-fpm", false,
+				"php artisan queue:work", "always", tc.schedule, "lerd-php84-fpm", "", false,
 			); err != nil {
 				t.Fatalf("writeWorkerUnitFile: %v", err)
 			}
@@ -50,7 +50,7 @@ func TestWriteWorkerUnitFileForcesColour(t *testing.T) {
 
 	if _, err := writeWorkerUnitFile(
 		"lerd-vite-alpha", "Vite", "alpha", sitePath, "",
-		"npm run dev", "always", "", "", true,
+		"npm run dev", "always", "", "", "", true,
 	); err != nil {
 		t.Fatalf("writeWorkerUnitFile host: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestWriteWorkerUnitFileRespectsNoColor(t *testing.T) {
 
 	if _, err := writeWorkerUnitFile(
 		"lerd-queue-alpha", "Queue Worker", "alpha", t.TempDir(), "8.4",
-		"php artisan queue:work", "always", "", "lerd-php84-fpm", false,
+		"php artisan queue:work", "always", "", "lerd-php84-fpm", "", false,
 	); err != nil {
 		t.Fatalf("writeWorkerUnitFile: %v", err)
 	}

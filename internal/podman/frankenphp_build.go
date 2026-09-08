@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 )
 
 // frankenPHPRuntimeExtensions is the standard PHP extension set baked into the
@@ -144,6 +145,12 @@ func buildFrankenPHPImage(version string, force bool, customExts, packages []str
 		if execCommand(PodmanBin(), "image", "exists", imageName).Run() == nil &&
 			imageLabelFn(imageName, frankenPHPContainerfileHashLabel) == hash {
 			return nil // image exists and is current
+		}
+		// Same deferral as the FPM build: offline keeps a stale but working
+		// image rather than re-downloading the FrankenPHP base.
+		if imagepull.Offline() && ImageExists(imageName) {
+			fmt.Fprintf(w, "  Offline: keeping the current FrankenPHP PHP %s image, run `lerd php:rebuild` to refresh it\n", version)
+			return nil
 		}
 	}
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatBytes } from './bytes';
+import { formatBytes, pullSize } from './bytes';
 
 describe('formatBytes', () => {
   it('renders zero and negatives as 0 B', () => {
@@ -15,5 +15,16 @@ describe('formatBytes', () => {
     expect(formatBytes(25690112)).toBe('24.5 MB');
     expect(formatBytes(18979224)).toBe('18.1 MB');
     expect(formatBytes(1024 * 1024 * 200)).toBe('200.0 MB');
+  });
+});
+
+describe('pullSize', () => {
+  it('renders an approximate size for a disclosed pull', () => {
+    expect(pullSize(18 * 1024 * 1024)).toBe(' (~18.0 MB)');
+  });
+
+  it('renders nothing when the registry did not answer with a size', () => {
+    expect(pullSize(undefined)).toBe('');
+    expect(pullSize(0)).toBe('');
   });
 });

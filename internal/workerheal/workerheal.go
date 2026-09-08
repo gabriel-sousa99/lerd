@@ -77,6 +77,7 @@ var (
 	isStoppedFn       = config.IsStopped
 	workerReachableFn = defaultWorkerReachable
 	dirExistsFn       = defaultDirExists
+	declaredFn        = config.DeclaredWorkerNames
 )
 
 // defaultDirExists reports whether a worktree checkout is still on disk. Asked
@@ -268,9 +269,9 @@ func Detect() ([]UnhealthyWorker, error) {
 	// Every active site's checkout, so a unit's WorkingDirectory can be told apart
 	// from a worktree's.
 	sitePaths := make(map[string]string, len(reg.Sites))
-	// path + framework per site, for resolving a health-probed worker's block.
-	type siteMeta struct{ path, framework string }
-	meta := make(map[string]siteMeta, len(reg.Sites))
+	// The site record per name, for resolving a health-probed worker's block and
+	// the set of workers the site still declares.
+	meta := make(map[string]config.Site, len(reg.Sites))
 	// Workers a site has intentionally idle-suspended must never be reported as
 	// failing or drifted — they are asleep on purpose and resume on the next
 	// request, so flagging or healing them would be noise (and a heal would wake
@@ -281,7 +282,7 @@ func Detect() ([]UnhealthyWorker, error) {
 			continue
 		}
 		sitePaths[s.Name] = s.Path
-		meta[s.Name] = siteMeta{path: s.Path, framework: s.Framework}
+		meta[s.Name] = s
 		if len(s.IdleSuspendedWorkers) > 0 {
 			set := make(map[string]bool, len(s.IdleSuspendedWorkers))
 			for _, w := range s.IdleSuspendedWorkers {
@@ -299,11 +300,30 @@ func Detect() ([]UnhealthyWorker, error) {
 	// used to resolve worktree units (by WorkingDirectory) and to gate the dial
 	// (by ActiveEnter). Empty on darwin; callers fall back to the prior behaviour.
 	unitMeta := unitMetaFn()
-	// Framework resolved lazily, at most once per site with an active worker.
-	// GetFrameworkForDir is not a plain lookup (it can trigger an unthrottled
-	// store fetch), so it must never run per worker inside the loop.
+	// Framework resolved lazily, at most once per site. GetFrameworkForDir is not
+	// a plain lookup (it can trigger an unthrottled store fetch), so it must never
+	// run per worker inside the loop.
 	resolvedFw := make(map[string]*config.Framework)
 	resolvedSet := make(map[string]bool)
+	frameworkFor := func(site string) *config.Framework {
+		if !resolvedSet[site] {
+			m := meta[site]
+			resolvedFw[site], _ = config.GetFrameworkForDir(m.Framework, m.Path)
+			resolvedSet[site] = true
+		}
+		return resolvedFw[site]
+	}
+	// Memoised alongside the framework so a site with several stale units reads
+	// its .lerd.yaml once per tick rather than once per unit.
+	declared := make(map[string]map[string]bool)
+	declaredSet := make(map[string]bool)
+	declaredFor := func(site string) (map[string]bool, bool) {
+		if !declaredSet[site] {
+			declared[site], _ = declaredFn(meta[site], frameworkFor(site))
+			declaredSet[site] = true
+		}
+		return declared[site], declared[site] != nil
+	}
 	var out []UnhealthyWorker
 	for unit, state := range states {
 		// The unit-state cache aliases each .service unit under both
@@ -351,6 +371,15 @@ func Detect() ([]UnhealthyWorker, error) {
 			})
 			continue
 		}
+		// A unit for a worker the site no longer declares answers to nothing, so
+		// there is no start that would heal it: the definition it came from either
+		// dropped the worker or was replaced. Reporting it as a failing worker is
+		// what puts a banner on the dashboard for something the store has not named
+		// for hours. The site doctor reports it once instead, with a fix that takes
+		// the unit off disk.
+		if names, ok := declaredFor(site); ok && !names[worker] {
+			continue
+		}
 		// Anything still on its way up is not yet a problem; the orphan case above
 		// is the only reason this state is looked at at all.
 		if state == "activating" {
@@ -371,18 +400,22 @@ func Detect() ([]UnhealthyWorker, error) {
 			if !unitEnabledFn(unit) {
 				continue
 			}
+			// A worker whose command ends when the user closes what it was
+			// running has finished, not drifted: NativePHP's native:serve exits
+			// with its window, and vite with its dev server. Their definitions
+			// say so by declaring on-failure, since an always-restart unit would
+			// reopen what the user just closed. Only always can be inactive
+			// against its own policy, which is what drift means.
+			if restart := unitMeta[unit].Restart; restart != "" && restart != "always" {
+				continue
+			}
 			detected = "expected-but-stopped"
 		default: // "active": up, but a health-probed server may have died under it.
-			m := meta[site]
-			if !resolvedSet[site] {
-				resolvedFw[site], _ = config.GetFrameworkForDir(m.framework, m.path)
-				resolvedSet[site] = true
-			}
 			path := probePath // worktree checkout, or the site root for a parent
 			if path == "" {
-				path = m.path
+				path = meta[site].Path
 			}
-			reachable, probed := workerReachableFn(path, resolvedFw[site], worker, unitMeta[unit].ActiveEnter)
+			reachable, probed := workerReachableFn(path, frameworkFor(site), worker, unitMeta[unit].ActiveEnter)
 			if !probed || reachable {
 				continue // no health probe declared, or the server is serving
 			}

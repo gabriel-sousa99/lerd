@@ -2,11 +2,11 @@ package cli
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/hostbin"
 	"github.com/spf13/cobra"
 )
 
@@ -91,8 +91,8 @@ func runShareTool(_ *cobra.Command, args []string) error {
 	if !ok {
 		return fmt.Errorf("unknown tool %q: use %s, or auto", tool, strings.Join(shareToolNames(), ", "))
 	}
-	if _, err := exec.LookPath(bin); err != nil {
-		return fmt.Errorf("%s requires %q which is not in PATH, install it first", tool, bin)
+	if _, ok := hostbin.Look(bin); !ok {
+		return fmt.Errorf("%s requires %q which is not installed", tool, bin)
 	}
 
 	cfg.Share.DefaultTool = tool

@@ -28,10 +28,27 @@ describe('sites actions', () => {
       async () => new Response(JSON.stringify({ path: '/x/custom.d/a.test.conf', content: '# snippet\n', exists: true }), { status: 200 })
     ) as unknown as typeof fetch;
     const { getSiteNginx } = await import('./sites');
-    const res = await getSiteNginx('a.test');
+    const res = await getSiteNginx('a.test', 'server');
     expect(res.path).toContain('a.test.conf');
     expect(res.content).toContain('# snippet');
     expect(res.exists).toBe(true);
+  });
+
+  it('nginx calls tag the location scope on the URL and leave server scope bare', async () => {
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      calls.push(String(url));
+      return new Response('{"ok":true}', { status: 200 });
+    }) as unknown as typeof fetch;
+    const { resetSiteNginx, loadSiteNginxBackups } = await import('./sites');
+    await resetSiteNginx('a.test', 'location');
+    await loadSiteNginxBackups('a.test', 'location');
+    await resetSiteNginx('a.test', 'server');
+    expect(calls).toEqual([
+      '/api/sites/a.test/nginx/reset?scope=location',
+      '/api/sites/a.test/nginx/backups?scope=location',
+      '/api/sites/a.test/nginx/reset'
+    ]);
   });
 
   it('saveSiteNginx POSTs the content and backup flag to /nginx', async () => {
@@ -48,7 +65,7 @@ describe('sites actions', () => {
       );
     }) as unknown as typeof fetch;
     const { saveSiteNginx } = await import('./sites');
-    const res = await saveSiteNginx('a.test', 'client_max_body_size 100m;\n', true);
+    const res = await saveSiteNginx('a.test', 'server', 'client_max_body_size 100m;\n', true);
     expect(res.ok).toBe(true);
     expect(res.backupName).toBe('a.test.conf.bkp.20260528-101010');
     expect(res.validationOutput).toBe('nginx -t ok');
@@ -73,7 +90,7 @@ describe('sites actions', () => {
         )
     ) as unknown as typeof fetch;
     const { saveSiteNginx } = await import('./sites');
-    const res = await saveSiteNginx('a.test', 'oops;\n');
+    const res = await saveSiteNginx('a.test', 'server', 'oops;\n');
     expect(res.ok).toBe(false);
     expect(res.error).toContain('rolled back');
     expect(res.validationOutput).toContain('unknown directive');
@@ -93,7 +110,7 @@ describe('sites actions', () => {
         )
     ) as unknown as typeof fetch;
     const { saveSiteNginx } = await import('./sites');
-    const res = await saveSiteNginx('a.test', 'client_max_body_size 100m;\n');
+    const res = await saveSiteNginx('a.test', 'server', 'client_max_body_size 100m;\n');
     expect(res.ok).toBe(true);
     expect(res.content).toContain('client_max_body_size');
     expect(res.exists).toBe(true);
@@ -106,7 +123,7 @@ describe('sites actions', () => {
       return new Response('{"ok":true}', { status: 200 });
     }) as unknown as typeof fetch;
     const { saveSiteNginx } = await import('./sites');
-    await saveSiteNginx('a.test', 'x;\n');
+    await saveSiteNginx('a.test', 'server', 'x;\n');
     expect(JSON.parse(String(calls[0][1]?.body))).toEqual({ content: 'x;\n', backup: false });
   });
 
@@ -115,7 +132,7 @@ describe('sites actions', () => {
       async () => new Response('[{"name":"a.test.conf.bkp.20260528-101010","mtime_unix":1}]', { status: 200 })
     ) as unknown as typeof fetch;
     const { loadSiteNginxBackups } = await import('./sites');
-    const res = await loadSiteNginxBackups('a.test');
+    const res = await loadSiteNginxBackups('a.test', 'server');
     expect(res.ok).toBe(true);
     expect(res.list).toEqual([{ name: 'a.test.conf.bkp.20260528-101010', mtime_unix: 1 }]);
     expect(res.error).toBeUndefined();
@@ -130,7 +147,7 @@ describe('sites actions', () => {
       async () => new Response('internal error', { status: 500 })
     ) as unknown as typeof fetch;
     const { loadSiteNginxBackups } = await import('./sites');
-    const res = await loadSiteNginxBackups('a.test');
+    const res = await loadSiteNginxBackups('a.test', 'server');
     expect(res.ok).toBe(false);
     expect(res.list).toEqual([]);
     expect(res.error).toMatch(/500/);
@@ -143,7 +160,7 @@ describe('sites actions', () => {
       return new Response('{"ok":true}', { status: 200 });
     }) as unknown as typeof fetch;
     const { resetSiteNginx } = await import('./sites');
-    const r = await resetSiteNginx('a.test');
+    const r = await resetSiteNginx('a.test', 'server');
     expect(r.ok).toBe(true);
     expect(calls[0][0]).toBe('/api/sites/a.test/nginx/reset');
     expect(calls[0][1]?.method).toBe('POST');
@@ -163,7 +180,7 @@ describe('sites actions', () => {
       );
     }) as unknown as typeof fetch;
     const { restoreSiteNginx } = await import('./sites');
-    const r = await restoreSiteNginx('a.test', 'a.test.conf.bkp.20260528-101010');
+    const r = await restoreSiteNginx('a.test', 'server', 'a.test.conf.bkp.20260528-101010');
     expect(calls[0][0]).toBe('/api/sites/a.test/nginx/restore');
     expect(JSON.parse(String(calls[0][1]?.body))).toEqual({
       name: 'a.test.conf.bkp.20260528-101010'

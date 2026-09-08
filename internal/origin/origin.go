@@ -10,6 +10,7 @@
 package origin
 
 import (
+	"net/url"
 	"os"
 	"strings"
 )
@@ -33,6 +34,17 @@ func StoreBaseURLs() []string {
 		return list
 	}
 	return []string{"https://raw.githubusercontent.com/" + frameworksRepo + "/main/frameworks"}
+}
+
+// StoreHost returns the hostname of the framework store, or "" when the base
+// carries none. Probes that need a name the install actually fetches take it
+// from here so a self-hosted store is tested rather than one lerd never calls.
+func StoreHost() string {
+	u, err := url.Parse(StoreBaseURLs()[0])
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // ServiceStoreBaseURLs returns the service-preset-store base, nested under a
@@ -91,7 +103,8 @@ func ToolsManifestURLs() []string {
 // normal install trusts.
 func ExtraToolHosts() []string { return splitList(os.Getenv("LERD_TOOLS_HOSTS")) }
 
-// ChangelogURLs lists raw changelog URLs.
+// ChangelogURLs lists raw changelog URLs for the given tag. An empty tag falls
+// back to the fork's default branch.
 //
 // Oracle fork: two corrections over upstream's path. The fork's default branch
 // is oracle-oci8-support, not main (main tracks upstream and carries none of the
@@ -99,11 +112,15 @@ func ExtraToolHosts() []string { return splitList(os.Getenv("LERD_TOOLS_HOSTS"))
 // serves a symlink's target *path* as the body, so that URL returned the literal
 // string "docs/changelog.md" with a 200 and `lerd whatsnew` rendered nothing.
 // Fetch the real file on the real branch instead.
-func ChangelogURLs() []string {
+func ChangelogURLs(tag string) []string {
 	if list := splitList(os.Getenv("LERD_CHANGELOG_URL")); len(list) > 0 {
 		return list
 	}
-	return []string{"https://raw.githubusercontent.com/" + mainRepo + "/" + defaultBranch + "/docs/changelog.md"}
+	ref := defaultBranch
+	if tag != "" {
+		ref = "v" + strings.TrimPrefix(tag, "v")
+	}
+	return []string{"https://raw.githubusercontent.com/" + mainRepo + "/" + ref + "/docs/changelog.md"}
 }
 
 // BaseImageRefs lists GHCR refs for a prebuilt PHP-FPM base image, where phpShort

@@ -72,11 +72,42 @@ func TestCheckEnvPresent_passesOnceThePrimaryExists(t *testing.T) {
 // The finding has to name the remedy. Leaving it at "it is missing" starts the
 // debugging session lerd exists to save.
 func TestEnvMissingDetail_namesTheCommandThatCreatesIt(t *testing.T) {
-	if d := envMissingDetail(".env", ""); !strings.Contains(d, "lerd env") {
+	if d := envMissingDetail(".env", "", false); !strings.Contains(d, "lerd env") {
 		t.Errorf("detail = %q, want the command that creates it", d)
 	}
-	d := envMissingDetail(".env", ".env.example")
+	d := envMissingDetail(".env", ".env.example", false)
 	if !strings.Contains(d, "lerd env") || !strings.Contains(d, ".env.example") {
 		t.Errorf("detail = %q, want the command and the example it copies", d)
+	}
+}
+
+// A file the application writes during its own install must not be recommended
+// into existence: an empty one reads to the framework as "already configured"
+// and breaks a project that was only waiting to be installed (#1563).
+func TestEnvMissingDetail_doesNotRecommendCreatingAnAppWrittenFile(t *testing.T) {
+	d := envMissingDetail("config/system/settings.php", "", true)
+	if strings.Contains(d, "lerd env") {
+		t.Errorf("detail = %q, but running that command is what breaks the project", d)
+	}
+	if !strings.Contains(d, "install") {
+		t.Errorf("detail = %q, want it to point at the framework's own install", d)
+	}
+}
+
+// The same check keeps its ordinary advice for a dotenv file, which is lerd's
+// to create.
+func TestCheckEnvPresent_keepsTheCommandForALerdOwnedFile(t *testing.T) {
+	c, _ := checkEnvPresent(t.TempDir(), ".env", ".env.example", false)
+	if c.Status != StatusFail || !strings.Contains(c.Detail, "lerd env") {
+		t.Errorf("check = %+v, want a failure naming lerd env", c)
+	}
+}
+
+// An app file lerd can seed from an example is still lerd's to create, which is
+// WordPress copying wp-config-sample.php, so the example wins over the installer.
+func TestEnvMissingDetail_prefersTheExampleOverTheInstaller(t *testing.T) {
+	d := envMissingDetail("wp-config.php", "wp-config-sample.php", true)
+	if !strings.Contains(d, "lerd env") || !strings.Contains(d, "wp-config-sample.php") {
+		t.Errorf("detail = %q, want the command and the sample it copies", d)
 	}
 }

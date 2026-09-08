@@ -2,7 +2,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name {{.ServerNames}};
-    return 302 https://$host$request_uri;
+    return 302 https://{{.HTTPSRedirectHost}}$request_uri;
 }
 
 server {
@@ -29,6 +29,7 @@ server {
         {{- if .BackendSSL}}
         proxy_ssl_verify off;
         {{- end}}
+        include /etc/nginx/custom.d/{{.Domain}}.location.conf*;
     }
 
     include /etc/nginx/custom.d/{{.Domain}}.conf*;

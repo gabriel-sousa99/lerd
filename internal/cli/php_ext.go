@@ -51,6 +51,13 @@ func newPhpExtAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Declaring a bundled extension makes every build rebuild it on top
+			// of the base image, which loses the configure flags that build gave
+			// it (ftp lost FTPS that way, #1576).
+			if len(podman.WithoutBundled(version, []string{ext})) == 0 {
+				return fmt.Errorf("extension %q already ships in the PHP %s image, nothing to add", ext, version)
+			}
+
 			rawDeps, _ := cmd.Flags().GetString("apk-deps")
 			deps, err := podman.ParseApkDeps(rawDeps)
 			if err != nil {

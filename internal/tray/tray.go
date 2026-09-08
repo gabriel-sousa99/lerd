@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/dashboard"
 	"github.com/gabriel-sousa99/lerd/internal/desktopnotify"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
@@ -28,11 +29,6 @@ import (
 // deliberately stays on 127.0.0.1 because the tray should work even
 // before nginx / DNS are up.
 var apiBase = "http://127.0.0.1:7073"
-
-// dashboardURL is the user-facing URL opened by "Open Dashboard" — the
-// nginx-proxied vhost so the dashboard shows up under lerd.localhost
-// rather than a bare IP:port.
-const dashboardURL = "http://lerd.localhost"
 
 // Snapshot holds the state polled from the Lerd API.
 type Snapshot struct {
@@ -237,7 +233,7 @@ func onReady(mono bool) {
 
 	go runPoller(ctx, updateCh)
 	go applyLoop(menu, updateCh, mono, icons)
-	go handleDash(menu.mDash)
+	go handleDash(menu.mDash, refresh)
 	go handleToggle(menu.mToggle, refresh)
 	menu.svcs.watch(refresh)
 	menu.php.watch(refresh)
@@ -249,6 +245,7 @@ func onReady(mono bool) {
 	go handleDumps(menu.mDumps, refresh)
 	go handleNotifications(menu.mNotifications, refresh)
 	go handleDebugGuide(menu.mDebugGuide)
+	go handleTrayOff(menu.mTrayOff)
 	if menu.mIconStyle != nil {
 		go handleIconStyle(menu.mIconStyle, refresh)
 	}
@@ -498,7 +495,7 @@ func applyLoop(menu *menuState, updateCh <-chan *Snapshot, mono bool, icons *ico
 	}
 }
 
-func handleDash(item *systray.MenuItem) {
+func handleDash(item *systray.MenuItem, refresh func()) {
 	for range item.ClickedCh {
 		// Prefer the desktop app when it's the registered lerd:// handler.
 		if desktopnotify.AppInstalled() {
@@ -506,7 +503,14 @@ func handleDash(item *systray.MenuItem) {
 				continue
 			}
 		}
-		openURL(dashboardURL)
+		if dashboard.Serving() {
+			openURL(dashboard.URL())
+			continue
+		}
+		// Nothing is serving it, so hand the click to `lerd dashboard`, which
+		// starts the stack before opening. Keeps start-then-open in one place
+		// rather than reimplementing the start here.
+		go runAndRefresh(lerdCmd("dashboard"), refresh)
 	}
 }
 
@@ -579,6 +583,14 @@ func handleNotifications(item *systray.MenuItem, refresh func()) {
 			enabled = cfg.IsNotificationsEnabled()
 		}
 		runAndRefresh(lerdCmd("notify", offOn(enabled)), refresh)
+	}
+}
+
+// handleTrayOff turns the tray off for good. The command kills this very
+// process, so there is nothing to refresh afterwards.
+func handleTrayOff(item *systray.MenuItem) {
+	for range item.ClickedCh {
+		_ = lerdCmd("tray", "off").Run()
 	}
 }
 

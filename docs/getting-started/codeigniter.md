@@ -19,7 +19,7 @@ Run `lerd mcp:enable-global` once and your AI assistant (Claude Code, Cursor, Ju
 ```bash [lerd new]
 cd ~/Lerd
 lerd new mysite --framework=codeigniter
-# runs: composer create-project codeigniter4/appstarter ./mysite
+# runs: composer create-project codeigniter4/appstarter:^4.0 ./mysite
 ```
 
 ```bash [composer]

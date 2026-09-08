@@ -3,7 +3,6 @@ package linker
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
@@ -36,7 +35,13 @@ func Resolve(dir string, cfg *config.GlobalConfig, p Policy) (*Plan, error) {
 		}
 	}
 
-	proj, _ := config.LoadProjectConfig(dir)
+	// A .lerd.yaml that does not parse used to be discarded whole and the link
+	// carried on reporting success, with none of the project's declarations
+	// applied and nothing said about why.
+	proj, err := config.LoadProjectConfig(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading the project config: %w", err)
+	}
 	plan.Project = proj
 
 	rawName := filepath.Base(dir)
@@ -176,7 +181,7 @@ func desiredDomains(proj *config.ProjectConfig, requested, name, tld string) []s
 	var domains []string
 	if proj != nil && len(proj.Domains) > 0 {
 		for _, d := range proj.Domains {
-			domains = append(domains, strings.ToLower(d)+"."+tld)
+			domains = append(domains, siteops.QualifyDomain(d, tld))
 		}
 	} else {
 		domains = []string{name + "." + tld}
@@ -185,7 +190,7 @@ func desiredDomains(proj *config.ProjectConfig, requested, name, tld string) []s
 		return domains
 	}
 
-	explicit := strings.ToLower(requested) + "." + tld
+	explicit := siteops.QualifyDomain(requested, tld)
 	filtered := make([]string, 0, len(domains))
 	for _, d := range domains {
 		if d != explicit {

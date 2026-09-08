@@ -83,8 +83,9 @@ func runUpdate(currentVersion string, beta bool) error {
 	// Show what's new between the current and latest version.
 	feedback.Line("what's new")
 	changelog, _ := lerdUpdate.FetchChangelog(cur, lat)
-	if changelog != "" {
-		for _, line := range strings.Split(changelog, "\n") {
+	summary := lerdUpdate.SummarizeChangelog(changelog)
+	if summary != "" {
+		for _, line := range strings.Split(summary, "\n") {
 			fmt.Println("  " + line)
 		}
 	} else {
@@ -188,6 +189,18 @@ func runUpdate(currentVersion string, beta bool) error {
 	// (gated on autostart), so we don't repeat them here.
 
 	restartLerdUserServices()
+
+	if feedback.Interactive() {
+		fmt.Printf("\nWhat's new in v%s (you had v%s):\n\n", lat, cur)
+		if summary != "" {
+			for _, line := range strings.Split(summary, "\n") {
+				fmt.Println(line)
+			}
+		} else {
+			fmt.Printf("  %s/tag/v%s\n", origin.ReleaseBaseURLs()[0], lat)
+		}
+	}
+
 	return nil
 }
 
@@ -224,16 +237,9 @@ func installedStoreFrameworkTargets() []storeFrameworkTarget {
 // whole catalogue only arrives one definition at a time, as projects that need
 // each one turn up.
 func publishedStoreFrameworkTargets(idx *store.Index) []storeFrameworkTarget {
+	idx = resolveStoreIndex(idx)
 	if idx == nil {
-		var err error
-		if idx, err = store.CachedIndex(); err != nil {
-			// No cache to read: this is the fresh machine the seeding is for, or a
-			// run whose earlier index fetch failed. Ask the store, so a network that
-			// has come back since still fills the catalogue on this run.
-			if idx, err = store.NewClient().RefreshIndex(); err != nil {
-				return nil
-			}
-		}
+		return nil
 	}
 	var targets []storeFrameworkTarget
 	for _, e := range idx.Frameworks {
@@ -251,43 +257,122 @@ func publishedStoreFrameworkTargets(idx *store.Index) []storeFrameworkTarget {
 // catalogue an established one does rather than only the built-ins. idx is the
 // index the caller has already fetched; nil reads the cached copy.
 func refreshStoreFrameworks(idx *store.Index) {
+	idx = resolveStoreIndex(idx)
+	targets := append(frameworkRefreshTargets(idx), packageRefreshTargets(idx)...)
+	if len(targets) == 0 {
+		return
+	}
+	// One line for the whole catalogue: a machine holding every framework the
+	// store publishes plus the package layer is dozens of fetches, and a line
+	// each buries the rest of the install in a wall nobody reads.
+	client := store.NewClient()
+	bar := feedback.StartProgress(fmt.Sprintf("refreshing %d store definition%s", len(targets), pluralS(len(targets))), len(targets))
+	for _, t := range targets {
+		if err := t.fetch(client); err != nil {
+			bar.Failed(t.label, err.Error())
+			continue
+		}
+		bar.Step(t.label)
+	}
+	bar.Done(storeRefreshTally(bar.Completed(), bar.Failures()))
+}
+
+// storeRefreshTarget is one file to pull from the store, named for the progress
+// line and carrying the fetch that gets it.
+type storeRefreshTarget struct {
+	label string
+	fetch func(*store.Client) error
+}
+
+func storeRefreshTally(refreshed, failed int) string {
+	out := fmt.Sprintf("%d refreshed", refreshed)
+	if failed > 0 {
+		out += fmt.Sprintf(", %d failed", failed)
+	}
+	return out
+}
+
+// resolveStoreIndex returns the index the caller already fetched, or the cached
+// copy, or a fresh one. Nil only when nothing on disk and nothing upstream can
+// say what the store publishes.
+func resolveStoreIndex(idx *store.Index) *store.Index {
+	if idx != nil {
+		return idx
+	}
+	// No cache to read: this is the fresh machine the seeding is for, or a run
+	// whose earlier index fetch failed. Ask the store, so a network that has come
+	// back since still fills the catalogue on this run.
+	cached, err := store.CachedIndex()
+	if err == nil {
+		return cached
+	}
+	fetched, err := store.NewClient().RefreshIndex()
+	if err != nil {
+		return nil
+	}
+	return fetched
+}
+
+// packageRefreshTargets lists the package layer the store publishes, so a
+// machine that has just installed resolves a package's workers and commands
+// offline the same way it resolves a framework's.
+func packageRefreshTargets(idx *store.Index) []storeRefreshTarget {
+	if idx == nil {
+		return nil
+	}
+	var targets []storeRefreshTarget
+	for _, entry := range idx.Packages {
+		for _, version := range store.PackageVersions(entry) {
+			name, version := entry.Name, version
+			targets = append(targets, storeRefreshTarget{
+				label: store.PackageLabel(name, version),
+				fetch: func(c *store.Client) error {
+					_, err := c.FetchPackage(name, version)
+					return err
+				},
+			})
+		}
+	}
+	return targets
+}
+
+// frameworkRefreshTargets lists every definition the store publishes plus any
+// already cached here that it no longer does.
+func frameworkRefreshTargets(idx *store.Index) []storeRefreshTarget {
 	seen := map[storeFrameworkTarget]bool{}
-	var targets []storeFrameworkTarget
+	var defs []storeFrameworkTarget
 	for _, t := range append(publishedStoreFrameworkTargets(idx), installedStoreFrameworkTargets()...) {
 		if seen[t] {
 			continue
 		}
 		seen[t] = true
-		targets = append(targets, t)
+		defs = append(defs, t)
 	}
-	if len(targets) == 0 {
-		return
-	}
-	sort.Slice(targets, func(i, j int) bool {
-		if targets[i].name != targets[j].name {
-			return targets[i].name < targets[j].name
+	sort.Slice(defs, func(i, j int) bool {
+		if defs[i].name != defs[j].name {
+			return defs[i].name < defs[j].name
 		}
-		return frameworkVersionOrder(targets[i].version) < frameworkVersionOrder(targets[j].version)
+		return frameworkVersionOrder(defs[i].version) < frameworkVersionOrder(defs[j].version)
 	})
-	feedback.Header(fmt.Sprintf("Refreshing %d framework%s", len(targets), pluralS(len(targets))))
-	client := store.NewClient()
-	for _, t := range targets {
-		label := t.name
-		if t.version != "" {
-			label = t.name + "@" + t.version
+	targets := make([]storeRefreshTarget, 0, len(defs))
+	for _, d := range defs {
+		d := d
+		label := d.name
+		if d.version != "" {
+			label = d.name + "@" + d.version
 		}
-		step := feedback.Start(label)
-		fw, err := client.FetchFramework(t.name, t.version)
-		if err != nil {
-			step.Fail(err)
-			continue
-		}
-		if err := config.SaveStoreFramework(fw); err != nil {
-			step.Fail(err)
-			continue
-		}
-		step.OK("")
+		targets = append(targets, storeRefreshTarget{
+			label: label,
+			fetch: func(c *store.Client) error {
+				fw, err := c.FetchFramework(d.name, d.version)
+				if err != nil {
+					return err
+				}
+				return config.SaveStoreFramework(fw)
+			},
+		})
 	}
+	return targets
 }
 
 // frameworkVersionOrder sorts a definition's major version numerically, so the
@@ -343,17 +428,44 @@ func refreshStorePresets() {
 	if len(names) == 0 {
 		return
 	}
-	sort.Strings(names)
-	feedback.Header(fmt.Sprintf("Refreshing %d service preset%s", len(names), pluralS(len(names))))
 	client := store.NewServiceClient()
+	names = publishedByStore(client, names)
+	if len(names) == 0 {
+		return
+	}
+	sort.Strings(names)
+	bar := feedback.StartProgress(fmt.Sprintf("refreshing %d service preset%s", len(names), pluralS(len(names))), len(names))
 	for _, name := range names {
-		step := feedback.Start(name)
 		if _, err := client.FetchServicePreset(name); err != nil {
-			step.Fail(err)
+			bar.Failed(name, err.Error())
 			continue
 		}
-		step.OK("")
+		bar.Step(name)
 	}
+	bar.Done(storeRefreshTally(bar.Completed(), bar.Failures()))
+}
+
+// publishedByStore narrows names to the presets the service store actually
+// carries. The built-in presets ship embedded and were never pushed to the
+// store, so fetching one is a guaranteed 404 that reads as a broken update. An
+// index the store cannot serve leaves nothing to refresh: the cached and
+// embedded copies keep serving either way.
+func publishedByStore(client *store.Client, names []string) []string {
+	idx, err := client.FetchServiceIndex()
+	if err != nil {
+		return nil
+	}
+	published := make(map[string]bool, len(idx.Services))
+	for _, e := range idx.Services {
+		published[e.Name] = true
+	}
+	var out []string
+	for _, name := range names {
+		if published[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // refreshGlobalMCPSkills re-writes the user-scope skill, rules, and guidelines

@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/shims"
 )
 
 func TestServiceDetail_ShowsPortsLine(t *testing.T) {
@@ -181,5 +184,161 @@ func TestPresetSuggestionFor_KnownService(t *testing.T) {
 	}
 	if got := presetSuggestionFor(nil); got != "" {
 		t.Errorf("nil svc must return empty, got %q", got)
+	}
+}
+
+// customShimService writes a custom service YAML exposing one client tool and a
+// tuning override, the fixture the client-tool and tuning sections read.
+func customShimService(t *testing.T, name string) {
+	t.Helper()
+	svc := &config.CustomService{
+		Name:        name,
+		Image:       "docker.io/library/redis:7",
+		ClientShims: []config.ClientShim{{Name: "acme-cli", Binaries: []string{"acme-cli"}}},
+		Tuning:      &config.TuningSpec{Target: "/etc/acme/acme.conf"},
+	}
+	if err := config.SaveCustomService(svc); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceDetail_ListsClientTools(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+	customShimService(t, "acmecache")
+
+	m := NewModel("test")
+	svc := &ServiceRow{Name: "acmecache", State: stateRunning, Custom: true}
+	joined := stripANSI(strings.Join(serviceDetailContentLines(m, svc, 120), "\n"))
+	if !strings.Contains(joined, "Client tools") {
+		t.Errorf("expected a client tools section:\n%s", joined)
+	}
+	if !strings.Contains(joined, "acme-cli") || !strings.Contains(joined, "off") {
+		t.Errorf("expected the declared tool and its state:\n%s", joined)
+	}
+	if !strings.Contains(joined, "space toggle client tool") {
+		t.Errorf("expected the toggle hint in the action row:\n%s", joined)
+	}
+}
+
+func TestServiceDetail_ClientToolCursorFollowsFocus(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+	customShimService(t, "acmecache")
+
+	m := NewModel("test")
+	m.snap = Snapshot{Services: []ServiceRow{{Name: "acmecache", State: stateRunning, Custom: true}}}
+	m.activeTab = tabServices
+	m.focus = paneDetail
+	_, cursor := serviceDetailContentLinesWithCursor(m, m.currentService(), 120)
+	if cursor < 0 {
+		t.Fatalf("expected the client-tool row to report a cursor line, got %d", cursor)
+	}
+	if n := m.serviceShimNavCount(); n != 1 {
+		t.Fatalf("expected one toggleable client tool, got %d", n)
+	}
+}
+
+func TestServiceDetail_ForeignToolIsNotToggleable(t *testing.T) {
+	tools := []shims.Info{
+		{Tool: "psql", Owner: "postgres"},
+		{Tool: "acme-cli", Owner: "acmecache"},
+	}
+	nav := navigableShimRows(tools, "acmecache")
+	if len(nav) != 1 || nav[0] != 1 {
+		t.Fatalf("expected only the owned tool to be navigable, got %v", nav)
+	}
+	row := stripANSI(renderShimRow(tools[0], "acmecache", false))
+	if !strings.Contains(row, "provided by postgres") {
+		t.Errorf("expected the owning service on a foreign tool row: %q", row)
+	}
+}
+
+func TestServiceDetail_ShowsTuningValues(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+	customShimService(t, "acmecache")
+	path := config.ServiceTuningFile("acmecache")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("# commented out\nmaxmemory 512mb\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewModel("test")
+	svc := &ServiceRow{Name: "acmecache", State: stateRunning, Custom: true}
+	joined := stripANSI(strings.Join(serviceDetailContentLines(m, svc, 120), "\n"))
+	if !strings.Contains(joined, "Tuning") || !strings.Contains(joined, "/etc/acme/acme.conf") {
+		t.Errorf("expected the tuning section with its mount target:\n%s", joined)
+	}
+	if !strings.Contains(joined, "maxmemory 512mb") {
+		t.Errorf("expected the set value:\n%s", joined)
+	}
+	if strings.Contains(joined, "commented out") {
+		t.Errorf("commented lines are not in effect and should not show:\n%s", joined)
+	}
+	if !strings.Contains(joined, "lerd service config acmecache") {
+		t.Errorf("expected the CLI edit hint:\n%s", joined)
+	}
+}
+
+func TestServiceDetail_ShowsEntities(t *testing.T) {
+	m := NewModel("test")
+	svc := &ServiceRow{Name: "rustfs", State: stateRunning}
+	m.svcEntities = map[string][]serviceEntityKind{
+		"rustfs": {{
+			kind:    "buckets",
+			label:   "Buckets",
+			columns: []serviceEntityColumn{{key: "size", label: "size", format: "bytes"}},
+			rows:    []serviceops.EntityRow{{Name: "media", Values: []string{"2097152"}}},
+		}},
+	}
+	joined := stripANSI(strings.Join(serviceDetailContentLines(m, svc, 120), "\n"))
+	if !strings.Contains(joined, "Buckets") || !strings.Contains(joined, "media") {
+		t.Errorf("expected the entity kind and its row:\n%s", joined)
+	}
+	if !strings.Contains(joined, "size 2MB") {
+		t.Errorf("expected the byte column formatted:\n%s", joined)
+	}
+	if !strings.Contains(joined, "create and drop live in the CLI") {
+		t.Errorf("expected the CLI-only note:\n%s", joined)
+	}
+}
+
+func TestServiceDetail_EntitiesLoadingPlaceholder(t *testing.T) {
+	m := NewModel("test")
+	m.svcEntitiesLoading = "rustfs"
+	svc := &ServiceRow{Name: "rustfs", State: stateRunning}
+	joined := stripANSI(strings.Join(serviceDetailContentLines(m, svc, 120), "\n"))
+	if !strings.Contains(joined, "Entities") || !strings.Contains(joined, "listing…") {
+		t.Errorf("expected a listing placeholder while the exec is in flight:\n%s", joined)
+	}
+}
+
+func TestServiceDetail_ScrollsPastTheLastClientTool(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+	customShimService(t, "acmecache")
+
+	m := NewModel("test")
+	m.snap = Snapshot{Services: []ServiceRow{{Name: "acmecache", State: stateRunning, Custom: true}}}
+	m.activeTab = tabServices
+	m.focus = paneDetail
+	// The one client tool is already selected, so the next move has to scroll
+	// the pane instead of sitting on the row: tuning lives below it.
+	m.moveCursor(1)
+	if m.svcDetailCursor != 0 {
+		t.Fatalf("cursor should stay on the only toggleable row, got %d", m.svcDetailCursor)
+	}
+	if m.detailScroll != 1 {
+		t.Fatalf("expected the pane to scroll past the last row, got %d", m.detailScroll)
+	}
+	if m.followCursor {
+		t.Fatal("a scroll past the cursor must not be dragged back by the follow")
 	}
 }

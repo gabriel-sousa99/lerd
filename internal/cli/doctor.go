@@ -16,6 +16,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/origin"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
@@ -365,9 +366,19 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 	fmt.Fprintln(w, "\n[DNS]")
 
 	dnsManaged := cfg == nil || cfg.DNS.Enabled
-	tld := "test"
-	if cfg != nil && cfg.DNS.TLD != "" {
-		tld = cfg.DNS.TLD
+
+	tld := dns.ConfiguredTLD()
+	rawTLD := ""
+	if cfg != nil {
+		rawTLD = cfg.DNS.TLD
+	}
+	tldRejected := rawTLD != "" && !dns.ValidTLD(rawTLD)
+
+	if tldRejected {
+		// Say so once here rather than in every rung below.
+		fail(fmt.Sprintf("DNS TLD (.%s)", rawTLD),
+			fmt.Sprintf("not a usable DNS suffix; serving .%s instead", tld),
+			"set dns.tld in "+cfgFile+" to dot-separated DNS labels (letters, digits, hyphens), e.g. test or internal.example.com")
 	}
 
 	if !dnsManaged {
@@ -375,7 +386,9 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 	} else if tld == "" {
 		fail("DNS TLD configured", "empty TLD in config", "set dns.tld in "+cfgFile)
 	} else {
-		ok(fmt.Sprintf("DNS TLD (.%s)", tld))
+		if !tldRejected {
+			ok(fmt.Sprintf("DNS TLD (.%s)", tld))
+		}
 		// Layered diagnostic: walk the chain (container, config, port,
 		// dig at 5300, resolver hookup, interface routing, system
 		// lookup) so a one-line failure points at exactly which rung
@@ -416,25 +429,56 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 		}
 	}
 
+	// Everything above is about .test resolving on the host. aardvark-dns
+	// answers container names and .test from its own records, so those keep
+	// working while every other lookup goes to the forwarders the lerd network
+	// was given, and a stale or unroutable forwarder there is invisible until
+	// composer or npm times out mid-download (#1519). Probe the store's own
+	// host so a self-hosted store is tested rather than a name lerd never fetches.
+	storeHost := origin.StoreHost()
+	switch {
+	case storeHost == "":
+		// A store base with no hostname leaves nothing to look up.
+	case !podman.ContainerRunningQuiet("lerd-nginx"):
+		warn("internet DNS from containers", "skipped — lerd-nginx not running (start lerd first)")
+	case podman.ResolvesFromNginx(storeHost):
+		ok(fmt.Sprintf("internet DNS from containers (%s)", storeHost))
+	default:
+		fail("internet DNS from containers",
+			fmt.Sprintf("%s does not resolve inside a container, so composer, npm and the framework store will fail", storeHost),
+			"re-point the network at your current resolvers: lerd stop && lerd start (inspect them with: podman network inspect lerd --format '{{.NetworkDNSServers}}')")
+	}
+
 	// ── Ports ────────────────────────────────────────────────────────────────
 	section = "Ports"
 	fmt.Fprintln(w, "\n[Ports]")
 
+	// Report the ports nginx is actually configured to bind, not 80/443: on a
+	// host that moved them, probing the defaults reports a conflict that no
+	// config change can resolve (#1544).
+	httpPort, httpsPort := config.NginxPorts()
 	nginxRunning, _ := podman.ContainerRunning("lerd-nginx")
-	if nginxRunning {
-		ok("port 80  (nginx running)")
-		ok("port 443 (nginx running)")
+	for _, p := range []int{httpPort, httpsPort} {
+		port := strconv.Itoa(p)
+		switch {
+		case nginxRunning:
+			ok(fmt.Sprintf("port %-4s (nginx running)", port))
+		case PortInUse(port):
+			fail("port "+port, "in use by another process", "find the process: "+FindListenerCmd(port))
+		default:
+			ok(fmt.Sprintf("port %-4s (free)", port))
+		}
+	}
+
+	// Xdebug connects back to the IDE on this port, so a lerd container that
+	// publishes it answers the debugger itself and the IDE never sees a session.
+	// The connection succeeds, which is why nothing else reports it (#1555).
+	if owner, taken := podman.PublishedPortOwner(config.XdebugClientPort); taken {
+		warn(fmt.Sprintf("xdebug port %d", config.XdebugClientPort),
+			fmt.Sprintf("published by %s, so breakpoints never reach your IDE (move it: lerd service port %s %d --container %d)",
+				owner.Unit, owner.Service, config.XdebugClientPort+1, owner.ContainerPort))
 	} else {
-		if PortInUse("80") {
-			fail("port 80", "in use by another process", "find the process: "+FindListenerCmd("80"))
-		} else {
-			ok("port 80  (free)")
-		}
-		if PortInUse("443") {
-			fail("port 443", "in use by another process", "find the process: "+FindListenerCmd("443"))
-		} else {
-			ok("port 443 (free)")
-		}
+		ok(fmt.Sprintf("port %d (free for xdebug)", config.XdebugClientPort))
 	}
 
 	// ── Stopped service ports ────────────────────────────────────────────────
@@ -565,6 +609,27 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 			}
 			warn(fmt.Sprintf("site %s", site.Name),
 				fmt.Sprintf("%s; switch with: lerd runtime frankenphp", hints[0].Reason))
+		}
+	}
+
+	// ── Sites ────────────────────────────────────────────────────────────────
+	// The broad command has to be broad: an environment that passes every check
+	// above while three sites are failing is not a healthy machine. Each site
+	// gets the cheap half of `lerd site:doctor`, which is named for the detail.
+	section = "Sites"
+	fmt.Fprintln(w, "\n[Sites]")
+	swept := sweepSites()
+	if len(swept) == 0 {
+		ok("no linked sites to check")
+	}
+	for _, s := range swept {
+		switch {
+		case s.Failures > 0:
+			fail(s.Label, s.Summary, "run: lerd site:doctor "+s.Label)
+		case s.Warnings > 0:
+			warn(s.Label, s.Summary+", run: lerd site:doctor "+s.Label)
+		default:
+			ok(s.Label)
 		}
 	}
 

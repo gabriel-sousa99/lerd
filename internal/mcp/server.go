@@ -327,17 +327,13 @@ func execArtisan(args map[string]any) (any, *rpcError) {
 		return toolErr("args is required and must be a non-empty array"), nil
 	}
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return toolErr("failed to detect PHP version: " + err.Error()), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr(err.Error()), nil
 	}
 
 	short := strings.ReplaceAll(phpVersion, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, short, container); errBody != nil {
 		return errBody, nil
 	}
@@ -509,7 +505,11 @@ func execSiteNginxRead(args map[string]any) (any, *rpcError) {
 	if err != nil {
 		return toolErr(err.Error()), nil
 	}
-	got, err := siteops.ReadCustomNginx(domain)
+	scope, err := siteops.ParseNginxScope(strArg(args, "scope"))
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	got, err := siteops.ReadCustomNginx(domain, scope)
 	if err != nil {
 		return toolErr(err.Error()), nil
 	}
@@ -517,7 +517,7 @@ func execSiteNginxRead(args map[string]any) (any, *rpcError) {
 	if !got.Exists {
 		state = "no override yet — showing the template"
 	}
-	return toolOK(fmt.Sprintf("# %s (%s)\n%s", domain, state, got.Body)), nil
+	return toolOK(fmt.Sprintf("# %s (%s scope, %s)\n%s", domain, scope, state, got.Body)), nil
 }
 
 func execSiteNginxWrite(args map[string]any) (any, *rpcError) {
@@ -525,7 +525,11 @@ func execSiteNginxWrite(args map[string]any) (any, *rpcError) {
 	if err != nil {
 		return toolErr(err.Error()), nil
 	}
-	res, err := siteops.SaveCustomNginx(domain, strArg(args, "content"), true)
+	scope, err := siteops.ParseNginxScope(strArg(args, "scope"))
+	if err != nil {
+		return toolErr(err.Error()), nil
+	}
+	res, err := siteops.SaveCustomNginx(domain, scope, strArg(args, "content"), true)
 	if err != nil {
 		return toolErr(err.Error()), nil
 	}
@@ -544,69 +548,14 @@ func execSiteNginxReset(args map[string]any) (any, *rpcError) {
 	if err != nil {
 		return toolErr(err.Error()), nil
 	}
-	if err := siteops.ResetCustomNginx(domain); err != nil {
-		return toolErr(err.Error()), nil
-	}
-	return toolOK(fmt.Sprintf("Reset %s to the bundled nginx defaults.", domain)), nil
-}
-
-// QueueStartFn and QueueStopFn are injected by the cli package (which owns the
-// cross-platform worker lifecycle) so the queue tools reuse it without a
-// cli -> mcp -> cli import cycle.
-var (
-	QueueStartFn func(siteName, sitePath, phpVersion, queue string, tries, timeout int) error
-	QueueStopFn  func(siteName string) error
-)
-
-func execQueueStart(args map[string]any) (any, *rpcError) {
-	siteName := strArg(args, "site")
-	if siteName == "" {
-		return toolErr("site is required"), nil
-	}
-
-	site, err := config.FindSite(siteName)
+	scope, err := siteops.ParseNginxScope(strArg(args, "scope"))
 	if err != nil {
-		return toolErr("site not found: " + siteName), nil
-	}
-
-	phpVersion := site.PHPVersion
-	if detected, err := phpDet.DetectVersion(site.Path); err == nil && detected != "" {
-		phpVersion = detected
-	}
-
-	queue := strArg(args, "queue")
-	if queue == "" {
-		queue = "default"
-	}
-	// The queue name is interpolated into the worker command; whitespace or a
-	// newline could inject extra arguments or a systemd directive.
-	if strings.ContainsAny(queue, " \t\r\n") {
-		return toolErr("invalid queue name: must not contain whitespace"), nil
-	}
-	tries := intArg(args, "tries", 3)
-	timeout := intArg(args, "timeout", 60)
-
-	if QueueStartFn == nil {
-		return toolErr("queue control unavailable"), nil
-	}
-	if err := QueueStartFn(siteName, site.Path, phpVersion, queue, tries, timeout); err != nil {
 		return toolErr(err.Error()), nil
 	}
-	return toolOK(fmt.Sprintf("Queue worker started for %s (queue: %s)", siteName, queue)), nil
-}
-
-func execQueueStop(args map[string]any) (any, *rpcError) {
-	siteName := strArg(args, "site")
-	if siteName == "" {
-		return toolErr("site is required"), nil
-	}
-	if QueueStopFn == nil {
-		return toolErr("queue control unavailable"), nil
-	}
-	if err := QueueStopFn(siteName); err != nil {
+	if err := siteops.ResetCustomNginx(domain, scope); err != nil {
 		return toolErr(err.Error()), nil
 	}
-	return toolOK("Queue worker stopped for " + siteName), nil
+	return toolOK(fmt.Sprintf("Reset the %s scope override for %s to the bundled nginx defaults.", scope, domain)), nil
 }
 
 func execReverbStart(args map[string]any) (any, *rpcError) {
@@ -622,9 +571,10 @@ func execReverbStart(args map[string]any) (any, *rpcError) {
 	if detected, err := phpDet.DetectVersion(site.Path); err == nil && detected != "" {
 		phpVersion = detected
 	}
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
+	// A custom-FPM site runs its own image, so the unit binds to and execs into
+	// the per-site container rather than the shared one it is never served by.
+	fpmUnit := podman.FPMContainerName(*site, phpVersion)
+	container := fpmUnit
 	unitName := "lerd-reverb-" + siteName
 
 	unit := fmt.Sprintf(`[Unit]
@@ -648,7 +598,7 @@ WantedBy=default.target
 	if err := podman.DaemonReloadFn(); err != nil {
 		return toolErr("daemon-reload: " + err.Error()), nil
 	}
-	_ = lerdSystemd.EnableService(unitName)
+	_ = lerdSystemd.SyncBootArming(unitName)
 	if err := lerdSystemd.StartService(unitName); err != nil {
 		return toolErr("starting reverb: " + err.Error()), nil
 	}
@@ -689,9 +639,10 @@ func execHorizonStart(args map[string]any) (any, *rpcError) {
 	if detected, err := phpDet.DetectVersion(site.Path); err == nil && detected != "" {
 		phpVersion = detected
 	}
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
+	// A custom-FPM site runs its own image, so the unit binds to and execs into
+	// the per-site container rather than the shared one it is never served by.
+	fpmUnit := podman.FPMContainerName(*site, phpVersion)
+	container := fpmUnit
 	unitName := "lerd-horizon-" + siteName
 
 	unit := fmt.Sprintf(`[Unit]
@@ -715,7 +666,7 @@ WantedBy=default.target
 	if err := podman.DaemonReloadFn(); err != nil {
 		return toolErr("daemon-reload: " + err.Error()), nil
 	}
-	_ = lerdSystemd.EnableService(unitName)
+	_ = lerdSystemd.SyncBootArming(unitName)
 	if err := lerdSystemd.StartService(unitName); err != nil {
 		return toolErr("starting horizon: " + err.Error()), nil
 	}
@@ -751,9 +702,10 @@ func execScheduleStart(args map[string]any) (any, *rpcError) {
 	if detected, err := phpDet.DetectVersion(site.Path); err == nil && detected != "" {
 		phpVersion = detected
 	}
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
+	// A custom-FPM site runs its own image, so the unit binds to and execs into
+	// the per-site container rather than the shared one it is never served by.
+	fpmUnit := podman.FPMContainerName(*site, phpVersion)
+	container := fpmUnit
 	unitName := "lerd-schedule-" + siteName
 
 	unit := fmt.Sprintf(`[Unit]
@@ -777,7 +729,7 @@ WantedBy=default.target
 	if err := podman.DaemonReloadFn(); err != nil {
 		return toolErr("daemon-reload: " + err.Error()), nil
 	}
-	_ = lerdSystemd.EnableService(unitName)
+	_ = lerdSystemd.SyncBootArming(unitName)
 	if err := lerdSystemd.StartService(unitName); err != nil {
 		return toolErr("starting scheduler: " + err.Error()), nil
 	}
@@ -864,7 +816,7 @@ WantedBy=default.target
 	if err := podman.DaemonReloadFn(); err != nil {
 		return toolErr("daemon-reload: " + err.Error()), nil
 	}
-	_ = lerdSystemd.EnableService(unitName)
+	_ = lerdSystemd.SyncBootArming(unitName)
 	if err := lerdSystemd.StartService(unitName); err != nil {
 		return toolErr("starting stripe listener: " + err.Error()), nil
 	}
@@ -931,17 +883,13 @@ func execComposer(args map[string]any) (any, *rpcError) {
 		return toolErr("args is required and must be a non-empty array"), nil
 	}
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return toolErr("failed to detect PHP version: " + err.Error()), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr(err.Error()), nil
 	}
 
 	short := strings.ReplaceAll(phpVersion, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, short, container); errBody != nil {
 		return errBody, nil
 	}
@@ -1010,17 +958,13 @@ func execVendorRun(args map[string]any) (any, *rpcError) {
 	}
 	binArgs := strSliceArg(args, "args")
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return toolErr("failed to detect PHP version: " + err.Error()), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr(err.Error()), nil
 	}
 
 	short := strings.ReplaceAll(phpVersion, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, short, container); errBody != nil {
 		return errBody, nil
 	}
@@ -1467,16 +1411,8 @@ func execCheck(args map[string]any) (any, *rpcError) {
 }
 
 func validatePHPVersionMCP(s string) error {
-	parts := strings.SplitN(s, ".", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if !config.ValidPHPVersion(s) {
 		return fmt.Errorf("must be MAJOR.MINOR format")
-	}
-	for _, p := range parts {
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return fmt.Errorf("must be MAJOR.MINOR format")
-			}
-		}
 	}
 	return nil
 }
@@ -1572,6 +1508,10 @@ func execServiceReinstall(args map[string]any) (any, *rpcError) {
 	name := strArg(args, "name")
 	if name == "" {
 		return toolErr("name is required"), nil
+	}
+	pending, _ := serviceops.ActionDownload(name, "reinstall", "")
+	if gate := downloadGate(args, pending, "Reinstalling "+name); gate != nil {
+		return gate, nil
 	}
 	resetData := boolArg(args, "reset_data")
 	opts := serviceops.ReinstallOptions{ResetData: resetData, SkipSnapshot: boolArg(args, "no_snapshot")}
@@ -1859,6 +1799,10 @@ func execServicePresetInstall(args map[string]any) (any, *rpcError) {
 		return toolErr("name is required"), nil
 	}
 	version := strArg(args, "version")
+	pending, _ := serviceops.PresetDownload(name, version)
+	if gate := downloadGate(args, pending, "Installing the "+name+" preset"); gate != nil {
+		return gate, nil
+	}
 	svc, err := serviceops.InstallPresetByName(name, version)
 	if err != nil {
 		return toolErr(err.Error()), nil
@@ -1922,11 +1866,11 @@ func execServiceUpdate(args map[string]any) (any, *rpcError) {
 		if err != nil || avail == nil || avail.CurrentImage == "" {
 			return toolErr("could not resolve current image for " + name), nil
 		}
-		if at := strings.LastIndex(avail.CurrentImage, ":"); at > 0 {
-			targetImage = avail.CurrentImage[:at] + ":" + tag
-		} else {
-			targetImage = avail.CurrentImage + ":" + tag
-		}
+		targetImage = serviceops.RetagImage(avail.CurrentImage, tag)
+	}
+	pending, _ := serviceops.ActionDownload(name, "update", tag)
+	if gate := downloadGate(args, pending, "Updating "+name); gate != nil {
+		return gate, nil
 	}
 	var lastImage string
 	emit := func(ev serviceops.PhaseEvent) {
@@ -1957,6 +1901,9 @@ func execServiceMigrate(args map[string]any) (any, *rpcError) {
 	if err != nil {
 		return toolErr(err.Error()), nil
 	}
+	if gate := downloadGate(args, podman.DescribeDownload(target), "Migrating "+name+" to "+tag); gate != nil {
+		return gate, nil
+	}
 	var lastImage string
 	emit := func(ev serviceops.PhaseEvent) {
 		if ev.Image != "" {
@@ -1973,6 +1920,10 @@ func execServiceRollback(args map[string]any) (any, *rpcError) {
 	name := strArg(args, "name")
 	if name == "" {
 		return toolErr("name is required"), nil
+	}
+	pending, _ := serviceops.ActionDownload(name, "rollback", "")
+	if gate := downloadGate(args, pending, "Rolling "+name+" back"); gate != nil {
+		return gate, nil
 	}
 	var lastImage string
 	emit := func(ev serviceops.PhaseEvent) {
@@ -3210,7 +3161,22 @@ func execWorkerStart(args map[string]any) (any, *rpcError) {
 	if errResp != nil {
 		return errResp, nil
 	}
-	out, err := runIn(cwd, lerdSelf(), "worker", "start", workerName)
+	argv := []string{"worker", "start", workerName}
+	if options := strSliceArg(args, "options"); len(options) > 0 {
+		w, ok := siteWorkers(site, cwd)[workerName]
+		if !ok {
+			return toolErr(fmt.Sprintf("site %q has no worker named %q; worker(action: \"list\") reports the ones it has", siteName, workerName)), nil
+		}
+		flags, err := workerTuneArgs(w, workerName, options)
+		if err != nil {
+			return toolErr(err.Error()), nil
+		}
+		// The generated `<worker>:start` is where the CLI renders one flag per
+		// tune_command placeholder, so the tuning goes through that surface
+		// rather than a second implementation of it.
+		argv = append([]string{workerName + ":start"}, flags...)
+	}
+	out, err := runIn(cwd, lerdSelf(), argv...)
 	if err != nil {
 		msg := strings.TrimSpace(out)
 		if msg == "" {
@@ -3260,22 +3226,19 @@ func execWorkerList(args map[string]any) (any, *rpcError) {
 		return toolErr("site not found: " + siteName), nil
 	}
 
-	fwName := site.Framework
-	if fwName == "" {
-		data, _ := json.MarshalIndent([]struct{}{}, "", "  ")
-		return toolOK(string(data)), nil
-	}
-	fw, ok := config.GetFrameworkForDir(fwName, site.Path)
-	if !ok || len(fw.Workers) == 0 {
+	workers := siteWorkers(site, site.Path)
+	if len(workers) == 0 {
 		data, _ := json.MarshalIndent([]struct{}{}, "", "  ")
 		return toolOK(string(data)), nil
 	}
 
 	branchArg := strArg(args, "branch")
 	var unitSuffix string
+	optionsDir := site.Path
 	if branchArg != "" {
 		sanitized := gitpkg.SanitizeBranch(branchArg)
-		if worktreePathFor(site, sanitized) == "" {
+		optionsDir = worktreePathFor(site, sanitized)
+		if optionsDir == "" {
 			return toolErr(fmt.Sprintf("worktree branch %q not found on site %q", branchArg, siteName)), nil
 		}
 		unitSuffix = "-" + sanitized
@@ -3293,11 +3256,16 @@ func execWorkerList(args map[string]any) (any, *rpcError) {
 		PerWorktree   bool   `json:"per_worktree,omitempty"`
 		ReplacesBuild bool   `json:"replaces_build,omitempty"`
 		Orphaned      bool   `json:"orphaned,omitempty"`
+		// Options are the values the worker's tune_command declares, each with
+		// the default the definition runs and what the project committed, so an
+		// assistant sees what it may pass to start without any of them being
+		// written into this tool's schema by hand.
+		Options []config.WorkerTuneOption `json:"options,omitempty"`
 	}
 
-	known := make(map[string]bool, len(fw.Workers))
+	known := make(map[string]bool, len(workers))
 	var result []workerInfo
-	for wname, w := range fw.Workers {
+	for wname, w := range workers {
 		known[wname] = true
 		unitName := "lerd-" + wname + "-" + siteName + unitSuffix
 		status, _ := podman.UnitStatus(unitName)
@@ -3320,6 +3288,7 @@ func execWorkerList(args map[string]any) (any, *rpcError) {
 			Host:          w.Host,
 			PerWorktree:   w.IsPerWorktree(),
 			ReplacesBuild: w.ReplacesBuild,
+			Options:       config.WorkerTuneOptions(optionsDir, wname, w),
 		})
 	}
 
@@ -3757,14 +3726,24 @@ func execProjectNew(args map[string]any) (any, *rpcError) {
 		return toolErr("path is required — provide an absolute path for the new project directory"), nil
 	}
 	frameworkName := strArg(args, "framework")
+	frameworkVersion := strArg(args, "version")
 	if frameworkName == "" {
+		if frameworkVersion != "" {
+			return toolErr("version needs a framework to apply it to — pass framework alongside it"), nil
+		}
 		frameworkName = "laravel"
 	}
 	extraArgs := strSliceArg(args, "args")
 
-	fw, ok := config.GetFrameworkForScaffold(frameworkName, "")
+	fw, ok := config.GetFrameworkForScaffold(frameworkName, frameworkVersion)
 	if !ok {
 		return toolErr(fmt.Sprintf("unknown framework %q — use framework_list to see available frameworks", frameworkName)), nil
+	}
+	// A major nothing publishes resolves to the current one rather than failing,
+	// which is right for a person who picked from a list and wrong here: the
+	// caller asked for a major and would otherwise be handed another one.
+	if frameworkVersion != "" && fw.Version != frameworkVersion {
+		return toolErr(fmt.Sprintf("framework %q does not publish major %q (the store serves %q) — use framework_list to see the majors it publishes", frameworkName, frameworkVersion, fw.Version)), nil
 	}
 	if fw.Create == "" {
 		return toolErr(fmt.Sprintf("framework %q has no create command — add a 'create' field to its YAML definition", frameworkName)), nil
@@ -3805,15 +3784,11 @@ func runComposerInstallIfNeeded(projectPath string, out *bytes.Buffer) error {
 		return nil
 	}
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil || phpVersion == "" {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil || cfg == nil {
-			return fmt.Errorf("could not determine PHP version: %w", err)
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return fmt.Errorf("could not determine PHP version: %w", err)
 	}
-	container := "lerd-php" + strings.ReplaceAll(phpVersion, ".", "") + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 
 	out.WriteString("\n\n--- composer install ---\n")
 	cmd := podman.Cmd("exec", "-w", projectPath, "--env", composer.ProcessTimeoutEnv(), container, "composer", "install", "--no-interaction")
@@ -3848,15 +3823,11 @@ func execSetup(args map[string]any) (any, *rpcError) {
 		return toolErr(fmt.Sprintf("framework %q is not defined", fwName)), nil
 	}
 
-	phpVersion, phpErr := phpDet.DetectVersion(projectPath)
+	phpVersion, phpErr := phpDet.VersionForDir(projectPath)
 	if phpErr != nil || phpVersion == "" {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil || cfg == nil {
-			return toolErr("could not determine PHP version"), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr("could not determine PHP version"), nil
 	}
-	container := "lerd-php" + strings.ReplaceAll(phpVersion, ".", "") + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, strings.ReplaceAll(phpVersion, ".", ""), container); errBody != nil {
 		return errBody, nil
 	}
@@ -4072,12 +4043,14 @@ func execSiteRuntime(args map[string]any) (any, *rpcError) {
 		return toolOK(fmt.Sprintf("%s: runtime set to fpm", siteName)), nil
 	}
 
-	// FrankenPHP only publishes images for PHP >= 8.2; without this guard the
-	// build normalizes the version up (e.g. 8.1 -> 8.5) and silently runs a
-	// different PHP than the site reports. Mirror the `lerd runtime` guard.
-	if !config.IsFrankenPHPVersion(site.PHPVersion) {
-		return toolErr(fmt.Sprintf("FrankenPHP requires PHP %s or newer; this site is on PHP %s — bump it first.",
-			config.FrankenPHPMinVersion, site.PHPVersion)), nil
+	// FrankenPHP only publishes images for released PHP >= 8.2; without this
+	// guard the build normalizes the version up (e.g. 8.1 -> 8.5) and silently
+	// runs a different PHP than the site reports. Mirror the `lerd runtime` guard.
+	if reason := config.FrankenPHPUnavailableReason(site.PHPVersion); reason != "" {
+		if config.IsPrereleasePHPVersion(site.PHPVersion) {
+			return toolErr(reason + " — this site runs on FPM until it ships."), nil
+		}
+		return toolErr(reason + " — bump it first."), nil
 	}
 
 	site.Runtime = "frankenphp"
@@ -4489,9 +4462,19 @@ func execPHPExtAdd(args map[string]any) (any, *rpcError) {
 		return toolErr(err.Error()), nil
 	}
 
+	// Declaring a bundled extension makes every build rebuild it on top of the
+	// base image, which loses the configure flags that build gave it (#1576).
+	if len(podman.WithoutBundled(version, []string{ext})) == 0 {
+		return toolErr(fmt.Sprintf("extension %q already ships in the PHP %s image, nothing to add", ext, version)), nil
+	}
+
 	deps, err := podman.ParseApkDeps(strArg(args, "apk_deps"))
 	if err != nil {
 		return toolErr(err.Error()), nil
+	}
+
+	if gate := downloadGate(args, podman.PHPDownload(version), "Rebuilding the PHP "+version+" image"); gate != nil {
+		return gate, nil
 	}
 
 	// Re-adding an already-declared extension must not let a failed verify

@@ -53,7 +53,13 @@ func TestWorkerStartPreflight_noUsableNodeIsActionable(t *testing.T) {
 		}
 	}
 
-	// A non-Node command in the same repo is unaffected.
+	// A non-Node command in the same repo is unaffected. The program has to be
+	// on disk: a worker naming one the project does not have is held back by its
+	// own gate, and this test is about the Node one.
+	server := filepath.Join(sitePath, "server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	direct := config.FrameworkWorker{Command: "./server --port 8000", Host: true}
 	if err := workerStartPreflight(sitePath, "app", direct); err != nil {
 		t.Errorf("non-Node command should pass: %v", err)

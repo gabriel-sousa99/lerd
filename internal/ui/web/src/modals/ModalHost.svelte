@@ -32,6 +32,7 @@
   import ConfirmSiteUnlinkModal from './ConfirmSiteUnlinkModal.svelte';
   import ConfirmServiceInstallModal from './ConfirmServiceInstallModal.svelte';
   import ErrorModal from './ErrorModal.svelte';
+  import ConfirmDownloadModal from './ConfirmDownloadModal.svelte';
 </script>
 
 {#if $modal.kind === 'domain' && $modal.site}
@@ -99,3 +100,7 @@
 {:else if $modal.kind === 'error' && $modal.error}
   <ErrorModal />
 {/if}
+
+<!-- Always mounted: a download confirmation can be raised on top of whichever
+     modal started the operation, so it is not part of the single-slot chain. -->
+<ConfirmDownloadModal />

@@ -23,7 +23,9 @@ and test against, but the pull request goes to **lerd-env/frameworks**.
    adjust. The existing YAML is the schema of record — do not invent fields.
 
 2. **Fill the sections that apply** (all keyed by real examples in the store):
-   - `name`, `version`, `label`, `public_dir`, `create` (scaffold command)
+   - `name`, `version`, `label`, `public_dir`, `create` (scaffold command,
+     which must constrain its package to the file's own major, e.g.
+     `composer create-project laravel/laravel:^12.0`)
    - `php.min` / `php.max` — the versions the framework supports
    - `detect` — marker file, lockfile, or `composer:` package that identifies it,
      including the major version
@@ -34,7 +36,10 @@ and test against, but the pull request goes to **lerd-env/frameworks**.
    - `workers` — queue, schedule, and any framework-specific long-runners. Each
      has `command`, `restart`, optional `check`/`exclude_check` (composer package
      or file gating), `conflicts_with`, `proxy`, `per_worktree`, `host`. **New
-     workers go here, not in Go.**
+     workers go here, not in Go** — unless a composer package owns the worker
+     rather than the framework, in which case it goes in
+     `packages/<vendor>-<name>.yaml` and is declared once for every
+     major (see step 4).
    - `setup` — post-link steps (migrate, storage:link…) with sensible `default:`
    - `doctor.checks` — declarative health checks (`env_combo`, `symlink`,
      `command`) with a `fix:` command and a human `detail:` string
@@ -56,6 +61,18 @@ and test against, but the pull request goes to **lerd-env/frameworks**.
 4. **Update `frameworks/index.json`** if the store requires it (check how the
    existing entries are registered), and the README table in the
    lerd-env/frameworks `README.md`.
+
+   A worker, command, setup step or doctor check gated on a composer package
+   belongs to the package, so it is declared once in
+   `packages/<vendor>-<name>.yaml` (`package:`, an optional `version:`
+   for the package's own major, an optional `frameworks:` list of
+   `name`/`min`/`max` scopes, then `workers`, `commands`, `setup`, `doctor`, and a `removes:` block for what a new
+   major of the package took away) and
+   listed under `packages` in `frameworks/index.json` as `{"name": "vendor/pkg"}`,
+   with `versions`/`latest` only when the package publishes a file per major.
+   lerd merges it onto the resolved definition for a project that requires the
+   package, and the package wins a name collision with the version file. Copy
+   `packages/laravel-horizon.yaml`.
 
 5. **Validate end-to-end** against a real project:
    ```bash

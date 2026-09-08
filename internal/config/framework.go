@@ -68,6 +68,9 @@ type Framework struct {
 	// dropdown. See FrameworkCommand for the schema. Projects extend or
 	// override this list in .lerd.yaml; use ResolveCommands to merge.
 	Commands []FrameworkCommand `yaml:"commands,omitempty"`
+	// HostCommands names the console commands that must run on the host rather
+	// than in the container, and the binary that runs them. See HostCommand.
+	HostCommands []HostCommand `yaml:"host_commands,omitempty"`
 	// CacheCommand is the console subcommand that clears the framework's
 	// compiled caches, run through Console the way key generation is. lerd runs it after rewriting a project's connection: a
 	// framework caches the container definitions built from that configuration,
@@ -199,10 +202,19 @@ type FrameworkWorker struct {
 	// framework definition rather than rewriting Command in Go means the store
 	// stays the single source of truth for what actually runs.
 	ReloadCommand string `yaml:"reload_command,omitempty"`
-	// TuneCommand is the parameterized variant of Command for `lerd queue:start`,
-	// a template with {queue}/{tries}/{timeout} placeholders so each framework
-	// declares its own flag syntax. Empty falls back to Command verbatim.
+	// TuneCommand is the parameterized variant of Command, a template whose
+	// {placeholder} tokens become the flags of the worker's generated start
+	// command: `--queue={queue} --tries={tries}` gives `lerd queue:start
+	// --queue --tries`. Each flag's default is read back from Command, so the
+	// definition declares both the syntax and the values. Empty falls back to
+	// Command verbatim.
 	TuneCommand string `yaml:"tune_command,omitempty"`
+	// RequiresService names a lerd service the worker cannot run without, so a
+	// start refuses with an actionable message instead of leaving the process to
+	// crash-loop on a DNS error. WhenEnv narrows the requirement to sites whose
+	// .env sets that key, since a queue worker only needs Redis when the site's
+	// queue connection is Redis.
+	RequiresService *WorkerService `yaml:"requires_service,omitempty"`
 	// RestartCommand gracefully restarts the queue worker in-container (e.g.
 	// Laravel's "php artisan queue:restart"). Empty means no graceful restart.
 	RestartCommand string `yaml:"restart_command,omitempty"`
@@ -246,9 +258,22 @@ func (w FrameworkWorker) IsPerWorktree() bool {
 // for this worker. When present, nginx adds a location block that proxies
 // requests to the worker inside the PHP-FPM container.
 type WorkerProxy struct {
-	Path        string `yaml:"path"`                   // URL path to proxy (e.g. "/app")
-	PortEnvKey  string `yaml:"port_env_key,omitempty"` // env key holding the port (e.g. "REVERB_SERVER_PORT")
-	DefaultPort int    `yaml:"default_port,omitempty"` // fallback port if env key is missing (default: 8080)
+	Path string `yaml:"path"` // URL path to proxy (e.g. "/app")
+	// Paths lists every path the worker's server answers on, one location each
+	// (Reverb takes its WebSocket on /app and its HTTP API on /apps). It wins
+	// over Path where both are set, so a definition can carry both and still
+	// proxy on binaries too old to read this field.
+	Paths       []string `yaml:"paths,omitempty"`
+	PortEnvKey  string   `yaml:"port_env_key,omitempty"` // env key holding the port (e.g. "REVERB_SERVER_PORT")
+	DefaultPort int      `yaml:"default_port,omitempty"` // fallback port if env key is missing (default: 8080)
+}
+
+// WorkerService is a running lerd service a worker depends on. WhenEnv is a
+// "KEY=VALUE" pair the site's .env has to carry for the dependency to apply, so
+// Laravel's queue worker can require Redis only where QUEUE_CONNECTION=redis.
+type WorkerService struct {
+	Name    string `yaml:"name"`
+	WhenEnv string `yaml:"when_env,omitempty"`
 }
 
 // WorkerHealth declares how to tell whether a worker's server is actually
@@ -296,6 +321,60 @@ type FrameworkSetupCmd struct {
 // ships canonical defaults; projects extend or override them by name in
 // .lerd.yaml. Distinct from FrameworkWorker (long-running) and
 // FrameworkSetupCmd (install-time only).
+// HostCommand declares that some of a framework's console commands cannot run
+// in the PHP-FPM container and names the binary that must run them instead.
+// The case it exists for is a desktop runtime: `php artisan native:run` opens a
+// window, and on a lerd machine `php` is the shim into the container, where
+// there is no Electron and no display. Args is a space-separated glob matched
+// against the leading arguments as typed, so `artisan native:*` catches the
+// whole namespace whether it arrives via `lerd php artisan ...` or `lerd
+// artisan ...`. Binary is relative to the project root.
+// InstallCommand is declared per entry rather than per package because a
+// project can carry two packages whose runtimes are installed by differently
+// named commands: nativephp/mobile installs through native:install-mobile
+// precisely because the desktop package already owns native:install.
+type HostCommand struct {
+	Args           string `yaml:"args" json:"args"`
+	Binary         string `yaml:"binary" json:"binary"`
+	InstallCommand string `yaml:"install_command,omitempty" json:"install_command,omitempty"`
+	// RequiresExtensions names the PHP extensions the declared binary must carry
+	// for the command to work at all. The runtimes projects bundle are trimmed
+	// builds, so a binary short one of them cannot run the command and lerd runs
+	// it in the PHP container on the host's network instead.
+	RequiresExtensions []string `yaml:"requires_extensions,omitempty" json:"requires_extensions,omitempty"`
+}
+
+// MatchHostCommand reports the declaration a framework carries for these
+// arguments, if any. The first declaration that matches wins, so a package
+// merged over a framework file is not shadowed by the pattern it replaces, and
+// the whole entry comes back so the binary and the command that installs it can
+// never be taken from two different declarations.
+func MatchHostCommand(fw *Framework, argv []string) (HostCommand, bool) {
+	if fw == nil || len(argv) == 0 {
+		return HostCommand{}, false
+	}
+	for _, hc := range fw.HostCommands {
+		if hc.Binary == "" {
+			continue
+		}
+		pattern := strings.Fields(hc.Args)
+		if len(pattern) == 0 || len(pattern) > len(argv) {
+			continue
+		}
+		matched := true
+		for i, tok := range pattern {
+			if ok, err := filepath.Match(tok, argv[i]); err != nil || !ok {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return hc, true
+		}
+	}
+	return HostCommand{}, false
+}
+
 type FrameworkCommand struct {
 	Name        string         `yaml:"name" json:"name"`                                   // stable identifier, also the `lerd run` argument
 	Label       string         `yaml:"label" json:"label"`                                 // human label shown in the UI
@@ -306,6 +385,11 @@ type FrameworkCommand struct {
 	Icon        string         `yaml:"icon,omitempty" json:"icon,omitempty"`               // icon name from the known set
 	Check       *FrameworkRule `yaml:"check,omitempty" json:"check,omitempty"`             // hide the command when this rule fails
 	CWD         string         `yaml:"cwd,omitempty" json:"cwd,omitempty"`                 // working dir relative to project root (default: ".")
+	// Pinned draws the command as its own button on the site's control row rather
+	// than only inside the commands dropdown. A definition ships it as the default
+	// for the commands a project runs constantly; the user's own choice, kept in
+	// the site registry, overrides it.
+	Pinned bool `yaml:"pinned,omitempty" json:"pinned,omitempty"`
 	// Disabled, in a project .lerd.yaml entry, suppresses the framework default
 	// of the same Name without replacing it. Ignored when read from a framework yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
@@ -327,7 +411,7 @@ const (
 var ValidCommandOutputs = []string{CommandOutputSilent, CommandOutputText, CommandOutputURL, CommandOutputTerminal}
 
 // KnownCommandIcons is the curated icon vocabulary. .lerd.yaml entries with an
-// icon outside this set fail `lerd check`. Keep in sync with the UI Icon
+// icon outside this set warn in `lerd site:doctor`. Keep in sync with the UI Icon
 // component so an icon present here always resolves to a visual on screen.
 var KnownCommandIcons = []string{
 	"broom", "database", "refresh", "link", "check", "list",
@@ -559,6 +643,10 @@ type DoctorCheck struct {
 	// Severity overrides the triggered status ("warn" or "fail"); each type has
 	// a sensible default (command→fail, the rest→warn).
 	Severity string `yaml:"severity,omitempty"`
+	// Check gates the whole check the way a worker's does: a check that speaks
+	// about an optional package is dropped on a project without it, rather than
+	// reporting a permanently green row.
+	Check *FrameworkRule `yaml:"check,omitempty"`
 
 	// env_key_set
 	EnvKey string `yaml:"env_key,omitempty"`
@@ -611,8 +699,16 @@ type FrameworkServiceDetect struct {
 // fallback, and that fallback is the configuration itself, which is WordPress's
 // wp-config.php and is written as normal.
 func (e FrameworkEnvConf) ResolveWrite(projectDir string) (file, format string) {
+	// The app file is lerd's to write once the installer has created it, and not
+	// before: the framework reads the skeleton lerd would leave there as a site
+	// already configured, so it stops serving the installer that would have
+	// written the file and fails on the values that are missing. A definition
+	// naming a plain file has somewhere to write in the meantime; one naming only
+	// the app file is written as normal, since that file is the configuration.
 	if e.AppFile != "" {
-		return e.AppFile, e.appFormat()
+		if _, err := os.Stat(filepath.Join(projectDir, e.AppFile)); err == nil || e.File == "" {
+			return e.AppFile, e.appFormat()
+		}
 	}
 	if e.File == "" {
 		return e.Resolve(projectDir)
@@ -793,6 +889,10 @@ var laravelFramework = &Framework{
 			RestartCommand: "php artisan queue:restart",
 			Restart:        "always",
 			ExcludeCheck:   &FrameworkRule{Composer: "laravel/horizon"}, // horizon supersedes queue
+			RequiresService: &WorkerService{
+				Name:    "redis",
+				WhenEnv: "QUEUE_CONNECTION=redis",
+			},
 		},
 		"schedule": {
 			Label:   "Task Scheduler",
@@ -806,6 +906,7 @@ var laravelFramework = &Framework{
 			Check:   &FrameworkRule{Composer: "laravel/reverb"},
 			Proxy: &WorkerProxy{
 				Path:        "/app",
+				Paths:       []string{"/app", "/apps"},
 				PortEnvKey:  "REVERB_SERVER_PORT",
 				DefaultPort: 8080,
 			},
@@ -1080,6 +1181,12 @@ func copyBuiltin(name string) *Framework {
 		workers[k] = v
 	}
 	fw.Workers = workers
+	fw.Commands = append([]FrameworkCommand(nil), src.Commands...)
+	if src.Doctor != nil {
+		doctor := *src.Doctor
+		doctor.Checks = append([]DoctorCheck(nil), src.Doctor.Checks...)
+		fw.Doctor = &doctor
+	}
 	return &fw
 }
 
@@ -1180,7 +1287,7 @@ func mergeUserOverlay(base *Framework) *Framework {
 }
 
 // GetFrameworkForDir is like GetFramework but auto-detects the framework version
-// from composer.lock in projectDir. If a version-specific store definition exists
+// from projectDir, preferring what composer.lock resolved. If a version-specific store definition exists
 // it is preferred over an unversioned one. User overlay workers are always merged.
 // When a version is detected but no local definition exists, it attempts to fetch
 // the definition from the store automatically.
@@ -1278,24 +1385,26 @@ func GetFrameworkForDir(name, projectDir string) (*Framework, bool) {
 		if version != "" && version != base.Version {
 			base.DetectedVersion = version
 		}
-		base = mergeUserOverlay(base)
 		base = mergeBuiltinFrankenPHP(base)
 		base = mergeBuiltinTinker(base)
 		base = mergeBuiltinDoctor(base)
+		// Packages before the overlay: a package replaces what a version file
+		// declares, and the overlay is the user's last word over both.
+		base = mergeStorePackages(base, projectDir)
+		base = mergeUserOverlay(base)
 		return mergeProjectWorkers(base, projectDir), true
 	}
 
 	// 4. For built-ins (Laravel, Symfony), fall back to the built-in definition.
-	if builtinFramework(name) != nil {
-		fw, ok := GetFramework(name)
-		if ok {
-			return mergeProjectWorkers(fw, projectDir), true
-		}
+	if base := copyBuiltin(name); base != nil {
+		base = mergeStorePackages(base, projectDir)
+		base = mergeBuiltinTinker(mergeBuiltinFrankenPHP(mergeUserOverlay(base)))
+		return mergeProjectWorkers(base, projectDir), true
 	}
 
 	// 5. No store definition — check user-only definition (custom framework).
 	if fw := loadFrameworkYAML(filepath.Join(FrameworksDir(), name+".yaml")); fw != nil {
-		return mergeProjectWorkers(fw, projectDir), true
+		return mergeProjectWorkers(mergeStorePackages(fw, projectDir), projectDir), true
 	}
 
 	return nil, false
@@ -1405,10 +1514,13 @@ func loadFrameworkYAML(path string) *Framework {
 }
 
 // cloneFrameworkMutable returns a copy where the maps and slices that
-// mergeUserOverlay/mergeProjectWorkers/mergeBuiltinFrankenPHP touch are freshly
-// allocated. Inner FrameworkWorker/Setup/Log values are copied by value;
-// pointer fields inside them aren't cloned because the merges only replace
-// whole entries, never mutate them in place.
+// mergeUserOverlay/mergeProjectWorkers/mergeBuiltinFrankenPHP/mergeStorePackages
+// touch are freshly allocated. Inner FrameworkWorker/Setup/Log values are copied
+// by value; pointer fields inside them aren't cloned because the merges only
+// replace whole entries, never mutate them in place. Commands and the doctor's
+// checks are cloned for the same reason the rest are: yaml decodes a sequence
+// into a slice with room to spare, so appending a package's command to the
+// value this hands back would otherwise write into the cache two callers share.
 func cloneFrameworkMutable(in *Framework) *Framework {
 	if in == nil {
 		return nil
@@ -1429,6 +1541,14 @@ func cloneFrameworkMutable(in *Framework) *Framework {
 	if in.FrankenPHP != nil {
 		cp := *in.FrankenPHP
 		out.FrankenPHP = &cp
+	}
+	if in.Commands != nil {
+		out.Commands = append([]FrameworkCommand(nil), in.Commands...)
+	}
+	if in.Doctor != nil {
+		cp := *in.Doctor
+		cp.Checks = append([]DoctorCheck(nil), in.Doctor.Checks...)
+		out.Doctor = &cp
 	}
 	return &out
 }
@@ -2319,8 +2439,23 @@ func (fw *Framework) DetectProxy(dir string) (*WorkerProxy, string) {
 	return nil, ""
 }
 
-// MatchesRule returns true if the given rule matches the project directory.
+// MatchesRule returns true if the given rule matches the project directory. It
+// is the check gate: a worker, command, setup step or doctor check asking
+// whether what it runs is there, so a composer rule counts a package composer
+// installed as well as one the project declares.
 func MatchesRule(dir string, rule FrameworkRule) bool {
+	return matchesRule(dir, rule, ComposerHasInstalled)
+}
+
+// MatchesDetectRule is the same rule against the question detection asks, which
+// is what the project is rather than what is installed under it. A composer rule
+// reads the manifest alone here: a library repo testing against Laravel has
+// laravel/framework in its lock, and that must not make it a Laravel site.
+func MatchesDetectRule(dir string, rule FrameworkRule) bool {
+	return matchesRule(dir, rule, ComposerHasPackage)
+}
+
+func matchesRule(dir string, rule FrameworkRule, hasPackage func(string, string, ...string) bool) bool {
 	if rule.File != "" {
 		if _, err := os.Stat(filepath.Join(dir, rule.File)); err == nil {
 			return true
@@ -2335,7 +2470,7 @@ func MatchesRule(dir string, rule FrameworkRule) bool {
 		}
 	}
 	if rule.Composer != "" {
-		if ComposerHasPackage(dir, rule.Composer, rule.ComposerSections...) {
+		if hasPackage(dir, rule.Composer, rule.ComposerSections...) {
 			return true
 		}
 	}
@@ -2347,7 +2482,7 @@ func matchesFramework(dir string, fw *Framework) bool {
 		return false
 	}
 	for _, rule := range fw.Detect {
-		if MatchesRule(dir, rule) {
+		if MatchesDetectRule(dir, rule) {
 			return true
 		}
 	}
@@ -2387,7 +2522,19 @@ func DetectMajorVersion(projectDir, frameworkName string) string {
 		return ""
 	}
 
-	// Try composer.json-based detection first.
+	// What composer resolved comes first: a constraint is only a claim about
+	// what would be installed, and one spanning two majors ("^11.0 || ^12.0")
+	// reads as the older of them however new the project actually is.
+	for _, rule := range rules {
+		if rule.Composer == "" {
+			continue
+		}
+		if v := lockedMajor(projectDir, rule.Composer); v != "" {
+			return v
+		}
+	}
+
+	// Then the manifest, which is all a project with no lock has.
 	if v := detectVersionFromComposer(projectDir, rules); v != "" {
 		return v
 	}

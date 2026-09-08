@@ -85,10 +85,12 @@ var (
 // Status glyphs for query/report output that renders its own layout rather than
 // using the Step/Live progress flow.
 const (
-	GlyphOK   = "✓"
-	GlyphFail = "✗"
-	GlyphWarn = "⚠"
-	GlyphLock = "🔒"
+	GlyphOK = "✓"
+	// GlyphDownload heads the block disclosing what a command is about to fetch.
+	GlyphDownload = "↓"
+	GlyphFail     = "✗"
+	GlyphWarn     = "⚠"
+	GlyphLock     = "🔒"
 )
 
 // Title styles a fragment as the bold accent (terminal-green) title colour.
@@ -110,6 +112,17 @@ func Dim(s string) string   { return paint(dimStyle, s) }
 func GreenIf(on bool, s string) string { return paintIf(on, okStyle, s) }
 func RedIf(on bool, s string) string   { return paintIf(on, redStyle, s) }
 func AmberIf(on bool, s string) string { return paintIf(on, warnStyle, s) }
+func DimIf(on bool, s string) string   { return paintIf(on, dimStyle, s) }
+func ValIf(on bool, s string) string   { return paintIf(on, valueStyle, s) }
+
+// ColorFor reports whether w should carry colour, for a package that renders a
+// block of its own on an explicit writer and wants the same per-writer gate the
+// glyph lines here use.
+func ColorFor(w io.Writer) bool { return colorEnabledFor(w) }
+
+// Prefix is the left margin every glyph line here starts with, exported so an
+// externally rendered block lines up with them.
+const Prefix = pad
 
 // spinnerFrames is the Braille spinner used by the Live progress line.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -289,13 +302,26 @@ func (s *Step) spin() {
 	}
 }
 
+// fitLine cuts a repainted line to the terminal width. A line wider than the
+// terminal wraps, and a repaint returns to and clears only the row the cursor
+// ended on, so the wrapped remainder is left behind and each frame adds a line
+// instead of replacing one. One column is kept spare so a full-width line does
+// not leave the cursor past the edge and wrap regardless. An unknown width
+// (piped or redirected) has nothing to fit into and is left whole.
+func fitLine(line string) string {
+	if w := tableWidth(); w > 1 {
+		return ansi.Truncate(line, w-1, "…")
+	}
+	return line
+}
+
 func (s *Step) frame(f string) {
 	mu.Lock()
 	defer mu.Unlock()
 	if s.paused {
 		return
 	}
-	fmt.Fprintf(s.dst(), "\r\033[2K%s%s %s %s", pad, paint(dimStyle, "→"), paint(dimStyle, s.msg), paint(spinStyle, f))
+	fmt.Fprint(s.dst(), "\r\033[2K"+fitLine(pad+paint(dimStyle, "→")+" "+paint(dimStyle, s.msg)+" "+paint(spinStyle, f)))
 }
 
 // Interrupt suspends the step's spinner and clears its line so fn can print
@@ -799,7 +825,7 @@ func (l *Live) draw(frame string) {
 	if frame != "" {
 		line += " " + paint(spinStyle, frame)
 	}
-	fmt.Fprintf(target(), "\r\033[2K%s", line)
+	fmt.Fprint(target(), "\r\033[2K"+fitLine(line))
 }
 
 // Interrupt suspends the spinner and clears its line so fn can print standalone

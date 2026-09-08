@@ -33,6 +33,9 @@ export interface StatusResponse {
   using_system_bun: boolean;
   watcher_running: boolean;
   frankenphp_php_versions: string[];
+  // Supported PHP versions upstream has not released yet, labelled as such
+  // wherever a version is offered.
+  prerelease_php_versions?: string[];
   home: string;
   // Workspace names in display order, empty ones included.
   workspaces?: string[];
@@ -65,6 +68,7 @@ const empty: StatusResponse = {
   using_system_bun: false,
   watcher_running: false,
   frankenphp_php_versions: [],
+  prerelease_php_versions: [],
   home: '',
   workspaces: [],
   tools: []

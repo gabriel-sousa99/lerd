@@ -5,8 +5,14 @@
   import DetailButton from '$components/DetailButton.svelte';
   import BuildLog from '$components/BuildLog.svelte';
   import { closeModal } from '$stores/modals';
-  import { installablePhpVersions, streamPhpInstall, loadPhpVersions } from '$stores/phpVersions';
-  import { loadStatus } from '$stores/status';
+  import {
+    installablePhpVersions,
+    streamPhpInstall,
+    loadPhpVersions,
+    confirmPhpDownload,
+    PRERELEASE_LABEL
+  } from '$stores/phpVersions';
+  import { loadStatus, status } from '$stores/status';
   import { goToTab } from '$stores/route';
   import { m } from '../paraglide/messages.js';
 
@@ -52,6 +58,7 @@
 
   async function install() {
     if (!version) return;
+    if (!(await confirmPhpDownload(version))) return;
     installing = true;
     finished = false;
     error = '';
@@ -126,7 +133,11 @@
             value={version}
             width="full"
             placeholder={m.system_php_addPlaceholder()}
-            options={versions.map((v) => ({ value: v, label: 'PHP ' + v }))}
+            options={versions.map((v) => ({
+              value: v,
+              label: 'PHP ' + v,
+              description: ($status.prerelease_php_versions || []).includes(v) ? PRERELEASE_LABEL : undefined
+            }))}
             onchange={(val) => (version = val)}
           />
         </div>

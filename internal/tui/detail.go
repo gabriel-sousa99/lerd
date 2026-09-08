@@ -492,7 +492,13 @@ func (m *Model) renderDetailInline(w, h int, focused bool) string {
 		// whether focus sits on the list or has moved onto the pane itself.
 		// Site detail is only the right answer on the Sites tab.
 		if m.activeTab == tabServices {
-			content = serviceDetailContentLines(m, m.currentService(), contentW)
+			content, cursorLine = serviceDetailContentLinesWithCursor(m, m.currentService(), contentW)
+			break
+		}
+		// The Databases tab's detail pane always shows the selected database,
+		// whether focus sits on the list or has moved onto the pane.
+		if m.activeTab == tabDatabases {
+			content = databaseDetailContentLines(m, contentW)
 			cursorLine = -1
 			break
 		}

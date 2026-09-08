@@ -98,7 +98,7 @@ func TestForceUpdateCheck_bypassesCache(t *testing.T) {
 	defer srv.Close()
 
 	defer stubURLs(&ReleaseBaseURLs, []string{srv.URL})()
-	defer stubURLs(&changelogURLs, []string{srv.URL + "/changelog"})()
+	defer stubTagURLs(&changelogURLs, []string{srv.URL + "/changelog"})()
 
 	info, err := ForceUpdateCheck("1.19.1")
 	if err != nil {
@@ -125,6 +125,13 @@ func stubURLs(fn *func() []string, urls []string) func() {
 	return func() { *fn = orig }
 }
 
+// stubTagURLs is the tag-accepting variant of stubURLs.
+func stubTagURLs(fn *func(string) []string, urls []string) func() {
+	orig := *fn
+	*fn = func(string) []string { return urls }
+	return func() { *fn = orig }
+}
+
 // withTempCache pre-seeds the on-disk update-check cache so CachedUpdateCheck
 // returns the given tag without hitting the network. Sets XDG_DATA_HOME (the
 // var DataDir() reads) so the writes land in the temp dir and never touch
@@ -141,5 +148,67 @@ func withTempCache(t *testing.T, tag string) {
 	data, _ := json.Marshal(state)
 	if err := os.WriteFile(config.UpdateCheckFile(), data, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSummarizeChangelog verifies the short-list parser: version and section
+// headers are kept, bold headlines are extracted with their issue refs, and
+// prose is dropped.
+func TestSummarizeChangelog(t *testing.T) {
+	sections := `## [1.33.1] - 2026-08-15
+
+This is a long prose paragraph that nobody wants to read in a terminal. It goes
+on for several lines and explains the release theme in detail.
+
+### Added
+
+- **A site wizard in the dashboard** (#1473). The ` + "`+`" + ` in Sites opened one screen that browsed the host directories and streamed a link, and now it is a wizard.
+- **Offline docs in the dashboard** (#1456). The documentation button opened lerd.sh in an iframe.
+
+### Fixed
+
+- **The doctor repairs the vhost serving a site** (#1421). A vhost is written when a site is linked and nothing ever looked at it again.
+- **A key an env file sets twice is reported** (#1403, #1404). A site showed postgres on every surface while the application ran on SQLite.`
+
+	got := SummarizeChangelog(sections)
+	want := `## [1.33.1] - 2026-08-15
+
+### Added
+- A site wizard in the dashboard (#1473)
+- Offline docs in the dashboard (#1456)
+
+### Fixed
+- The doctor repairs the vhost serving a site (#1421)
+- A key an env file sets twice is reported (#1403, #1404)`
+
+	if got != want {
+		t.Errorf("SummarizeChangelog:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestSummarizeChangelog_empty returns an empty string when there are no entries.
+func TestSummarizeChangelog_empty(t *testing.T) {
+	if got := SummarizeChangelog(""); got != "" {
+		t.Errorf("SummarizeChangelog(\"\") = %q, want \"\"", got)
+	}
+}
+
+// A bullet without a bold headline carries its issue ref inside the sentence, so
+// the ref must not be appended a second time.
+func TestSummarizeChangelog_plainEntryKeepsOneIssueRef(t *testing.T) {
+	sections := "### Docs\n\n- The landing page draws each framework with its own mark (#1498). Both stores publish that artwork.\n"
+	want := "### Docs\n- The landing page draws each framework with its own mark (#1498)"
+	if got := SummarizeChangelog(sections); got != want {
+		t.Errorf("SummarizeChangelog:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// A range spanning two releases repeats its section names, so the version each
+// group belongs to has to survive or the list reads as one flat release.
+func TestSummarizeChangelog_keepsTheVersionHeaders(t *testing.T) {
+	sections := "## [1.33.1] - 2026-08-15\n\n### Fixed\n\n- **Later fix** (#2).\n\n## [1.33.0] - 2026-08-01\n\n### Fixed\n\n- **Earlier fix** (#1).\n"
+	want := "## [1.33.1] - 2026-08-15\n\n### Fixed\n- Later fix (#2)\n\n## [1.33.0] - 2026-08-01\n\n### Fixed\n- Earlier fix (#1)"
+	if got := SummarizeChangelog(sections); got != want {
+		t.Errorf("SummarizeChangelog:\ngot:\n%s\n\nwant:\n%s", got, want)
 	}
 }

@@ -121,6 +121,40 @@ func removeWorkerName(names []string, name string) []string {
 	return slices.DeleteFunc(names, func(w string) bool { return w == name })
 }
 
+// SetProjectWorkerOptions persists the values for a worker's tune_command
+// placeholders, replacing whatever that worker had. Empty values drop the
+// worker's entry. Setting creates .lerd.yaml when it does not exist, so the
+// options survive a restart the way the flags that produced them could not;
+// clearing on a project with no file is a no-op, since there is nothing to
+// forget.
+func SetProjectWorkerOptions(dir, name string, values map[string]string) error {
+	if len(values) == 0 {
+		return updateProjectConfig(dir, func(cfg *ProjectConfig) {
+			delete(cfg.WorkerOptions, name)
+			if len(cfg.WorkerOptions) == 0 {
+				cfg.WorkerOptions = nil
+			}
+		})
+	}
+
+	cfg, err := LoadProjectConfig(dir)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = &ProjectConfig{}
+	}
+	if cfg.WorkerOptions == nil {
+		cfg.WorkerOptions = make(map[string]map[string]string)
+	}
+	opts := make(map[string]string, len(values))
+	for k, v := range values {
+		opts[k] = v
+	}
+	cfg.WorkerOptions[name] = opts
+	return SaveProjectConfig(dir, cfg)
+}
+
 // SetProjectDomains replaces the domains list. No-op if .lerd.yaml does not exist.
 func SetProjectDomains(dir string, domains []string) error {
 	return updateProjectConfig(dir, func(cfg *ProjectConfig) {
@@ -135,26 +169,32 @@ func SetProjectDomains(dir string, domains []string) error {
 // No-op if .lerd.yaml does not exist.
 func SyncProjectDomains(dir string, fullDomains []string, tld string) error {
 	return updateProjectConfig(dir, func(cfg *ProjectConfig) {
-		suffix := "." + tld
 		seen := make(map[string]bool)
 		var names []string
 		for _, d := range fullDomains {
-			name := strings.TrimSuffix(d, suffix)
-			low := strings.ToLower(name)
-			if !seen[low] {
-				names = append(names, name)
-				seen[low] = true
+			key := ProjectDomainKey(d, tld)
+			if !seen[key] {
+				names = append(names, key)
+				seen[key] = true
 			}
 		}
 		for _, d := range cfg.Domains {
-			low := strings.ToLower(d)
-			if !seen[low] {
+			// Entries a project wrote itself may carry the TLD, so main.test and
+			// main are one domain and must not both survive the merge.
+			if key := ProjectDomainKey(d, tld); !seen[key] {
 				names = append(names, d)
-				seen[low] = true
+				seen[key] = true
 			}
 		}
 		cfg.Domains = names
 	})
+}
+
+// ProjectDomainKey normalises a domain to the spelling .lerd.yaml stores, which
+// is lowercase and without the TLD. Both the registry's full domains and the
+// project's own entries are compared through it.
+func ProjectDomainKey(domain, tld string) string {
+	return strings.TrimSuffix(strings.ToLower(domain), "."+tld)
 }
 
 // ReplaceProjectDomain syncs the registry domains into .lerd.yaml (preserving
@@ -170,22 +210,23 @@ func ReplaceProjectDomain(dir string, fullDomains []string, oldDomain, tld strin
 	if oldDomain == "" {
 		return nil
 	}
-	stripped := strings.TrimSuffix(oldDomain, "."+tld)
+	stripped := ProjectDomainKey(oldDomain, tld)
 	for _, d := range fullDomains {
-		if strings.EqualFold(strings.TrimSuffix(d, "."+tld), stripped) {
+		if ProjectDomainKey(d, tld) == stripped {
 			return nil // still a current domain, keep it
 		}
 	}
-	return RemoveProjectDomain(dir, stripped)
+	return RemoveProjectDomain(dir, stripped, tld)
 }
 
-// RemoveProjectDomain removes a single domain (case-insensitive match).
-// No-op if .lerd.yaml does not exist.
-func RemoveProjectDomain(dir string, domain string) error {
+// RemoveProjectDomain removes a single domain, matching whichever spelling the
+// file used for it. No-op if .lerd.yaml does not exist.
+func RemoveProjectDomain(dir, domain, tld string) error {
+	key := ProjectDomainKey(domain, tld)
 	return updateProjectConfig(dir, func(cfg *ProjectConfig) {
 		var kept []string
 		for _, d := range cfg.Domains {
-			if !strings.EqualFold(d, domain) {
+			if ProjectDomainKey(d, tld) != key {
 				kept = append(kept, d)
 			}
 		}

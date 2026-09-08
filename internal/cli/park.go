@@ -10,6 +10,7 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 	"github.com/gabriel-sousa99/lerd/internal/linker"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -412,4 +413,82 @@ func ensureFPMQuadletTo(phpVersion string, w io.Writer) error {
 		return restartUnitFn(unitName)
 	}
 	return startUnitFn(unitName)
+}
+
+// fpmImageCurrentFn is a seam for the check that decides whether a version has
+// anything to build, and so whether it needs the loader.
+var fpmImageCurrentFn = podman.FPMImageCurrent
+
+// fpmVersionsToEnsure lists the PHP versions install has to bring up: the
+// global default first, then the version of every site that is actually
+// served, once each. A site with no version of its own runs the default.
+func fpmVersionsToEnsure(defaultVersion string, sites []config.Site) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(v string) {
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+
+	add(defaultVersion)
+	for _, s := range sites {
+		if s.Paused || s.Ignored {
+			continue
+		}
+		v := s.PHPVersion
+		if v == "" {
+			v = defaultVersion
+		}
+		add(v)
+	}
+	return out
+}
+
+// fpmEnsurePlan splits versions into the ones with an image to build and the
+// ones already current, which have nothing to show.
+func fpmEnsurePlan(versions []string) (build, quiet []string) {
+	for _, v := range versions {
+		if fpmImageCurrentFn(v) {
+			quiet = append(quiet, v)
+			continue
+		}
+		build = append(build, v)
+	}
+	return build, quiet
+}
+
+// ensureFPMQuadlets ensures the quadlet, image and unit of every PHP version.
+// The ones that really build go through the loader with their downloads
+// disclosed first; before this they streamed raw podman build output into the
+// middle of the install log, past the point where the disclosure is printed.
+func ensureFPMQuadlets(versions []string) {
+	build, quiet := fpmEnsurePlan(versions)
+
+	for _, v := range quiet {
+		if err := ensureFPMQuadletTo(v, io.Discard); err != nil {
+			feedback.Warn("PHP %s FPM quadlet: %v", v, err)
+		}
+	}
+	if len(build) == 0 {
+		return
+	}
+
+	jobs := make([]BuildJob, len(build))
+	plan := make(imagepull.Plan, len(build))
+	for i, v := range build {
+		ver := v
+		jobs[i] = BuildJob{
+			Label: "PHP " + ver,
+			Run:   func(w io.Writer) error { return ensureFPMQuadletTo(ver, w) },
+		}
+		plan[i] = imagepull.Build("PHP "+ver+" image", podman.PHPBaseImageRef(ver),
+			"the PHP "+ver+" runtime")
+	}
+
+	feedback.Header("Building PHP images")
+	plan.Fill().Report(os.Stdout)
+	RunParallel(jobs) //nolint:errcheck
 }

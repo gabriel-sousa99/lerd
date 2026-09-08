@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { phpOptionsForSite } from './phpVersions';
+import { phpOptionsForSite, PRERELEASE_LABEL } from './phpVersions';
 
 describe('phpOptionsForSite', () => {
   const installed = ['7.4', '8.1', '8.3', '8.4', '8.5'];
@@ -36,6 +36,17 @@ describe('phpOptionsForSite', () => {
     const opts = phpOptionsForSite('fpm', installed, franken, '8.3', '8.1', '8.3');
     expect(values(opts)).toEqual(installed); // all kept, none hidden
     expect(disabled(opts)).toEqual(['7.4', '8.4', '8.5']);
+  });
+
+  it('marks a prerelease version so it never reads as an ordinary choice', () => {
+    const opts = phpOptionsForSite('fpm', [...installed, '8.6'], franken, '8.4', undefined, undefined, ['8.6']);
+    expect(opts.find((o) => o.value === '8.6')?.description).toBe(PRERELEASE_LABEL);
+    expect(opts.find((o) => o.value === '8.5')?.description).toBeUndefined();
+  });
+
+  it('lets the framework range explain a disabled prerelease instead', () => {
+    const opts = phpOptionsForSite('fpm', [...installed, '8.6'], franken, '8.3', '8.1', '8.3', ['8.6']);
+    expect(opts.find((o) => o.value === '8.6')?.description).toBe('needs PHP 8.1 to 8.3');
   });
 
   it('never disables the current version even if it is out of range', () => {
@@ -95,5 +106,40 @@ describe('phpVersions store', () => {
     const res = await savePhpIni('8.4', 'x = 1');
     expect(res.ok).toBe(false);
     expect(res.error).toBe('updating php quadlet: boom');
+  });
+});
+
+describe('confirmPhpDownload', () => {
+  const realFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  // A repeat rebuild starts from a base that is already on the machine, so it
+  // must not stop to ask about a download that will not happen.
+  it('does not prompt when the base image is already local', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ image: 'ghcr.io/lerd-env/lerd-php84-fpm-base:abc', bytes: 0, local: true }), {
+        status: 200
+      })
+    ) as unknown as typeof fetch;
+    const { confirmPhpDownload } = await import('./phpVersions');
+    expect(await confirmPhpDownload('8.4')).toBe(true);
+  });
+
+  it('asks about the version being built, not a service', async () => {
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify({ image: '', bytes: 0, local: false }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const { confirmPhpDownload } = await import('./phpVersions');
+    await confirmPhpDownload('8.4');
+    expect(urls[0]).toContain('php=8.4');
   });
 });

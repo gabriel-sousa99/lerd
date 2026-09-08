@@ -1178,19 +1178,8 @@ func appendHTTPSField(fields []huh.Field, httpsAvailable bool, secured *bool) []
 // validatePHPVersion checks that the input looks like a valid PHP version
 // (e.g. "8.3", "8.4") and rejects inputs like "8,5" or plain strings.
 func validatePHPVersion(s string) error {
-	parts := strings.SplitN(s, ".", 2)
-	if len(parts) != 2 {
+	if !config.ValidPHPVersion(s) {
 		return fmt.Errorf("PHP version must be in MAJOR.MINOR format, e.g. 8.3")
-	}
-	for _, p := range parts {
-		if p == "" {
-			return fmt.Errorf("PHP version must be in MAJOR.MINOR format, e.g. 8.3")
-		}
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return fmt.Errorf("PHP version must be in MAJOR.MINOR format, e.g. 8.3")
-			}
-		}
 	}
 	return nil
 }

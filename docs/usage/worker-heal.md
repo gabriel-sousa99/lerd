@@ -29,6 +29,8 @@ The probe is deliberately conservative about what it treats as a failure, becaus
 
 What the probe does catch is the case it exists for: a URL file written by the current run, pointing at a port that refuses a connection.
 
+A unit whose worker the site no longer declares is skipped as well. A framework definition that retires a worker reaches every install within a day, and the unit it wrote stays on disk, so a heal pass that looked only at systemd would keep reporting a worker the store had not named for hours. There is no start that would fix such a unit, so `lerd site:doctor` reports it once under **Worker Units** and offers to remove it; see [stale worker units](framework-workers.md#stale-worker-units).
+
 A worker with a `schedule` is not probed at all. It is a oneshot unit driven by a systemd timer, so it is inactive between ticks by design; its liveness is the timer's state, and a failing last run still surfaces from the service.
 
 ## CLI

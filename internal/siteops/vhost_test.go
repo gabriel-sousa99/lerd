@@ -179,3 +179,35 @@ func TestMoveCustomNginxConfig_samePrimaryIsNoop(t *testing.T) {
 		t.Errorf("override disturbed by same-domain call: %q err=%v", body, err)
 	}
 }
+
+// The location-scope override is keyed by the same primary domain, so a rename
+// has to carry it and its backups too or the renamed site silently loses the
+// only file that can override fastcgi_param.
+func TestMoveCustomNginxConfig_carriesLocationScope(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	live := config.NginxCustomD()
+	bkp := config.NginxCustomDBkp()
+	seedFile(t, filepath.Join(live, "leasebook.test.location.conf"), "# main location\n")
+	seedFile(t, filepath.Join(live, "feat.leasebook.test.location.conf"), "# worktree location\n")
+	seedFile(t, filepath.Join(bkp, "leasebook.test.location.conf.bkp.20260101-101010"), "# location backup\n")
+
+	if err := MoveCustomNginxConfig("leasebook.test", "rentals.test"); err != nil {
+		t.Fatalf("MoveCustomNginxConfig: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(live, "rentals.test.location.conf"))
+	if err != nil || string(body) != "# main location\n" {
+		t.Errorf("main location override = %q err=%v; want content under new domain", body, err)
+	}
+	body, err = os.ReadFile(filepath.Join(live, "feat.rentals.test.location.conf"))
+	if err != nil || string(body) != "# worktree location\n" {
+		t.Errorf("worktree location override = %q err=%v; want content under new domain", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(bkp, "rentals.test.location.conf.bkp.20260101-101010")); err != nil {
+		t.Errorf("location backup not carried across: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(live, "leasebook.test.location.conf")); !os.IsNotExist(err) {
+		t.Errorf("old location override still present, want renamed")
+	}
+}

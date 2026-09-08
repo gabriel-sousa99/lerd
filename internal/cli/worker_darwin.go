@@ -42,7 +42,10 @@ const defaultMacOSNodeVersion = "22"
 // Scheduled workers (Schedule != "") still aren't supported on macOS —
 // launchd's StartCalendarInterval would work but the unit translation
 // isn't wired through services.Mgr yet.
-func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, command, restart, schedule, fpmUnit string, host bool) (bool, error) {
+// requiresUnit is accepted for parity with the Linux writer and ignored:
+// launchd has no ordering directive, so the preflight is the only gate here.
+func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, command, restart, schedule, fpmUnit, requiresUnit string, host bool) (bool, error) {
+	_ = requiresUnit
 	// Generation-boundary guard so every caller is covered (incl. the boot
 	// restore path): every value below is a line of the unit, and a cloned
 	// repo's .lerd.yaml can set the worker ones.
@@ -94,6 +97,7 @@ func writeWorkerHostUnit(unitName, sitePath, command, restart string) (bool, err
 		return false, fmt.Errorf("creating worker run dir: %w", err)
 	}
 	scriptPath := filepath.Join(workersDir, unitName+".sh")
+	pidFile := filepath.Join(workersDir, unitName+".pid")
 
 	// bun projects rewrite npm/npx/node to bun and run it directly (no manager),
 	// with ~/.bun/bin added to PATH; Node projects resolve a version and run
@@ -121,9 +125,17 @@ func writeWorkerHostUnit(unitName, sitePath, command, restart string) (bool, err
 		}
 	}
 
-	script := buildDarwinHostWorkerGuardScript(execPrefix, config.BinDir(), sitePath, command, extraBinDirs)
+	script := buildDarwinHostWorkerGuardScript(execPrefix, config.BinDir(), sitePath, command, extraBinDirs, pidFile)
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
 		return false, fmt.Errorf("writing host worker guard script: %w", err)
+	}
+
+	// Persist the reap command so stop can take down the rest of the process
+	// group: launchd signals the job leader alone, and a worker that launches a
+	// desktop app leaves it running, reparented to init.
+	reapPath := filepath.Join(workersDir, unitName+".reap")
+	if err := os.WriteFile(reapPath, []byte(buildHostWorkerReapCommand(pidFile)), 0644); err != nil {
+		feedback.Warn("worker %s: writing reap sidecar: %v (stop may leave an orphan)", unitName, err)
 	}
 
 	unit := buildDarwinHostWorkerService(scriptPath, restart)
@@ -292,6 +304,11 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 			return
 		}
 	}
+	// The unit is rewritten here on every `lerd start`, so the dev server flags
+	// have to be rebuilt with it or the worker comes back on its own port and
+	// the site's page is refused the assets it asks for.
+	command = devServerCommand(siteName, sitePath, workerName, command, w.Host)
+
 	fpmUnit := resolveWorkerFPMUnit(siteName, phpVersion)
 	unitName, displaySite := workerNames(siteName, sitePath, workerName)
 	restart := w.Restart
@@ -302,5 +319,5 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 	if label == "" {
 		label = workerName
 	}
-	writeWorkerUnitFile(unitName, label, displaySite, sitePath, phpVersion, command, restart, w.Schedule, fpmUnit, w.Host) //nolint:errcheck
+	writeWorkerUnitFile(unitName, label, displaySite, sitePath, phpVersion, command, restart, w.Schedule, fpmUnit, requiredServiceUnit(sitePath, w), w.Host) //nolint:errcheck
 }

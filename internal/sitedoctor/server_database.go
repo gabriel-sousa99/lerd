@@ -3,6 +3,8 @@ package sitedoctor
 import (
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
@@ -27,7 +29,59 @@ var listDatabases = func(service string) ([]string, error) {
 func stubDatabaseLister(fn func(string) ([]string, error)) func() {
 	prev := listDatabases
 	listDatabases = fn
-	return func() { listDatabases = prev }
+	ForgetDatabases("")
+	return func() {
+		listDatabases = prev
+		ForgetDatabases("")
+	}
+}
+
+// dbListTTL bounds how long one engine's database list is reused. `lerd doctor`
+// sweeps every site, and without this each one pays its own container exec to
+// ask the same engine the same question.
+const dbListTTL = 5 * time.Second
+
+type dbListEntry struct {
+	names []string
+	err   error
+	at    time.Time
+}
+
+var dbListCache = struct {
+	sync.Mutex
+	entries map[string]dbListEntry
+}{entries: map[string]dbListEntry{}}
+
+// cachedDatabases is listDatabases with the recent answer reused. One lock
+// covers every engine and is held across the lookup on purpose: the sweep's
+// callers wait for a running exec instead of each starting their own, and a
+// machine runs one or two engines, so serialising them costs a single extra
+// exec on a cold cache and saves one per site after that.
+func cachedDatabases(service string) ([]string, error) {
+	dbListCache.Lock()
+	defer dbListCache.Unlock()
+	if e, ok := dbListCache.entries[service]; ok && time.Since(e.at) < dbListTTL {
+		return e.names, e.err
+	}
+	names, err := listDatabases(service)
+	dbListCache.entries[service] = dbListEntry{names: names, err: err, at: time.Now()}
+	return names, err
+}
+
+// ForgetDatabases drops one engine's cached list, or every engine's when
+// service is empty. Anything that creates or removes a database has to call it:
+// the cache exists so a sweep does not ask the same engine once per site, and
+// the re-check that follows a fix runs well inside that window, so without this
+// it reads the list from before the create and reports the database it just
+// made as still missing.
+func ForgetDatabases(service string) {
+	dbListCache.Lock()
+	defer dbListCache.Unlock()
+	if service == "" {
+		dbListCache.entries = map[string]dbListEntry{}
+		return
+	}
+	delete(dbListCache.entries, service)
 }
 
 // checkServerDatabase fails when the site's database does not exist on the
@@ -40,19 +94,46 @@ func stubDatabaseLister(fn func(string) ([]string, error)) func() {
 // checked like any other. It used to read DB_CONNECTION, DB_HOST and DB_DATABASE
 // by name, which are Laravel's, so the frameworks least likely to be wired that
 // way were the ones it could not check.
-func checkServerDatabase(path string, fw *config.Framework) (Check, bool) {
-	targets := config.DBTargetsFor(path)
-	if len(targets) == 0 {
-		// No lerd-run database: a file database, an external server, or nothing
-		// configured. None of those is this check's to judge.
+//
+// The fix creates the database rather than migrating it: migrations fail against
+// a database the engine does not hold, so the schema has to exist first, and the
+// migrate button returns on the re-check that follows.
+func checkServerDatabase(path string) (Check, bool) {
+	missing, checked := missingDatabases(path)
+	if !checked {
+		// Either nothing could be asked of an engine, or the project points at no
+		// lerd-run database at all: a file database, an external server, or
+		// nothing configured. None of those is this check's to judge.
 		return Check{}, false
 	}
-	checked := false
-	for _, t := range targets {
-		names, err := listDatabases(t.Service)
+	if len(missing) == 0 {
+		return Check{Name: "server_database", Status: StatusOK}, true
+	}
+	named := make([]string, 0, len(missing))
+	for _, t := range missing {
+		named = append(named, fmt.Sprintf("%q on %s", t.Database, t.Service))
+	}
+	return Check{Name: "server_database", Status: StatusFail, Fix: FixCreateDatabase,
+		Detail: fmt.Sprintf("%s %s %s not exist. Create %s, then run migrations.",
+			Plural(len(missing), "Database", "Databases"), strings.Join(named, ", "),
+			Plural(len(missing), "does", "do"), Plural(len(missing), "it", "them"))}, true
+}
+
+// MissingDatabases returns the lerd-managed databases a project points at that
+// their engine does not hold. Exported so the fix works the set out again
+// rather than trusting the client, the same way the service fixes do.
+func MissingDatabases(path string) []config.DBTarget {
+	missing, _ := missingDatabases(path)
+	return missing
+}
+
+// missingDatabases pairs the set with whether any engine could be asked at all:
+// an unreachable one leaves the site unjudged rather than reported as missing a
+// schema that may well exist.
+func missingDatabases(path string) (missing []config.DBTarget, checked bool) {
+	for _, t := range config.DBTargetsFor(path) {
+		names, err := cachedDatabases(t.Service)
 		if err != nil {
-			// The engine is down or unreachable. Reporting that as a missing
-			// schema would send the user to create a database that may exist.
 			continue
 		}
 		checked = true
@@ -64,13 +145,8 @@ func checkServerDatabase(path string, fw *config.Framework) (Check, bool) {
 			}
 		}
 		if !found {
-			return Check{Name: "server_database", Status: StatusFail, Fix: migrateFix(fw),
-				Detail: fmt.Sprintf("Database %q does not exist on %s — create it with lerd db:create %s, then run migrations.", t.Database, t.Service, t.Database)}, true
+			missing = append(missing, t)
 		}
 	}
-	if !checked {
-		// Nothing could be asked, so there is nothing to report either way.
-		return Check{}, false
-	}
-	return Check{Name: "server_database", Status: StatusOK}, true
+	return missing, checked
 }

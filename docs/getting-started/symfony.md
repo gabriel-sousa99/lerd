@@ -19,7 +19,7 @@ Run `lerd mcp:enable-global` once and your AI assistant (Claude Code, Cursor, Ju
 ```bash [lerd new]
 cd ~/Lerd
 lerd new myapp --framework=symfony
-# runs: composer create-project symfony/skeleton ./myapp
+# runs: composer create-project symfony/skeleton:^8.0 ./myapp
 ```
 
 ```bash [composer]

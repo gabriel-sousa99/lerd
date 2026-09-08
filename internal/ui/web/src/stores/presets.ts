@@ -1,9 +1,11 @@
 import { writable, derived } from 'svelte/store';
 import { apiJson, apiFetch, apiUrl } from '$lib/api';
-import { loadServices } from './services';
+import { loadServices, serviceLabel } from './services';
 import { loadServiceIcons } from './serviceIcons';
 import { goToTab } from './route';
 import { m } from '../paraglide/messages.js';
+import { pullSize } from '$lib/bytes';
+import { confirmDownload } from './downloadConfirm';
 
 export interface PresetVersion {
   tag: string;
@@ -149,6 +151,15 @@ export async function installPreset(p: Preset): Promise<InstallResult> {
     error: ''
   }));
 
+  // Ask before the install commits to a download the user cannot see coming.
+  // installing is already set, so the modal underneath ignores the Escape that
+  // dismisses this one.
+  const versionParam = (p.versions || []).length > 0 ? p.selected_version || '' : '';
+  if (!(await confirmDownload(serviceLabel(p.name), { preset: p.name, version: versionParam }))) {
+    updatePreset(p.name, (x) => ({ ...x, installing: false }));
+    return { ok: false };
+  }
+
   let url = '/api/services/presets/' + encodeURIComponent(p.name);
   if ((p.versions || []).length > 0 && p.selected_version) {
     url += '?version=' + encodeURIComponent(p.selected_version);
@@ -175,7 +186,15 @@ export async function installPreset(p: Preset): Promise<InstallResult> {
         const line = buffer.slice(0, nl).trim();
         buffer = buffer.slice(nl + 1);
         if (!line) continue;
-        let evt: { phase?: string; dep?: string; image?: string; message?: string; name?: string; error?: string };
+        let evt: {
+          phase?: string;
+          dep?: string;
+          image?: string;
+          message?: string;
+          name?: string;
+          error?: string;
+          bytes?: number;
+        };
         try {
           evt = JSON.parse(line);
         } catch {
@@ -190,7 +209,9 @@ export async function installPreset(p: Preset): Promise<InstallResult> {
           installingPhase: evt.phase || '',
           installingDep: evt.phase === 'starting_deps' ? evt.dep || '' : x.installingDep,
           installingMessage:
-            evt.phase === 'pulling_image' ? evt.message || (evt.image ? 'pulling ' + evt.image : '') : ''
+            evt.phase === 'pulling_image'
+              ? evt.message || (evt.image ? 'pulling ' + evt.image + pullSize(evt.bytes) : '')
+              : ''
         }));
       }
     }

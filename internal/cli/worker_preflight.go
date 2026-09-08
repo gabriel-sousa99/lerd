@@ -3,10 +3,15 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
+	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
 // validateWorkerUnitFields refuses any value that would break out of its line
@@ -66,6 +71,12 @@ func workerStartPreflight(sitePath, workerName string, w config.FrameworkWorker)
 	if msg := hostWorkerNoNodeMsg(workerName, sitePath, w); msg != "" {
 		return errors.New(msg)
 	}
+	if msg := missingRequiredServiceMsg(workerName, sitePath, w); msg != "" {
+		return errors.New(msg)
+	}
+	if msg := missingWorkerProgramMsg(workerName, sitePath, w); msg != "" {
+		return errors.New(msg)
+	}
 	if w.Check != nil && !config.MatchesRule(sitePath, *w.Check) {
 		if msg := hostWorkerNotReadyMsg(workerName, sitePath, w); msg != "" {
 			return errors.New(msg)
@@ -80,6 +91,71 @@ func workerStartPreflight(sitePath, workerName string, w config.FrameworkWorker)
 			workerName, describeRule(*w.ExcludeCheck))
 	}
 	return nil
+}
+
+// missingRequiredServiceMsg returns an actionable message when the worker
+// declares a service it needs and that service isn't running. A Laravel queue
+// worker on QUEUE_CONNECTION=redis is the case this exists for: without the
+// gate it boots and dies on a PHP "getaddrinfo for lerd-redis failed", which
+// says nothing about what to start. The requirement and the env condition that
+// scopes it both come from the definition; core only reads them.
+func missingRequiredServiceMsg(workerName, sitePath string, w config.FrameworkWorker) string {
+	name := requiredServiceFor(sitePath, w)
+	if name == "" {
+		return ""
+	}
+	if running, _ := podman.ContainerRunning("lerd-" + name); running {
+		return ""
+	}
+	return fmt.Sprintf("worker %q needs the %s service, which is not running\nStart it first: lerd services start %s", workerName, name, name)
+}
+
+// requiredServiceFor returns the service the worker needs on this site, or ""
+// when it declares none or its env condition doesn't hold here.
+func requiredServiceFor(sitePath string, w config.FrameworkWorker) string {
+	if w.RequiresService == nil || w.RequiresService.Name == "" {
+		return ""
+	}
+	if cond := w.RequiresService.WhenEnv; cond != "" {
+		key, want, ok := strings.Cut(cond, "=")
+		if !ok || envfile.ReadKey(filepath.Join(sitePath, ".env"), key) != want {
+			return ""
+		}
+	}
+	return w.RequiresService.Name
+}
+
+// missingWorkerProgramMsg returns an actionable message when a worker's command
+// names a program inside the project that is not there. Such a worker starts,
+// dies on "No such file or directory", and is restarted every few seconds, so
+// the reason scrolls past in a log nobody is reading while the unit flaps. Only
+// a project-relative path is judged: a bare name is resolved through PATH, which
+// is not lerd's to second-guess, and an absolute one belongs to the host.
+func missingWorkerProgramMsg(workerName, sitePath string, w config.FrameworkWorker) string {
+	fields := strings.Fields(w.Command)
+	if len(fields) == 0 {
+		return ""
+	}
+	program := fields[0]
+	if filepath.IsAbs(program) || !strings.Contains(program, "/") {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(sitePath, program)); err == nil {
+		return ""
+	}
+	return fmt.Sprintf("worker %q needs %s, which this project does not have yet\nIts framework installs it: check `lerd run` for the command that does", workerName, program)
+}
+
+// requiredServiceUnit is the systemd unit of the service a worker declares it
+// needs, so the worker's own unit can be ordered after it. Without the ordering
+// a boot starts the two together and the worker crash-loops until the service it
+// is talking to comes up.
+func requiredServiceUnit(sitePath string, w config.FrameworkWorker) string {
+	name := requiredServiceFor(sitePath, w)
+	if name == "" {
+		return ""
+	}
+	return "lerd-" + name
 }
 
 // hostWorkerNotReadyMsg returns an actionable message for a host worker (vite et

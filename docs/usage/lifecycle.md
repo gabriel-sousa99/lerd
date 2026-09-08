@@ -29,7 +29,7 @@ lerd start
 Walks the install in dependency order:
 
 1. Pre-flight: checks for **port conflicts** on 53, 80, and 443; refuses to start if another process is bound.
-2. Rebuilds or pulls any missing container images (e.g. after a `podman rmi` or a podman cleanup).
+2. Rebuilds or pulls any missing container images (e.g. after a `podman rmi` or a podman cleanup), listing every image and its download size first (see [Image downloads](#image-downloads)).
 3. Boots core: `lerd-dns`, `lerd-nginx`, `lerd-watcher`.
 4. Boots every PHP-FPM container that has at least one site referencing its version. Unused PHP versions stay stopped.
 5. Boots all installed services that are **not** marked as manually paused (see [Manually stopped services](services.md#manually-stopped-services) for the pause-state contract).
@@ -56,6 +56,83 @@ Either way the site gets the same teardown `lerd unlink` performs: its workers a
 
 Both paths skip `Ignored: true` sites, those are explicitly parked by the user (e.g. via `lerd unpark` leaving a tombstone) and must not be reaped.
 :::
+
+---
+
+## Image downloads
+
+Every command that can pull or rebuild a container image says so before a single
+byte moves. The block lists what is being fetched, how big it is, and why:
+
+```
+ ↓ lerd will download 2 images (~247.9 MiB total)
+    pull    docker.io/library/mysql:8.0  ~222.8 MiB  missing, needed by mysql
+    rebuild PHP 8.4 image                 ~25.1 MiB  missing, needed by php84-fpm
+```
+
+Sizes come from the registry manifest, so nothing is downloaded to work them
+out. A registry that does not answer in time leaves the line without a number
+rather than holding the command up.
+
+`lerd install` reports the same block for the PHP versions it has to rebuild,
+usually after an upgrade that changed the image recipe. Each version then builds
+behind its own progress line instead of streaming the raw build log; press
+Ctrl+O while it runs to see the output.
+
+To see what a start would fetch without fetching it:
+
+```bash
+lerd start --dry-run
+```
+
+### In the dashboard
+
+Installing a service, updating, migrating, rolling back or reinstalling one, and
+installing or rebuilding a PHP version all ask first when the image they need is
+not already on the machine:
+
+> **Download required**
+> MySQL needs a container image that isn't on this machine yet. Continuing
+> downloads about 222.8 MB.
+
+Nothing is fetched until you confirm. When the image is already in the local
+store there is no download to warn about, so the operation runs straight away
+with no extra click; a repeat PHP rebuild against a base you already pulled is
+the usual case for that.
+
+### From an assistant
+
+The MCP tools that would fetch an image (installing a service preset, updating,
+migrating, rolling back or reinstalling a service, and adding a PHP extension,
+which rebuilds the image) report the image and its size back to the assistant
+and download nothing. It takes a second call carrying `confirm: true` to go
+ahead, so the size reaches the person paying for the connection before the bytes
+move. An image already on the machine is not disclosed and the action runs
+straight away.
+
+### Offline mode
+
+On a metered or offline connection, `--no-pull` (or `LERD_OFFLINE=1`, which
+also covers the dashboard, the watcher and the MCP server) keeps lerd on the
+images you already have:
+
+```bash
+lerd start --no-pull
+LERD_OFFLINE=1 lerd service start redis
+```
+
+An image that is missing outright is still pulled, because nothing would run
+otherwise. What offline mode skips is the refresh of something that already
+works: a service pull that would only fetch a newer tag, and the PHP image
+rebuilds a lerd update would otherwise trigger. Those stay deferred until you
+ask for them yourself:
+
+```bash
+lerd php:rebuild
+```
+
+`lerd php:rebuild` and `lerd fetch` always run, offline or not: they exist
+because you asked for the download.
 
 ---
 
@@ -170,6 +247,8 @@ lerd autostart disable     # stop booting on login
 ```
 
 `lerd autostart enable` runs `systemctl --user enable` on the full set; `lerd autostart disable` runs the matching `disable`. The dashboard's enabled state is the canonical "is autostart on" indicator surfaced by the UI and tray.
+
+The switch is sticky. A worker you enable later, while autostart is off, stays disarmed as well, so it cannot come back on the next boot ahead of the databases and caches it needs and crash-restart against them.
 
 The same toggle also appears in the **System Tray** menu under **Autostart**; see [System Tray](../features/system-tray.md).
 

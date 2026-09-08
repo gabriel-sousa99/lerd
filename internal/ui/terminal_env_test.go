@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -82,5 +83,78 @@ func TestGraphicalEnvDoesNotDuplicateKeys(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("XDG_SESSION_TYPE appears %d times, want 1", count)
+	}
+}
+
+// The terminal the user picked in System Settings is the one to open, so it has
+// to outrank every emulator that merely happens to be installed. Only $TERMINAL,
+// an explicit override, comes first.
+func TestMacDefaultTerminalBundle_ReadsTheShellScriptHandler(t *testing.T) {
+	const plist = `{"LSHandlers":[
+		{"LSHandlerRoleAll":"com.apple.ical","LSHandlerURLScheme":"webcal"},
+		{"LSHandlerContentType":"com.apple.terminal.shell-script","LSHandlerRoleAll":"dev.warp.warp-stable"}
+	]}`
+	if got := macDefaultTerminalBundle([]byte(plist)); got != "dev.warp.warp-stable" {
+		t.Errorf("bundle = %q, want dev.warp.warp-stable", got)
+	}
+}
+
+// Setting the default from Finder's Get Info panel writes the shell role rather
+// than the catch-all one, and that choice counts just the same.
+func TestMacDefaultTerminalBundle_FallsBackToTheShellRole(t *testing.T) {
+	const plist = `{"LSHandlers":[
+		{"LSHandlerContentType":"com.apple.terminal.shell-script","LSHandlerRoleShell":"com.googlecode.iterm2"}
+	]}`
+	if got := macDefaultTerminalBundle([]byte(plist)); got != "com.googlecode.iterm2" {
+		t.Errorf("bundle = %q, want com.googlecode.iterm2", got)
+	}
+}
+
+// A user who never changed their terminal has no entry at all, and unreadable
+// input must not be mistaken for one either. Both leave the caller on its
+// ordinary fallbacks rather than opening nothing.
+func TestMacDefaultTerminalBundle_EmptyWhenUnset(t *testing.T) {
+	for name, plist := range map[string]string{
+		"no handlers":    `{"LSHandlers":[]}`,
+		"other handlers": `{"LSHandlers":[{"LSHandlerContentType":"public.html","LSHandlerRoleAll":"com.apple.safari"}]}`,
+		"not a plist":    `<?xml version="1.0"?>`,
+		"empty document": ``,
+	} {
+		if got := macDefaultTerminalBundle([]byte(plist)); got != "" {
+			t.Errorf("%s: bundle = %q, want empty", name, got)
+		}
+	}
+}
+
+// Warp takes a directory argument through open, the same as iTerm and Terminal,
+// so it needs no special-casing beyond being detected and offered.
+func TestTerminalDirCandidates_OffersWarpBeforeTerminal(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the macOS terminals are only offered on darwin")
+	}
+	if _, err := os.Stat("/Applications/Warp.app"); err != nil {
+		t.Skip("Warp is not installed")
+	}
+	t.Setenv("TERMINAL", "")
+
+	const dir = "/Users/me/project"
+	warp, terminal := -1, -1
+	for i, c := range terminalDirCandidates(dir) {
+		joined := strings.Join(c.args, " ")
+		switch {
+		case strings.Contains(joined, "-a Warp"):
+			warp = i
+			if !strings.Contains(joined, dir) {
+				t.Errorf("warp args %v do not carry the target dir %q", c.args, dir)
+			}
+		case strings.Contains(joined, "-a Terminal"):
+			terminal = i
+		}
+	}
+	if warp == -1 {
+		t.Fatal("Warp is not among the terminal candidates")
+	}
+	if terminal != -1 && warp > terminal {
+		t.Errorf("Warp at %d is offered after Apple Terminal at %d", warp, terminal)
 	}
 }
