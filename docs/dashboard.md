@@ -79,7 +79,8 @@ O editor cobre proxies simples e fullstack, aliases, upstream HTTP ou HTTPS,
 host e porta, caminho de health check, timeout, TLS, autostart e rotas com
 destinos independentes por site ou host/porta. A configuração continua
 declarativa em `proxies.yaml`, e cada alteração regenera o vhost. Ver
-[Proxies](../README.md#proxies-para-projetos-não-php).
+[Proxy fullstack](features/proxy-fullstack-frontend.md) e
+[sites host-proxy](usage/host-proxy.md).
 
 ## Serviços novos (presets desta fork)
 
