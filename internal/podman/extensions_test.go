@@ -82,19 +82,23 @@ func TestBundledExtensionsDropsPECLOnPrerelease(t *testing.T) {
 	}
 	v := config.PrereleasePHPVersions[0]
 	got := strings.Join(BundledExtensions(v), " ")
-	for _, ext := range []string{"igbinary", "pcov", "xdebug"} {
+	for _, ext := range []string{"igbinary", "pcov", "xdebug", "amqp", "memcached"} {
 		if strings.Contains(" "+got+" ", " "+ext+" ") {
 			t.Errorf("BundledExtensions(%q) advertises %q, which does not build on a prerelease", v, ext)
 		}
 	}
-	for _, ext := range []string{"curl", "intl", "opcache", "pdo_mysql", "redis", "imagick", "mongodb"} {
+	// oci8 is in the kept list on purpose: it is the reason this fork exists and
+	// it does build on the prerelease, so losing it has to fail here.
+	for _, ext := range []string{"curl", "intl", "opcache", "pdo_mysql", "redis", "imagick", "mongodb", "oci8"} {
 		if !strings.Contains(" "+got+" ", " "+ext+" ") {
 			t.Errorf("BundledExtensions(%q) dropped %q, which the image does build", v, ext)
 		}
 	}
 	stable := strings.Join(BundledExtensions("8.5"), " ")
-	if !strings.Contains(stable, "xdebug") {
-		t.Error("BundledExtensions(8.5) lost xdebug; the prerelease rule leaked into a released version")
+	for _, ext := range []string{"xdebug", "amqp", "memcached"} {
+		if !strings.Contains(" "+stable+" ", " "+ext+" ") {
+			t.Errorf("BundledExtensions(8.5) lost %q; the prerelease rule leaked into a released version", ext)
+		}
 	}
 }
 

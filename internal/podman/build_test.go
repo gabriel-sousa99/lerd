@@ -334,6 +334,29 @@ func TestPhpFpmContainerfile_BuildsFTPWithSSL(t *testing.T) {
 	}
 }
 
+// PHP 8.6 ships no pecl, so a bare `pecl install` fails the whole build under
+// set -e. Every PECL install has to go through lerd-pecl-install, which falls
+// back to a phpize build. The Oracle layer is the one that regressed: it was
+// fork-only, so it never showed up as a merge conflict when upstream moved.
+func TestPhpFpmContainerfile_InstallsPECLThroughTheWrapper(t *testing.T) {
+	tmpl, err := GetQuadletTemplate("lerd-php-fpm.Containerfile")
+	if err != nil {
+		t.Fatalf("read containerfile: %v", err)
+	}
+	_, body, ok := strings.Cut(tmpl, "chmod +x /usr/local/bin/lerd-pecl-install")
+	if !ok {
+		t.Fatal("lerd-pecl-install wrapper missing from Containerfile")
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "pecl install") && !strings.Contains(line, "lerd-pecl-install") {
+			t.Errorf("PECL install must go through lerd-pecl-install, PHP 8.6 has no pecl: %s", strings.TrimSpace(line))
+		}
+	}
+	if !strings.Contains(body, `lerd-pecl-install "$OCI8_PKG" instantclient,/opt/oracle/instantclient`) {
+		t.Error("oci8 must pass the Instant Client path to the wrapper, or the phpize build cannot find libclntsh")
+	}
+}
+
 func TestPhpExtensionLoaded(t *testing.T) {
 	out := "Core\ndate\nimap\nPDO\nZend OPcache\n"
 	cases := map[string]bool{

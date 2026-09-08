@@ -21,10 +21,16 @@ var bundledSince = map[string][2]int{
 // may advertise a name the image never loads. Shrink this as upstream catches
 // up; the base image build fails on anything advertised and missing, so an entry
 // left here too long costs a name, never a broken image.
+// amqp and memcached are the fork's own additions, so upstream had no reason to
+// list them: on 8.6.0beta2 amqp 2.2.0 wants the removed XtOffsetOf and
+// memcached 3.4.0 trips the pointer-type errors that are now fatal. oci8 stays
+// out of this map because it does build there, against Instant Client 21.18.
 var prereleaseUnbuildable = map[string]bool{
-	"igbinary": true,
-	"pcov":     true,
-	"xdebug":   true,
+	"igbinary":  true,
+	"pcov":      true,
+	"xdebug":    true,
+	"amqp":      true,
+	"memcached": true,
 }
 
 // BundledExtensions returns the PHP extensions the default lerd FPM image ships

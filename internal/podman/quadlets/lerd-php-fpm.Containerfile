@@ -8,15 +8,22 @@ FROM docker.io/library/php:{{.Version}}-fpm-alpine AS builder
 # PHP 8.6 removed PEAR, so `pecl` is gone from the upstream image. Where it is
 # missing, the release tarball on pecl.php.net is the same source pecl fetches,
 # so every PECL install below goes through one wrapper instead of branching.
+# The optional second argument is the answer pecl would prompt for, which the
+# phpize path has to spell as a --with-<ext>= flag instead; oci8 needs it to
+# find the Instant Client and is the only caller that passes one.
 RUN printf '%s\n' \
       '#!/bin/sh' \
       'set -e' \
       'spec="$1"' \
-      'if command -v pecl >/dev/null 2>&1; then yes "" | pecl install "$spec"; exit 0; fi' \
+      'cfg="${2:-}"' \
+      'if command -v pecl >/dev/null 2>&1; then' \
+      '  if [ -n "$cfg" ]; then echo "$cfg" | pecl install "$spec"; else yes "" | pecl install "$spec"; fi' \
+      '  exit 0' \
+      'fi' \
       'dir=$(mktemp -d)' \
       'wget -qO- "https://pecl.php.net/get/$spec" | tar xz -C "$dir"' \
       'cd "$dir"/*/' \
-      'phpize && ./configure && make -j"$(nproc)" && make install' \
+      'phpize && ./configure ${cfg:+--with-${spec%%-*}=$cfg} && make -j"$(nproc)" && make install' \
       'rm -rf "$dir"' \
     > /usr/local/bin/lerd-pecl-install \
     && chmod +x /usr/local/bin/lerd-pecl-install
@@ -138,7 +145,9 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
 # the runtime stage via the existing COPY --from=builder block at the bottom;
 # the Instant Client itself is copied separately in the runtime stage below.
 # pecl package is pinned per-PHP-major where the rolling "oci8" tag drops
-# support; PHP 8.2+ tracks the latest.
+# support; PHP 8.2+ tracks the latest. The install goes through
+# lerd-pecl-install because 8.6 ships no pecl, and the Instant Client path it
+# would be prompted for is passed as that wrapper's second argument.
 #
 # 8.1 gets 3.2.1, not 3.3.0: 3.3.0's package.xml claims min PHP 8.1, but its
 # generated oci8_arginfo.h references ZEND_STR_SENSITIVEPARAMETER and
@@ -167,7 +176,6 @@ RUN set -eux; \
       unzip -qo instantclient-basic-linux.x64-21.18.0.0.0dbru.zip; \
       unzip -qo instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip; \
       rm -f /opt/oracle/*.zip; \
-      pecl channel-update pecl.php.net; \
       case "$PHPVER" in \
         5.6)             OCI8_PKG="oci8-2.0.12" ;; \
         7.2|7.3|7.4)     OCI8_PKG="oci8-2.2.0" ;; \
@@ -177,7 +185,7 @@ RUN set -eux; \
         8.4)             OCI8_PKG="oci8-3.4.1" ;; \
         *)               OCI8_PKG="oci8" ;; \
       esac; \
-      printf "instantclient,/opt/oracle/instantclient\n" | pecl install "$OCI8_PKG"; \
+      lerd-pecl-install "$OCI8_PKG" instantclient,/opt/oracle/instantclient; \
       docker-php-ext-enable oci8; \
     fi; \
     rm -rf /opt/oracle/instantclient_21_18/sdk /tmp/pear /var/cache/apk/*
