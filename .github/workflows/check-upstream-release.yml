@@ -13,7 +13,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 env:
   UPSTREAM: lerd-env/lerd
@@ -162,25 +161,27 @@ jobs:
         if: steps.open_pr.outcome == 'failure'
         run: echo "::warning::Automated PR creation is blocked by repository settings. The merge branch was pushed and can be turned into a PR by hand."
 
-      - name: Open an issue for a conflicted merge
+      # Issues are disabled on this repository, so a conflicted merge cannot be
+      # filed as one. Failing the job is the channel that does reach someone:
+      # GitHub mails the owner when a scheduled workflow fails, and the summary
+      # below carries the file list and the resolutions that keep recurring.
+      - name: Report a conflicted merge
         if: steps.merge.outputs.clean == 'false'
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.upstream.outputs.tag }}
           BASE: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          title="Merge upstream ${TAG} into the fork"
-          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
-          if [ -n "$existing" ]; then
-            echo "::notice::issue #${existing} already tracks ${TAG}"
-            exit 0
-          fi
           {
-            printf 'Upstream published %s and the merge into `%s` does not apply on its own, so it needs a human. The files that conflicted:\n\n' "$TAG" "$BASE"
-            printf '```\n'
+            echo "## Upstream ${TAG} needs a manual merge"
+            echo
+            echo "It does not apply onto \`${BASE}\` on its own. Conflicted files:"
+            echo
+            echo '```'
             cat /tmp/conflicts.txt
-            printf '```\n\n'
-            printf 'The recurring ones have known resolutions. Import blocks resolve by union, with the module path rewritten to the fork%ss afterwards and unused imports dropped where the build points at them. The i18n message files under internal/ui/web/messages resolve as a three way merge by key. Files the fork rewrote whole, README.md above all, keep the fork%ss version.\n' "'" "'"
-          } > /tmp/issue-body.md
-          gh issue create --title "$title" --body-file /tmp/issue-body.md
+            echo '```'
+            echo
+            echo "Import blocks resolve by union, with the module path rewritten to the fork's afterwards and unused imports dropped where the build points at them. The i18n message files under internal/ui/web/messages resolve as a three way merge by key. Files the fork rewrote whole, README.md above all, keep the fork's version."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Upstream ${TAG} conflicts with ${BASE}, see the run summary for the file list"
+          exit 1
