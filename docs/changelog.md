@@ -7,6 +7,69 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.34.3-oracle.0] — 2026-09-08 — merge upstream v1.33.1 → v1.34.3
+
+Fork (Oracle Edition). Integra 284 commits do upstream (`lerd-env/lerd`), de
+v1.33.1 a v1.34.3. Nenhuma feature nova do fork nesta versão: as que existiam
+foram preservadas, e o resumo abaixo cobre o que **mudou de comportamento** na
+integração, mais dois defeitos que o merge revelou na camada Oracle.
+
+O upstream trocou de organização nesse intervalo. O endereço antigo,
+`geodro/lerd`, apenas redireciona, e o remote deste fork foi corrigido para
+`lerd-env/lerd`. As referências que apontam de propósito para o upstream, a URL
+dos docs e as refs de issue, seguem intactas.
+
+### Added
+
+- **PHP 8.6, ainda em prerelease.** Entra nas versões ofertadas e as imagens base
+  do fork passam a incluí-lo, construídas a partir do tag `-rc` porque o 8.6 não
+  tem tag GA. A camada Oracle chega parcial nele: o `oci8` compila e carrega
+  contra o Instant Client 21.18, mas o `amqp` e o `memcached` não compilam contra
+  o 8.6, e por isso deixam de ser anunciados nessa versão em vez de serem
+  prometidos e faltar.
+- **Verificação semanal do upstream.** Um job de segunda-feira compara a release
+  estável do upstream com o histórico da branch de trabalho, abre PR quando o
+  merge aplica sozinho e, quando conflita, escreve os arquivos em conflito e as
+  resoluções recorrentes no resumo da execução.
+
+### Changed
+
+- **Os comandos nomeados de worker saíram do Go.** O upstream passou a gerá-los a
+  partir da definição do framework, então `lerd horizon`, `lerd reverb` e
+  `lerd schedule` continuam existindo, agora declarados no store em vez de
+  hardcoded. Nada muda para quem usa; muda para quem lê o código.
+- **`lerd whatsnew` recebe a tag que quer consultar.** Com a tag vazia ele segue
+  resolvendo para a branch padrão deste fork, e não para `main`, porque `main`
+  acompanha o upstream e não carrega nenhuma entrada do fork.
+- **O README perdeu as instruções de instalação por PPA, COPR e Homebrew.** Elas
+  vazaram de um merge anterior e apontavam para repositórios e taps onde este
+  fork não publica, instalando o lerd de upstream, sem Oracle.
+
+### Fixed
+
+- **O build da imagem PHP 8.6 morria no passo do OCI8.** O `oci8` era instalado
+  chamando o `pecl` direto, sob `set -eux`, e o 8.6 não traz mais o `pecl` desde a
+  remoção do PEAR. Passou despercebido porque aquele bloco é do próprio fork, então
+  a migração do upstream de todas as outras instalações PECL para o wrapper
+  `lerd-pecl-install` nunca apareceu como conflito. O wrapper agora aceita como
+  segundo argumento a resposta que o `pecl` pediria, que o caminho `phpize`
+  escreve como flag `--with-<ext>=`.
+- **O gate do CI nunca rodava na branch que entrega.** O `ci.yml` herdou do
+  upstream uma lista de branches com `main` e `release/**`, mas a branch default
+  deste fork é `oracle-oci8-support`, então nenhum push nela e nenhum pull request
+  apontando para ela disparava o CI. O `release.yml` roda uma cópia própria desses
+  jobs numa tag, que é por que uma release seguia verificada enquanto os pull
+  requests não estavam.
+- **O modal de proxy ficava inalcançável abaixo da dobra e não reagia à própria
+  largura.** O corpo do formulário mais longo do dashboard era o único sem
+  container de scroll, coisa que os outros nove modais têm, então todo campo
+  abaixo da dobra ficava fora de alcance. E o fieldset de upstream pedia um
+  breakpoint de viewport dentro de um painel de largura fixa, o que punha duas
+  colunas em 464px em qualquer janela acima de 640px. O corpo agora scrolla e as
+  colunas seguem a largura do formulário, não a da janela, num painel maior.
+
+---
+
 ## [1.34.3] - 2026-09-07
 
 A patch for an install that stopped dead at a question. On a machine that already carries a database client of its own, the install asks whether lerd's shim should shadow it, and that question is the first thing in the run to read the keyboard after the progress views have had it. Each of those views left a reader behind with nothing to do but still queued on the terminal, so the answer typed at the question went to one of them and the newline ending it to another, and the install sat waiting for input that had already been taken. Answering again did nothing, because the same thing happened to the next keystroke.
