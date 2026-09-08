@@ -1,10 +1,15 @@
 name: CI
 
+# oracle-oci8-support is this fork's default branch, where the Oracle work lives;
+# main only tracks upstream. Without it listed, no push to the fork's own branch
+# and no pull request targeting it ever ran CI, so a PR merged with no checks at
+# all. release.yml runs its own copy of these jobs on a tag, so a release was
+# verified even while pull requests were not.
 on:
   push:
-    branches: ["main", "release/**"]
+    branches: ["oracle-oci8-support", "main", "release/**"]
   pull_request:
-    branches: ["main", "release/**"]
+    branches: ["oracle-oci8-support", "main", "release/**"]
 
 jobs:
   build:
