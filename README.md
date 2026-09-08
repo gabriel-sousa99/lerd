@@ -280,6 +280,12 @@ NÃO** → sites em `http://meusite.localhost/` (sem sudo, RFC 6761).
 lerd about    # confirma "Lerd Oracle Edition" e versão 1.33.1-oracle.1
 ```
 
+### macOS
+
+O mesmo script: ele detecta o sistema e baixa o binário `darwin` da release do
+fork, incluindo o `lerd-tray`. Não há tap do Homebrew para este fork — o tap
+`lerd-env/lerd` instala o upstream, sem Oracle.
+
 > [!TIP]
 > No **WSL2** há premissas extras (systemd, networking mirrored, projetos no
 > `$HOME`). Guia completo em **[docs/wsl2.md](docs/wsl2.md)**.
@@ -288,47 +294,13 @@ lerd about    # confirma "Lerd Oracle Edition" e versão 1.33.1-oracle.1
 
 ## Primeiro uso
 
-The PPA publishes for every Ubuntu release in standard support and for the current development release. On one of those:
-
 ```bash
 cd ~/meu-projeto-laravel
 lerd init     # wizard: PHP, Node, HTTPS, Database, serviços, workers
 lerd open     # abre em http://meu-projeto-laravel.localhost
 ```
 
-On any other release the PPA has no packages, and `add-apt-repository` leaves behind a source entry that fails every later `apt update`. Remove it with `sudo add-apt-repository --remove ppa:lerd/lerd` and use the script installer above.
-
-The package finishes setup with no prompt: its maintainer script applies the root-level steps and runs the per-user install, so `.test` DNS and HTTPS come up on their own. Update with `sudo apt upgrade`; a packaged lerd lives under `/usr`, so `lerd update` defers to your package manager instead of fighting it.
-
 ---
-
-<details>
-<summary>Install via dnf instead (Fedora)</summary>
-
-The COPR builds for every Fedora release in standard support and for rawhide:
-
-```bash
-sudo dnf copr enable georged/lerd
-sudo dnf install lerd
-```
-
-The package finishes setup with no prompt, exactly like the apt one: `.test` DNS and HTTPS come up on their own. Update with `sudo dnf upgrade`; a packaged lerd lives under `/usr`, so `lerd update` defers to your package manager instead of fighting it.
-
-</details>
-
-<details>
-<summary>Install via Homebrew instead</summary>
-
-```bash
-brew install lerd-env/lerd/lerd
-lerd install
-```
-
-Podman comes from your distro rather than as a brew dependency, and Homebrew on Linux needs its usual prerequisites (notably a C compiler). Update with `brew upgrade lerd`.
-
-</details>
-
-### macOS
 
 ## Trabalhando com Oracle
 
