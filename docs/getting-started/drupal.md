@@ -19,7 +19,7 @@ Run `lerd mcp:enable-global` once and your AI assistant (Claude Code, Cursor, Ju
 ```bash [lerd new]
 cd ~/Lerd
 lerd new mysite --framework=drupal
-# runs: composer create-project drupal/recommended-project ./mysite
+# runs: composer create-project drupal/recommended-project:^11.0 ./mysite
 ```
 
 ```bash [composer]

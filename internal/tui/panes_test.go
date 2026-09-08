@@ -187,3 +187,14 @@ func TestCountFailingWorkers_ZeroWhenAllHealthy(t *testing.T) {
 		t.Errorf("failingWorkerNames count = %d, want 0", got)
 	}
 }
+
+func TestRenderServiceRow_MarksServicesWithADashboard(t *testing.T) {
+	withDash := stripANSI(renderServiceRow(false, ServiceRow{Name: "mailpit", Dashboard: "http://localhost:8025"}, 60))
+	if !strings.Contains(withDash, "web") {
+		t.Errorf("expected a dashboard marker on the row: %q", withDash)
+	}
+	plain := stripANSI(renderServiceRow(false, ServiceRow{Name: "redis"}, 60))
+	if strings.Contains(plain, "web") {
+		t.Errorf("a service without a dashboard should carry no marker: %q", plain)
+	}
+}

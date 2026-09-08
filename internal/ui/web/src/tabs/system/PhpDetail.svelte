@@ -9,7 +9,14 @@
   import PhpExtensionsTab from './PhpExtensionsTab.svelte';
   import SitesPopover from '$components/SitesPopover.svelte';
   import { status, loadStatus } from '$stores/status';
-  import { setDefaultPhp, startPhp, stopPhp, checkPhpUpdates } from '$stores/phpVersions';
+  import {
+    setDefaultPhp,
+    startPhp,
+    stopPhp,
+    checkPhpUpdates,
+    confirmPhpDownload,
+    openPhpShell
+  } from '$stores/phpVersions';
   import { sites, sitesByPhp } from '$stores/sites';
   import { xdebugOn, xdebugOff, XDEBUG_MODES, type XdebugMode } from '$stores/xdebug';
   import { openPhpRemoveModal, openPhpRebuildModal } from '$stores/modals';
@@ -201,6 +208,16 @@
     }
   }
 
+  // The shell runs in the host's terminal emulator, so the only thing the tab
+  // can report is a launcher that never came up; the session itself lives out
+  // there. A stopped container has nothing to exec into, hence the guard.
+  async function openShell() {
+    const res = await openPhpShell(version);
+    if (!res.ok) {
+      notifyLocalInfo('php_shell', 'PHP ' + version, res.error || m.common_failed());
+    }
+  }
+
   const versionBusy = $derived(fpmBusy || defaultBusy || checking);
 
   const rebuildAction = $derived<ButtonMenuAction>({
@@ -209,7 +226,9 @@
     icon: rebuildIcon,
     label: baseUpdate ? m.system_php_rebuildUpdate() : m.system_php_rebuild(),
     title: baseUpdate ? m.system_php_baseUpdateHint() : m.system_php_rebuildHint(),
-    onclick: () => openPhpRebuildModal(version)
+    onclick: async () => {
+      if (await confirmPhpDownload(version)) openPhpRebuildModal(version);
+    }
   });
 
   const versionActions = $derived.by<ButtonMenuAction[]>(() => {
@@ -221,6 +240,14 @@
       acts.push(rebuildAction);
     }
     const tail: ButtonMenuAction[] = [
+      {
+        id: 'shell',
+        icon: terminalIcon,
+        label: m.common_terminal(),
+        title: m.system_php_shellTitle(),
+        disabled: !running,
+        onclick: openShell
+      },
       {
         id: 'check-updates',
         icon: checkUpdatesIcon,
@@ -289,6 +316,9 @@
 {/snippet}
 {#snippet rebuildIcon()}
   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+{/snippet}
+{#snippet terminalIcon()}
+  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
 {/snippet}
 {#snippet checkUpdatesIcon()}
   <svg class={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 4 21 10 15 10"/></svg>

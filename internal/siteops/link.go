@@ -7,6 +7,7 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
@@ -211,6 +212,11 @@ func FinishFrankenPHPLink(site config.Site) error {
 	// Build the derived image (dunglas base + lerd's standard extension set) so
 	// the site has redis/gd/pdo/... instead of the bare base. The build pulls the
 	// base itself; a failure leaves the site registered to retry on next start.
+	if podman.NeedsFrankenPHPRebuild([]string{site.PHPVersion}) {
+		imagepull.Plan{imagepull.Build("FrankenPHP "+site.PHPVersion+" image",
+			podman.FrankenPHPBaseImage(site.PHPVersion),
+			"the site runs on FrankenPHP")}.Fill().Report(os.Stdout)
+	}
 	buildErr := podman.BuildFrankenPHPImage(site.PHPVersion, false, os.Stdout)
 	// Starting a unit whose image is absent is worse than not switching: podman
 	// reads the "localhost/" prefix as a registry and the unit restart-loops on a

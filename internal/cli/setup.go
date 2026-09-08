@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -485,7 +484,7 @@ func planSetupSteps(cwd string, skipOpen bool) []setupStep {
 		config.ComposerHasPackage(cwd, "pestphp/pest-plugin-browser") {
 		alreadyBaked := false
 		if gcfg, err := config.LoadGlobal(); err == nil {
-			alreadyBaked = slices.Contains(gcfg.GetPackages(), pestBrowserPkg)
+			alreadyBaked = len(missingPestBrowserPkgs(gcfg)) == 0
 		}
 		if !alreadyBaked {
 			steps = append(steps, setupStep{

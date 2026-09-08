@@ -30,6 +30,31 @@ func TestUnitLifecycle_refusesRealSystemdUnderTest(t *testing.T) {
 	}
 }
 
+// macOS installs a real launchd manager from init(), so UnitLifecycle was never
+// nil there and the guard above never fired: a single `go test ./...` booted out
+// the developer's own nginx job and re-bootstrapped it against a plist in a temp
+// dir the test then deleted. A platform manager is the real system, not a stub.
+func TestUnitLifecycle_refusesThePlatformManagerUnderTest(t *testing.T) {
+	prev, prevPlatform := UnitLifecycle, platformUnitLifecycle
+	t.Cleanup(func() { UnitLifecycle, platformUnitLifecycle = prev, prevPlatform })
+	UsePlatformUnitLifecycle(&recordingLifecycle{})
+
+	for _, tc := range []struct {
+		name string
+		call func(string) error
+	}{
+		{"start", StartUnit},
+		{"stop", StopUnit},
+		{"restart", RestartUnit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call("lerd-nginx"); !errors.Is(err, errNoRealSystemd) {
+				t.Errorf("%s reached the real launchd from a test (err = %v)", tc.name, err)
+			}
+		})
+	}
+}
+
 // With a stub installed the lifecycle still works, so the refusal only covers the
 // unstubbed path and doesn't disarm the tests that do drive it.
 func TestUnitLifecycle_stubStillDrivesTheLifecycle(t *testing.T) {

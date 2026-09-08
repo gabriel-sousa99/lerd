@@ -14,6 +14,12 @@ func CustomFPMContainerName(siteName string) string {
 	return "lerd-cfpm-" + siteName
 }
 
+// SharedFPMContainerName returns the per-version FPM container every site on a
+// version is served by, e.g. "lerd-php84-fpm".
+func SharedFPMContainerName(version string) string {
+	return "lerd-php" + strings.ReplaceAll(version, ".", "") + "-fpm"
+}
+
 // FPMContainerName resolves the FPM container nginx fastcgi's to and the php
 // shims exec into: a per-site container for custom-FPM sites, otherwise the
 // shared lerd-php<version>-fpm container.
@@ -21,7 +27,7 @@ func FPMContainerName(site config.Site, version string) string {
 	if site.IsCustomFPM() {
 		return CustomFPMContainerName(site.Name)
 	}
-	return "lerd-php" + strings.ReplaceAll(version, ".", "") + "-fpm"
+	return SharedFPMContainerName(version)
 }
 
 // WriteCustomFPMQuadlet writes a per-site PHP-FPM quadlet running the site's

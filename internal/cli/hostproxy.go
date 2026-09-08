@@ -109,7 +109,7 @@ func rebindHostProxyDevServer(proxy *config.ProxyConfig, siteName, sitePath stri
 	}
 	command := resolveWorkerCommand(sitePath, hostProxyWorkerName, w)
 	fpmUnit := resolveWorkerFPMUnit(siteName, "")
-	changed, err := writeWorkerUnitFile(unitName, label, unitSiteName, sitePath, "", command, restart, w.Schedule, fpmUnit, w.Host)
+	changed, err := writeWorkerUnitFile(unitName, label, unitSiteName, sitePath, "", command, restart, w.Schedule, fpmUnit, requiredServiceUnit(sitePath, w), w.Host)
 	if err != nil {
 		feedback.Warn("rebinding dev server for %s: %v", siteName, err)
 		return

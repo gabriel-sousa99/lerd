@@ -29,6 +29,22 @@ func resolveNginxDomain(args []string, branch string) (*config.Site, string, err
 	return site, domain, nil
 }
 
+// nginxScope maps the --location flag onto the scope. The two override files
+// differ only in where the generated vhost includes them, so one boolean beats
+// a --scope string with exactly two legal values.
+func nginxScope(location bool) siteops.NginxScope {
+	if location {
+		return siteops.NginxLocationScope
+	}
+	return siteops.NginxServerScope
+}
+
+// addNginxFlags registers the flags every `lerd nginx` subcommand shares.
+func addNginxFlags(cmd *cobra.Command, branch *string, location *bool) {
+	cmd.Flags().StringVar(branch, "branch", "", "Worktree branch to target instead of the main branch")
+	cmd.Flags().BoolVar(location, "location", false, "Target the override included inside the site's request-handling location, where fastcgi_param and proxy_set_header overrides take effect")
+}
+
 // NewNginxCmd returns the `lerd nginx` command group for the per-site custom
 // nginx override. Saving goes through the same edit service as the web UI, so
 // `nginx -t` validation, backups, and the reload all behave identically.
@@ -37,8 +53,10 @@ func NewNginxCmd() *cobra.Command {
 		Use:   "nginx",
 		Short: "Show, edit, or reset a site's custom nginx override",
 		Long: "Manage the per-site nginx override included at the end of a site's\n" +
-			"server block (custom.d/{domain}.conf). Pass --branch to target a\n" +
-			"worktree's override instead of the main branch's.",
+			"server block (custom.d/{domain}.conf). Pass --location for the one\n" +
+			"included inside the block that serves the site, the only place a\n" +
+			"fastcgi_param or proxy_set_header override takes effect, and\n" +
+			"--branch to target a worktree's override instead of the main branch's.",
 	}
 	cmd.AddCommand(newNginxShowCmd(), newNginxEditCmd(), newNginxResetCmd())
 	return cmd
@@ -46,6 +64,7 @@ func NewNginxCmd() *cobra.Command {
 
 func newNginxShowCmd() *cobra.Command {
 	var branch string
+	var location bool
 	var pathOnly bool
 	cmd := &cobra.Command{
 		Use:   "show [site]",
@@ -57,10 +76,10 @@ func newNginxShowCmd() *cobra.Command {
 				return err
 			}
 			if pathOnly {
-				fmt.Fprintln(cmd.OutOrStdout(), siteops.CustomNginxPath(domain))
+				fmt.Fprintln(cmd.OutOrStdout(), siteops.CustomNginxPath(domain, nginxScope(location)))
 				return nil
 			}
-			got, err := siteops.ReadCustomNginx(domain)
+			got, err := siteops.ReadCustomNginx(domain, nginxScope(location))
 			if err != nil {
 				return err
 			}
@@ -71,13 +90,14 @@ func newNginxShowCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&branch, "branch", "", "Worktree branch to target instead of the main branch")
+	addNginxFlags(cmd, &branch, &location)
 	cmd.Flags().BoolVar(&pathOnly, "path", false, "Print the override file path and exit")
 	return cmd
 }
 
 func newNginxEditCmd() *cobra.Command {
 	var branch string
+	var location bool
 	cmd := &cobra.Command{
 		Use:   "edit [site]",
 		Short: "Open the custom nginx override in $EDITOR, then validate and reload",
@@ -87,7 +107,7 @@ func newNginxEditCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			got, err := siteops.ReadCustomNginx(domain)
+			got, err := siteops.ReadCustomNginx(domain, nginxScope(location))
 			if err != nil {
 				return err
 			}
@@ -111,7 +131,7 @@ func newNginxEditCmd() *cobra.Command {
 				return err
 			}
 			if !launched {
-				fmt.Printf("Override file: %s\n", siteops.CustomNginxPath(domain))
+				fmt.Printf("Override file: %s\n", siteops.CustomNginxPath(domain, nginxScope(location)))
 				fmt.Println("Set $EDITOR to edit it automatically.")
 				return nil
 			}
@@ -123,7 +143,7 @@ func newNginxEditCmd() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "No changes.")
 				return nil
 			}
-			res, err := siteops.SaveCustomNginx(domain, string(edited), got.Exists)
+			res, err := siteops.SaveCustomNginx(domain, nginxScope(location), string(edited), got.Exists)
 			if err != nil {
 				return err
 			}
@@ -137,12 +157,13 @@ func newNginxEditCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&branch, "branch", "", "Worktree branch to target instead of the main branch")
+	addNginxFlags(cmd, &branch, &location)
 	return cmd
 }
 
 func newNginxResetCmd() *cobra.Command {
 	var branch string
+	var location bool
 	cmd := &cobra.Command{
 		Use:   "reset [site]",
 		Short: "Delete the custom nginx override and reload nginx (backups are kept)",
@@ -152,13 +173,13 @@ func newNginxResetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := siteops.ResetCustomNginx(domain); err != nil {
+			if err := siteops.ResetCustomNginx(domain, nginxScope(location)); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Reset %s to bundled defaults.\n", domain)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&branch, "branch", "", "Worktree branch to target instead of the main branch")
+	addNginxFlags(cmd, &branch, &location)
 	return cmd
 }

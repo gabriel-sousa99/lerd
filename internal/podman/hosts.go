@@ -277,19 +277,41 @@ func isInfraHostname(name string) bool {
 // probeHostFromNginx returns true if lerd-nginx can open a TCP connection to
 // ip:port within 2 seconds. Uses busybox nc (-z = scan only, -w = timeout).
 func probeHostFromNginx(ip, port string) bool {
-	cmd := execCommand(PodmanBin(), "exec", "lerd-nginx", "nc", "-z", "-w", "2", ip, port)
+	return runCapped(execCommand(PodmanBin(), "exec", "lerd-nginx", "nc", "-z", "-w", "2", ip, port), 3*time.Second)
+}
+
+// dnsProbeTimeout caps the container-side name lookup. A forwarder that is
+// unreachable from inside the netns times out rather than answering, which is
+// the failure this probe exists to catch, so it must not wait on it.
+var dnsProbeTimeout = 4 * time.Second
+
+// ResolvesFromNginx reports whether lerd-nginx can resolve name through the
+// forwarders the lerd network hands aardvark-dns. Container names and .test
+// domains keep working when those forwarders are stale, so nothing else
+// notices until composer or npm times out mid-download (#1519). Returns false
+// when the exec cannot run, so callers must check lerd-nginx is up first to
+// tell a broken resolver from an absent one.
+func ResolvesFromNginx(name string) bool {
+	if name == "" {
+		return false
+	}
+	return runCapped(execCommand(PodmanBin(), "exec", "lerd-nginx", "getent", "hosts", name), dnsProbeTimeout)
+}
+
+// runCapped runs cmd discarding its output and reports whether it exited 0
+// within d, killing it otherwise so a hung podman exec cannot block the caller.
+func runCapped(cmd *exec.Cmd, d time.Duration) bool {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	// Cap total wall time so a hung exec doesn't block lerd start.
-	done := make(chan error, 1)
 	if err := cmd.Start(); err != nil {
 		return false
 	}
+	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
 		return err == nil
-	case <-time.After(3 * time.Second):
+	case <-time.After(d):
 		_ = cmd.Process.Kill()
 		return false
 	}

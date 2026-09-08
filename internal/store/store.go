@@ -35,9 +35,11 @@ type Client struct {
 	Fallbacks []string
 }
 
-// Index is the top-level store index listing all available frameworks.
+// Index is the top-level store index listing all available frameworks, and the
+// composer packages that ship declarations of their own.
 type Index struct {
-	Frameworks []IndexEntry `json:"frameworks"`
+	Frameworks []IndexEntry               `json:"frameworks"`
+	Packages   []config.StorePackageEntry `json:"packages,omitempty"`
 }
 
 // IndexEntry describes a single framework available in the store.
@@ -276,7 +278,7 @@ func (c *Client) DetectFromStore(dir string) (*IndexEntry, string, bool) {
 
 	for i, entry := range idx.Frameworks {
 		for _, rule := range entry.Detect {
-			if config.MatchesRule(dir, rule) {
+			if config.MatchesDetectRule(dir, rule) {
 				version := c.resolveVersion(dir, &entry)
 				return &idx.Frameworks[i], version, true
 			}
@@ -326,9 +328,16 @@ func (c *Client) findEntry(idx *Index, name string) (*IndexEntry, bool) {
 }
 
 func (c *Client) fetch(path string) ([]byte, error) {
+	return c.fetchFrom(append([]string{c.BaseURL}, c.Fallbacks...), path)
+}
+
+// fetchFrom tries each base in order and returns the first body one serves, so
+// a caller reading a part of the store that lives outside the definitions
+// directory passes its own bases rather than a path full of parent segments.
+func (c *Client) fetchFrom(bases []string, path string) ([]byte, error) {
 	client := &http.Client{Timeout: httpTimeout}
 	var errs []string
-	for _, base := range append([]string{c.BaseURL}, c.Fallbacks...) {
+	for _, base := range bases {
 		body, err := fetchWithRetry(client, base+"/"+path)
 		if err == nil {
 			return body, nil

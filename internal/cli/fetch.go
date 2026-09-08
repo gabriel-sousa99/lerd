@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 
@@ -60,7 +61,7 @@ func NewFetchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "fetch [version...]",
 		Short: "Pre-build PHP FPM images so first use isn't slow",
-		Long:  "Pulls pre-built PHP-FPM base images from ghcr.io and applies local layers (mkcert CA, custom extensions).\nPass --local to skip the pull and build entirely from source.\nSkips any version whose image already exists.",
+		Long:  "Pulls pre-built PHP-FPM base images from ghcr.io and applies local layers (mkcert CA, custom extensions).\nPass --local to skip the pull and build entirely from source.\nSkips any version whose image already exists.\nWith no arguments it builds the released versions; a prerelease only builds when named.",
 		RunE:  runFetch,
 	}
 	cmd.Flags().Bool("local", false, "Build images locally instead of pulling pre-built base images")
@@ -79,7 +80,7 @@ func runFetch(cmd *cobra.Command, args []string) error {
 		versions = append(versions, v)
 	}
 	if len(versions) == 0 {
-		versions = SupportedPHPVersions
+		versions = config.StablePHPVersions()
 	}
 
 	var rebuiltMu sync.Mutex
@@ -100,6 +101,16 @@ func runFetch(cmd *cobra.Command, args []string) error {
 			},
 		}
 	}
+
+	// Only versions whose image is stale actually build, so only those are
+	// disclosed as a download.
+	var pending []string
+	for _, v := range versions {
+		if !podman.FPMImageCurrent(v) {
+			pending = append(pending, v)
+		}
+	}
+	phpBuildPlan(pending, local, "requested by lerd fetch").Fill().Report(os.Stdout)
 
 	if err := RunParallel(jobs); err != nil {
 		feedback.Warn("some images failed to build: %v", err)

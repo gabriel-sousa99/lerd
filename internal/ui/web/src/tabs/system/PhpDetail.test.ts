@@ -96,16 +96,27 @@ describe('PhpDetail', () => {
   // rather than sitting in the button next to Xdebug inviting a click.
   it('keeps rebuild in the menu until the base has moved', async () => {
     const { container } = render(PhpDetail, { props: { version: '8.4' } });
-    expect(screen.getByText('Check for updates')).toBeInTheDocument();
     expect(screen.queryByText('Rebuild image')).not.toBeInTheDocument();
 
     await openMenu(container);
     expect(screen.getByText('Rebuild image')).toBeInTheDocument();
+    expect(screen.getByText('Check for updates')).toBeInTheDocument();
   });
 
   it('promotes rebuild to the button once the base is republished', () => {
     setStatus({ update_available: true });
     render(PhpDetail, { props: { version: '8.4' } });
     expect(screen.getByText('Rebuild on the new base')).toBeInTheDocument();
+  });
+
+  // The shell is the one action worth a click on a version that is just sitting
+  // there, so it leads the group rather than waiting in the menu.
+  it('offers a shell in the container, and only while it is running', async () => {
+    render(PhpDetail, { props: { version: '8.4' } });
+    expect(screen.getByText('Terminal').closest('button')).toBeDisabled();
+
+    setStatus({ running: true });
+    await tick();
+    expect(screen.getByText('Terminal').closest('button')).not.toBeDisabled();
   });
 });

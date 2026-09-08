@@ -1,0 +1,187 @@
+name: Check Upstream Release
+
+# Weekly check of lerd-env/lerd for a stable release this fork has not merged
+# yet. A conflict-free merge goes through the whole local gate and becomes a
+# PR; a conflicted one becomes an issue, because the recurring collisions here
+# (the module path, the .localhost DNS default, the Oracle base images) need a
+# human to resolve. Prereleases are skipped: releases/latest ignores them.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM: lerd-env/lerd
+  MODULE_OLD: github.com/geodro/lerd
+  MODULE_NEW: github.com/gabriel-sousa99/lerd
+
+jobs:
+  check:
+    name: Merge upstream release
+    runs-on: ubuntu-latest
+    if: github.repository == 'gabriel-sousa99/lerd'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the newest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch --quiet upstream --tags
+          tag=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          # An ancestor tag is already in this branch's history, which is what a
+          # finished merge leaves behind, so there is nothing to do this week.
+          if git merge-base --is-ancestor "$tag" HEAD; then
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${tag} is already merged"
+          else
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${tag} is not merged yet"
+          fi
+
+      - name: Merge it
+        id: merge
+        if: steps.upstream.outputs.pending == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -uo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "chore/merge-upstream-${TAG}"
+          if git merge --no-edit "$TAG"; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt
+            git merge --abort
+          fi
+
+      # Before the rewrite below, so its gofmt is the version go.mod pins
+      # rather than whatever the runner image happens to ship.
+      - uses: actions/setup-go@v5
+        if: steps.merge.outputs.clean == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Rewrite the module path in the files the merge brought in
+        if: steps.merge.outputs.clean == 'true'
+        run: |
+          set -euo pipefail
+          # New upstream files arrive with the upstream import path and break
+          # the build. Only the path is rewritten: geodro.github.io is the docs
+          # site and geodro/lerd#N are issue references, both left alone.
+          files=$(git grep -l "$MODULE_OLD" || true)
+          if [ -n "$files" ]; then
+            echo "$files" | xargs sed -i "s#${MODULE_OLD}#${MODULE_NEW}#g"
+            gofmt -w .
+            git add -u
+            git commit --amend --no-edit
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.merge.outputs.clean == 'true'
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: internal/ui/web/package-lock.json
+
+      - name: Install tray build dependencies
+        if: steps.merge.outputs.clean == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --fix-missing libayatana-appindicator3-dev
+
+      - name: Install bats-core
+        if: steps.merge.outputs.clean == 'true'
+        run: |
+          git clone --depth 1 --quiet https://github.com/bats-core/bats-core.git /tmp/bats-core
+          sudo /tmp/bats-core/install.sh /usr/local
+
+      - name: Run the gate
+        id: gate
+        if: steps.merge.outputs.clean == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          make build-ui
+          make test-ui
+          go mod download
+          CGO_ENABLED=1 go build -o /dev/null ./cmd/lerd
+          CGO_ENABLED=1 go test ./...
+          CGO_ENABLED=1 go vet ./...
+          test -z "$(gofmt -l .)"
+          bats tests/installer/installer.bats
+
+      - name: Push the merge branch
+        if: steps.merge.outputs.clean == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: git push --force-with-lease origin "chore/merge-upstream-${TAG}"
+
+      - name: Open the merge PR
+        id: open_pr
+        if: steps.merge.outputs.clean == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.upstream.outputs.tag }}
+          BASE: ${{ github.ref_name }}
+          GATE: ${{ steps.gate.outcome }}
+        run: |
+          set -euo pipefail
+          branch="chore/merge-upstream-${TAG}"
+          if gh pr view "$branch" --json number --jq .number >/dev/null 2>&1; then
+            echo "::notice::a PR for ${branch} is already open"
+            exit 0
+          fi
+          if [ "$GATE" = "success" ]; then
+            verdict="The full gate passed on this merge, build, tests, vet, gofmt, the UI suite and the installer tests."
+          else
+            verdict="The gate failed on this merge, so read the run log before merging. The usual causes are an upstream test that assumes the .test TLD this fork does not default to, and an unused import left by an import block union."
+          fi
+          gh pr create \
+            --base "$BASE" \
+            --head "$branch" \
+            --title "chore: merge upstream ${TAG}" \
+            --body "Automated merge of the upstream release ${TAG} from ${UPSTREAM}, opened by the weekly upstream check. The module path of the files the merge brought in was rewritten to the fork's, and the tree was reformatted. ${verdict}"
+
+      - name: Warn when PR creation is blocked
+        if: steps.open_pr.outcome == 'failure'
+        run: echo "::warning::Automated PR creation is blocked by repository settings. The merge branch was pushed and can be turned into a PR by hand."
+
+      # Issues are disabled on this repository, so a conflicted merge cannot be
+      # filed as one. Failing the job is the channel that does reach someone:
+      # GitHub mails the owner when a scheduled workflow fails, and the summary
+      # below carries the file list and the resolutions that keep recurring.
+      - name: Report a conflicted merge
+        if: steps.merge.outputs.clean == 'false'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          BASE: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Upstream ${TAG} needs a manual merge"
+            echo
+            echo "It does not apply onto \`${BASE}\` on its own. Conflicted files:"
+            echo
+            echo '```'
+            cat /tmp/conflicts.txt
+            echo '```'
+            echo
+            echo "Import blocks resolve by union, with the module path rewritten to the fork's afterwards and unused imports dropped where the build points at them. The i18n message files under internal/ui/web/messages resolve as a three way merge by key. Files the fork rewrote whole, README.md above all, keep the fork's version."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Upstream ${TAG} conflicts with ${BASE}, see the run summary for the file list"
+          exit 1

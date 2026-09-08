@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// A finished rebuild must re-probe the patch and drop the status snapshot
+// A finished build must re-probe the patch and drop the status snapshot
 // before the client is told it is done, or the card keeps the old number until
 // the snapshot's TTL expires.
-func TestRefreshAfterPHPRebuild(t *testing.T) {
+func TestRefreshAfterPHPBuild(t *testing.T) {
 	origPoll, origPatch := pollContainersFn, refreshPHPPatchFn
 	t.Cleanup(func() {
 		pollContainersFn, refreshPHPPatchFn = origPoll, origPatch
@@ -26,7 +26,7 @@ func TestRefreshAfterPHPRebuild(t *testing.T) {
 	snapshots.status.data, snapshots.status.at = []byte(`{"php":[]}`), time.Now()
 	snapshots.status.mu.Unlock()
 
-	refreshAfterPHPRebuild("8.5")
+	refreshAfterPHPBuild("8.5")
 
 	if !polled {
 		t.Error("container cache was not polled")

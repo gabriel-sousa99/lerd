@@ -10,7 +10,22 @@ Each framework can define **workers**: long-running processes managed as systemd
 | `lerd worker stop <name>` | Stop a named worker |
 | `lerd worker list` | List all workers defined for this project's framework |
 
-The shortcut commands `lerd queue:start`, `lerd schedule:start`, `lerd reverb:start`, and `lerd horizon:start` are aliases; they look up the worker from the framework definition and delegate to the generic handler. They work for any framework that defines a worker with that name.
+Every worker also gets commands under its own name, generated from the framework definition rather than written by hand: `lerd queue:start`, `lerd horizon:stop`, `lerd reverb start` and so on, in both the `name:verb` and `name verb` spellings. They run the same implementation `lerd worker start` does, so a worker added to the store arrives with its own commands and no lerd release. Outside a linked project there is no framework to read them from, so they aren't there.
+
+A worker whose definition has a `reload_command` also gets `lerd <name>:reload [on|off]`, which toggles restart-on-file-change for the current project and restarts the worker when it is already running. With no argument it prints the current state.
+
+**Tuning flags**: a worker with a `tune_command` gets a flag per placeholder on its start command, so Laravel's `--queue={queue} --tries={tries} --timeout={timeout}` becomes `lerd queue:start --queue emails --tries 5`. Each default is read back out of the plain `command`, so nothing is duplicated, and a framework that spells its queue differently (CodeIgniter takes it positionally and has no timeout flag) gets exactly the flags it declares. Passing no flags runs the declared command verbatim.
+
+**Required services**: a worker can name a service it cannot run without, optionally scoped to sites whose `.env` carries a given key. Laravel's queue worker requires Redis on `QUEUE_CONNECTION=redis`, so starting it with `lerd-redis` down says which service to start instead of leaving the worker to crash-loop on a DNS error:
+
+```yaml
+workers:
+  queue:
+    command: php artisan queue:work
+    requires_service:
+      name: redis
+      when_env: QUEUE_CONNECTION=redis
+```
 
 ## Worker features
 
@@ -42,9 +57,14 @@ workers:
     command: php artisan reverb:start
     proxy:
       path: /app                    # URL path for the proxy location block
+      paths:                        # every path the server answers on (optional)
+        - /app
+        - /apps
       port_env_key: REVERB_SERVER_PORT  # env key holding the port
       default_port: 8080            # starting port for auto-assignment
 ```
+
+A server that answers on more than one path lists them all under `paths`, and each gets its own location block on the same port. Reverb is the case in point: the WebSocket connection lands on `/app` while the HTTP broadcasting API a server-side `ShouldBroadcast` event posts to lives on `/apps/{app_id}/events`, and a path left out falls through to PHP and answers 404. Where both are set, `paths` is the list that gets proxied and `path` is ignored, so a definition keeps `path` alongside it and still proxies on lerd versions released before `paths` existed.
 
 Port assignment scans all proxy port env keys across all sites to prevent collisions between different workers and frameworks.
 
@@ -90,7 +110,7 @@ Host workers auto-start in three places:
 
 Host workers run with lerd's bin dir prepended to `PATH`, so subprocesses spawned by `npm run dev` (for example Inertia's wayfinder Vite plugin shelling out to `php artisan`) reach lerd's `php`, `composer` and `laravel` shims and route into the containerised runtime. Stopping a host worker via the UI or `lerd worker stop` is now sticky: a HEAD-write event (commit, checkout, rebase, branch rename) inside a worktree no longer resurrects it, and on macOS the heal loop respects a missing plist as a user-stop signal instead of recreating it.
 
-On macOS the unit is a launchd plist (`~/Library/LaunchAgents/lerd-<worker>-<site>[-<branch>].plist`) backed by a guard script under `~/.local/share/lerd/run/workers/` that `cd`s into the site/worktree and `fnm exec`s the command. The watcher self-heals the unit independently of the worker exec mode, host workers always need launchd-level supervision because they aren't behind podman's `--restart=always`. Scheduled workers (`schedule != ""`) still aren't supported on macOS; launchd's `StartCalendarInterval` isn't wired through the unit translator yet.
+On macOS the unit is a launchd plist (`~/Library/LaunchAgents/lerd-<worker>-<site>[-<branch>].plist`) backed by a guard script under `~/.local/share/lerd/run/workers/` that `cd`s into the site/worktree and `fnm exec`s the command. The guard records its own pid, which is the process group leader, and stopping the worker signals that whole group: launchd only signals the leader, so a worker that hands off to a launcher (`npm` to `electron-vite` to Electron) would otherwise leave the app running, reparented to init, with no unit left to stop it. The watcher self-heals the unit independently of the worker exec mode, host workers always need launchd-level supervision because they aren't behind podman's `--restart=always`. Scheduled workers (`schedule != ""`) still aren't supported on macOS; launchd's `StartCalendarInterval` isn't wired through the unit translator yet.
 
 **Dev servers on the site's own domain**: A dev server normally advertises its own address, so a Vite app renders asset URLs pointing at `localhost:5173`. That address means nothing to anyone else, so the page arrives unstyled over a share tunnel, over [LAN sharing](/usage/lan-sharing), or on any host other than the one that started it.
 
@@ -112,7 +132,13 @@ Some plugin middleware registers itself ahead of the tool's own base handling an
 
 When [idle-suspend](/usage/idle-suspend) is enabled it stops every one of a site's workers once the site has been idle, so workers carry no special configuration for it. A worker marked `per_worktree: true` (Vite is the only one by default) is suspended per worktree, on each worktree's own idle timer.
 
+## Workers a package brings
+
+A worker gated on a composer package belongs to the package, not to the framework major it happens to be written in, so the store lets it be declared once in `packages/<vendor>-<name>.yaml` and merges it onto whatever definition the project resolved. It behaves like any other framework worker from there: same commands, same tuning flags, same lifecycle. See [package definitions](framework-definitions.md#package-definitions) for the schema and how a package narrows itself to a framework and a range of its majors.
+
 ## Project-specific custom workers
+
+The `workers:` list is what `lerd start` brings back, and it follows the worker units lerd has written rather than what happens to be running at the moment you touch another worker. Starting a worker adds it, stopping one by name removes it, and a worker that is merely down, crash-looping or stopped for a rebuild, stays on the list and starts again with the rest.
 
 Add workers to `.lerd.yaml` for project-specific needs that don't belong in the framework definition:
 
@@ -226,6 +252,19 @@ A worker becomes orphaned when its systemd unit is still running but its definit
 - **`lerd worker stop <name>`**: can stop orphaned workers even without a definition
 - **`lerd setup`**: offers orphaned workers as pre-selected stop steps before framework worker starts
 - **UI**: the stop button works for orphaned workers directly
+
+## Stale worker units
+
+A worker that leaves the definition entirely is a different case. A framework definition reaches every install within a day with no binary release, so a worker retired upstream is retired on every machine at once: it stops appearing in `lerd worker list`, and the dashboard stops drawing a toggle for it. Its unit file stays where it was written, though, still linked into `default.target.wants` and still armed for boot.
+
+Nothing used to reconcile the two, so a unit that answered to nothing kept being walked by [worker-heal](worker-heal.md) and reported as a worker that needed healing. Two things changed. Worker-heal now leaves a unit whose worker the site no longer declares alone, so it no longer counts towards the failing-worker banner. And `lerd site:doctor` reports it once, under **Worker Units**, with a fix that disables the unit, deletes it, and reloads the daemon:
+
+```bash
+lerd site:doctor           # names the units that answer to nothing
+lerd site:doctor --fix     # disables and removes them
+```
+
+The unit is never removed silently, because it may still be running something you want. A worker whose `check` rule simply stopped matching is not stale: the definition still names it, and the next branch checkout brings it back.
 
 ## Web UI (worker toggles)
 

@@ -77,13 +77,15 @@ func runRuntime(cmd *cobra.Command, args []string) error {
 		}
 		return switchToFPM(site)
 	case "frankenphp":
-		// dunglas/frankenphp only publishes images for PHP >= 8.2; without this
-		// guard the build would normalize the version up (e.g. 8.1 -> 8.5) and
-		// silently run a different PHP than the site reports, with its ini files
-		// still mounted from the old version's path.
-		if !config.IsFrankenPHPVersion(site.PHPVersion) {
-			return fmt.Errorf("FrankenPHP requires PHP %s or newer; this site is on PHP %s — bump it first with 'lerd isolate %s' (or higher)",
-				config.FrankenPHPMinVersion, site.PHPVersion, config.FrankenPHPMinVersion)
+		// dunglas/frankenphp publishes images for released PHP >= 8.2 only;
+		// without this guard the build would normalize the version up (e.g. 8.1
+		// -> 8.5) and silently run a different PHP than the site reports, with
+		// its ini files still mounted from the old version's path.
+		if reason := config.FrankenPHPUnavailableReason(site.PHPVersion); reason != "" {
+			if config.IsPrereleasePHPVersion(site.PHPVersion) {
+				return fmt.Errorf("%s — this site runs on FPM until it ships", reason)
+			}
+			return fmt.Errorf("%s — bump it first with 'lerd isolate %s' (or higher)", reason, config.FrankenPHPMinVersion)
 		}
 		fw, ok := config.GetFrameworkForDir(site.Framework, site.Path)
 		if !ok {

@@ -15,20 +15,58 @@ var selfExecutable = os.Executable
 // later cannot break the file, with Homebrew as the exception: its kegs are
 // version-pinned, so the resolved path names a directory the next
 // `brew upgrade lerd` deletes. Falls back to ~/.local/bin/lerd, lerd's own
-// install location, when the running executable cannot be resolved.
+// install location, when the running executable cannot be resolved or is a
+// build running out of a scratch directory, which is not an install and will
+// be gone by the time a unit or a shim written against it next runs.
 func LerdBinary() string {
 	exe, err := selfExecutable()
 	if err != nil || exe == "" {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".local", "bin", "lerd")
+		return installedLerdBinary()
 	}
 	if resolved, rErr := filepath.EvalSymlinks(exe); rErr == nil {
 		exe = resolved
+	}
+	if underScratchRoot(exe) {
+		return installedLerdBinary()
 	}
 	if opt := brewOptPath(exe); opt != "" {
 		return opt
 	}
 	return exe
+}
+
+// installedLerdBinary is the path to fall back on when the running executable
+// is not one anything may record: lerd's own install location, which the shims'
+// `[ -x "$LERD" ] || LERD=lerd` line covers if it turns out to be elsewhere.
+func installedLerdBinary() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "bin", "lerd")
+}
+
+// scratchRoots are the throwaway directories a lerd binary gets built and run
+// from during development. Tests override it, since their fixtures live in
+// exactly such a directory.
+var scratchRoots = []string{os.TempDir(), "/tmp", "/var/tmp", "/dev/shm", "/run"}
+
+// underScratchRoot reports whether path sits in one of those directories. Roots
+// are resolved before comparing, so macOS spelling /var against /private/var
+// still matches.
+func underScratchRoot(path string) bool {
+	for _, root := range scratchRoots {
+		if root == "" {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			root = resolved
+		}
+		if !strings.HasSuffix(root, string(os.PathSeparator)) {
+			root += string(os.PathSeparator)
+		}
+		if strings.HasPrefix(path, root) {
+			return true
+		}
+	}
+	return false
 }
 
 // SupersededBinary reports whether recorded names a lerd binary that current

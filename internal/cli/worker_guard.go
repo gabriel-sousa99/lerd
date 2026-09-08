@@ -90,3 +90,20 @@ trap 'rm -f %[1]s' EXIT
 exec %[5]s
 `, podman.ShellQuote(pidFile), podmanBin, container, podman.ShellQuote(inner), runCmd)
 }
+
+// buildHostWorkerReapCommand tears down what a host worker leaves behind.
+// launchd signals the job's leader on stop, and a leader that hands off to a
+// launcher (npm -> electron-vite -> Electron) keeps its grandchildren alive,
+// reparented to init. The guard records its own pid, which is the group
+// leader, so the whole group can be signalled by negated pid.
+func buildHostWorkerReapCommand(pidFile string) string {
+	return fmt.Sprintf(`pg="$(cat %[1]s 2>/dev/null)"
+case "$pg" in ''|*[!0-9]*) exit 0 ;; esac
+kill -TERM -"$pg" 2>/dev/null || exit 0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  kill -0 -"$pg" 2>/dev/null || exit 0
+  sleep 0.2
+done
+kill -KILL -"$pg" 2>/dev/null || true
+`, podman.ShellQuote(pidFile))
+}

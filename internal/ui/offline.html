@@ -88,6 +88,9 @@
       cursor: pointer;
     }
     button:hover { background: #e8281c; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    button.secondary { background: transparent; border: 1px solid #2a2a2a; color: #d1d5db; }
+    button.secondary:hover { background: #141414; color: #fff; }
     .status { font-size: 12px; color: #6b7280; }
     .status.online { color: #10b981; }
   </style>
@@ -95,10 +98,22 @@
 <body>
   <div class="card">
     <img class="logo" src="/icons/icon.svg" alt="Lerd">
-    <p class="title"><span class="dot" id="dot"></span> Lerd is not running</p>
-    <p class="subtitle">This page is being served by the installed app's offline cache. Your containers and site files are untouched; only the lerd stack is stopped or restarting.</p>
+    <p class="title"><span class="dot" id="dot"></span> <span id="headline">Lerd is not running</span></p>
+    <p class="subtitle" id="blurb">This page is being served by the installed app's offline cache. Your containers and site files are untouched; only the lerd stack is stopped or restarting.</p>
 
-    <h2>Start it</h2>
+    <!-- Actions first. Start Lerd appears whenever the daemon still answers on
+         its own port, which is the case after `lerd stop`: nginx is a container
+         that stops with the stack, lerd-ui is a host process that does not. -->
+    <div class="row" id="actions">
+      <button id="start" type="button" hidden>Start Lerd</button>
+      <button id="retry" class="secondary" type="button">Retry now</button>
+      <span class="status" id="status">checking every 5s…</span>
+    </div>
+
+    <!-- The fallback for a lerd that is down entirely (after `lerd quit`, or a
+         boot with autostart off): nothing is left listening to be asked. -->
+    <div id="manual">
+    <h2>From a terminal</h2>
     <div class="cmd-row">
       <pre id="cmd">lerd start</pre>
       <button class="copy-btn" id="copy" type="button">Copy</button>
@@ -106,10 +121,6 @@
 
     <h2>Or use the tray</h2>
     <p class="subtitle" style="margin-top: 0">Click the lerd tray icon and choose <strong>Start Lerd</strong>. On macOS, look in the menu bar.</p>
-
-    <div class="row">
-      <button id="retry">Retry now</button>
-      <span class="status" id="status">checking every 5s…</span>
     </div>
   </div>
   <script>
@@ -119,18 +130,32 @@
       var retryBtn = document.getElementById('retry');
       var copyBtn = document.getElementById('copy');
       var cmdEl = document.getElementById('cmd');
+      var startBtn = document.getElementById('start');
+      var manualEl = document.getElementById('manual');
+      var headlineEl = document.getElementById('headline');
+      var blurbEl = document.getElementById('blurb');
+      var DAEMON = 'http://127.0.0.1:7073';
+      var VHOST = 'http://lerd.localhost';
+      var starting = false;
 
+      // say puts a line under the buttons and mirrors it in the tab title, so a
+      // start that runs behind a background tab is still readable from the tab
+      // strip rather than only on the page.
+      function say(text) {
+        statusEl.textContent = text;
+        document.title = text ? 'Lerd — ' + text : 'Lerd';
+      }
       copyBtn.addEventListener('click', async function () {
         try {
           await navigator.clipboard.writeText(cmdEl.textContent.trim());
         } catch (_) {
           var r = document.createRange();
           r.selectNodeContents(cmdEl);
-          var s = window.getSelection();
-          s.removeAllRanges();
-          s.addRange(r);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
           try { document.execCommand('copy'); } catch (_) {}
-          s.removeAllRanges();
+          sel.removeAllRanges();
         }
         copyBtn.textContent = 'Copied';
         copyBtn.classList.add('copied');
@@ -140,22 +165,114 @@
         }, 1500);
       });
 
-      async function probe() {
+      // The daemon is what performs the start, so the button only appears once
+      // it answers. Its own port is never proxied by nginx, so this stays true
+      // while the vhost this page belongs to is down.
+      async function probeDaemon() {
+        if (starting) return;
         try {
-          var res = await fetch('/api/status', { cache: 'no-store' });
-          if (res.ok) {
-            statusEl.textContent = 'online — reloading';
-            statusEl.classList.add('online');
-            dotEl.style.background = '#10b981';
-            dotEl.style.boxShadow = '0 0 0 3px rgba(16, 185, 129, 0.2)';
-            setTimeout(function () { location.reload(); }, 400);
-            return;
-          }
-        } catch (_) { /* still offline */ }
-        statusEl.textContent = 'still offline — retrying in 5s';
+          startBtn.hidden = !(await fetch(DAEMON + '/api/status', { cache: 'no-store' })).ok;
+        } catch (_) {
+          startBtn.hidden = true;
+        }
       }
 
+      // vhostServing asks nginx for the dashboard page, not an API route: /api/
+      // is proxied to the daemon only on some platforms, while the page is what
+      // every install serves. The lerd-probe param keeps it out of the service
+      // worker's cache in both directions.
+      //
+      // It has to name the vhost rather than go relative, because as the splash
+      // this page is served by the daemon on its own port: a relative probe
+      // there would answer for the daemon and report a stopped stack as up.
+      async function vhostServing() {
+        try {
+          if (location.origin === VHOST) {
+            return (await fetch('/?lerd-probe=1', { cache: 'no-store' })).ok;
+          }
+          // Cross-origin the body is not readable, so the response type is the
+          // signal: only a real reply from nginx is opaque. "Did not throw" is
+          // not enough, because a service worker can answer with a synthesized
+          // error Response and that would read as a stack which is up.
+          var res = await fetch(VHOST + '/?lerd-probe=1', { mode: 'no-cors', cache: 'no-store' });
+          return res.type === 'opaque' || res.ok;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      async function probe() {
+        // A start in flight owns the page: it moves on by itself when the units
+        // are up, and navigating underneath it would drop the progress feed.
+        if (starting) return;
+        if (await vhostServing()) {
+          say('online — opening the dashboard');
+          statusEl.classList.add('online');
+          dotEl.style.background = '#10b981';
+          dotEl.style.boxShadow = '0 0 0 3px rgba(16, 185, 129, 0.2)';
+          setTimeout(function () { location.reload(); }, 400);
+          return;
+        }
+        say('still offline — retrying in 5s');
+        probeDaemon();
+      }
+
+      // The start streams NDJSON progress, the same feed the dashboard's own
+      // start button reads, so a run that takes a minute says what it is doing.
+      startBtn.addEventListener('click', async function () {
+        if (starting) return;
+        starting = true;
+        startBtn.disabled = true;
+        startBtn.textContent = 'Starting…';
+        say('');
+        var total = 0;
+        var done = 0;
+        try {
+          var res = await fetch(DAEMON + '/api/lerd/start', {
+            method: 'POST',
+            headers: { 'X-Lerd-CSRF': '1' }
+          });
+          if (!res.ok || !res.body) throw new Error(res.status + ' ' + res.statusText);
+          var reader = res.body.getReader();
+          var decoder = new TextDecoder();
+          var buf = '';
+          for (;;) {
+            var chunk = await reader.read();
+            if (chunk.done) break;
+            buf += decoder.decode(chunk.value, { stream: true });
+            var nl;
+            while ((nl = buf.indexOf('\n')) >= 0) {
+              var line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              var evt;
+              try { evt = JSON.parse(line); } catch (_) { continue; }
+              if (evt.phase === 'step') {
+                if (evt.total) total = evt.total;
+                say(evt.step || '');
+              } else if (evt.phase === 'unit') {
+                done++;
+                say(evt.unit + (total ? ' — ' + done + '/' + total : ''));
+              } else if (evt.phase === 'failed') {
+                throw new Error(evt.error || 'start failed');
+              }
+            }
+          }
+          say('started — opening the dashboard');
+          location.reload();
+          return;
+        } catch (e) {
+          say(String((e && e.message) || e));
+          headlineEl.textContent = 'Lerd could not start';
+        }
+        starting = false;
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start Lerd';
+      });
+
       retryBtn.addEventListener('click', function () { location.reload(); });
+
+      probeDaemon();
       probe();
       setInterval(probe, 5000);
     })();

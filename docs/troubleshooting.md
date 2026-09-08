@@ -3,11 +3,19 @@
 When something isn't working, start with the built-in diagnostics:
 
 ```bash
-lerd doctor   # full check: podman, systemd, DNS, ports, images, config
+lerd doctor   # full check: podman, systemd, DNS, ports, images, config, sites
 lerd status   # quick health snapshot of all running services
 ```
 
 `lerd doctor` reports OK/FAIL/WARN for each check with a hint for every failure.
+
+It finishes with a `[Sites]` section, one line per linked site, so the broad command is actually broad: an environment that passes everything else while three sites are down is not a healthy machine. Each site runs the cheap half of [`lerd site:doctor`](reference/commands.md), the file-and-config checks, and the line names the command to run for the detail:
+
+```bash
+lerd site:doctor acme.test
+```
+
+The expensive checks, `composer audit`, `npm audit`, and the response-time lookup, only run there, so the sweep stays quick however many sites you have. `lerd site:doctor` also validates the project's `.lerd.yaml`, which is what `lerd check` used to do on its own; `check` still works as a deprecated alias for it.
 
 ## Repairing findings automatically
 
@@ -31,7 +39,7 @@ If you need help on the [issue tracker](https://github.com/gabriel-sousa99/lerd/
 lerd bug-report
 ```
 
-This writes a single plain-text file (default: `./lerd-bug-report-<timestamp>.txt`) containing the full `lerd doctor` output, your `config.yaml` and `sites.yaml`, the state of every `lerd-*` systemd unit, recent journal and container logs for lerd's own infra units, listening sockets on the lerd ports, and a curated set of environment variables.
+This writes a single plain-text file (default: `./lerd-bug-report-<timestamp>.txt`) containing the full `lerd doctor` output, your `config.yaml`, `sites.yaml` and every linked site's `.lerd.yaml`, the state of every `lerd-*` systemd unit, recent journal and container logs for lerd's own infra units, listening sockets on the lerd ports, and a curated set of environment variables.
 
 What gets filtered before it lands on disk:
 
@@ -158,6 +166,34 @@ hosts: mymachines mdns_minimal [NOTFOUND=return] files myhostname dns resolve
 ```
 
 This makes glibc consult the plain `dns` module before systemd-resolved's `nss-resolve`, which the VPN client no longer shadows.
+:::
+
+::: details `lerd install` fails at "Building dnsmasq" with "unable to select packages"
+The dnsmasq image is the one thing lerd builds rather than pulls, and the `apk add` inside that build resolves names from the build's own network namespace, not through the host resolver that just pulled the base image. When that namespace has no working resolver, the build fails with `WARNING: fetching https://dl-cdn.alpinelinux.org/...: DNS: transient error` followed by `ERROR: unable to select packages`, even though every pull before it succeeded.
+
+lerd retries the build with your host's real upstream nameservers pinned, which covers the common case of a stub resolver (`127.0.0.53`) that podman's default handling does not translate correctly on your setup. When that still resolves nothing, it builds once more on the host network, which is the namespace that pulled the base image a moment earlier and so is known to work. A rootless build cannot join the lerd network, so those two are the levers available.
+
+If every attempt fails, lerd says so at the end of the install rather than reporting a clean finish: without the image, lerd-dns cannot start and no `.test` name resolves. Check what the container network can reach with `lerd doctor`, in particular the `internet DNS from containers` line, fix it, then run `lerd install` again.
+:::
+
+::: details composer or npm fails with "could not resolve host" inside a container
+Composer, npm and the framework store all run inside the container, not on the host, so they use the resolver the lerd network hands aardvark-dns rather than yours. Those two can differ: `.test` domains and container names are answered by aardvark-dns from its own records and keep working regardless, so a broken forwarder shows up only as downloads that fail with `could not resolve host` or `curl error 28 while downloading`, with nothing else complaining.
+
+`lerd doctor` checks this directly. In the DNS section, the `internet DNS from containers` line asks the running nginx container to resolve the framework store's hostname, which is an ordinary internet name and the same lookup composer makes:
+
+```
+[DNS]
+  ...
+  internet DNS from containers (raw.githubusercontent.com)   OK
+```
+
+If it fails, the forwarders on the lerd network are stale or unreachable from inside the container network namespace. `lerd stop && lerd start` re-points them at your current host resolvers, which fixes it in most cases. To see what they are set to:
+
+```bash
+podman network inspect lerd --format '{{.NetworkDNSServers}}'
+```
+
+An address that is valid on the host but not routable from a rootless network namespace is the usual cause. This is worth checking on WSL2 in particular, where the Windows-side resolver address the WSL VM is given is not always reachable from inside the namespace.
 :::
 
 ::: details "Secure Connection Failed" after the host wakes from suspend or hibernate
@@ -485,6 +521,22 @@ export LERD_DISABLE_IPV6=1
 ```
 
 Either path writes `~/.local/share/lerd/ipv6-probe-failed-lerd`, which `EnsureNetwork` honors on every code path (initial create, migration, recreate). To re-enable dual-stack, delete that marker file and re-run `lerd install`.
+:::
+
+::: details Every service fails with "rootlessport listen tcp [::1]:80: bind: cannot assign requested address"
+
+Symptom: nothing starts. nginx, mysql, redis, mailpit and every other service exit with status 126, and the journal shows a bind failure on an IPv6 loopback address:
+
+```
+Error: rootlessport listen tcp [::1]:3306: bind: cannot assign requested address
+lerd-mysql.service: Main process exited, code=exited, status=126/n/a
+```
+
+Cause: the host no longer has `::1`. IPv6 was turned off kernel-wide, either at boot with `ipv6.disable=1` or at runtime by a VPN client doing leak prevention (the NordVPN Linux client sets `net.ipv6.conf.{all,default,lo}.disable_ipv6=1` while connected). Lerd published each service on both `127.0.0.1` and `[::1]`, and podman treats a publish it cannot bind as fatal rather than falling back to the address that would have worked.
+
+Lerd now checks for `::1` before writing a unit and publishes on IPv4 alone when it is gone, so a host in this state comes up normally. Existing units written by an older build are repaired on the next `lerd start`, which rewrites them and restarts whatever was already running. If IPv6 comes back later, the following start restores the dual-stack publish.
+
+Note that this is a different check from the one the network schema uses. That one wants a routable address; the publish only needs loopback, so a VM with just `::1` and `fe80::` still gets its `[::1]` binds while the network stays v4-only.
 :::
 
 ::: details Every DNS lookup inside a lerd container stalls ~5 seconds

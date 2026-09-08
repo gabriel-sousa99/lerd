@@ -2,7 +2,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name {{.ServerNames}};
-    return 302 https://$host$request_uri;
+    return 302 https://{{.HTTPSRedirectHost}}$request_uri;
 }
 
 server {
@@ -16,10 +16,10 @@ server {
     ssl_certificate_key /etc/nginx/certs/{{.CertDomain}}.key;
 {{if .FrameworkNginx}}
 {{.FrameworkNginx}}
-{{end}}{{if .Proxy}}
-    location ~ ^{{.ProxyPath}}(/|$) {
-        set $proxybackend "{{.FPMContainer}}";
-        proxy_pass http://$proxybackend:{{.ProxyPort}};
+{{end}}{{range .ProxyPaths}}
+    location ~ ^{{.}}(/|$) {
+        set $proxybackend "{{$.FPMContainer}}";
+        proxy_pass http://$proxybackend:{{$.ProxyPort}};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -27,8 +27,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout {{.RequestTimeout}}s;
-        proxy_send_timeout {{.RequestTimeout}}s;
+        proxy_read_timeout {{$.RequestTimeout}}s;
+        proxy_send_timeout {{$.RequestTimeout}}s;
     }
 {{end}}
 {{if .DevServerBase}}
@@ -79,7 +79,8 @@ server {
         fastcgi_param HTTP_COOKIE "$http_cookie; SPX_KEY=$spx_key{{if .Profiling}}; SPX_ENABLED=1{{end}}";
 {{if .LerdSite}}        fastcgi_param LERD_SITE {{.LerdSite}};
 {{end}}{{if .LerdBranch}}        fastcgi_param LERD_BRANCH {{.LerdBranch}};
-{{end}}    }
+{{end}}        include /etc/nginx/custom.d/{{.Domain}}.location.conf*;
+    }
 
     location ~ /\.ht {
         deny all;

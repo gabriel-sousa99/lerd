@@ -181,7 +181,7 @@ Firefox/Chromium use their own certificate stores. Many pick up the mkcert CA au
 ## Create a Laravel project
 
 ```bash
-lerd new myapp        # composer create-project laravel/laravel ./myapp
+lerd new myapp        # composer create-project laravel/laravel:^13.0 ./myapp
 cd myapp
 lerd isolate 8.4      # pin PHP version for this project (optional; 8.5 also available)
 lerd link             # register ./myapp → myapp.test

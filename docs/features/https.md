@@ -87,7 +87,7 @@ Unsecuring the parent switches all worktree vhosts back to HTTP and updates thei
 
 ## Stripe listener
 
-If a [Stripe webhook listener](../usage/stripe.md#stripelisten) is running for the site, toggling HTTPS automatically restarts it so `--forward-to` points at the correct `http://` or `https://` URL. No manual intervention required.
+If a [Stripe webhook listener](../usage/stripe.md#stripe-listen) is running for the site, toggling HTTPS automatically restarts it so `--forward-to` points at the correct `http://` or `https://` URL. No manual intervention required.
 
 ---
 

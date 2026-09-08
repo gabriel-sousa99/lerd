@@ -49,6 +49,7 @@ func TestBrewOptPathIgnoresOrdinaryInstalls(t *testing.T) {
 // The ordinary install resolves symlinks, so a unit written today survives the
 // ~/.local/bin symlink being repointed or removed later.
 func TestLerdBinaryResolvesSymlink(t *testing.T) {
+	noScratchRoots(t)
 	dir := resolvedTempDir(t)
 	real := filepath.Join(dir, "versions", "lerd")
 	link := filepath.Join(dir, "lerd")
@@ -67,6 +68,7 @@ func TestLerdBinaryResolvesSymlink(t *testing.T) {
 }
 
 func TestLerdBinaryPrefersBrewOptPath(t *testing.T) {
+	noScratchRoots(t)
 	prefix := resolvedTempDir(t)
 	keg := filepath.Join(prefix, "Cellar", "lerd", "1.32.0", "bin", "lerd")
 	opt := filepath.Join(prefix, "opt", "lerd", "bin", "lerd")
@@ -126,6 +128,34 @@ func TestSupersededBinaryLeavesAnotherInstallAlone(t *testing.T) {
 // resolvedTempDir is t.TempDir() with symlinks resolved, so a comparison
 // against a path LerdBinary resolved does not fail on macOS, where the temp dir
 // lives under the /var → /private/var symlink.
+// A build run from a scratch directory (an agent's temp dir, a CI checkout
+// under /tmp) is not an install. Recording its path in a shim or a systemd unit
+// leaves them naming a file that gets deleted, so the installed lerd is what
+// they have to carry instead.
+func TestLerdBinaryRefusesAScratchBuildPath(t *testing.T) {
+	scratch := filepath.Join(t.TempDir(), "scratchpad", "lerd-tui-new")
+	writeExecutable(t, scratch)
+
+	prev := selfExecutable
+	selfExecutable = func() (string, error) { return scratch, nil }
+	defer func() { selfExecutable = prev }()
+
+	home, _ := os.UserHomeDir()
+	want := filepath.Join(home, ".local", "bin", "lerd")
+	if got := LerdBinary(); got != want {
+		t.Errorf("LerdBinary() = %q; want the installed %q, not a path that disappears", got, want)
+	}
+}
+
+// noScratchRoots lets a test keep its fixtures in a temp directory without
+// LerdBinary rejecting them as a scratch build.
+func noScratchRoots(t *testing.T) {
+	t.Helper()
+	prev := scratchRoots
+	scratchRoots = nil
+	t.Cleanup(func() { scratchRoots = prev })
+}
+
 func resolvedTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())

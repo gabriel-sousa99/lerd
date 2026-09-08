@@ -32,7 +32,7 @@ Worth knowing before you start, because each one changes a step below:
 cd ~/Lerd
 lerd new mysite --framework=magento
 # runs: composer create-project --repository-url=https://mirror.mage-os.org/ \
-#         magento/project-community-edition ./mysite
+#         magento/project-community-edition:^2.0 ./mysite
 ```
 
 ```bash [composer]

@@ -5,6 +5,8 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/services"
+	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
 	"github.com/gabriel-sousa99/lerd/internal/tray"
 	"github.com/spf13/cobra"
 )
@@ -21,8 +23,94 @@ func NewTrayCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&mono, "mono", false, "Use a monochrome template icon (OS recolors it); default is the colour icon that flips white/red with lerd state")
-	cmd.AddCommand(newTrayIconCmd())
+	cmd.AddCommand(newTrayIconCmd(), newTrayOnCmd(), newTrayOffCmd())
 	return cmd
+}
+
+// newTrayOnCmd puts the tray back, for the desktop where it was turned off.
+func newTrayOnCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "on",
+		Short: "Run the system tray applet with lerd",
+		Args:  cobra.NoArgs,
+		RunE:  func(_ *cobra.Command, _ []string) error { return runTraySet(true) },
+	}
+}
+
+// newTrayOffCmd stops the applet and keeps `lerd start` from bringing it back,
+// for desktops that already show the same state somewhere else.
+func newTrayOffCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "off",
+		Short: "Stop running the system tray applet",
+		Args:  cobra.NoArgs,
+		RunE:  func(_ *cobra.Command, _ []string) error { return runTraySet(false) },
+	}
+}
+
+func runTraySet(enabled bool) error {
+	changed, err := ApplyTray(enabled)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		fmt.Printf("System tray already %s.\n", trayStateWord(enabled))
+		return nil
+	}
+	fmt.Printf("System tray %s.\n", trayStateWord(enabled))
+	return nil
+}
+
+// ApplyTray persists the tray preference and brings the running tray in line
+// with it, so the CLI, the tray menu and the dashboard all take one path. It
+// reports whether the preference actually changed, which only the CLI prints.
+func ApplyTray(enabled bool) (bool, error) {
+	changed, err := setTrayPreference(enabled)
+	if err != nil {
+		return false, err
+	}
+	if !enabled {
+		killTray()
+		disableTrayUnit()
+		return changed, nil
+	}
+	// Re-enabling only makes sense where the unit would have been enabled in the
+	// first place: autostart on, and an appindicator library actually present.
+	if lerdSystemd.IsAutostartEnabled() && len(tray.MissingLibs(tray.HelperPath())) == 0 {
+		_ = services.Mgr.Enable("lerd-tray")
+	}
+	return changed, launchTray()
+}
+
+// setTrayPreference persists the preference alone, reporting whether it moved.
+func setTrayPreference(enabled bool) (bool, error) {
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return false, fmt.Errorf("loading config: %w", err)
+	}
+	if cfg.IsTrayEnabled() == enabled {
+		return false, nil
+	}
+	cfg.SetTrayEnabled(enabled)
+	if err := config.SaveGlobal(cfg); err != nil {
+		return false, fmt.Errorf("saving config: %w", err)
+	}
+	return true, nil
+}
+
+// trayEnabled reports the configured preference for the start and install
+// paths. A config that will not load keeps the tray, so a broken file never
+// silently removes a surface the user expects.
+func trayEnabled() bool {
+	cfg, err := config.LoadGlobal()
+	return err != nil || cfg.IsTrayEnabled()
+}
+
+func trayStateWord(enabled bool) string {
+	if enabled {
+		return "on"
+	}
+	return "off"
 }
 
 // newTrayIconCmd chooses between the theme-adaptive running icon and the

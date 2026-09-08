@@ -1,12 +1,17 @@
 package tui
 
 import (
+	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/shims"
+	"github.com/gabriel-sousa99/lerd/internal/stats"
 )
 
 // presetSuggestions mirrors internal/ui/web/src/stores/presetSuggestions.ts:
@@ -29,17 +34,26 @@ var presetSuggestions = map[string]string{
 // Worker rows (queue-X, schedule-X, …) get their own variant since they
 // have no own container or env.
 func serviceDetailContentLines(m *Model, svc *ServiceRow, innerW int) []string {
+	lines, _ := serviceDetailContentLinesWithCursor(m, svc, innerW)
+	return lines
+}
+
+// serviceDetailContentLinesWithCursor is serviceDetailContentLines plus the
+// line index of the selected client-tool row, so the pane can scroll the
+// selection into view the way the site detail does.
+func serviceDetailContentLinesWithCursor(m *Model, svc *ServiceRow, innerW int) ([]string, int) {
 	out := make([]string, 0, 32)
+	cursorLine := -1
 	add := func(s string) { out = append(out, padToWidth(clipLine(s, innerW), innerW)) }
 
 	if svc == nil {
 		add(sectionStyle.Render("Service detail"))
 		add(dimStyle.Render("  no service selected"))
-		return out
+		return out, cursorLine
 	}
 
 	if svc.WorkerKind != "" {
-		return workerDetailContentLines(svc, innerW)
+		return workerDetailContentLines(svc, innerW), cursorLine
 	}
 
 	// Header: name, version, state.
@@ -107,6 +121,51 @@ func serviceDetailContentLines(m *Model, svc *ServiceRow, innerW int) []string {
 		add("")
 	}
 
+	// Client tools: the host shims this service exposes, each a reversible
+	// toggle (writing or removing a file in the bin dir), so they sit with
+	// start / stop rather than behind the CLI. A tool another installed
+	// service owns is listed but managed from that service.
+	tools := shims.ServiceShims(svc.Name)
+	if len(tools) > 0 {
+		add(sectionStyle.Render("Client tools"))
+		nav := navigableShimRows(tools, svc.Name)
+		m.clampServiceDetailCursor(len(nav))
+		selected := -1
+		if len(nav) > 0 && m.serviceDetailFocused() {
+			selected = nav[m.svcDetailCursor]
+		}
+		for i, info := range tools {
+			if i == selected {
+				cursorLine = len(out)
+			}
+			add(renderShimRow(info, svc.Name, i == selected))
+		}
+		add("")
+	}
+
+	// Tuning: the values actually in effect, read off the override file the
+	// Config surface writes. Editing is a whole-file edit, so it stays in
+	// `lerd service config`; this pane only reports what is set.
+	if target, values, ok := serviceTuningInfo(svc.Name); ok {
+		add(sectionStyle.Render("Tuning"))
+		add(dimStyle.Render("  file:    ") + target)
+		if len(values) == 0 {
+			add(dimStyle.Render("  no overrides set, the image defaults are in effect"))
+		} else {
+			for _, v := range values {
+				add("  " + v)
+			}
+		}
+		add(dimStyle.Render("  edit with ") + accentStyle.Render("lerd service config "+svc.Name))
+		add("")
+	}
+
+	// Entities: whatever the preset declares it holds (buckets, indexes,
+	// collections). Listing execs in the container, so it arrives
+	// asynchronously and is cached per service; creating or dropping one
+	// stays with the CLI.
+	out = append(out, serviceEntityLines(m, svc, innerW)...)
+
 	// Preset suggestion banner: if the focused service has an associated
 	// admin dashboard preset that isn't installed yet, hint at it. We don't
 	// install from the TUI (Preset install is destructive-ish per the TUI
@@ -123,8 +182,262 @@ func serviceDetailContentLines(m *Model, svc *ServiceRow, innerW int) []string {
 	if svc.Dashboard != "" {
 		actions += " · O dashboard"
 	}
+	if len(tools) > 0 {
+		actions += " · space toggle client tool"
+	}
 	add(dimStyle.Render(actions))
+	return out, cursorLine
+}
+
+// navigableShimRows returns the indexes of the client-tool rows this service
+// may toggle: a tool a different installed service owns is shown for context
+// but is managed from its owner, mirroring the web UI's disabled toggle.
+func navigableShimRows(tools []shims.Info, service string) []int {
+	var idx []int
+	for i, info := range tools {
+		if info.Owner != "" && info.Owner != service {
+			continue
+		}
+		idx = append(idx, i)
+	}
+	return idx
+}
+
+// renderShimRow draws one client-tool row: state glyph, tool name, on/off, and
+// the note that explains why a row cannot be toggled or what turning it on
+// would shadow.
+func renderShimRow(info shims.Info, service string, selected bool) string {
+	prefix := "  "
+	if selected {
+		prefix = " " + accentStyle.Render("▸")
+	}
+	glyph := stoppedStyle.Render(glyphStopped)
+	state := strings.TrimSpace(dimStyle.Render("off"))
+	if info.Enabled {
+		glyph = runningStyle.Render(glyphRunning)
+		state = runningStyle.Render("on")
+	}
+	name := padRight(truncatePlain(info.Tool, 16), 16)
+	if selected {
+		name = selectedStyle.Render(name)
+	}
+	note := ""
+	switch {
+	case info.Owner != "" && info.Owner != service:
+		note = dimStyle.Render("  provided by " + info.Owner)
+	case info.HostHas:
+		note = suspendedStyle.Render("  shadows your own " + info.Tool)
+	}
+	return prefix + " " + glyph + " " + name + " " + state + note
+}
+
+// serviceTuningInfo returns the in-container path a service's tuning override
+// is mounted at and the settings currently set in it, comments and blank lines
+// dropped so the pane shows what is actually in effect. ok is false for a
+// service that declares no tuning at all.
+func serviceTuningInfo(name string) (target string, values []string, ok bool) {
+	svc, err := config.ResolveServiceForTuning(name)
+	if err != nil || svc == nil {
+		return "", nil, false
+	}
+	target, ok = config.ServiceTuningMount(svc)
+	if !ok {
+		return "", nil, false
+	}
+	data, err := os.ReadFile(config.ServiceTuningFile(name))
+	if err != nil {
+		return target, nil, true
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		values = append(values, line)
+	}
+	return target, values, true
+}
+
+// serviceEntityLines renders the cached entity listing for a service: one block
+// per declared kind with its rows, the declared columns beside each name. The
+// listing itself is fetched by ensureServiceEntities.
+func serviceEntityLines(m *Model, svc *ServiceRow, innerW int) []string {
+	kinds, cached := m.svcEntities[svc.Name]
+	if !cached && m.svcEntitiesLoading != svc.Name {
+		return nil
+	}
+	out := make([]string, 0, 8)
+	add := func(s string) { out = append(out, padToWidth(clipLine(s, innerW), innerW)) }
+	if !cached {
+		add(sectionStyle.Render("Entities"))
+		add(dimStyle.Render("  listing…"))
+		add("")
+		return out
+	}
+	if len(kinds) == 0 {
+		return nil
+	}
+	add(sectionStyle.Render("Entities"))
+	for _, k := range kinds {
+		label := k.label
+		if label == "" {
+			label = k.kind
+		}
+		add("  " + label + dimStyle.Render(" ("+strconv.Itoa(len(k.rows))+")"))
+		if k.err != "" {
+			add(failingStyle.Render("    " + k.err))
+			continue
+		}
+		if len(k.rows) == 0 {
+			add(dimStyle.Render("    none"))
+			continue
+		}
+		for _, row := range k.rows {
+			line := "    " + accentStyle.Render("·") + " " + row.Name
+			if cols := entityRowMeta(k, row); cols != "" {
+				line += dimStyle.Render("  " + cols)
+			}
+			add(line)
+		}
+	}
+	add(dimStyle.Render("  create and drop live in the CLI"))
+	add("")
 	return out
+}
+
+// entityRowMeta joins a row's declared column values into one dim trailer,
+// formatting byte counts the way the dashboard does so a size reads as a size.
+func entityRowMeta(k serviceEntityKind, row serviceops.EntityRow) string {
+	parts := make([]string, 0, len(row.Values))
+	for i, v := range row.Values {
+		if v == "" || i >= len(k.columns) {
+			continue
+		}
+		col := k.columns[i]
+		if col.format == "bytes" {
+			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				v = stats.FormatBytes(n)
+			}
+		}
+		label := col.label
+		if label == "" {
+			label = col.key
+		}
+		parts = append(parts, label+" "+v)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// serviceEntityKind is one declared entity kind with the rows listed inside the
+// service. Cached on the model per service so the container exec runs on
+// selection rather than on every frame.
+type serviceEntityKind struct {
+	kind    string
+	label   string
+	columns []serviceEntityColumn
+	rows    []serviceops.EntityRow
+	err     string
+}
+
+type serviceEntityColumn struct {
+	key    string
+	label  string
+	format string
+}
+
+// serviceEntitiesMsg carries a finished entity listing back into the model,
+// keyed by the service it was run for so a late result cannot land against
+// another service.
+type serviceEntitiesMsg struct {
+	service string
+	kinds   []serviceEntityKind
+}
+
+// serviceEntitiesCmd lists every declared entity kind of a service off the main
+// loop: each kind runs its declared list command inside the container, which is
+// far too slow to do inline in a render.
+func serviceEntitiesCmd(service string) tea.Cmd {
+	return func() tea.Msg {
+		specs := serviceops.ServiceEntities(service)
+		kinds := make([]serviceEntityKind, 0, len(specs))
+		for i := range specs {
+			spec := &specs[i]
+			k := serviceEntityKind{kind: spec.Kind, label: spec.Label}
+			for _, c := range spec.Columns {
+				k.columns = append(k.columns, serviceEntityColumn{key: c.Key, label: c.Label, format: c.Format})
+			}
+			rows, err := serviceops.ListEntities(service, spec)
+			if err != nil {
+				k.err = err.Error()
+			} else {
+				k.rows = rows
+			}
+			kinds = append(kinds, k)
+		}
+		return serviceEntitiesMsg{service: service, kinds: kinds}
+	}
+}
+
+// ensureServiceEntities kicks off the entity listing for the selected service
+// when it has none cached yet. Only a running service is asked: the list
+// commands exec in its container.
+func (m *Model) ensureServiceEntities() tea.Cmd {
+	if m.activeTab != tabServices || m.svcEntitiesLoading != "" {
+		return nil
+	}
+	svc := m.currentService()
+	if svc == nil || svc.WorkerKind != "" || svc.State != stateRunning {
+		return nil
+	}
+	if _, ok := m.svcEntities[svc.Name]; ok {
+		return nil
+	}
+	m.svcEntitiesLoading = svc.Name
+	return serviceEntitiesCmd(svc.Name)
+}
+
+// serviceDetailFocused reports whether the client-tool cursor is live: the
+// service detail pane owns focus on the Services tab.
+func (m *Model) serviceDetailFocused() bool {
+	return m.activeTab == tabServices && m.focus == paneDetail
+}
+
+// clampServiceDetailCursor keeps the client-tool cursor inside the rows the
+// current service actually has.
+func (m *Model) clampServiceDetailCursor(n int) {
+	m.svcDetailCursor = clamp(m.svcDetailCursor, 0, max(0, n-1))
+}
+
+// serviceShimNavCount is how many client-tool rows the selected service can
+// toggle, the bound cursor movement clamps against.
+func (m *Model) serviceShimNavCount() int {
+	svc := m.currentService()
+	if svc == nil || svc.WorkerKind != "" {
+		return 0
+	}
+	return len(navigableShimRows(shims.ServiceShims(svc.Name), svc.Name))
+}
+
+// toggleServiceShim installs or removes the selected client tool's host shim,
+// through the same CLI verb a user would type.
+func (m *Model) toggleServiceShim() tea.Cmd {
+	svc := m.currentService()
+	if svc == nil || svc.WorkerKind != "" {
+		return nil
+	}
+	tools := shims.ServiceShims(svc.Name)
+	nav := navigableShimRows(tools, svc.Name)
+	if len(nav) == 0 {
+		return nil
+	}
+	m.clampServiceDetailCursor(len(nav))
+	info := tools[nav[m.svcDetailCursor]]
+	if info.Enabled {
+		m.setStatus("removing the "+info.Tool+" shim…", 5*time.Second)
+		return runLerd("", "shims", "remove", info.Tool)
+	}
+	m.setStatus("installing the "+info.Tool+" shim…", 5*time.Second)
+	return runLerd("", "shims", "add", info.Tool)
 }
 
 // workerDetailContentLines renders the service-detail pane variant for

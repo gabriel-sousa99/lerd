@@ -8,12 +8,11 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
-
-	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
-
 	"github.com/spf13/cobra"
 )
 
@@ -106,6 +105,21 @@ func restartFrankenPHPUnits(units []frankenRestart) {
 	}
 }
 
+// phpBuildPlan discloses what building these PHP versions downloads: lerd's
+// prebuilt base for each version, or nothing sizeable under --local, where the
+// build starts from the upstream image named in the Containerfile instead.
+func phpBuildPlan(versions []string, local bool, reason string) imagepull.Plan {
+	plan := make(imagepull.Plan, 0, len(versions))
+	for _, v := range versions {
+		ref := ""
+		if !local {
+			ref = podman.PHPBaseImageRef(v)
+		}
+		plan = append(plan, imagepull.Build("PHP "+v+" image", ref, reason))
+	}
+	return plan
+}
+
 // RebuildPHPVersion force-rebuilds one version's image against the current
 // prebuilt base and brings everything running on it back up, streaming the
 // build to w. The dashboard's rebuild action goes through here so it means the
@@ -115,6 +129,7 @@ func RebuildPHPVersion(version string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	phpBuildPlan([]string{version}, false, "explicit rebuild").Fill().Report(w)
 	fmt.Fprintf(w, "Rebuilding PHP %s image...\n", version)
 	if err := podman.RebuildFPMImageTo(version, false, w); err != nil {
 		return err
@@ -123,20 +138,32 @@ func RebuildPHPVersion(version string, w io.Writer) error {
 		fmt.Fprintf(w, "  WARN: storing PHP-FPM image hash: %v\n", err)
 	}
 	fmt.Fprintln(w, "Restarting containers...")
+	running := runningInContainerWorkers()
 	applyPHPImageChange(version)
-	restartInContainerWorkers()
+	restartInContainerWorkers(running)
 	fmt.Fprintf(w, "PHP %s image rebuilt.\n", version)
 	return nil
 }
 
-// restartInContainerWorkers restarts the workers that run inside FPM containers
-// via podman exec. BindsTo stops them when the FPM container stops but does not
-// bring them back when it returns, so a rebuild has to do it explicitly.
-func restartInContainerWorkers() {
+// runningInContainerWorkers snapshots which of the declared podman-exec worker
+// units are running. Callers take it before restarting an FPM container: BindsTo
+// stops those workers along with the container, so afterwards there is no way
+// left to tell which ones the user actually had up.
+func runningInContainerWorkers() []string {
+	var out []string
 	for _, unit := range append(append(lifecycle.RegisteredReverbUnits(), lifecycle.RegisteredQueueUnits()...), lifecycle.RegisteredScheduleUnits()...) {
-		if !lerdSystemd.IsServiceActive(unit) && !lerdSystemd.IsServiceEnabled(unit) {
-			continue
+		if lerdSystemd.IsServiceActive(unit) {
+			out = append(out, unit)
 		}
+	}
+	return out
+}
+
+// restartInContainerWorkers brings back the workers a snapshot found running.
+// BindsTo stops them when the FPM container stops but does not bring them back
+// when it returns, so a rebuild has to do it explicitly.
+func restartInContainerWorkers(units []string) {
+	for _, unit := range units {
 		if err := lerdSystemd.RestartService(unit); err != nil {
 			feedback.Warn("restart %s: %v", unit, err)
 		} else {
@@ -223,6 +250,13 @@ func runPhpRebuild(cmd *cobra.Command, args []string) error {
 			Run:   func(w io.Writer) error { return podman.BuildFrankenPHPImage(ver, true, w) },
 		})
 	}
+	plan := phpBuildPlan(versions, local, "explicit rebuild")
+	for _, v := range fpVersions {
+		plan = append(plan, imagepull.Build("FrankenPHP "+v+" image",
+			podman.FrankenPHPBaseImage(v), "Octane sites run on PHP "+v))
+	}
+	plan.Fill().Report(os.Stdout)
+
 	RunParallel(jobs) //nolint:errcheck — individual failures printed by RunParallel
 
 	restartFrankenPHPUnits(fpUnits)
@@ -237,6 +271,7 @@ func runPhpRebuild(cmd *cobra.Command, args []string) error {
 		label = "PHP " + versions[0] + " image"
 	}
 	feedback.Line("restarting containers")
+	running := runningInContainerWorkers()
 	for _, v := range versions {
 		unit := "lerd-php" + strings.ReplaceAll(v, ".", "") + "-fpm"
 		if err := podman.RestartUnit(unit); err != nil {
@@ -246,7 +281,7 @@ func runPhpRebuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	restartInContainerWorkers()
+	restartInContainerWorkers(running)
 
 	feedback.Done(label + " rebuilt")
 	return nil

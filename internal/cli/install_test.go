@@ -2,7 +2,9 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +13,9 @@ import (
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/freeport"
+	"github.com/gabriel-sousa99/lerd/internal/hostbin"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
-
 	"github.com/gabriel-sousa99/lerd/internal/services"
 )
 
@@ -320,10 +323,13 @@ func TestRefreshUnreferencedCustomQuadlets_globalCustomServiceGetsV6Pair(t *test
 	t.Cleanup(func() { podman.DaemonReloadFn = origReload })
 	podman.DaemonReloadFn = func() error { return nil }
 
+	// A port the host already publishes is shifted to a free one, so the
+	// assertions below have to run on a port nothing here holds.
+	port := freeHostPort(t)
 	svc := &config.CustomService{
 		Name:  "mongo-express",
 		Image: "docker.io/library/mongo-express:latest",
-		Ports: []string{"127.0.0.1:8082:8081"},
+		Ports: []string{fmt.Sprintf("127.0.0.1:%d:8081", port)},
 	}
 	if err := config.SaveCustomService(svc); err != nil {
 		t.Fatalf("SaveCustomService: %v", err)
@@ -337,12 +343,32 @@ func TestRefreshUnreferencedCustomQuadlets_globalCustomServiceGetsV6Pair(t *test
 		t.Fatalf("quadlet not written at %s: %v", path, err)
 	}
 	got := string(data)
-	if !strings.Contains(got, "PublishPort=127.0.0.1:8082:8081") {
+	if want := fmt.Sprintf("PublishPort=127.0.0.1:%d:8081", port); !strings.Contains(got, want) {
 		t.Errorf("v4 bind missing from rewritten quadlet:\n%s", got)
 	}
-	if !strings.Contains(got, "PublishPort=[::1]:8082:8081") {
+	if want := fmt.Sprintf("PublishPort=[::1]:%d:8081", port); podman.HostHasIPv6Loopback() && !strings.Contains(got, want) {
 		t.Errorf("v6 pair missing — PairIPv6Binds did not apply during refresh:\n%s", got)
 	}
+}
+
+// freeHostPort returns a port the quadlet writer's own guard agrees is free,
+// asking the kernel for an ephemeral one rather than naming a number some
+// other service on the developer's machine may already publish.
+func freeHostPort(t *testing.T) int {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
+		if freeport.Bindable(port) {
+			return port
+		}
+	}
+	t.Fatal("no free host port after 20 tries")
+	return 0
 }
 
 func TestRefreshUnreferencedCustomQuadlets_skipsSeenServices(t *testing.T) {
@@ -618,10 +644,22 @@ func TestDetectSystemNode_findsNvmDirEvenWhenPathIsEmpty(t *testing.T) {
 	}
 }
 
+// detectNvm resolves the nvm dir through the global config first and, on macOS,
+// through the Homebrew prefixes, so without this the assertions read whatever
+// the developer's own machine has installed.
+func isolateNvmLookup(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	prev := hostbin.ExtraDirs
+	hostbin.ExtraDirs = func() []string { return nil }
+	t.Cleanup(func() { hostbin.ExtraDirs = prev })
+}
+
 // An nvm with no Node versions in it is invisible to detectSystemNode, so
 // detectNvm is what makes the management question reach that user at all.
 func TestDetectNvm(t *testing.T) {
 	t.Run("empty nvm dir under NVM_DIR counts", func(t *testing.T) {
+		isolateNvmLookup(t)
 		tmp := t.TempDir()
 		t.Setenv("NVM_DIR", tmp)
 		if detectNvm() {
@@ -636,6 +674,7 @@ func TestDetectNvm(t *testing.T) {
 	})
 
 	t.Run("falls back to ~/.nvm", func(t *testing.T) {
+		isolateNvmLookup(t)
 		tmp := t.TempDir()
 		t.Setenv("NVM_DIR", "")
 		t.Setenv("HOME", tmp)

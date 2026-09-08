@@ -69,7 +69,7 @@ func WriteQuadletDiff(name, content string) (changed bool, err error) {
 		autostartDisabled = cfg.Autostart.Disabled
 	}
 	content = BindQuadletForLAN(name, content, lanExposed, servicesExposed)
-	content = PairIPv6Binds(content)
+	content = applyIPv6BindPolicy(content)
 	content = StripInstallSection(content, autostartDisabled)
 	// Centralised platform image rewrite + podman-run flags so every quadlet
 	// writer emits identical units. On Apple Silicon PlatformImage swaps
@@ -191,7 +191,7 @@ func RebindInstalledQuadletsForLAN() ([]string, error) {
 			return nil, fmt.Errorf("reading %s: %w", filepath.Base(path), err)
 		}
 		name := strings.TrimSuffix(filepath.Base(path), ".container")
-		updated := PairIPv6Binds(BindQuadletForLAN(name, string(content), lanExposed, servicesExposed))
+		updated := applyIPv6BindPolicy(BindQuadletForLAN(name, string(content), lanExposed, servicesExposed))
 		if string(content) != updated {
 			config.GuardRealWrite(path)
 			if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
@@ -210,6 +210,41 @@ func RebindInstalledQuadletsForLAN() ([]string, error) {
 		}
 	}
 	return restart, nil
+}
+
+// HealIPv6Binds reapplies the IPv6 bind policy to every installed quadlet and
+// returns the units it rewrote. A host that loses ::1 after install (a VPN
+// client disabling IPv6, a reboot with ipv6.disable=1) leaves stale [::1]
+// publish lines behind, and rootlessport treats a bind it cannot satisfy as
+// fatal, so those units never start again until the file is fixed (#1634).
+func HealIPv6Binds() ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(config.QuadletDir(), "lerd-*.container"))
+	if err != nil {
+		return nil, err
+	}
+	healed := make([]string, 0, len(paths))
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", filepath.Base(path), err)
+		}
+		updated := applyIPv6BindPolicy(string(content))
+		if updated == string(content) {
+			continue
+		}
+		name := strings.TrimSuffix(filepath.Base(path), ".container")
+		config.GuardRealWrite(path)
+		if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+			return nil, fmt.Errorf("rewriting %s: %w", filepath.Base(path), err)
+		}
+		if AfterQuadletWriteFn != nil {
+			if err := AfterQuadletWriteFn(name, updated); err != nil {
+				return nil, fmt.Errorf("syncing %s: %w", name, err)
+			}
+		}
+		healed = append(healed, name)
+	}
+	return healed, nil
 }
 
 // quadletWantsLAN reports whether the given quadlet content publishes beyond
@@ -287,16 +322,31 @@ func RemoveContainer(name string) {
 // canonical source of truth; the plist is the live runtime unit).
 var AfterQuadletWriteFn func(name, content string) error
 
-// UnitLifecycle is the interface for starting, stopping, restarting, and
-// querying service units. Set by the platform service manager on macOS so that
-// StartUnit/StopUnit/RestartUnit/UnitStatus route through launchd instead of
-// systemctl. Nil on Linux (the systemctl fallback is used).
-var UnitLifecycle interface {
+// UnitLifecycleManager starts, stops, restarts and queries service units.
+type UnitLifecycleManager interface {
 	Start(name string) error
 	Stop(name string) error
 	Restart(name string) error
 	UnitStatus(name string) (string, error)
 	AllUnitStates() map[string]string
+}
+
+// UnitLifecycle routes StartUnit/StopUnit/RestartUnit/UnitStatus through the
+// platform's manager, set on macOS so they reach launchd instead of systemctl.
+// Nil on Linux, where the systemctl fallback is used, and assigned directly by
+// tests that install a stub.
+var UnitLifecycle UnitLifecycleManager
+
+// platformUnitLifecycle is the manager a platform init() installs (launchd on
+// macOS). It is the real system rather than a test stub, so the under-test guard
+// below has to tell the two apart: keying only on nil left macOS unguarded.
+var platformUnitLifecycle UnitLifecycleManager
+
+// UsePlatformUnitLifecycle installs the platform's real unit manager. Only a
+// platform init() calls it; a test assigns UnitLifecycle directly, which is what
+// keeps its stub distinguishable from the real launchd.
+func UsePlatformUnitLifecycle(m UnitLifecycleManager) {
+	UnitLifecycle, platformUnitLifecycle = m, m
 }
 
 // DaemonReload runs the equivalent of systemctl --user daemon-reload.
@@ -374,7 +424,12 @@ func unitOpCaller() string {
 var errNoRealSystemd = errors.New("podman: refusing the real systemd from a test; set podman.UnitLifecycle")
 
 // realSystemdBlocked reports whether this call must not reach the real user bus.
-func realSystemdBlocked() bool { return UnitLifecycle == nil && config.UnderTest() }
+func realSystemdBlocked() bool {
+	if !config.UnderTest() {
+		return false
+	}
+	return UnitLifecycle == nil || UnitLifecycle == platformUnitLifecycle
+}
 
 func StartUnit(name string) error {
 	logUnitOp("start", name)

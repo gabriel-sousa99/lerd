@@ -5,6 +5,29 @@ FROM docker.io/library/composer:latest AS composer-bin
 # the runtime stage via COPY at the bottom.
 FROM docker.io/library/php:{{.Version}}-fpm-alpine AS builder
 
+# PHP 8.6 removed PEAR, so `pecl` is gone from the upstream image. Where it is
+# missing, the release tarball on pecl.php.net is the same source pecl fetches,
+# so every PECL install below goes through one wrapper instead of branching.
+# The optional second argument is the answer pecl would prompt for, which the
+# phpize path has to spell as a --with-<ext>= flag instead; oci8 needs it to
+# find the Instant Client and is the only caller that passes one.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -e' \
+      'spec="$1"' \
+      'cfg="${2:-}"' \
+      'if command -v pecl >/dev/null 2>&1; then' \
+      '  if [ -n "$cfg" ]; then echo "$cfg" | pecl install "$spec"; else yes "" | pecl install "$spec"; fi' \
+      '  exit 0' \
+      'fi' \
+      'dir=$(mktemp -d)' \
+      'wget -qO- "https://pecl.php.net/get/$spec" | tar xz -C "$dir"' \
+      'cd "$dir"/*/' \
+      'phpize && ./configure ${cfg:+--with-${spec%%-*}=$cfg} && make -j"$(nproc)" && make install' \
+      'rm -rf "$dir"' \
+    > /usr/local/bin/lerd-pecl-install \
+    && chmod +x /usr/local/bin/lerd-pecl-install
+
 RUN apk update && apk add --no-cache \
         autoconf \
         make \
@@ -25,6 +48,7 @@ RUN apk update && apk add --no-cache \
         gmp-dev \
         bzip2-dev \
         openldap-dev \
+        openssl-dev \
         sqlite-dev \
         libxslt-dev \
         zlib-dev \
@@ -33,6 +57,14 @@ RUN apk update && apk add --no-cache \
            docker-php-ext-configure gd --with-freetype-dir=/usr --with-jpeg-dir=/usr --with-png-dir=/usr --with-webp-dir=/usr; \
        else \
            docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp; \
+       fi \
+    # ext/ftp drops FTPS unless OpenSSL is configured, and a phpize build never
+    # sets PHP_OPENSSL, so ftp_ssl_connect goes missing (#1576). 8.4 renamed the
+    # opt-in flag from --with-openssl-dir to --with-ftp-ssl.
+    && if [ "$PHP_ID" -lt 80400 ]; then \
+           docker-php-ext-configure ftp --with-openssl-dir=/usr; \
+       else \
+           docker-php-ext-configure ftp --with-ftp-ssl; \
        fi \
     && docker-php-ext-install -j$(nproc) \
         curl \
@@ -65,28 +97,28 @@ RUN apk update && apk add --no-cache \
     && if [ "$PHP_ID" -lt 70000 ]; then REDIS_PKG=redis-4.3.0; \
          elif [ "$PHP_ID" -lt 70400 ]; then REDIS_PKG=redis-5.3.7; \
          else REDIS_PKG=redis; fi \
-    && { (yes '' | pecl install "$REDIS_PKG" && docker-php-ext-enable redis) \
+    && { (lerd-pecl-install "$REDIS_PKG" && docker-php-ext-enable redis) \
          || (git clone --depth 1 https://github.com/phpredis/phpredis /tmp/phpredis \
              && cd /tmp/phpredis && phpize && ./configure && make -j$(nproc) && make install \
              && docker-php-ext-enable redis \
              && rm -rf /tmp/phpredis) \
          || true; } \
-    && { (yes '' | pecl install imagick && docker-php-ext-enable imagick) \
+    && { (lerd-pecl-install imagick && docker-php-ext-enable imagick) \
          || (git clone --depth 1 https://github.com/Imagick/imagick /tmp/imagick \
              && cd /tmp/imagick && phpize && ./configure && make -j$(nproc) && make install \
              && docker-php-ext-enable imagick \
              && rm -rf /tmp/imagick) \
          || true; } \
-    && { (yes '' | pecl install igbinary && docker-php-ext-enable igbinary) || true; } \
+    && { (lerd-pecl-install igbinary && docker-php-ext-enable igbinary) || true; } \
     && { (PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
-          && if [ "$PHPVER" = "7.4" ]; then yes '' | pecl install mongodb-1.16.2; \
-             else yes '' | pecl install mongodb; fi \
+          && if [ "$PHPVER" = "7.4" ]; then lerd-pecl-install mongodb-1.16.2; \
+             else lerd-pecl-install mongodb; fi \
           && docker-php-ext-enable mongodb) || true; } \
-    && { (yes '' | pecl install pcov && docker-php-ext-enable pcov) || true; } \
+    && { (lerd-pecl-install pcov && docker-php-ext-enable pcov) || true; } \
     && { (apk add --no-cache libmemcached-dev zlib-dev \
-          && yes '' | pecl install memcached && docker-php-ext-enable memcached) || true; } \
+          && lerd-pecl-install memcached && docker-php-ext-enable memcached) || true; } \
     && { (apk add --no-cache rabbitmq-c-dev \
-          && yes '' | pecl install amqp && docker-php-ext-enable amqp) || true; } \
+          && lerd-pecl-install amqp && docker-php-ext-enable amqp) || true; } \
     && { (git clone --depth 1 --branch release/latest https://github.com/NoiseByNorthwest/php-spx /tmp/php-spx \
           && cd /tmp/php-spx && phpize && ./configure && make -j$(nproc) && make install \
           && docker-php-ext-enable spx) || true; } \
@@ -103,8 +135,7 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
         8.0) XDEBUG_PKG="xdebug-3.3.2" ;; \
         *)   XDEBUG_PKG="xdebug" ;; \
     esac \
-    && pecl channel-update pecl.php.net \
-    && yes '' | pecl install "$XDEBUG_PKG" && docker-php-ext-enable xdebug \
+    && { (lerd-pecl-install "$XDEBUG_PKG" && docker-php-ext-enable xdebug) || true; } \
     && rm -rf /tmp/pear /var/cache/apk/*
 
 # ── Oracle Instant Client 21.18 + oci8 (builder) ────────────────────────────
@@ -114,7 +145,9 @@ RUN PHPVER="$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')" \
 # the runtime stage via the existing COPY --from=builder block at the bottom;
 # the Instant Client itself is copied separately in the runtime stage below.
 # pecl package is pinned per-PHP-major where the rolling "oci8" tag drops
-# support; PHP 8.2+ tracks the latest.
+# support; PHP 8.2+ tracks the latest. The install goes through
+# lerd-pecl-install because 8.6 ships no pecl, and the Instant Client path it
+# would be prompted for is passed as that wrapper's second argument.
 #
 # 8.1 gets 3.2.1, not 3.3.0: 3.3.0's package.xml claims min PHP 8.1, but its
 # generated oci8_arginfo.h references ZEND_STR_SENSITIVEPARAMETER and
@@ -143,7 +176,6 @@ RUN set -eux; \
       unzip -qo instantclient-basic-linux.x64-21.18.0.0.0dbru.zip; \
       unzip -qo instantclient-sdk-linux.x64-21.18.0.0.0dbru.zip; \
       rm -f /opt/oracle/*.zip; \
-      pecl channel-update pecl.php.net; \
       case "$PHPVER" in \
         5.6)             OCI8_PKG="oci8-2.0.12" ;; \
         7.2|7.3|7.4)     OCI8_PKG="oci8-2.2.0" ;; \
@@ -153,7 +185,7 @@ RUN set -eux; \
         8.4)             OCI8_PKG="oci8-3.4.1" ;; \
         *)               OCI8_PKG="oci8" ;; \
       esac; \
-      printf "instantclient,/opt/oracle/instantclient\n" | pecl install "$OCI8_PKG"; \
+      lerd-pecl-install "$OCI8_PKG" instantclient,/opt/oracle/instantclient; \
       docker-php-ext-enable oci8; \
     fi; \
     rm -rf /opt/oracle/instantclient_21_18/sdk /tmp/pear /var/cache/apk/*
@@ -189,6 +221,7 @@ RUN apk update && apk add --no-cache \
         git \
         openssh-client \
         mysql-client \
+        mariadb-connector-c \
         nodejs \
         npm \
         libzip \
@@ -266,7 +299,8 @@ COPY --from=builder /usr/local/share/misc/php-spx/ /usr/local/share/misc/php-spx
 
 # MariaDB client (mysql-client) connecting to lerd MySQL uses self-signed
 # certs; disable SSL verification so CLI tools (mysqldump, schema loading)
-# work out of the box.
+# work out of the box. mariadb-connector-c above ships the
+# caching_sha2_password plugin MySQL 8.4+ authenticates root with.
 RUN mkdir -p /etc/my.cnf.d && printf '[client]\nssl=0\n' > /etc/my.cnf.d/lerd-no-ssl.cnf
 
 # Composer from the official image.

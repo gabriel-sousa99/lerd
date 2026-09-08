@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"strings"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
 // bundledSince records the first PHP version whose image actually ships an
@@ -12,6 +14,23 @@ import (
 var bundledSince = map[string][2]int{
 	"random":  {8, 2},
 	"mongodb": {8, 1},
+}
+
+// prereleaseUnbuildable are the third-party extensions whose sources do not yet
+// compile against a prerelease PHP, so the tolerant build drops them and nothing
+// may advertise a name the image never loads. Shrink this as upstream catches
+// up; the base image build fails on anything advertised and missing, so an entry
+// left here too long costs a name, never a broken image.
+// amqp and memcached are the fork's own additions, so upstream had no reason to
+// list them: on 8.6.0beta2 amqp 2.2.0 wants the removed XtOffsetOf and
+// memcached 3.4.0 trips the pointer-type errors that are now fatal. oci8 stays
+// out of this map because it does build there, against Instant Client 21.18.
+var prereleaseUnbuildable = map[string]bool{
+	"igbinary":  true,
+	"pcov":      true,
+	"xdebug":    true,
+	"amqp":      true,
+	"memcached": true,
 }
 
 // BundledExtensions returns the PHP extensions the default lerd FPM image ships
@@ -38,14 +57,36 @@ func BundledExtensions(phpVersion string) []string {
 		"oci8", "amqp", "memcached",
 	}
 
+	prerelease := config.IsPrereleasePHPVersion(phpVersion)
 	bundled := make([]string, 0, len(all))
 	for _, ext := range all {
 		if since, gated := bundledSince[ext]; gated && !phpAtLeast(phpVersion, since[0], since[1]) {
 			continue
 		}
+		if prerelease && prereleaseUnbuildable[ext] {
+			continue
+		}
 		bundled = append(bundled, ext)
 	}
 	return bundled
+}
+
+// WithoutBundled drops the extensions the image for phpVersion already ships.
+// Rebuilding one as a custom extension layers a bare docker-php-ext-install on
+// top of the base image, which loses the configure flags the base build passed
+// it: that is how ftp lost FTPS support after #1583 (#1576).
+func WithoutBundled(phpVersion string, exts []string) []string {
+	bundled := map[string]bool{}
+	for _, e := range BundledExtensions(phpVersion) {
+		bundled[e] = true
+	}
+	kept := make([]string, 0, len(exts))
+	for _, e := range exts {
+		if !bundled[CanonicalExtension(e)] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // BundledSince returns the first PHP version that ships ext, for the extensions an

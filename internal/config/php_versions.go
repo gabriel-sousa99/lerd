@@ -9,11 +9,52 @@ import (
 // SupportedPHPVersions lists the PHP versions lerd can build FPM images for.
 // 7.4 and 8.0 are a frozen legacy tier for old projects: still buildable from
 // Alpine 3.16, but pinned (older xdebug, no mongodb ext) and not security-updated.
-var SupportedPHPVersions = []string{"7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"}
+// The tail may hold a prerelease tier, see PrereleasePHPVersions.
+var SupportedPHPVersions = []string{"7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"}
+
+// PrereleasePHPVersions is the tier upstream has not released yet: buildable and
+// installable on request, but offered as a prerelease, left out of the default
+// fetch set, and FPM only until FrankenPHP publishes an image. This list is the
+// only place the exception lives: on release day, delete the version from it and
+// the upstream tag, the FrankenPHP set and the labelling all follow.
+var PrereleasePHPVersions = []string{"8.6"}
 
 // FrankenPHPMinVersion is the oldest PHP version dunglas/frankenphp publishes an
 // image for; supported versions below it run under FPM only.
 const FrankenPHPMinVersion = "8.2"
+
+// IsPrereleasePHPVersion reports whether v is an unreleased upstream version.
+func IsPrereleasePHPVersion(v string) bool {
+	for _, s := range PrereleasePHPVersions {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+// StablePHPVersions returns the supported versions upstream has released, in the
+// same ascending order. This is what bulk operations act on, so a prerelease is
+// never built for someone who did not ask for it by name.
+func StablePHPVersions() []string {
+	out := make([]string, 0, len(SupportedPHPVersions))
+	for _, v := range SupportedPHPVersions {
+		if !IsPrereleasePHPVersion(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// UpstreamPHPTag returns the docker.io/library/php tag an image builds FROM.
+// A prerelease has no plain "8.6-fpm-alpine" tag until GA, so it resolves to the
+// "-rc" tag upstream publishes throughout beta and RC.
+func UpstreamPHPTag(v string) string {
+	if IsPrereleasePHPVersion(v) {
+		return v + "-rc"
+	}
+	return v
+}
 
 // IsSupportedPHPVersion reports whether v is a version lerd can install.
 func IsSupportedPHPVersion(v string) bool {
@@ -48,7 +89,7 @@ func NormalizePHPVersion(input string) (string, error) {
 func FrankenPHPVersions() []string {
 	var out []string
 	for _, v := range SupportedPHPVersions {
-		if phpVersionAtLeast(v, FrankenPHPMinVersion) {
+		if IsFrankenPHPVersion(v) {
 			out = append(out, v)
 		}
 	}
@@ -56,8 +97,24 @@ func FrankenPHPVersions() []string {
 }
 
 // IsFrankenPHPVersion reports whether dunglas/frankenphp publishes an image for v.
+// Prereleases are excluded: FrankenPHP builds on released PHP only, so those
+// sites stay on FPM until the version ships.
 func IsFrankenPHPVersion(v string) bool {
-	return IsSupportedPHPVersion(v) && phpVersionAtLeast(v, FrankenPHPMinVersion)
+	return IsSupportedPHPVersion(v) && !IsPrereleasePHPVersion(v) && phpVersionAtLeast(v, FrankenPHPMinVersion)
+}
+
+// FrankenPHPUnavailableReason explains why v cannot run under FrankenPHP, or ""
+// when it can. A prerelease is not too old but too new, so it gets its own
+// sentence instead of an answer that reads like the user should downgrade.
+func FrankenPHPUnavailableReason(v string) string {
+	switch {
+	case IsFrankenPHPVersion(v):
+		return ""
+	case IsPrereleasePHPVersion(v):
+		return fmt.Sprintf("dunglas/frankenphp publishes no image for PHP %s while it is a prerelease", v)
+	default:
+		return fmt.Sprintf("FrankenPHP requires PHP %s or newer; this site is on PHP %s", FrankenPHPMinVersion, v)
+	}
 }
 
 // LatestFrankenPHPVersion returns the newest PHP version dunglas/frankenphp

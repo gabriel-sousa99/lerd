@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -55,10 +56,11 @@ func siteRunLockKey(site *config.Site) string {
 	return site.Path
 }
 
-// commandRoute dispatches the two commands subroutes:
+// commandRoute dispatches the commands subroutes:
 //
 //	GET  /api/sites/{domain}/commands              → list
 //	POST /api/sites/{domain}/commands/{name}/run   → execute + stream
+//	POST /api/sites/{domain}/commands/{name}/pin   → pin/unpin on the control row
 //
 // Returns true if the request was a commands subroute (handled here), false
 // otherwise so the caller can fall through to the generic site action handler.
@@ -75,6 +77,14 @@ func commandRoute(w http.ResponseWriter, r *http.Request, domain string, rest []
 	case len(rest) == 1 && r.Method == http.MethodGet:
 		// Listing commands does not mutate the host.
 		handleCommandsList(w, r, site)
+	case len(rest) == 3 && rest[2] == "pin" && r.Method == http.MethodPost:
+		// Pinning only rewrites the site registry, but it is still a host-config
+		// mutation, so it takes the same authority the run route does.
+		if !hasHostActionAuthority(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return true
+		}
+		handleCommandPin(w, r, site, rest[1])
 	case len(rest) == 3 && rest[2] == "run" && r.Method == http.MethodPost:
 		// Running a command requires dashboard-control authority because it
 		// executes arbitrary shell code as the lerd-ui user.
@@ -91,7 +101,7 @@ func commandRoute(w http.ResponseWriter, r *http.Request, domain string, rest []
 
 func handleCommandsList(w http.ResponseWriter, r *http.Request, site *config.Site) {
 	branch := r.URL.Query().Get("branch")
-	cmds := resolveSiteCommands(site, branch)
+	cmds := config.ApplyCommandPins(resolveSiteCommands(site, branch), site.PinnedCommands)
 	// A project-supplied command that hasn't been approved yet runs on the host,
 	// so force the confirm modal (which shows the command) until the user approves
 	// it once. ProjectOrigin itself is not serialized; the UI only sees Confirm.
@@ -101,6 +111,34 @@ func handleCommandsList(w http.ResponseWriter, r *http.Request, site *config.Sit
 		}
 	}
 	writeJSON(w, map[string]any{"commands": cmds})
+}
+
+// handleCommandPin toggles whether a command draws its own button on the site's
+// control row. ?on=0 unpins; anything else pins. The cap is enforced here rather
+// than only in the UI, so a second tab can't push the row past it.
+func handleCommandPin(w http.ResponseWriter, r *http.Request, site *config.Site, name string) {
+	on := r.URL.Query().Get("on") != "0"
+	cmds := config.ApplyCommandPins(resolveSiteCommands(site, r.URL.Query().Get("branch")), site.PinnedCommands)
+	var target *config.FrameworkCommand
+	for i := range cmds {
+		if cmds[i].Name == name {
+			target = &cmds[i]
+			break
+		}
+	}
+	if target == nil {
+		writeJSON(w, map[string]any{"error": "command not found: " + name})
+		return
+	}
+	if on && !target.Pinned && config.CountPinned(cmds) >= config.MaxPinnedCommands {
+		writeJSON(w, map[string]any{"error": fmt.Sprintf("at most %d pinned commands per site", config.MaxPinnedCommands)})
+		return
+	}
+	if err := config.SetSiteCommandPinned(site.Name, name, on); err != nil {
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // resolveSiteCommands merges the framework's command set with the project's
@@ -239,7 +277,7 @@ func handleCommandRun(w http.ResponseWriter, r *http.Request, site *config.Site,
 	// running inside, then return immediately. The UI handles this by
 	// skipping the modal and showing a toast.
 	if target.Output == config.CommandOutputTerminal {
-		script := "cd " + podman.ShellQuote(cwd) + " && " + target.Command + "\nprintf '\\n[press any key to close]'\nread -n 1 -s -r 2>/dev/null || read"
+		script := terminalCommandScript(cwd, target.Command)
 		if err := openTerminalCommand(script); err != nil {
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
@@ -393,4 +431,19 @@ func streamHostAction(w http.ResponseWriter, line string, actionErr error) {
 	}
 	body, _ := json.Marshal(map[string]any{"exit": exit, "durationMs": 0})
 	send("done", string(body))
+}
+
+// terminalCommandScript is what the spawned terminal runs: the command in the
+// project directory, then a pause so the window holds its output.
+//
+// The trap is what keeps ctrl+c usable. A non-interactive shell dies on SIGINT
+// with the command it is waiting on, so interrupting a long-running one left
+// the terminal reporting a crashed shell instead of the command's own goodbye
+// and the pause below. It is a handler rather than an ignore on purpose: an
+// ignored SIGINT is inherited by every child, and the command would stop
+// answering ctrl+c at all.
+func terminalCommandScript(cwd, command string) string {
+	return "trap 'true' INT\n" +
+		"cd " + podman.ShellQuote(cwd) + " && " + command +
+		"\nprintf '\\n[press any key to close]'\nread -n 1 -s -r 2>/dev/null || read"
 }

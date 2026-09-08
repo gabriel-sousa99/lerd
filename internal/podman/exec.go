@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 	"github.com/gabriel-sousa99/lerd/internal/imgledger"
 )
 
@@ -127,6 +128,12 @@ func pullArgs(image string) []string {
 // stderr to the given writers so the three entry points share one error-wrap
 // and one platform-aware argv (pullArgs).
 func runPull(image string, stdout, stderr io.Writer) error {
+	// Offline keeps whatever already works: only an image that is missing
+	// outright is worth the bytes on a metered connection.
+	if imagepull.Offline() && ImageExists(image) {
+		fmt.Fprintf(stdout, "Offline: keeping the local %s\n", PlatformImage(image))
+		return nil
+	}
 	cmd := Cmd(pullArgs(image)...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

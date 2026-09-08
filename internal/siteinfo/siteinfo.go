@@ -141,6 +141,11 @@ type EnrichedSite struct {
 	// Custom framework workers
 	FrameworkWorkers []WorkerInfo
 
+	// WorkerOptions maps a worker name to the values its definition lets a
+	// project change (a tune_command placeholder each), paired with what this
+	// project committed. Only workers that declare tunables appear.
+	WorkerOptions map[string][]config.WorkerTuneOption
+
 	// Idle suspension — IdleSuspendedWorkers names the parent-site workers the
 	// idle engine gracefully stopped (queue, schedule, vite, …) so a row can
 	// show "suspended" rather than a misleading "stopped". WorktreeIdleSuspended
@@ -592,6 +597,20 @@ func (e *EnrichedSite) enrichWorkers(fw *config.Framework, hasFw bool) {
 		e.HorizonRunning = status == "active" || status == "activating"
 		e.HorizonFailing = status == "failed"
 		e.HasQueueWorker = false // Horizon manages queues
+	}
+
+	// The knobs each worker offers, for the surfaces that let a project change
+	// them. Includes the well-known workers above, which are the ones that
+	// mostly declare a tune_command.
+	for wname, wDef := range fw.Workers {
+		opts := config.WorkerTuneOptions(e.Path, wname, wDef)
+		if len(opts) == 0 {
+			continue
+		}
+		if e.WorkerOptions == nil {
+			e.WorkerOptions = map[string][]config.WorkerTuneOption{}
+		}
+		e.WorkerOptions[wname] = opts
 	}
 
 	// Custom framework workers. per_worktree workers still surface on the

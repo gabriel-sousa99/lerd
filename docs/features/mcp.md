@@ -2,7 +2,7 @@
 
 Lerd ships a [Model Context Protocol](https://modelcontextprotocol.io/) server, letting AI assistants manage your dev environment directly: run migrations, start services, toggle queue workers, and inspect logs without leaving the chat.
 
-Supported assistants: **Claude Code, Cursor, JetBrains Junie, Codex CLI, Gemini CLI, GitHub Copilot (VS Code), Google Antigravity, Windsurf**, and any other MCP-compatible tool.
+Supported assistants: **Claude Code, Cursor, JetBrains Junie, Codex CLI, Gemini CLI, GitHub Copilot (VS Code), Google Antigravity, OpenCode, Windsurf**, and any other MCP-compatible tool.
 
 ---
 
@@ -32,6 +32,7 @@ MCP server registration:
 | Codex CLI | `~/.codex/config.toml` |
 | GitHub Copilot (VS Code) | `~/.config/Code/User/mcp.json` |
 | Google Antigravity | `~/.gemini/config/mcp_config.json` |
+| OpenCode | `~/.config/opencode/opencode.json` |
 
 Context / instructions files:
 
@@ -42,6 +43,7 @@ Context / instructions files:
 | `~/.junie/guidelines.md` | JetBrains Junie user-scope guidelines (merged, not overwritten) |
 | `~/.gemini/GEMINI.md` | Gemini CLI user-scope context (merged) |
 | `~/.codex/AGENTS.md` | Codex CLI user-scope context (merged) |
+| `~/.config/opencode/AGENTS.md` | OpenCode user-scope context (merged) |
 
 All clients share a single canonical tool reference, so the guidance never drifts between assistants. When running globally, the server uses the **directory the assistant is opened in** as the site context: no further configuration is needed.
 
@@ -50,6 +52,8 @@ All clients share a single canonical tool reference, so the guidance never drift
 > **GitHub Copilot** uses VS Code's `servers` key (each entry typed `stdio`), which differs from the `mcpServers` key the other clients use. Its instructions file (`.github/copilot-instructions.md`) is project-scoped only.
 
 > **Google Antigravity** registers at `~/.gemini/config/mcp_config.json` (its project-scoped MCP config is not honoured, so it is global only). It auto-loads `GEMINI.md` and `AGENTS.md`, which the Gemini and Codex entries already write, so no separate Antigravity context file is needed.
+
+> **OpenCode** uses neither of the other two shapes: its entry sits under an `mcp` key, is typed `local` rather than `stdio`, and takes the whole invocation as a single `command` array. It reads `AGENTS.md` from the project root, which the Codex entry already writes, so only its own `~/.config/opencode/AGENTS.md` is written separately. OpenCode also reads `opencode.jsonc`, and its own documentation asks for one format per directory, so where a `.jsonc` already exists lerd merges into that file rather than leaving a `.json` beside it that may never be read. The rewrite emits plain JSON, so comments in that file are not preserved.
 
 > **During `lerd install`:** If Claude Code is detected, you'll be prompted to run this automatically.
 
@@ -78,7 +82,8 @@ This writes MCP config and context files for every supported client into the pro
 | `GEMINI.md` | Gemini CLI context (merged) |
 | `.vscode/mcp.json` | GitHub Copilot (VS Code) MCP config |
 | `.github/copilot-instructions.md` | GitHub Copilot instructions (merged) |
-| `AGENTS.md` | Codex CLI context (merged) |
+| `AGENTS.md` | Codex CLI context, also read by OpenCode (merged) |
+| `opencode.json` | OpenCode MCP config |
 
 The written entries carry no machine-specific data: the server resolves the site from the directory the assistant is opened in, exactly like a global registration. A committed `.mcp.json` therefore stays identical across every teammate's checkout, with no absolute path to drift or break on another machine. (An older lerd wrote a `LERD_SITE_PATH` absolute path into these files; it is still honoured if you set it by hand, but no longer written.)
 
@@ -112,6 +117,40 @@ PHP runs inside the container, so the AI agent environment variables your coding
 
 Commands the `exec` MCP tool runs (`artisan`, `composer`, `vendor_run` for Pest/PHPUnit) go a step further: because reaching them through the MCP server proves an agent is driving the command, lerd injects a neutral `AI_AGENT=lerd-mcp` marker when no real agent variable is present. Pao therefore returns JSON for MCP-originated test runs even if the host environment carries nothing, while a real agent variable is still forwarded as-is when it exists. Manual terminal runs are never given the marker, so their output is unchanged.
 
+### Running your framework's own MCP server
+
+This is separate from lerd's MCP server. Some frameworks ship their own local MCP server, started as a console command — Laravel MCP does, and it is what [Laravel Boost](https://github.com/laravel/boost) builds on. Such a server has to run where the application runs: started from the host it resolves `lerd-mysql` or `lerd-redis` against nothing, and you end up maintaining a second set of host-only `.env` values just to keep it alive.
+
+lerd's `php` shim already takes care of that. The installer puts lerd's bin directory ahead of the system one on your PATH, and the `php` there execs into the project's container, so the ordinary registration works unchanged:
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "command": "php",
+      "args": ["artisan", "mcp:start", "weather"]
+    }
+  }
+}
+```
+
+The server then runs on the same PHP build, the same extensions and the same container network as the site, and the hostnames in your `.env` resolve exactly as they do for a web request.
+
+A client you launch from a desktop icon rather than a terminal may not inherit your login PATH, in which case it finds the system `php` instead of the shim. Name lerd explicitly there:
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "command": "lerd",
+      "args": ["artisan", "mcp:start", "weather"]
+    }
+  }
+}
+```
+
+Either form leaves stdout to the server: anything lerd needs to say while starting a container or a service goes to stderr, so it never lands in the middle of the JSON-RPC stream.
+
 ---
 
 ## Available MCP tools
@@ -121,10 +160,10 @@ The MCP surface is **twelve grouped tools**, each driven by an `action` argument
 | Tool | Actions |
 |---|---|
 | `site` | `list` (discover sites, call first), `link`, `unlink`, `domain_add`, `domain_remove`, `group_assign`, `group_unassign`, `group_label`, `group_db`, `group_list`, `tls_enable`, `tls_disable`, `tls_renew`, `php`, `node`, `pause`, `unpause`, `restart`, `rebuild`, `runtime`, `nginx_read`, `nginx_write`, `nginx_reset`, `park`, `unpark` |
-| `service` | `start`, `stop`, `restart`, `pin`, `unpin`, `update`, `rollback`, `migrate`, `remove`, `reinstall`, `add`, `expose`, `port`, `env`, `config_read`, `config_write`, `config_restore`, `config_reset`, `config_list_backups`, `preset_list`, `preset_search`, `preset_install`, `check_updates` |
-| `db` | `list`, `set`, `move`, `create`, `export`, `import`, `snapshot`, `snapshots`, `restore`, `snapshot_delete` |
+| `service` | `start`, `stop`, `restart`, `pin`, `unpin`, `update`, `rollback`, `migrate`, `remove`, `reinstall`, `add`, `expose`, `port`, `env`, `config_read`, `config_write`, `config_restore`, `config_reset`, `config_list_backups`, `preset_list`, `preset_search`, `preset_install`, `check_updates`, `entities`, `entity_action` |
+| `db` | `list`, `set`, `move`, `create`, `export`, `import`, `snapshot`, `snapshots`, `restore`, `snapshot_delete`, `extension_list`, `extension_add` |
 | `env` | `setup`, `check`, `override` |
-| `runtime` | `versions`, `node_install`, `node_uninstall`, `php_list`, `ext_list`, `ext_add`, `ext_remove`, `ports_list`, `ports_add`, `ports_remove`, `ini_read`, `ini_write`, `ini_reset` |
+| `runtime` | `versions`, `node_install`, `node_uninstall`, `node_manager`, `php_list`, `ext_list`, `ext_add`, `ext_remove`, `ports_list`, `ports_add`, `ports_remove`, `ini_read`, `ini_write`, `ini_reset` |
 | `worker` | `list` (call first), `start`, `stop`, `add`, `remove`, `health`, `heal`, `mode_get`, `mode_set`, `queue_start`, `queue_stop`, `horizon_start`, `horizon_stop`, `reverb_start`, `reverb_stop`, `schedule_start`, `schedule_stop`, `stripe_start`, `stripe_stop`, `stripe_config` |
 | `exec` | `artisan`, `console`, `composer`, `vendor_bins`, `vendor_run`, `commands_list`, `commands_run`, `command_add`, `command_remove` |
 | `framework` | `list`, `add`, `remove`, `prune`, `search`, `update`, `project_new`, `setup` |
@@ -156,6 +195,14 @@ A **site group** (the `site` tool's `group_*` actions) nests a real site under a
 `preset_list` returns each preset's `category`, `icon` and `admin_for`. `admin_for` names the services a preset's admin UI administers, and it is **not** `depends_on`: phpMyAdmin depends on mysql (satisfied by MariaDB via `env_role`) but administers both, and RedisInsight depends on redis (satisfied by Valkey) while administering both. To answer "which dashboard administers this database", read `admin_for`.
 
 `service` start/stop/restart use the same `serviceops` path as the CLI, Web UI, and TUI: `depends_on` resolution (including family / `env_role` drop-ins), reverse-dependent start, soft stop cascade, and `discover_family` / pinned-dependency-host consumer regen. Stop failures surface as errors rather than a silent OK. Do not assume MCP is a thinner StartUnit wrapper.
+
+### Downloads are disclosed, not started
+
+An assistant is not the one paying for the bandwidth, so the actions that have to fetch a container image (`service` `preset_install`, `update`, `migrate`, `rollback`, `reinstall`, and `runtime` `ext_add`, which rebuilds a PHP image) answer with what they would download instead of downloading it. The answer names the image and its size, read from the registry manifest without pulling anything, and nothing has been fetched at that point. Repeating the call with `confirm: true` goes ahead. An image already in the local store is never disclosed, so the usual case runs straight through. This is the disclosure half of what `LERD_OFFLINE=1` does for the refusal half; see [Image downloads](../usage/lifecycle.md#image-downloads).
+
+### Worker tuning comes from the framework definition
+
+`worker` `list` reports each worker's tunable `options`: the placeholders its framework definition declares in `tune_command`, the default the definition runs for each, and whatever the project committed to `.lerd.yaml`. `start` (and `queue_start`) take them back as `options: ["queue=emails", "tries=5"]`. Nothing is named in the tool's own schema, so a store definition that makes another worker tunable reaches an assistant within the day, the same way the CLI grows a flag per placeholder. See [Worker options](../usage/queue-workers.md#worker-options).
 
 ### Reading logs
 

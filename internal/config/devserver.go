@@ -78,8 +78,17 @@ const lerd = {
         allowedHosts: %s,
         // Naming an origin makes some framework plugins treat it as the whole
         // CORS allowlist, so a page on any other domain of the site would be
-        // refused the assets it just asked for. Declare them all.
-        cors: { origin: %s },
+        // refused the assets it just asked for. Declare them all, and loopback
+        // with them: a native shell serves the same app from 127.0.0.1 on a port
+        // it picks at boot, and its page may fetch what the site's page may.
+        cors: {
+            origin: [
+                ...%s,
+                /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
+                /^https?:\/\/\[::1\](:\d+)?$/,
+                /^https?:\/\/localhost(:\d+)?$/,
+            ],
+        },
     },
 };
 

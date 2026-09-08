@@ -1114,6 +1114,21 @@ func TestBuildTunnelCommand_exposeGoesThroughTheLocalProxy(t *testing.T) {
 	}
 }
 
+// Expose names the tunnel after the host it is pointed at, so without an
+// explicit subdomain a share claims the proxy's port number as its public name.
+func TestBuildTunnelCommand_exposeAsksForTheSiteSubdomain(t *testing.T) {
+	target := shareTarget{name: "rapids-feature", domain: "feature.rapids.test", secured: true}
+	cmd, stop, err := buildTunnelCommand(&shareTool{mode: shareModeExpose}, "", target, 80, 443, true)
+	if err != nil {
+		t.Fatalf("buildTunnelCommand: %v", err)
+	}
+	defer stop()
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--subdomain=feature-rapids") {
+		t.Errorf("args = %v, want the site label asked for as the subdomain", cmd.Args)
+	}
+}
+
 // The two serveo-shaped providers predate the generalized SSH mode, so their
 // invocation is pinned: default port, nokey user, a fixed remote port of 80.
 func TestBuildTunnelCommand_serveoKeepsTheClassicSSHForm(t *testing.T) {

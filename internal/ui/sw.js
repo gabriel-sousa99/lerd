@@ -88,6 +88,9 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
+  // The offline page's "are we back?" probe. It must reach nginx every time and
+  // must never be stored, so it bypasses both halves of the cache below.
+  if (url.searchParams.has('lerd-probe')) return;
   // /_spx/ is the profiler UI: dynamic (the report list grows as profiles are
   // captured), so it must hit the network, never the cache-first path below.
   if (url.pathname.startsWith('/_spx/')) return;

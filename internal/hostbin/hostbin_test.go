@@ -91,3 +91,21 @@ func writeExe(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// A tunnel tool dropped into lerd's own bin dir is only on PATH through
+// `lerd path:enable`, which a daemon never inherits.
+func TestLookFindsLerdBinDir(t *testing.T) {
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	binDir := filepath.Join(data, "lerd", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(binDir, "expose"))
+	t.Setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+
+	got, ok := Look("expose")
+	if !ok || got != filepath.Join(binDir, "expose") {
+		t.Fatalf("Look() = %q, %v; want %s", got, ok, filepath.Join(binDir, "expose"))
+	}
+}

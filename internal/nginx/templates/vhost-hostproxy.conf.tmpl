@@ -19,6 +19,7 @@ server {
         {{- if .BackendSSL}}
         proxy_ssl_verify off;
         {{- end}}
+        include /etc/nginx/custom.d/{{.Domain}}.location.conf*;
     }
 
     include /etc/nginx/custom.d/{{.Domain}}.conf*;

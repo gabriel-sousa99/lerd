@@ -26,8 +26,8 @@
 | `lerd php:ports add <host:container...> [--php version]` | Publish a host port on the version's shell container; a bare number publishes the same port straight through, and a busy host port shifts to the next free one |
 | `lerd php:ports remove <host...> [--php version]` | Unpublish a host port from the version's shell container |
 | `lerd php:ports list [--php version]` | List the extra host ports published for a PHP version |
-| `lerd pest:browser install [version]` | Set up in-container Pest browser testing (musl chromium + Playwright shim); see [browser testing](browser-testing#pest-browser-testing-playwright) |
-| `lerd pest:browser remove [version]` | Remove chromium from the FPM image and disable Pest browser testing |
+| `lerd pest:browser install [version]` | Set up in-container Pest browser testing (musl chromium, Xvfb, Playwright shim); see [browser testing](browser-testing#pest-browser-testing-playwright) |
+| `lerd pest:browser remove [version]` | Remove chromium and Xvfb from the FPM image and disable Pest browser testing |
 | `lerd pest:browser doctor [version]` | Diagnose the Pest browser testing setup for a PHP version |
 | `lerd php:ini [version]` | Open the user php.ini for a PHP version in `$EDITOR` |
 
@@ -35,7 +35,7 @@ If no version is given, the version is resolved from the current directory (`.ph
 
 Versions are written as `major.minor`, but common spellings are accepted everywhere a version is typed: `php8.4`, `84` and `8.4.7` all normalize to `8.4`. Anything that does not resolve to a supported version is rejected up front, so a typo can never end up as the stored default and break image names.
 
-Inside a linked site, the commands that run PHP in a container (`lerd php`, `lerd composer`, `lerd console`, `lerd php:shell`) use the version the site is registered on, which is the version its FPM container serves. That matters when a framework clamps the version at link time: a Laravel 13 project pinning `.php-version` to 8.1 is linked on 8.5, because Laravel 13 supports 8.3 to 8.5, and composer then runs on 8.5 too rather than resolving 8.1 from the file and quietly using a different PHP than the site itself.
+Inside a linked site, the commands that run PHP in a container (`lerd php`, `lerd composer`, `lerd console`, `lerd shell`) use the version the site is registered on, which is the version its FPM container serves. That matters when a framework clamps the version at link time: a Laravel 13 project pinning `.php-version` to 8.1 is linked on 8.5, because Laravel 13 supports 8.3 to 8.5, and composer then runs on 8.5 too rather than resolving 8.1 from the file and quietly using a different PHP than the site itself.
 
 A git worktree resolves ahead of the site it belongs to. A worktree inherits its parent site's version until you pin one with `lerd isolate` from inside the checkout, and from then on the whole toolchain follows that pin: the worktree's own vhost, `lerd php`, `lerd composer`, and everything else that runs PHP in a container. This holds wherever the checkout lives, including inside the parent site's own directory, so a worktree on 8.3 under a site on 8.5 runs composer on 8.3 rather than picking up the parent's version.
 
@@ -75,6 +75,19 @@ lerd rector process
 ```
 
 These run inside the project's PHP-FPM container with the project's working directory mounted, so configuration files (`pest.xml`, `pint.json`, `phpstan.neon`, etc.) are picked up automatically. Real lerd commands always take precedence; if you have a `vendor/bin/composer`, `lerd composer` still resolves to the built-in command.
+
+### Running a package you have not installed
+
+[cpx](https://cpx.dev) is to Composer what npx is to npm: it runs a command from any Composer package without adding it to the project. Require it once, and `lerd cpx` runs it inside the project's container:
+
+```bash
+lerd composer global require cpx/cpx
+lerd cpx phpstan/phpstan analyse
+```
+
+The package runs on the PHP version the site is registered on rather than whatever PHP is on the host, which is the whole reason to route it through lerd. Fetched packages are cached under `~/.cpx` on the host, so they survive a container restart and are shared with any cpx you run outside lerd.
+
+Requiring it globally also puts a `cpx` shim on your PATH, so bare `cpx` works too and runs through the same container. `lerd cpx` is the explicit form, and the one that tells you what to install when cpx is missing.
 
 The MCP integration exposes the same surface through two tools, `vendor_bins` (list available binaries) and `vendor_run` (execute one), so AI assistants can discover and run project tooling without per-project configuration.
 
@@ -183,8 +196,34 @@ Xdebug is configured with:
 
 Set your IDE to listen on port `9003`. In VS Code, the default PHP Debug configuration works without changes. In PhpStorm, set **Settings > PHP > Debug > Debug port** to `9003`.
 
+Port `9003` is reserved: no lerd service is ever published on it, because a container that held it would answer Xdebug's connect-back itself and your IDE would simply never see a session. An install that already shifted a service onto it before this was reserved keeps it, so `lerd doctor` names the service and the command that moves it:
+
+```bash
+lerd service port rustfs 9004 --container 9001
+```
+
 `host.containers.internal` is resolved via a real reachability probe: when lerd writes the shared hosts file it tries each candidate IP (netavark's `host.containers.internal` entry, the host's primary LAN IP, slirp4netns's `10.0.2.2`) by opening a TCP connection to lerd-ui on port 7073 from inside lerd-nginx, and writes the first one that succeeds. If none succeed, `lerd doctor` reports the failure so you get a real diagnosis instead of Xdebug silently timing out with `Time-out connecting to debugging client`.
 :::
+
+### Turn off "break at first line"
+
+lerd mounts a small `auto_prepend_file` into every PHP version it builds, the bridge that carries `dump()` and `dd()` output to the dashboard. Being a prepend, it is the first file PHP runs on every request, before a single line of your application.
+
+An IDE set to stop on the first line of every script therefore stops there, in a file that exists only inside the container:
+
+```
+Cannot find a local copy of the file on server /usr/local/etc/lerd/dump-bridge.php
+```
+
+Nothing is broken, and your own breakpoints are still fine. In **PhpStorm** three settings can cause it, and the two that matter here are not the obvious one:
+
+- **Settings > PHP > Debug > External connections > Force break at first line when no path mapping specified** — the bridge has none, so this one fires and is what draws the *Click to set up path mappings* link
+- **Settings > PHP > Debug > External connections > Force break at first line when a script is outside the project** — the bridge is outside it, so this one fires too
+- **Settings > PHP > Debug > Break at first line in PHP scripts** — the general one, off by default
+
+All three are worth turning off for a lerd project: the first two default to **on**, so unchecking only the third leaves the session still stopping in the bridge. **VS Code** does not do this by default, but `"stopOnEntry": true` in a launch configuration behaves the same way.
+
+The same is worth knowing about `start_with_request=yes`, which is the default: with the debugger listening, *every* request connects, so the first one lands on the bridge before you have asked to debug anything in particular. [On-demand debugging](#on-demand-debugging-workers-and-cli) is the way to keep the debugger quiet until you trigger a session.
 
 ### Picking a mode
 
@@ -232,7 +271,7 @@ Toggling never restarts FPM or its workers. The bridge auto-prepend file and its
 
 ## Pre-built images
 
-lerd ships pre-built PHP-FPM base images on ghcr.io for all supported versions (7.4 and 8.0–8.5), covering both `amd64` and `arm64`. When you run `lerd fetch` or `lerd php:rebuild`, lerd pulls the matching base image and layers just your mkcert CA certificate on top, bringing first-time build time from ~5 minutes down to ~30 seconds.
+lerd ships pre-built PHP-FPM base images on ghcr.io for all supported versions (7.4 and 8.0–8.6), covering both `amd64` and `arm64`. When you run `lerd fetch` or `lerd php:rebuild`, lerd pulls the matching base image and layers just your mkcert CA certificate on top, bringing first-time build time from ~5 minutes down to ~30 seconds.
 
 The base image tag is derived from the embedded Containerfile, so lerd always pulls the exact image that matches the version of lerd you have installed. If the pull fails (no internet, image not yet published) lerd falls back to a full local build transparently.
 
@@ -279,6 +318,25 @@ lerd fetch 7.4 8.0
 
 ---
 
+## Prerelease PHP versions
+
+PHP 8.6 is still in beta upstream, and lerd builds it so a project can run its test suite against it before release. It is offered as a prerelease everywhere a version is picked, in the dashboard's version cards and both PHP dropdowns, so it is never chosen in the belief that it behaves like a released version:
+
+- It builds from the `8.6-rc` image the PHP Docker library publishes through beta and RC, because there is no plain `8.6-fpm-alpine` tag until release. That switches to the released tag when 8.6 ships, with nothing to change on your side.
+- `lerd fetch` with no arguments builds the released versions only. A prerelease builds when you name it.
+- FrankenPHP publishes no image for it, so an 8.6 site is served by FPM. Switching a site to the FrankenPHP runtime on 8.6 is refused rather than quietly run on a different PHP, and a site already on FrankenPHP falls back to FPM when it moves to 8.6.
+- PHP 8.6 removed PEAR, so `pecl` is gone from the upstream image and lerd installs PECL extensions from their release tarballs instead. `redis`, `imagick` and `mongodb` still build; `igbinary`, `pcov` and `xdebug` do not compile against 8.6 yet, so they are absent from the image and lerd does not advertise them on that version. They come back as their upstreams catch up. The profiler needs `php-spx`, which is in the same position, so it is unavailable on 8.6.
+- Upstream behaviour still changes between builds, so it is a place to test rather than a default to develop on.
+
+Use it like any other version:
+
+```bash
+lerd fetch 8.6
+lerd isolate 8.6
+```
+
+---
+
 ## Custom extensions
 
 The default lerd FPM image ships ~30 extensions covering the vast majority of Laravel projects (`bcmath`, `bz2`, `calendar`, `curl`, `dba`, `exif`, `ftp`, `gd`, `gmp`, `igbinary`, `imagick`, `intl`, `ldap`, `mbstring`, `mongodb`, `mysqli`, `opcache`, `pcntl`, `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`, `redis`, `soap`, `shmop`, `sockets`, `sqlite3`, `sysvmsg`, `sysvsem`, `sysvshm`, `xdebug`, `xsl`, `zip`, and more).
@@ -290,6 +348,8 @@ To add an extension that isn't in the bundle:
 ```bash
 lerd php:ext add swoole
 ```
+
+An extension the image already ships is refused, since the bundle is the better build of it. The image compiles those extensions as part of its own configure run, with flags a standalone rebuild on top of the image cannot pass, so redeclaring one would quietly replace it with a lesser build: `ftp` declared this way came back without FTPS support and no `ftp_ssl_connect`. Builds skip any bundled name left over in an existing declared set for the same reason, and an image built while one was still being rebuilt reads as out of date, so the next build puts the image's own version back with nothing to run by hand.
 
 Extensions belong to you, not to a PHP version. One declared set applies to every PHP image lerd builds, so a site that changes version keeps them. The version you are on is rebuilt and verified straight away; other installed versions carry the old set until they are rebuilt, and lerd says which ones those are.
 
@@ -410,7 +470,7 @@ container:
   containerfile: Containerfile.lerd
 ```
 
-Then `lerd link`. lerd builds `lerd-custom-myapp:local`, runs a dedicated FPM container `lerd-cfpm-myapp`, and points nginx fastcgi at it. The per-site container reuses every lerd mount, so xdebug, dumps, the debug bridge, the profiler, and `lerd shell` all work exactly as on a normal PHP site, and `lerd php`, `artisan`, `composer`, `tinker`, and queue/horizon workers all run inside it. Toggling xdebug for that PHP version restarts the per-site container too.
+Then `lerd link`. lerd builds `lerd-custom-myapp:local`, runs a dedicated FPM container `lerd-cfpm-myapp`, and points nginx fastcgi at it. The per-site container reuses every lerd mount, so xdebug, dumps, the debug bridge, the profiler, and `lerd shell` all work exactly as on a normal PHP site, and `lerd php`, `artisan`, `composer`, `tinker`, queue/horizon workers, and the commands an AI assistant runs through the MCP server all run inside it. Toggling xdebug for that PHP version restarts the per-site container too.
 
 The PHP version is fixed by the `FROM` line, not by `.php-version` or the dashboard, so the version selector is shown read-only for these sites. To change the version, edit the `FROM` and relink.
 
@@ -431,13 +491,14 @@ Each custom-image PHP site runs its own FPM container rather than sharing the pe
 
 ## PHP shell
 
-`lerd shell` opens an interactive shell inside the PHP-FPM container for the current project:
+`lerd shell` opens an interactive shell inside the PHP-FPM container for the current project. With a version it opens one in that version's shared container instead, from anywhere, which is what the dashboard's **Terminal** button on a PHP version runs:
 
 ```bash
 lerd shell
+lerd shell 8.4
 ```
 
-The PHP version is resolved the same way as every other lerd command (`.php-version`, `composer.json`, global default). The shell's working directory is set to the project root.
+The PHP version is resolved the same way as every other lerd command (`.php-version`, `composer.json`, global default). The shell's working directory is set to the project root. A version shell has no project behind it, so it opens on the container's own directory, and it starts a stopped container but never offers to build a missing one.
 
 If the container is not running, lerd prints the platform-appropriate command (`launchctl kickstart` on macOS, `systemctl --user start` on Linux) to bring it back up rather than silently failing.
 

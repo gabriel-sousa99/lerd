@@ -13,6 +13,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
 )
@@ -137,6 +138,9 @@ func ensureDNSImageForStart() {}
 
 // pullDNSImages is a no-op on macOS — DNS runs natively.
 func pullDNSImages() []BuildJob { return nil }
+
+// dnsImagePlan is empty on macOS: native DNS downloads nothing.
+func dnsImagePlan() imagepull.Plan { return nil }
 
 // isDNSContainerUnit returns false on macOS since DNS uses a native service.
 func isDNSContainerUnit() bool { return false }

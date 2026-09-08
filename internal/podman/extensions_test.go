@@ -1,6 +1,11 @@
 package podman
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/gabriel-sousa99/lerd/internal/config"
+)
 
 // TestComposerPlatformNameRoundTrips checks both directions of the name folding:
 // composer publishes OPcache as ext-zend-opcache (the module is "Zend OPcache",
@@ -66,5 +71,55 @@ func TestBundledExtensionsCoverContainerfile(t *testing.T) {
 		if !bundled[ext] {
 			t.Errorf("Containerfile installs %q but BundledExtensions omits it — park would never warn a project needs it", ext)
 		}
+	}
+}
+
+// A prerelease PHP outruns the PECL releases: they do not compile against it, so
+// the image drops them and BundledExtensions must not promise what it never got.
+func TestBundledExtensionsDropsPECLOnPrerelease(t *testing.T) {
+	if len(config.PrereleasePHPVersions) == 0 {
+		t.Skip("no prerelease version in the supported list")
+	}
+	v := config.PrereleasePHPVersions[0]
+	got := strings.Join(BundledExtensions(v), " ")
+	for _, ext := range []string{"igbinary", "pcov", "xdebug", "amqp", "memcached"} {
+		if strings.Contains(" "+got+" ", " "+ext+" ") {
+			t.Errorf("BundledExtensions(%q) advertises %q, which does not build on a prerelease", v, ext)
+		}
+	}
+	// oci8 is in the kept list on purpose: it is the reason this fork exists and
+	// it does build on the prerelease, so losing it has to fail here.
+	for _, ext := range []string{"curl", "intl", "opcache", "pdo_mysql", "redis", "imagick", "mongodb", "oci8"} {
+		if !strings.Contains(" "+got+" ", " "+ext+" ") {
+			t.Errorf("BundledExtensions(%q) dropped %q, which the image does build", v, ext)
+		}
+	}
+	stable := strings.Join(BundledExtensions("8.5"), " ")
+	for _, ext := range []string{"xdebug", "amqp", "memcached"} {
+		if !strings.Contains(" "+stable+" ", " "+ext+" ") {
+			t.Errorf("BundledExtensions(8.5) lost %q; the prerelease rule leaked into a released version", ext)
+		}
+	}
+}
+
+// A declared extension the image already ships must be dropped: rebuilding it
+// generically on top of the base image loses the configure flags the base build
+// gave it, which is how ftp lost FTPS support again after #1583 (#1576).
+func TestWithoutBundled(t *testing.T) {
+	got := WithoutBundled("8.5", []string{"ftp", "yaml", "Zend-OPcache", "ssh2"})
+	want := []string{"yaml", "ssh2"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("WithoutBundled = %v, want %v", got, want)
+	}
+}
+
+// Version-gated names are not bundled everywhere, so a version whose image
+// cannot build one must still be allowed to install it as a custom extension.
+func TestWithoutBundled_KeepsVersionGatedNames(t *testing.T) {
+	if got := WithoutBundled("8.1", []string{"random"}); len(got) != 1 {
+		t.Errorf("WithoutBundled dropped random on 8.1, where the image does not ship it: %v", got)
+	}
+	if got := WithoutBundled("8.2", []string{"random"}); len(got) != 0 {
+		t.Errorf("WithoutBundled kept random on 8.2, where the image ships it: %v", got)
 	}
 }

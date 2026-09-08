@@ -16,7 +16,6 @@ import (
 func NewStripeCmds() []*cobra.Command {
 	return []*cobra.Command{
 		newStripeListenCmd(),
-		newStripeListenStopCmd(),
 		newStripeConfigCmd(),
 	}
 }
@@ -133,7 +132,7 @@ func newStripeListenCmd() *cobra.Command {
 				return err
 			}
 			if site, err := config.FindSite(siteName); err == nil && !site.Paused {
-				_ = config.SetProjectWorkers(site.Path, CollectRunningWorkerNames(site))
+				_ = config.SetProjectWorkers(site.Path, CollectDeclaredWorkerNames(site))
 			}
 			return nil
 		},
@@ -141,12 +140,16 @@ func newStripeListenCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Stripe API key (defaults to the secret in .env)")
 	cmd.Flags().StringVar(&webhookPath, "path", config.DefaultStripeWebhookPath, "Webhook route path on your app (persisted to .lerd.yaml)")
 	cmd.Flags().StringVar(&secretEnvKey, "secret-env-key", "", "Which .env key holds the Stripe secret (persisted to .lerd.yaml)")
+	// stop hangs off the starter rather than sitting beside it at the root:
+	// two root commands whose Use began with stripe:listen made cobra resolve
+	// the documented `lerd stripe:listen` to an arbitrary one of the two.
+	cmd.AddCommand(newStripeListenStopCmd())
 	return cmd
 }
 
 func newStripeListenStopCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "stripe:listen stop",
+		Use:   "stop",
 		Short: "Stop the Stripe webhook listener for the current site",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -162,7 +165,7 @@ func newStripeListenStopCmd() *cobra.Command {
 				return err
 			}
 			if site, err := config.FindSite(siteName); err == nil && !site.Paused {
-				_ = config.SetProjectWorkers(site.Path, CollectRunningWorkerNames(site))
+				_ = config.SetProjectWorkers(site.Path, CollectDeclaredWorkerNames(site))
 			}
 			return nil
 		},
@@ -198,7 +201,7 @@ WantedBy=default.target
 		if err := podman.DaemonReloadFn(); err != nil {
 			return fmt.Errorf("daemon-reload: %w", err)
 		}
-		if err := services.Mgr.Enable(unitName); err != nil {
+		if err := syncWorkerBootArming(unitName); err != nil {
 			feedback.Warn("enable: %v", err)
 		}
 	}

@@ -21,7 +21,11 @@
   // tab; the FrankenPHP container mounts the shared 98-lerd-user.ini, so edits
   // apply to it after the save restarts the container.
   const showPhpIni = $derived(site.runtime === 'frankenphp' && Boolean(site.php_version));
-  let tab = $state<'nginx' | 'phpini'>('nginx');
+
+  // Server scope is included at the end of the server block; location scope
+  // inside the block that serves the site, which is the only level where a
+  // fastcgi_param or proxy_set_header override survives.
+  let tab = $state<'server' | 'location' | 'phpini'>('server');
 
   // Save/Restore/Reset open their own confirm modal on top of this one via
   // the shared modal store. While one is up it owns Escape and the backdrop,
@@ -31,7 +35,7 @@
     onclose();
   }
 
-  const tabBtn = (id: 'nginx' | 'phpini') =>
+  const tabBtn = (id: 'server' | 'location' | 'phpini') =>
     'px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ' +
     (tab === id
       ? 'border-lerd-red text-lerd-red'
@@ -40,20 +44,23 @@
 
 <Modal {open} title={m.sites_nginx_modalTitle({ domain })} onclose={handleClose} size="xl">
   <div class="h-[70vh] flex flex-col overflow-hidden rounded-b-xl">
-    {#if showPhpIni}
-      <div class="flex gap-1 px-3 pt-1 border-b border-gray-200 dark:border-gray-700 shrink-0">
-        <button class={tabBtn('nginx')} onclick={() => (tab = 'nginx')}>Nginx</button>
+    <div class="flex gap-1 px-3 pt-1 border-b border-gray-200 dark:border-gray-700 shrink-0">
+      <button class={tabBtn('server')} onclick={() => (tab = 'server')}>Server block</button>
+      <button class={tabBtn('location')} onclick={() => (tab = 'location')}>Location</button>
+      {#if showPhpIni}
         <button class={tabBtn('phpini')} onclick={() => (tab = 'phpini')}>php.ini</button>
-      </div>
-    {/if}
+      {/if}
+    </div>
     <div class="flex-1 min-h-0 overflow-hidden">
       {#if showPhpIni && tab === 'phpini'}
         <!-- Per-site scope: a FrankenPHP site has its own php.ini, edited via the
              same per-version editor keyed by a "site:<name>" scope token. -->
         <PhpIniTab version={`site:${site.name}`} />
       {:else}
-        {#key domain}
-          <SiteNginxTab {site} {domain} onSaved={onclose} />
+        <!-- Keyed on scope as well as domain so switching tabs remounts the
+             editor and reloads the other file instead of keeping the buffer. -->
+        {#key `${domain}:${tab}`}
+          <SiteNginxTab {site} {domain} scope={tab === 'location' ? 'location' : 'server'} onSaved={onclose} />
         {/key}
       {/if}
     </div>

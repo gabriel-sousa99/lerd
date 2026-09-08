@@ -462,3 +462,119 @@ commands:
 		t.Error("an approved project command should not force the confirm modal")
 	}
 }
+
+// listPinned returns the pinned flag of every command the list route reports.
+func listPinned(t *testing.T, domain string) map[string]bool {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/sites/"+domain+"/commands", nil)
+	rec := httptest.NewRecorder()
+	handleSiteAction(rec, req)
+	var resp struct {
+		Commands []config.FrameworkCommand `json:"commands"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out := map[string]bool{}
+	for _, c := range resp.Commands {
+		out[c.Name] = c.Pinned
+	}
+	return out
+}
+
+func postPin(t *testing.T, domain, name, on string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/sites/"+domain+"/commands/"+name+"/pin?on="+on, nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	handleSiteAction(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	return rec.Body.String()
+}
+
+func TestCommandPin_TogglesAndOverridesTheDefault(t *testing.T) {
+	sitePath := registerSite(t, "acme", "acme.test")
+	writeProjectYAML(t, sitePath, `
+commands:
+  - name: seed
+    label: Seed
+    command: ./bin/seed
+    pinned: true
+  - name: build
+    label: Build
+    command: ./bin/build
+`)
+	if got := listPinned(t, "acme.test"); !got["seed"] || got["build"] {
+		t.Fatalf("declared default not honored: %v", got)
+	}
+	postPin(t, "acme.test", "seed", "0")
+	postPin(t, "acme.test", "build", "1")
+	if got := listPinned(t, "acme.test"); got["seed"] || !got["build"] {
+		t.Fatalf("the user's choice should win over the default: %v", got)
+	}
+}
+
+func TestCommandPin_RefusesPastTheCap(t *testing.T) {
+	sitePath := registerSite(t, "acme", "acme.test")
+	writeProjectYAML(t, sitePath, `
+commands:
+  - name: one
+    command: ./bin/one
+  - name: two
+    command: ./bin/two
+  - name: three
+    command: ./bin/three
+`)
+	postPin(t, "acme.test", "one", "1")
+	postPin(t, "acme.test", "two", "1")
+	if body := postPin(t, "acme.test", "three", "1"); !strings.Contains(body, "at most") {
+		t.Fatalf("a third pin should be refused, got %s", body)
+	}
+	if got := listPinned(t, "acme.test"); got["three"] {
+		t.Errorf("three must stay unpinned: %v", got)
+	}
+}
+
+// Ctrl+c on a terminal command used to take the shell with it: a
+// non-interactive sh dies on SIGINT alongside the command it is waiting on, and
+// the window ended up reporting a crashed shell rather than showing the
+// command's own shutdown and the pause. The trap has to be a handler, since an
+// ignored SIGINT is inherited and the command itself would stop answering it.
+func TestTerminalCommandScript_survivesInterruptWithoutIgnoringIt(t *testing.T) {
+	script := terminalCommandScript("/home/u/my app", "php artisan native:jump")
+
+	if !strings.HasPrefix(script, "trap 'true' INT\n") {
+		t.Errorf("script = %q, want it to trap INT before running anything", script)
+	}
+	if strings.Contains(script, "trap '' INT") {
+		t.Error("script ignores INT, which children inherit and ctrl+c stops working")
+	}
+	if !strings.Contains(script, "cd '/home/u/my app' && php artisan native:jump") {
+		t.Errorf("script = %q, want the quoted directory and the command", script)
+	}
+	if !strings.Contains(script, "[press any key to close]") {
+		t.Errorf("script = %q, want the window to hold its output", script)
+	}
+}
+
+// A declared command reaches `php` and `lerd` through lerd's own bin directory,
+// which `lerd run` and the dashboard runner both put on PATH. A terminal
+// command has to resolve them the same way rather than inheriting whatever the
+// service manager imported, or a store command fails as not found on one
+// machine and works on the next.
+func TestTerminalEnv_carriesLerdsBinDirOnPath(t *testing.T) {
+	var path string
+	for _, kv := range terminalEnv() {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	if path == "" {
+		t.Fatal("terminal env sets no PATH")
+	}
+	if !strings.Contains(path, config.BinDir()) {
+		t.Errorf("PATH = %q, want lerd's bin dir %q in it", path, config.BinDir())
+	}
+}

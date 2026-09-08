@@ -78,6 +78,19 @@ func resolveLinks(path string) string {
 	return path
 }
 
+// GuardRealLaunchd stops a test mutating the launchd domain of whoever is running
+// it. Isolating HOME moves the plist file but not the domain it is bootstrapped
+// into, and launchd has no per-test domain to move it to, so a test that reaches
+// a mutating verb has nowhere safe for it to land. One did, and left the
+// developer's nginx job registered to a plist in a temp dir the test then removed.
+func GuardRealLaunchd(cmd string) {
+	if !underTest {
+		return
+	}
+	panic("test ran a mutating launchctl against the real domain: " + cmd +
+		"; install a stub in podman.UnitLifecycle instead")
+}
+
 // UnderTest reports whether this process is a test binary, for packages that must
 // refuse to touch the real system (systemd, podman) when no stub is installed.
 func UnderTest() bool { return underTest }

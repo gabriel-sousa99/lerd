@@ -28,7 +28,7 @@
     error = '';
     validationOutput = '';
     try {
-      const res = await saveSiteNginx(target.domain, target.content, backup);
+      const res = await saveSiteNginx(target.domain, target.scope, target.content, backup);
       if (!res.ok) {
         error = res.error || m.nginxEditor_saveFailed();
         // The validation output carries nginx's actual line-and-directive

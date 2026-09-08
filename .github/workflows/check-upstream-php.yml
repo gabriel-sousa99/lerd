@@ -26,7 +26,9 @@ jobs:
         run: |
           mkdir -p /tmp/php-digests
           CHANGED=""
-          for V in 8.1 8.2 8.3 8.4 8.5; do
+          # 8.6 is still a prerelease upstream, so it is watched on its -rc tag
+          # (see config.UpstreamPHPTag); swap it for the plain one on release day.
+          for V in 8.1 8.2 8.3 8.4 8.5 8.6-rc; do
             CURRENT=$(docker buildx imagetools inspect \
               "docker.io/library/php:${V}-fpm-alpine" \
               --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"')

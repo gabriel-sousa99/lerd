@@ -7,14 +7,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -23,9 +27,6 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/gabriel-sousa99/lerd/internal/shims"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
-
-	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
-
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -46,12 +47,39 @@ func quadletImage(unit string) string {
 	return ""
 }
 
-// ensureImages checks all images required by units that are about to start and
-// builds or pulls any that are missing, using the parallel spinner UI.
+// imageWork pairs the job that produces an image with the disclosure of what
+// that job downloads, so a new case can never add a silent download.
+type imageWork struct {
+	job  BuildJob
+	item imagepull.Item
+}
+
+// ensureImages checks all images required by units that are about to start,
+// discloses everything it is about to download, and then builds or pulls any
+// that are missing using the parallel spinner UI.
 func ensureImages() {
+	work := pendingImageWork()
+	if len(work) == 0 {
+		return
+	}
+	plan := make(imagepull.Plan, len(work))
+	jobs := make([]BuildJob, len(work))
+	for i, w := range work {
+		plan[i], jobs[i] = w.item, w.job
+	}
+	plan.Fill().Report(os.Stdout)
+	if imagepull.DryRun() {
+		return
+	}
+	RunParallel(jobs) //nolint:errcheck
+}
+
+// pendingImageWork lists every image a start would have to build or pull
+// because it is not in the local store.
+func pendingImageWork() []imageWork {
 	units := append(lifecycle.CoreUnits(), lifecycle.InstalledServiceUnits()...)
 	units = append(units, lifecycle.InstalledCustomContainerUnits()...)
-	var jobs []BuildJob
+	var work []imageWork
 	seen := map[string]bool{}
 
 	for _, unit := range units {
@@ -75,18 +103,17 @@ func ensureImages() {
 		}
 
 		img := image
+		reason := "missing, needed by " + strings.TrimPrefix(unit, "lerd-")
 		switch {
-		case img == "lerd-dnsmasq:local":
-			jobs = append(jobs, BuildJob{
-				Label: "Building dnsmasq",
-				Run: func(w io.Writer) error {
-					containerfile := "FROM docker.io/library/alpine:latest\nRUN apk add --no-cache dnsmasq\n"
-					cmd := podman.Cmd("build", "-t", "lerd-dnsmasq:local", "-")
-					cmd.Stdin = strings.NewReader(containerfile)
-					cmd.Stdout = w
-					cmd.Stderr = w
-					return cmd.Run()
+		case img == podman.DNSMasqImage:
+			work = append(work, imageWork{
+				job: BuildJob{
+					Label: "Building dnsmasq",
+					Run: func(w io.Writer) error {
+						return podman.BuildDNSMasqImage(w, dns.ReadUpstreamDNS())
+					},
 				},
+				item: imagepull.Build("dnsmasq image", podman.DNSMasqBaseImage, reason),
 			})
 
 		case strings.HasPrefix(img, "lerd-php") && strings.HasSuffix(img, "-fpm:local"):
@@ -94,12 +121,15 @@ func ensureImages() {
 			short := strings.TrimSuffix(strings.TrimPrefix(img, "lerd-php"), "-fpm:local")
 			ver := short[:1] + "." + short[1:]
 			v := ver
-			jobs = append(jobs, BuildJob{
-				Label: "PHP " + v,
-				Run: func(w io.Writer) error {
-					_, err := podman.BuildFPMImageTo(v, false, w)
-					return err
+			work = append(work, imageWork{
+				job: BuildJob{
+					Label: "PHP " + v,
+					Run: func(w io.Writer) error {
+						_, err := podman.BuildFPMImageTo(v, false, w)
+						return err
+					},
 				},
+				item: imagepull.Build("PHP "+v+" image", podman.PHPBaseImageRef(v), reason),
 			})
 
 		case strings.HasPrefix(img, "localhost/lerd-frankenphp") && strings.HasSuffix(img, ":local"):
@@ -110,57 +140,88 @@ func ensureImages() {
 				continue // malformed tag with no version digits; skip rather than panic
 			}
 			v := short[:1] + "." + short[1:]
-			jobs = append(jobs, BuildJob{
-				Label: "FrankenPHP " + v,
-				Run:   func(w io.Writer) error { return podman.BuildFrankenPHPImage(v, false, w) },
+			work = append(work, imageWork{
+				job: BuildJob{
+					Label: "FrankenPHP " + v,
+					Run:   func(w io.Writer) error { return podman.BuildFrankenPHPImage(v, false, w) },
+				},
+				item: imagepull.Build("FrankenPHP "+v+" image", podman.FrankenPHPBaseImage(v), reason),
 			})
 
 		case strings.HasPrefix(img, "lerd-custom-") && strings.HasSuffix(img, ":local"):
 			// Rebuild custom container from the site's Containerfile.
 			siteName := strings.TrimSuffix(strings.TrimPrefix(img, "lerd-custom-"), ":local")
 			sn := siteName
-			jobs = append(jobs, BuildJob{
-				Label: "Custom: " + sn,
-				Run: func(w io.Writer) error {
-					site, err := config.FindSite(sn)
-					if err != nil {
-						return err
-					}
-					proj, err := config.LoadProjectConfig(site.Path)
-					if err != nil {
-						return err
-					}
-					return podman.BuildCustomImageTo(sn, site.Path, proj.Container, w)
+			work = append(work, imageWork{
+				job: BuildJob{
+					Label: "Custom: " + sn,
+					Run: func(w io.Writer) error {
+						site, err := config.FindSite(sn)
+						if err != nil {
+							return err
+						}
+						proj, err := config.LoadProjectConfig(site.Path)
+						if err != nil {
+							return err
+						}
+						return podman.BuildCustomImageTo(sn, site.Path, proj.Container, w)
+					},
 				},
+				// The site's own Containerfile decides what this downloads, so
+				// there is no single base image to size up.
+				item: imagepull.Build("Custom container: "+sn, "", reason),
 			})
 
 		default:
 			label := podman.PlatformImage(img)
-			jobs = append(jobs, BuildJob{
-				Label: "Pulling " + label,
-				Run: func(w io.Writer) error {
-					args := append(append([]string{"pull"}, podman.PlatformPullArgs(label)...), label)
-					cmd := podman.Cmd(args...)
-					cmd.Stdout = w
-					cmd.Stderr = w
-					return cmd.Run()
+			work = append(work, imageWork{
+				job: BuildJob{
+					Label: "Pulling " + label,
+					Run: func(w io.Writer) error {
+						return podman.PullImageTo(label, w)
+					},
 				},
+				item: imagepull.Pull(label, reason),
 			})
 		}
 	}
 
-	if len(jobs) > 0 {
-		RunParallel(jobs) //nolint:errcheck
-	}
+	return work
 }
 
 // NewStartCmd returns the start command.
 func NewStartCmd() *cobra.Command {
-	return &cobra.Command{
+	var dryRun bool
+	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start Lerd (DNS, nginx, PHP-FPM, and installed services)",
-		RunE:  runStart,
+		RunE: func(*cobra.Command, []string) error {
+			if dryRun {
+				imagepull.SetDryRun(true)
+				ReportPendingDownloads(os.Stdout)
+				return nil
+			}
+			return startLerd(nil, nil)
+		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
+		"Report the images a start would pull or rebuild, with their sizes, and exit")
+	return cmd
+}
+
+// ReportPendingDownloads discloses everything a start would download without
+// downloading or starting anything.
+func ReportPendingDownloads(w io.Writer) {
+	work := pendingImageWork()
+	if len(work) == 0 {
+		feedback.LineOn(w, "Nothing to download: every image lerd needs is already in the local store.")
+		return
+	}
+	plan := make(imagepull.Plan, len(work))
+	for i, it := range work {
+		plan[i] = it.item
+	}
+	plan.Fill().Report(w)
 }
 
 // NewStopCmd returns the stop command.
@@ -241,17 +302,7 @@ func CollectPortChecks(units []string) []PortCheck {
 
 	// Nginx ports (configurable).
 	if unitSet["lerd-nginx"] {
-		cfg, err := config.LoadGlobal()
-		httpPort := 80
-		httpsPort := 443
-		if err == nil {
-			if cfg.Nginx.HTTPPort > 0 {
-				httpPort = cfg.Nginx.HTTPPort
-			}
-			if cfg.Nginx.HTTPSPort > 0 {
-				httpsPort = cfg.Nginx.HTTPSPort
-			}
-		}
+		httpPort, httpsPort := config.NginxPorts()
 		checks = append(checks,
 			PortCheck{strconv.Itoa(httpPort), "nginx HTTP", "lerd-nginx"},
 			PortCheck{strconv.Itoa(httpsPort), "nginx HTTPS", "lerd-nginx"},
@@ -387,15 +438,43 @@ func podmanContainerRunning(name string) bool {
 // the configured TLD, which means a listener on the DNS port is lerd-dns itself
 // rather than a foreign process.
 func lerdDNSAnswering() bool {
-	cfg, _ := config.LoadGlobal()
-	tld := "test"
-	if cfg != nil && cfg.DNS.TLD != "" {
-		tld = cfg.DNS.TLD
-	}
-	return dns.CheckStatus(tld) != dns.StatusDown
+	return dns.CheckStatus(dns.ConfiguredTLD()) != dns.StatusDown
 }
 
-func runStart(_ *cobra.Command, _ []string) error {
+// StartEvent is one step of the start sequence. The dashboard streams these so
+// a start driven from the UI reads like the CLI's spinner instead of a button
+// that hangs for a minute with nothing to show for it.
+type StartEvent struct {
+	// Phase is "step" for a stage of the sequence, "unit" for one unit that has
+	// finished starting (Error set if it failed), and "done" at the end.
+	Phase string `json:"phase"`
+	Step  string `json:"step,omitempty"`
+	Unit  string `json:"unit,omitempty"`
+	// Total is the number of units the run will start, sent once before the
+	// first of them so the dashboard can show progress out of a known total.
+	Total int    `json:"total,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// startLerd is the full start sequence. emit, when set, receives a StartEvent
+// per stage and per unit; it is called from the parallel start jobs, so it is
+// serialised here rather than in every caller.
+//
+// skip names units the run must not touch, for a daemon starting lerd from
+// inside one of them: starting a unit boots it out of launchd first, which is
+// the same SIGTERM a stop is, so lerd-ui asking for its own unit killed the
+// start half way and left the dashboard unreachable behind a 502.
+func startLerd(emit func(StartEvent), skip []string) error {
+	var emitMu sync.Mutex
+	report := func(e StartEvent) {
+		if emit == nil {
+			return
+		}
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		emit(e)
+	}
+	report(StartEvent{Phase: "step", Step: "preparing"})
 	// Clear the intentional-stop marker up front: we're bringing lerd up, so the
 	// worker health watcher should resume reporting real drift once units are back.
 	_ = config.ClearStopped()
@@ -456,6 +535,23 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// missing quadlet, drop an orphan quadlet with no YAML. Data dirs untouched.
 	reconcileCustomServices()
 
+	// Heal quadlets whose IPv6 publish lines the host can no longer bind. A
+	// VPN client that turns IPv6 off host-wide takes ::1 with it, and every
+	// unit still carrying a [::1] line dies with exit 126 (#1634).
+	if healed, err := podman.HealIPv6Binds(); err != nil {
+		fmt.Printf("  WARN: healing IPv6 binds: %v\n", err)
+	} else if len(healed) > 0 {
+		fmt.Printf("  Rewrote %d unit(s) to match the host's IPv6 support\n", len(healed))
+		_ = podman.DaemonReloadFn()
+		for _, name := range healed {
+			if status, _ := services.Mgr.UnitStatus(name); status == "active" || status == "activating" {
+				if err := podman.RestartUnit(name); err != nil {
+					fmt.Printf("  WARN: restarting %s: %v\n", name, err)
+				}
+			}
+		}
+	}
+
 	// If the configured default PHP version has never been installed (no plist /
 	// quadlet / container), install it now so CoreUnits can include it.
 	ensureDefaultPHPInstalled()
@@ -465,11 +561,25 @@ func runStart(_ *cobra.Command, _ []string) error {
 	checkPortConflicts(units)
 
 	// Build or pull any missing images before starting containers.
+	report(StartEvent{Phase: "step", Step: "images"})
 	ensureImages()
 
 	// Rewrite nginx.conf so any config changes in new binary versions take effect.
 	if err := nginx.EnsureNginxConfig(); err != nil {
 		fmt.Printf("  WARN: nginx config: %v\n", err)
+	}
+	// The quadlet carries the host ports nginx publishes, so a start has to
+	// rewrite it too, and restart the container when it changed: a running
+	// nginx keeps the mapping it was created with, so writing the unit alone
+	// leaves a moved nginx.http_port unapplied until something else restarts
+	// it (#1544).
+	if quadletChanged, err := nginx.RewriteNginxQuadlet(); err != nil {
+		fmt.Printf("  WARN: nginx quadlet: %v\n", err)
+	} else if quadletChanged {
+		_ = podman.DaemonReloadFn()
+		if err := podman.RestartUnit("lerd-nginx"); err != nil {
+			fmt.Printf("  WARN: restarting nginx on the new ports: %v\n", err)
+		}
 	}
 	if err := nginx.EnsureLerdVhost(); err != nil {
 		fmt.Printf("  WARN: lerd vhost: %v\n", err)
@@ -539,6 +649,7 @@ func runStart(_ *cobra.Command, _ []string) error {
 	serviceUnits := append(lifecycle.CoreUnits(), lifecycle.InstalledServiceUnits()...)
 	serviceUnits = append(serviceUnits, lifecycle.InstalledCustomContainerUnits()...)
 	serviceUnits = append(serviceUnits, "lerd-ui", "lerd-watcher")
+	serviceUnits = dropSkipped(serviceUnits, skip)
 
 	// Phase 2: worker units that depend on running containers.
 	workerUnits := append(lifecycle.RegisteredQueueUnits(), lifecycle.RegisteredStripeUnits()...)
@@ -556,9 +667,11 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// (site shown asleep, workers actually running) and making workerheal skip it.
 	// Mirrors the worktree autostart filter; real activity wakes it via the engine.
 	workerUnits = dropIdleSuspendedUnits(workerUnits)
+	workerUnits = dropSkipped(workerUnits, skip)
 
 	feedback.Begin()
 	feedback.Line("starting lerd")
+	report(StartEvent{Phase: "step", Step: "units", Total: len(serviceUnits) + len(workerUnits)})
 
 	makeJobs := func(us []string) []BuildJob {
 		jobs := make([]BuildJob, len(us))
@@ -568,10 +681,18 @@ func runStart(_ *cobra.Command, _ []string) error {
 			jobs[i] = BuildJob{
 				Label: label,
 				Run: func(w io.Writer) error {
+					var err error
 					if unit == "lerd-dns" {
-						return podman.RestartUnit(unit)
+						err = podman.RestartUnit(unit)
+					} else {
+						err = podman.StartUnit(unit)
 					}
-					return podman.StartUnit(unit)
+					ev := StartEvent{Phase: "unit", Unit: label}
+					if err != nil {
+						ev.Error = err.Error()
+					}
+					report(ev)
+					return err
 				},
 			}
 		}
@@ -606,6 +727,7 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// stop there; on every other platform it is a no-op that returns false and
 	// the start continues as normal.
 	if reportOverlayHealOutcome(serviceErr) {
+		report(StartEvent{Phase: "done"})
 		return nil
 	}
 	if len(workerUnits) > 0 {
@@ -656,6 +778,7 @@ func runStart(_ *cobra.Command, _ []string) error {
 	// script fires on interface "up" but that event precedes lerd-dns starting.
 	// The NixOS note lives here (and on install), not inside ConfigureResolver:
 	// the watcher calls that whenever .test fails.
+	report(StartEvent{Phase: "step", Step: "dns"})
 	dns.NoteNixOSOwnsResolver()
 	if err := dns.ConfigureResolver(); err != nil {
 		fmt.Printf("  WARN: DNS resolver config: %v\n", err)
@@ -673,31 +796,18 @@ func runStart(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Restart the tray applet, stopping any existing instance first.
-	// Prefer the systemd service when enabled; otherwise launch directly.
-	tray := feedback.Start("starting lerd-tray")
-	if services.Mgr.IsEnabled("lerd-tray") {
-		// Use Start (bootout+bootstrap) instead of Restart (kickstart -k) to
-		// avoid launchctl hanging while waiting for the tray process to die.
-		killTray()
-		if err := services.Mgr.Start("lerd-tray"); err != nil {
-			tray.Fail(err)
-		} else {
-			tray.OK("")
-		}
-	} else {
-		killTray()
-		exe, err := os.Executable()
-		if err == nil {
-			err = exec.Command(exe, "tray").Start()
-		}
-		if err != nil {
+	// Both launch paths below bring the tray back, which is why masking the
+	// unit never kept it away; the preference has to be checked here instead.
+	if trayEnabled() {
+		tray := feedback.Start("starting lerd-tray")
+		if err := launchTray(); err != nil {
 			tray.Fail(err)
 		} else {
 			tray.OK("")
 		}
 	}
 
+	report(StartEvent{Phase: "done"})
 	return nil
 }
 
@@ -710,8 +820,9 @@ func startRestoredServices() {
 		return
 	}
 
-	// Pull missing images first.
+	// Pull missing images first, disclosing the download before it starts.
 	var pullJobs []BuildJob
+	var plan imagepull.Plan
 	seen := map[string]bool{}
 	for _, unit := range units {
 		// PlatformImage covers a quadlet still on the upstream image from before
@@ -725,18 +836,14 @@ func startRestoredServices() {
 			continue
 		}
 		img := image
+		plan = append(plan, imagepull.Pull(img, "missing, needed by "+strings.TrimPrefix(unit, "lerd-")))
 		pullJobs = append(pullJobs, BuildJob{
 			Label: "Pulling " + img,
-			Run: func(w io.Writer) error {
-				args := append(append([]string{"pull"}, podman.PlatformPullArgs(img)...), img)
-				cmd := podman.Cmd(args...)
-				cmd.Stdout = w
-				cmd.Stderr = w
-				return cmd.Run()
-			},
+			Run:   func(w io.Writer) error { return podman.PullImageTo(img, w) },
 		})
 	}
 	if len(pullJobs) > 0 {
+		plan.Fill().Report(os.Stdout)
 		RunParallel(pullJobs) //nolint:errcheck
 	}
 
@@ -790,10 +897,33 @@ func startRestoredServices() {
 	RunParallel(workerJobs) //nolint:errcheck
 }
 
-// killTray kills any running lerd tray process (launched directly or as lerd-tray binary).
+// launchTray restarts the tray applet, stopping any existing instance first.
+// Prefers the systemd service when enabled, otherwise launches the helper
+// directly. Start (bootout+bootstrap) rather than Restart (kickstart -k), or
+// launchctl hangs waiting for the tray process to die.
+func launchTray() error {
+	killTray()
+	if services.Mgr.IsEnabled("lerd-tray") {
+		return services.Mgr.Start("lerd-tray")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return exec.Command(exe, "tray").Start()
+}
+
+// trayProcessPatterns match a running tray applet, launched directly or as the
+// lerd-tray binary, and nothing else. Anchored at the end because `lerd tray
+// off` has to kill the applet from a command line that contains those very
+// words, and an unanchored match takes out the command and its shell with it.
+var trayProcessPatterns = []string{`lerd tray( --mono)?$`, `lerd-tray$`}
+
+// killTray kills any running lerd tray process.
 func killTray() {
-	exec.Command("pkill", "-f", "lerd tray").Run()
-	exec.Command("pkill", "-f", "lerd-tray").Run()
+	for _, pattern := range trayProcessPatterns {
+		exec.Command("pkill", "-f", pattern).Run() //nolint:errcheck
+	}
 }
 
 // reconcileCustomServices heals custom-service drift on start (issue #678).
@@ -1147,8 +1277,18 @@ func dedupeStrings(in []string) []string {
 	return out
 }
 
-// RunStart starts all lerd services (exported for use by the UI server).
-func RunStart() error { return runStart(nil, nil) }
+// RunStart starts all lerd services (exported for use by the UI server). emit,
+// when set, receives one StartEvent per stage and per unit. Pass the caller's
+// own unit in skip so the start does not boot the caller out.
+func RunStart(emit func(StartEvent), skip ...string) error { return startLerd(emit, skip) }
+
+// dropSkipped removes skip's units from us, leaving the order of the rest.
+func dropSkipped(us, skip []string) []string {
+	if len(skip) == 0 {
+		return us
+	}
+	return slices.DeleteFunc(us, func(u string) bool { return slices.Contains(skip, u) })
+}
 
 // RunStop stops lerd containers (exported for use by the UI server).
 func RunStop() error { return runStop(nil, nil) }
@@ -1177,11 +1317,11 @@ func runQuit(_ *cobra.Command, _ []string) error {
 	return lifecycle.Quit(spinnerRunner, killTray)
 }
 
-// canPromptForPassword reports whether sudo would have someone to ask. sudo reads
-// the password from the controlling terminal, not from stdin, so /dev/tty is the
-// signal: `lerd start < /dev/null` in a terminal can still prompt, and a systemd
-// service with neither cannot. term.IsTerminal on stdin alone gets both wrong.
-func canPromptForPassword() bool {
+// hasControllingTerminal reports whether this run has a terminal behind it.
+// /dev/tty rather than stdin is the signal: `lerd start < /dev/null` in a
+// terminal still has one, and a launchd job or a Finder-launched app has
+// neither. term.IsTerminal on stdin alone gets both wrong.
+func hasControllingTerminal() bool {
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		return true
 	}
@@ -1192,6 +1332,10 @@ func canPromptForPassword() bool {
 	tty.Close()
 	return true
 }
+
+// canPromptForPassword reports whether sudo would have someone to ask: it reads
+// the password from the controlling terminal, not from stdin.
+func canPromptForPassword() bool { return hasControllingTerminal() }
 
 // dnsEnabled reports whether the user has lerd manage DNS. When off, start must
 // not install DNS sudoers grants or touch any resolver state.

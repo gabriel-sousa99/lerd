@@ -6,6 +6,8 @@ The tray binary requires CGO and `libayatana-appindicator`. See [System Tray: Bu
 
 Go is required to build from source. The released binary has no runtime dependencies.
 
+The installer suite runs under `bats` and shells out to `perl` for the two checks that need a process with no controlling terminal, since `setsid` is util-linux and macOS ships no equivalent. Both are present by default on macOS and on every distro lerd targets.
+
 **Web UI**: the `lerd-ui` dashboard is built from Svelte sources under `internal/ui/web/` and bundled into the Go binary via `//go:embed`. Node.js (20+) and npm are required to rebuild it. `make build` runs `npm install` (once) and `npm run build` automatically before the Go build, so a single `make` command still produces a self-contained binary. If you only change Go code, you can skip the JS build by running `go build` directly against a previously-built `internal/ui/web/dist/` tree.
 
 ## Build commands
@@ -24,6 +26,8 @@ make clean       # remove ./build/ and internal/ui/web/dist/
 Tests must isolate lerd's state before they touch it, with `t.Setenv("XDG_CONFIG_HOME", t.TempDir())` and `t.Setenv("XDG_DATA_HOME", t.TempDir())`. Anything writing or deleting a real config file, systemd unit or quadlet panics with the path it tried to touch, because a test that skipped this once removed a developer's lerd-dns quadlet and left the container running under a unit systemd no longer knew about.
 
 On macOS the launchd units in `~/Library/LaunchAgents` follow `HOME` instead, so a test that writes or removes one needs `t.Setenv("HOME", t.TempDir())` on top of the XDG pair, guarded by `runtime.GOOS == "darwin"`. Moving `HOME` on Linux would relocate podman's container storage into the temp dir, which the test then cannot clean up. The guard names whichever var applies when it fires.
+
+Isolating `HOME` moves the plist file but not the launchd domain it is bootstrapped into, which has no per-test equivalent. Starting, stopping or restarting a unit is therefore refused outright under test unless the test installs its own stub in `podman.UnitLifecycle`; the platform manager macOS registers at init counts as the real system, not a stub. A test that needs the lifecycle to run should assign a fake and assert against what it recorded.
 
 ## Cross-compile for arm64
 

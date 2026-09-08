@@ -54,12 +54,16 @@ func TestNextTab_CyclesBothDirections(t *testing.T) {
 		t.Fatalf("dashboard +1 should be sites, got %d", got)
 	}
 	m.activeTab = tabServices
+	if got := m.nextTab(+1); got != tabDatabases {
+		t.Fatalf("services +1 should be databases, got %d", got)
+	}
+	m.activeTab = tabDatabases
 	if got := m.nextTab(+1); got != tabDashboard {
-		t.Fatalf("services +1 should wrap to dashboard, got %d", got)
+		t.Fatalf("databases +1 should wrap to dashboard, got %d", got)
 	}
 	m.activeTab = tabDashboard
-	if got := m.nextTab(-1); got != tabServices {
-		t.Fatalf("dashboard -1 should wrap to services, got %d", got)
+	if got := m.nextTab(-1); got != tabDatabases {
+		t.Fatalf("dashboard -1 should wrap to databases, got %d", got)
 	}
 }
 

@@ -35,7 +35,7 @@ func TestWriteWorkerUnitFileRefusesInjectionInAnyField(t *testing.T) {
 
 			_, err := writeWorkerUnitFile(
 				"lerd-probe-mysite", tc.label, tc.siteName, t.TempDir(), "8.4",
-				"sleep 3600", tc.restart, tc.schedule, "lerd-php84-fpm", false,
+				"sleep 3600", tc.restart, tc.schedule, "lerd-php84-fpm", "", false,
 			)
 			if err == nil {
 				t.Errorf("%s carrying a newline was accepted", tc.field)
@@ -61,7 +61,7 @@ func TestWriteWorkerUnitFileAcceptsNormalFields(t *testing.T) {
 
 	changed, err := writeWorkerUnitFile(
 		"lerd-queue-mysite", "Queue Worker", "mysite", t.TempDir(), "8.4",
-		"php artisan queue:work", "always", "", "lerd-php84-fpm", false,
+		"php artisan queue:work", "always", "", "lerd-php84-fpm", "", false,
 	)
 	if err != nil || !changed {
 		t.Fatalf("writeWorkerUnitFile = %v, %v; want a clean write", changed, err)

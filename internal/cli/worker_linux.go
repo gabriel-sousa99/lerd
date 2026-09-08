@@ -32,7 +32,7 @@ func removeWorkerExecArtifacts(_ string) {}
 // expression — the right shape for one-shot commands like Laravel 10's
 // `php artisan schedule:run`, which exit immediately and would otherwise
 // restart-loop every 5s under Restart=always.
-func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, command, restart, schedule, fpmUnit string, host bool) (bool, error) {
+func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, command, restart, schedule, fpmUnit, requiresUnit string, host bool) (bool, error) {
 	// Generation-boundary guard so every caller is covered (incl. the boot
 	// restore path): every value below is a line of the unit, and a cloned
 	// repo's .lerd.yaml can set the worker ones.
@@ -49,7 +49,14 @@ func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, comman
 		return false, err
 	}
 	if host {
-		return writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart, fpmUnit)
+		return writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart, fpmUnit, requiresUnit)
+	}
+	// A worker that declares a service it needs is ordered after it, so a boot
+	// brings the service up first rather than restart-looping the worker until
+	// it does. Wants, not BindsTo: a service restart must not kill the worker.
+	requires := ""
+	if requiresUnit != "" {
+		requires = fmt.Sprintf("After=%s.service\nWants=%s.service\n", requiresUnit, requiresUnit)
 	}
 	container := fpmUnit
 
@@ -58,11 +65,11 @@ func writeWorkerUnitFile(unitName, label, siteName, sitePath, phpVersion, comman
 Description=Lerd %s (%s)
 After=network.target %s.service
 BindsTo=%s.service
-
+%s
 [Service]
 Type=oneshot
 ExecStart=%s exec -w %s --env=LERD_SITE=%s %s%s %s
-`, label, siteName, fpmUnit, fpmUnit, podman.PodmanBin(), podman.ShellQuote(sitePath), siteName, workerColorArgs(), container, command)
+`, label, siteName, fpmUnit, fpmUnit, requires, podman.PodmanBin(), podman.ShellQuote(sitePath), siteName, workerColorArgs(), container, command)
 
 		timerUnit := fmt.Sprintf(`[Unit]
 Description=Lerd %s timer (%s)
@@ -91,7 +98,7 @@ WantedBy=timers.target
 Description=Lerd %s (%s)
 After=network.target %s.service
 BindsTo=%s.service
-
+%s
 [Service]
 Type=simple
 Restart=%s
@@ -101,7 +108,7 @@ ExecStart=%s exec -w %s --env=LERD_SITE=%s%s %s%s %s
 
 [Install]
 WantedBy=default.target
-`, label, siteName, fpmUnit, fpmUnit, restart, podman.PodmanBin(), podman.ShellQuote(sitePath), siteName, workerExecEnvFlags(sitePath), workerColorArgs(), container, command)
+`, label, siteName, fpmUnit, fpmUnit, requires, restart, podman.PodmanBin(), podman.ShellQuote(sitePath), siteName, workerExecEnvFlags(sitePath), workerColorArgs(), container, command)
 
 	// A previous run may have written a sibling .timer for this unit
 	// (e.g. before the framework yaml dropped its `schedule:` field).
@@ -119,7 +126,7 @@ const defaultNodeVersion = "22"
 // other language (Python, Ruby, Go, …) runs its command directly. When the
 // worker backs a PHP site (fpmUnit set) the unit is ordered after and pulls up
 // that FPM container; host-proxy sites have no FPM and omit the dependency.
-func writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart, fpmUnit string) (bool, error) {
+func writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, restart, fpmUnit, requiresUnit string) (bool, error) {
 	// Wrap the command in /bin/sh -c so shell features (&&, |, env-var
 	// expansion, redirects) work. systemd's ExecStart performs argv-style
 	// splitting on whitespace and execve's the result directly, so without the
@@ -171,6 +178,9 @@ func writeHostWorkerUnitFile(unitName, label, siteName, sitePath, command, resta
 	fpmOrder := ""
 	if fpmUnit != "" {
 		fpmOrder = fmt.Sprintf("After=network.target %s.service\nWants=%s.service\n", fpmUnit, fpmUnit)
+	}
+	if requiresUnit != "" {
+		fpmOrder += fmt.Sprintf("After=%s.service\nWants=%s.service\n", requiresUnit, requiresUnit)
 	}
 	unit := fmt.Sprintf(`[Unit]
 Description=Lerd %s (%s)
@@ -228,6 +238,10 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 		}
 		command = command + " --port=" + port
 	}
+	// The unit is rewritten here on every `lerd start`, so the dev server flags
+	// have to be rebuilt with it or the worker comes back on its own port and
+	// the site's page is refused the assets it asks for.
+	command = devServerCommand(siteName, sitePath, workerName, command, w.Host)
 
 	fpmUnit := resolveWorkerFPMUnit(siteName, phpVersion)
 	unitName, displaySite := workerNames(siteName, sitePath, workerName)
@@ -241,7 +255,7 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 		label = workerName
 	}
 
-	changed, err := writeWorkerUnitFile(unitName, label, displaySite, sitePath, phpVersion, command, restart, w.Schedule, fpmUnit, w.Host)
+	changed, err := writeWorkerUnitFile(unitName, label, displaySite, sitePath, phpVersion, command, restart, w.Schedule, fpmUnit, requiredServiceUnit(sitePath, w), w.Host)
 	if err != nil {
 		feedback.Warn("writing worker unit %s: %v", unitName, err)
 		return
@@ -251,7 +265,7 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 		if w.Schedule != "" {
 			enableTarget = unitName + ".timer"
 		}
-		if err := services.Mgr.Enable(enableTarget); err != nil {
+		if err := syncWorkerBootArming(enableTarget); err != nil {
 			feedback.Warn("enable %s: %v", enableTarget, err)
 		}
 	}

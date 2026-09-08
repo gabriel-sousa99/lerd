@@ -65,6 +65,14 @@ const (
 	// into the env file its framework declares, which is what `lerd env` does
 	// and what resolves a service picked but not wired.
 	FixEnvSync = "env_sync"
+	// FixCreateDatabase creates the databases a site points at that its engine
+	// does not hold, a host action like the service fixes since a site cannot
+	// create its own schema from inside its container.
+	FixCreateDatabase = "database_create"
+	// FixStaleWorkers disables and deletes the unit files left behind for
+	// workers the site no longer declares, a host action for the same reason the
+	// vhost fix is one: the units live outside the container.
+	FixStaleWorkers = "stale_workers_remove"
 )
 
 // DoctorFixCommands maps each universal fix key to the shell command run in the
@@ -113,20 +121,26 @@ func (d *Response) add(c Check) {
 	d.Checks = append(d.Checks, c)
 }
 
-// Run builds the doctor report for the project at path using fw to drive both
-// the universal baseline and the framework's declarative checks. fw may be nil
-// (an unknown framework) — only the file/dependency baseline runs then. The
-// cheap checks read files; command and audit checks touch the container.
 // RunForPath resolves the framework definition for a project path and runs the
-// doctor, so the CLI, MCP, and Web UI share one path -> framework -> Run chain
-// instead of re-deriving it three ways. fwName is the site's recorded framework
-// when known; pass "" to detect it from the path.
+// doctor, so the CLI, MCP, and Web UI share one path -> framework -> Run chain.
+// fwName is the site's recorded framework; pass "" to detect it from the path.
 func RunForPath(ctx context.Context, path, fwName string) Response {
+	return runForPath(ctx, path, fwName, Options{})
+}
+
+// RunQuickForPath is RunForPath without the checks that shell into the site
+// container or read the timing snapshot, so `lerd doctor` can sweep every linked
+// site without turning into a minute-long command.
+func RunQuickForPath(ctx context.Context, path, fwName string) Response {
+	return runForPath(ctx, path, fwName, Options{Quick: true})
+}
+
+func runForPath(ctx context.Context, path, fwName string, opts Options) Response {
 	if fwName == "" {
 		fwName, _ = config.DetectFrameworkForDir(path)
 	}
 	fw, _ := config.GetFrameworkForDir(fwName, path)
-	return Run(ctx, path, fw)
+	return RunWith(ctx, path, fw, opts)
 }
 
 // AppliesForPath reports whether the doctor has any check to run for the project
@@ -148,7 +162,7 @@ func AppliesForPath(path, fwName string) bool {
 // it, since its package.json still drives the node checks.
 func Applies(path string, fw *config.Framework) bool {
 	if fw != nil {
-		if len(fw.Requires) > 0 || fw.HasEnvConfig() || len(frameworkChecks(fw)) > 0 {
+		if len(fw.Requires) > 0 || fw.HasEnvConfig() || len(frameworkChecks(fw, path)) > 0 {
 			return true
 		}
 		if fw.PHP.Min != "" || fw.PHP.Max != "" {
@@ -161,6 +175,11 @@ func Applies(path string, fw *config.Framework) bool {
 	if fileExists(filepath.Join(path, "package.json")) {
 		return true
 	}
+	// A .lerd.yaml is itself something to validate, so a project carrying one
+	// always has a report worth opening.
+	if fileExists(filepath.Join(path, projectConfigFile)) {
+		return true
+	}
 	// A committed dotenv example drives the env_drift check even with no framework,
 	// so a bare proxy carrying one still has something to report.
 	if _, format, exampleFile := envSetup(fw, path); format == "dotenv" && fileExists(filepath.Join(path, exampleFile)) {
@@ -169,8 +188,27 @@ func Applies(path string, fw *config.Framework) bool {
 	return false
 }
 
+// Options tunes how much of the report Run produces.
+type Options struct {
+	// Quick drops the checks that shell into the site container (the framework
+	// command checks, composer validate, the composer and npm audits) and the
+	// request-timing lookup, leaving the file-and-config ones.
+	Quick bool
+}
+
+// Run builds the doctor report for the project at path using fw to drive both
+// the universal baseline and the framework's declarative checks. fw may be nil
+// (an unknown framework), and then only the file/dependency baseline runs.
 func Run(ctx context.Context, path string, fw *config.Framework) Response {
+	return RunWith(ctx, path, fw, Options{})
+}
+
+// RunWith is Run honouring opts, so a caller can ask for the cheap checks only.
+func RunWith(ctx context.Context, path string, fw *config.Framework, opts Options) Response {
 	resp := Response{Checks: []Check{}}
+	if c, ok := checkProjectConfig(path, fw); ok {
+		resp.add(c)
+	}
 	envFile, envFormat, exampleFile := envSetup(fw, path)
 	envPath := filepath.Join(path, envFile)
 
@@ -183,7 +221,7 @@ func Run(ctx context.Context, path string, fw *config.Framework) Response {
 		// settings.php its installer wrote, and reporting that as the env file
 		// present would hide the missing one lerd and drush both need.
 		writeFile, _ := fw.Env.ResolveWrite(path)
-		if c, ok := checkEnvPresent(path, writeFile, fwExampleFile(fw)); ok {
+		if c, ok := checkEnvPresent(path, writeFile, fwExampleFile(fw), writeFile == fw.Env.AppFile); ok {
 			resp.add(c)
 		}
 		if c, ok := checkServiceWiring(path, envFile, fw); ok {
@@ -207,7 +245,7 @@ func Run(ctx context.Context, path string, fw *config.Framework) Response {
 	}
 	// Whether the site's database exists is answered through the framework
 	// declaration, so it is asked of every format, not only dotenv.
-	if c, ok := checkServerDatabase(path, fw); ok {
+	if c, ok := checkServerDatabase(path); ok {
 		resp.add(c)
 		dbBroken = dbBroken || c.Status == StatusFail
 	}
@@ -225,8 +263,13 @@ func Run(ctx context.Context, path string, fw *config.Framework) Response {
 	// (results collected in order) so a down app caps the panel at roughly one
 	// timeout instead of the sum of them all.
 	var tasks []func() (Check, bool)
-	for _, spec := range frameworkChecks(fw) {
+	for _, spec := range frameworkChecks(fw, path) {
 		spec := spec
+		// A command check is an exec into the site's container, which is what the
+		// quick pass exists to avoid.
+		if opts.Quick && spec.Type == "command" {
+			continue
+		}
 		// A known-broken database turns a migration check into "couldn't run" noise
 		// that just repeats the database finding's remedy, so skip a command check
 		// whose fix is the same migrate command; unrelated command checks still run.
@@ -235,7 +278,7 @@ func Run(ctx context.Context, path string, fw *config.Framework) Response {
 		}
 		tasks = append(tasks, func() (Check, bool) { return runDeclaredCheck(ctx, path, envPath, envFormat, spec) })
 	}
-	tasks = append(tasks, dependencyCheckTasks(ctx, path, fw)...)
+	tasks = append(tasks, dependencyCheckTasks(ctx, path, fw, opts)...)
 	for _, c := range runChecksConcurrently(tasks) {
 		resp.add(c)
 	}
@@ -245,8 +288,13 @@ func Run(ctx context.Context, path string, fw *config.Framework) Response {
 	if c, ok := checkVhost(path); ok {
 		resp.add(c)
 	}
-	if c, ok := checkSlowRoutes(path); ok {
+	if c, ok := checkStaleWorkers(path, fw); ok {
 		resp.add(c)
+	}
+	if !opts.Quick {
+		if c, ok := checkSlowRoutes(path); ok {
+			resp.add(c)
+		}
 	}
 	applyLabels(&resp)
 	return resp
@@ -385,8 +433,8 @@ func checkRequiredServices(path string, fw *config.Framework) (Check, bool) {
 			Status: StatusFail,
 			Fix:    FixInstallServices,
 			Detail: fmt.Sprintf("%s needs %s, which %s not installed. Install %s with %s.",
-				frameworkLabel(fw), strings.Join(missing, ", "), plural(len(missing), "is", "are"),
-				plural(len(missing), "it", "them"),
+				frameworkLabel(fw), strings.Join(missing, ", "), Plural(len(missing), "is", "are"),
+				Plural(len(missing), "it", "them"),
 				serviceCommands("lerd service preset", missing)),
 		}, true
 	case len(stopped) > 0:
@@ -395,8 +443,8 @@ func checkRequiredServices(path string, fw *config.Framework) (Check, bool) {
 			Status: StatusWarn,
 			Fix:    FixStartServices,
 			Detail: fmt.Sprintf("%s %s required but not running. Start %s with %s.",
-				strings.Join(stopped, ", "), plural(len(stopped), "is", "are"),
-				plural(len(stopped), "it", "them"),
+				strings.Join(stopped, ", "), Plural(len(stopped), "is", "are"),
+				Plural(len(stopped), "it", "them"),
 				serviceCommands("lerd service start", stopped)),
 		}, true
 	}
@@ -421,12 +469,20 @@ func frameworkLabel(fw *config.Framework) string {
 	return fw.Name
 }
 
-// frameworkChecks returns the framework's declarative doctor checks, or nil.
-func frameworkChecks(fw *config.Framework) []config.DoctorCheck {
+// frameworkChecks returns the framework's declarative doctor checks, dropping
+// any whose gate does not hold for this project, or nil.
+func frameworkChecks(fw *config.Framework, projectDir string) []config.DoctorCheck {
 	if fw == nil || fw.Doctor == nil {
 		return nil
 	}
-	return fw.Doctor.Checks
+	var out []config.DoctorCheck
+	for _, c := range fw.Doctor.Checks {
+		if c.Check != nil && !config.MatchesRule(projectDir, *c.Check) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // runDeclaredCheck dispatches one store-declared check to its typed evaluator,
@@ -459,6 +515,7 @@ func runDeclaredCheck(ctx context.Context, path, envPath, envFormat string, spec
 // universalLabels maps the built-in check names to their display labels. The
 // declared framework checks carry their own labels from the store.
 var universalLabels = map[string]string{
+	"project_config":    "Project Config",
 	"required_services": "Required Services",
 	"env_present":       "Env File",
 	"service_wiring":    "Service Wiring",
@@ -474,6 +531,7 @@ var universalLabels = map[string]string{
 	"php_version":       "PHP Version",
 	"vhost":             "Nginx Vhost",
 	"slow_routes":       "Response Time",
+	"stale_workers":     "Worker Units",
 }
 
 // humanize turns a snake_case check name into a Title Case fallback label.
@@ -509,19 +567,27 @@ func applyLabels(resp *Response) {
 // seeding an empty one when it does not, and then writes the connection values
 // for the services the project picks. Leaving the finding at "it is missing"
 // hands the user a question lerd already knows the answer to.
-func envMissingDetail(envFile, exampleFile string) string {
-	if exampleFile == "" {
-		return fmt.Sprintf("%s is missing, run `lerd env` to create it and wire the services this project picks.", envFile)
+func envMissingDetail(envFile, exampleFile string, appWritten bool) string {
+	if exampleFile != "" {
+		return fmt.Sprintf("%s is missing, run `lerd env` to create it from %s and wire the services this project picks.", envFile, exampleFile)
 	}
-	return fmt.Sprintf("%s is missing, run `lerd env` to create it from %s and wire the services this project picks.", envFile, exampleFile)
+	// With nothing to seed from, a file the application writes during its own
+	// install must not be created by hand: an empty one reads to the framework as
+	// "already configured" and breaks a project that was merely waiting to be
+	// installed (#1563). Name the installer instead of a command that would make
+	// things worse.
+	if appWritten {
+		return fmt.Sprintf("%s is missing, so this project has not been installed yet. Run the framework's own install (`lerd run setup` where it offers one), which writes it.", envFile)
+	}
+	return fmt.Sprintf("%s is missing, run `lerd env` to create it and wire the services this project picks.", envFile)
 }
 
-func checkEnvPresent(path, envFile, exampleFile string) (Check, bool) {
+func checkEnvPresent(path, envFile, exampleFile string, appWritten bool) (Check, bool) {
 	if _, err := os.Stat(filepath.Join(path, envFile)); err != nil {
 		return Check{
 			Name:   "env_present",
 			Status: StatusFail,
-			Detail: envMissingDetail(envFile, exampleFile),
+			Detail: envMissingDetail(envFile, exampleFile, appWritten),
 		}, true
 	}
 	return Check{Name: "env_present", Status: StatusOK}, true
@@ -995,17 +1061,23 @@ func runChecksConcurrently(tasks []func() (Check, bool)) []Check {
 // tasks. Each is skipped when its manifest is absent, and the composer audit is
 // skipped when vendor/ is missing (checkComposerDeps already flags that, and the
 // audit can only degrade to "unknown" without installed packages).
-func dependencyCheckTasks(ctx context.Context, path string, fw *config.Framework) []func() (Check, bool) {
+func dependencyCheckTasks(ctx context.Context, path string, fw *config.Framework, opts Options) []func() (Check, bool) {
 	var tasks []func() (Check, bool)
 	if fileExists(filepath.Join(path, "composer.json")) && !composerDisabled(fw) {
-		tasks = append(tasks, func() (Check, bool) { return checkComposerDeps(ctx, path), true })
-		if dirExists(filepath.Join(path, "vendor")) {
-			tasks = append(tasks, func() (Check, bool) { return checkComposerAudit(ctx, path), true })
+		if opts.Quick {
+			tasks = append(tasks, func() (Check, bool) { return checkComposerDepsFiles(path), true })
+		} else {
+			tasks = append(tasks, func() (Check, bool) { return checkComposerDeps(ctx, path), true })
+			if dirExists(filepath.Join(path, "vendor")) {
+				tasks = append(tasks, func() (Check, bool) { return checkComposerAudit(ctx, path), true })
+			}
 		}
 	}
 	if fileExists(filepath.Join(path, "package.json")) {
 		tasks = append(tasks, func() (Check, bool) { return checkNodeDeps(path), true })
-		tasks = append(tasks, func() (Check, bool) { return checkNodeAudit(ctx, path), true })
+		if !opts.Quick {
+			tasks = append(tasks, func() (Check, bool) { return checkNodeAudit(ctx, path), true })
+		}
 	}
 	return tasks
 }
@@ -1020,11 +1092,8 @@ func composerDisabled(fw *config.Framework) bool {
 // lock file has drifted from composer.json. Degrades to "unknown" when composer
 // can't run.
 func checkComposerDeps(ctx context.Context, path string) Check {
-	if !dirExists(filepath.Join(path, "vendor")) {
-		return Check{Name: "composer_deps", Status: StatusWarn, Detail: "Composer dependencies aren't installed, run composer install.", Fix: FixComposerInstall}
-	}
-	if !fileExists(filepath.Join(path, "composer.lock")) {
-		return Check{Name: "composer_deps", Status: StatusWarn, Detail: "No composer.lock is committed, run composer install to create one.", Fix: FixComposerInstall}
+	if c := checkComposerDepsFiles(path); c.Status != StatusOK {
+		return c
 	}
 	cctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
@@ -1034,6 +1103,19 @@ func checkComposerDeps(ctx context.Context, path string) Check {
 	}
 	if composerLockStale(out) {
 		return Check{Name: "composer_deps", Status: StatusWarn, Detail: "composer.lock is out of date with composer.json, run composer update.", Fix: FixComposerUpdate}
+	}
+	return Check{Name: "composer_deps", Status: StatusOK}
+}
+
+// checkComposerDepsFiles is the part of the composer check that reads files
+// only. Its OK is "nothing visibly wrong here", which the full check then puts
+// to composer itself.
+func checkComposerDepsFiles(path string) Check {
+	if !dirExists(filepath.Join(path, "vendor")) {
+		return Check{Name: "composer_deps", Status: StatusWarn, Detail: "Composer dependencies aren't installed, run composer install.", Fix: FixComposerInstall}
+	}
+	if !fileExists(filepath.Join(path, "composer.lock")) {
+		return Check{Name: "composer_deps", Status: StatusWarn, Detail: "No composer.lock is committed, run composer install to create one.", Fix: FixComposerInstall}
 	}
 	return Check{Name: "composer_deps", Status: StatusOK}
 }
@@ -1059,7 +1141,7 @@ func checkComposerAudit(ctx context.Context, path string) Check {
 		return Check{Name: "composer_audit", Status: StatusUnknown, Detail: "Couldn't read composer audit output."}
 	}
 	if n > 0 {
-		return Check{Name: "composer_audit", Status: StatusWarn, Detail: fmt.Sprintf("%d known security advisor%s in composer packages, run composer update.", n, plural(n, "y", "ies")), Fix: FixComposerUpdate}
+		return Check{Name: "composer_audit", Status: StatusWarn, Detail: fmt.Sprintf("%d known security advisor%s in composer packages, run composer update.", n, Plural(n, "y", "ies")), Fix: FixComposerUpdate}
 	}
 	return Check{Name: "composer_audit", Status: StatusOK}
 }
@@ -1128,7 +1210,7 @@ func checkNodeAudit(ctx context.Context, path string) Check {
 		return Check{Name: "node_audit", Status: StatusUnknown, Detail: "Couldn't read npm audit output."}
 	}
 	if n > 0 {
-		return Check{Name: "node_audit", Status: StatusWarn, Detail: fmt.Sprintf("%d known vulnerabilit%s in node packages, run npm audit fix.", n, plural(n, "y", "ies")), Fix: FixNpmAuditFix}
+		return Check{Name: "node_audit", Status: StatusWarn, Detail: fmt.Sprintf("%d known vulnerabilit%s in node packages, run npm audit fix.", n, Plural(n, "y", "ies")), Fix: FixNpmAuditFix}
 	}
 	return Check{Name: "node_audit", Status: StatusOK}
 }
@@ -1191,7 +1273,9 @@ func dirExists(p string) bool {
 	return err == nil && info.IsDir()
 }
 
-func plural(n int, one, many string) string {
+// Plural picks the singular or plural word for n. Exported so the doctor's site
+// sweep counts read the way the per-site report already does.
+func Plural(n int, one, many string) string {
 	if n == 1 {
 		return one
 	}

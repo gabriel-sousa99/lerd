@@ -771,8 +771,12 @@ func TestBootout_MarksWatcherStops(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, ".local", "share"))
 
-	// A domain that cannot exist, so launchctl fails fast without touching any
-	// real job. The marker is written before the call either way.
+	// The marker is what this covers, not launchd, so the command is stubbed out
+	// rather than aimed at a domain that cannot exist.
+	prev := launchctl
+	launchctl = func(...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { launchctl = prev })
+
 	bootout(podman.WatcherUnit, "gui/4294967290", "com.lerd.does-not-exist") //nolint:errcheck
 	if !config.ConsumeWatcherManagedStop() {
 		t.Error("booting out the watcher must mark the stop as lerd-initiated")

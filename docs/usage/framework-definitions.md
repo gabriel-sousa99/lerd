@@ -10,8 +10,9 @@ Lerd resolves framework definitions from multiple sources. Higher priority wins:
 |----------|--------|----------|---------|
 | 1 | User overlay | `~/.config/lerd/frameworks/<name>.yaml` | Manual overrides (merged on top) |
 | 2 | Project embedded | `.lerd.yaml` `framework_def` | Portability for user-defined frameworks |
-| 3 | Store-installed | `~/.local/share/lerd/frameworks/<name>@<version>.yaml` | Community definitions (auto-fetched) |
-| 4 | Built-in | Compiled into lerd binary | Laravel fallback only |
+| 3 | Store package layer | `~/.local/share/lerd/packages/<vendor>-<name>.yaml` | A composer package's own workers, commands and checks (merged on top, see below) |
+| 4 | Store-installed | `~/.local/share/lerd/frameworks/<name>@<version>.yaml` | Community definitions (auto-fetched) |
+| 5 | Built-in | Compiled into lerd binary | Laravel fallback only |
 
 Workers from the user overlay and project `.lerd.yaml` are merged on top of store or built-in definitions. See [Framework workers](framework-workers.md) for the worker lifecycle and how custom workers are added and managed.
 
@@ -23,13 +24,88 @@ A `.lerd.yaml` ships inside a project, so its embedded `framework_def` is treate
 A project's own host extensions still work, just with consent: a `host: true` entry in top-level `custom_workers`, and any top-level `commands:` you run via `lerd run` or the dashboard, prompt once showing the exact command before they run on your host, and the approval is remembered per site. Set `host_commands.skip_confirmation: true` (or `host_commands.disabled: true` to refuse them outright) in the global config to change that.
 :::
 
+## Package definitions
+
+Most of what a definition declares is not really the framework's. A Horizon worker belongs to `laravel/horizon`, a fixtures command to `doctrine/doctrine-fixtures-bundle`, and NativePHP's worker, commands and checks to `nativephp/electron` and `nativephp/mobile`. Written into the version files, each one has to be repeated in every major of every framework that can carry the package, and corrected in all of them at once.
+
+A package definition is that declaration written once, in the same store, as `packages/<vendor>-<name>.yaml`, a sibling of the `frameworks/` directory rather than something inside it, since a package is not a version of a framework. The composer name becomes the file name, the slash it carries being the only thing standing between it and a flat directory:
+
+```yaml
+package: nativephp/electron
+frameworks:                       # optional: which frameworks, and which majors
+  - name: laravel
+    min: "11"                     # inclusive; max: works the same way, either may be omitted
+workers:
+  native:
+    label: NativePHP
+    command: vendor/nativephp/electron/resources/js/resources/php/php artisan native:serve
+    host: true
+commands:
+  - name: native:build
+    label: Build desktop app
+    command: vendor/nativephp/electron/resources/js/resources/php/php artisan native:build
+setup:
+  - label: php artisan native:install
+    command: php artisan native:install
+    default: false
+doctor:
+  checks:
+    - name: nativephp_runtime
+      type: command
+      command: test -x vendor/nativephp/electron/resources/js/resources/php/php
+```
+
+Workers, commands, post-link setup steps and doctor checks are the whole schema, because that is what the duplication was made of. A `removes:` block takes entries away again, which is what a new major of the package needs (see below). Env wiring, detection and services stay with the framework, which is where they belong.
+
+The layer is merged onto the resolved definition when the project has the package, and only for the frameworks the `frameworks:` list names. An empty list means every framework, which is right for a queue driver and wrong for `nativephp/electron`; `min` and `max` bound the framework majors it applies to, and are compared against the project's own major, so a Laravel 14 project still gets a package that declares `min: "11"`. The package wins any name collision: it is where the entry is maintained now, so a copy left behind in a version file is replaced rather than shadowing it, and the replacement keeps the position the definition listed it in. Your user overlay and a project's `.lerd.yaml` are merged after the package layer and still sit above it.
+
+Having the package means composer installed it, not that the project named it. The manifest is read first, and then `composer.lock`, which is the only place a dependency that arrived under a meta-package shows up, and the only place a package that another one `replace`s or `provide`s exists at all: `tempest/framework` stands in for `tempest/database`, so a stock Tempest project has that code installed while its `composer.json` names neither. A `check:` on a worker, command, setup step or doctor check is answered the same way, since what it is really asking is whether the thing it runs is there. Detection is the exception and reads the manifest alone: a library repo testing against Laravel has `laravel/framework` in its lock, and that must not make it a Laravel site.
+
+### When a package major changes what lerd runs
+
+A package that has kept its interface is one file and says nothing about versions. When a major renames a command, moves a binary, or changes what a worker should run, that major gets a file of its own, `<vendor>-<name>@<major>.yaml`, and the index entry lists it:
+
+```json
+{"name": "drush/drush", "versions": ["13", "11"], "latest": "13"}
+```
+
+A versioned file serves its own major and every later one until the next versioned file, and the unversioned file serves everything below the first of them. So `drush-drush.yaml` keeps answering for Drush 10 and older, `@11` covers 11 and 12, `@13` covers 13 and up. Adding a major is adding one file: nothing that already worked has to be restated, and no project is moved onto a definition written for a version it does not have. A constraint no major can be read out of (`dev-main`, `*`) takes the latest, since a project tracking a branch is on the newest thing published.
+
+Publishing a major for a package that had one file asks every install for a file it has never fetched. Online that is one fetch, cached like any other. Offline, the newest cached file at or below that version answers instead, down to the unversioned one, so a worker a machine has been running for months does not disappear the day the store gains a version it cannot reach.
+
+Each file is the whole answer for the versions it serves, not a patch on the one before it, so a command that survived the major is repeated in the new file. What a new major *removes* has to be said out loud, because the copy the declaration was lifted out of is still sitting in the framework's own version files and silence there means keep it:
+
+```yaml
+package: laravel/horizon
+version: "6"
+removes:
+  commands:
+    - horizon:snapshot          # by name
+  workers:
+    - horizon-metrics
+  setup:
+    - Publish Horizon assets    # a setup step by its label, the only name it has
+  doctor:
+    - horizon_supervisor
+```
+
+Removals run after the merge, so a package can replace an entry and drop another in the same file.
+
+`lerd framework list` prints the layer under the definitions table: every package the store publishes, what each one declares, which file answers for the project you are standing in, and whether that project requires it. Everything a package contributes surfaces as an ordinary worker or command, so this is the only place that says where a declaration came from. It reads the cache and never fetches.
+
+Only the packages listed under `packages` in the store index are ever looked up, so a project's dependency list never turns into a request for a file the store does not have. They are cached in `~/.local/share/lerd/packages/`, under the same file name the store serves, seeded by `lerd install`, refreshed by `lerd framework update` and on the same 24 hour window as a definition, so a package's worker resolves offline exactly like a framework's.
+
 ## Version resolution
 
 When loading a framework definition for a project, the version is resolved in order:
 
-1. `composer.lock`: the actual installed version (source of truth)
-2. `.lerd.yaml` `framework_version`: pinned version (fallback when no `composer.lock`)
-3. Latest available in store
+1. `composer.lock`: the version composer resolved for the framework's own package (source of truth)
+2. `composer.json`: the major read out of the declared constraint, for a project with no lock
+3. A `version_file` regex, for a framework that ships no composer package
+4. `.lerd.yaml` `framework_version`: the pinned version
+5. Latest available in store
+
+The lock leads because a constraint only says what would be installed: `"^11.0 || ^12.0"` carries two majors and is read as the older one, and `dev-main` carries none at all.
 
 When `composer.lock` shows a different version than `.lerd.yaml`, the pinned version is auto-updated.
 
@@ -76,7 +152,9 @@ env:
 
 `file` is the env file lerd writes, and `lerd env` creates it when it is not there yet, from `example_file` when the definition names one and empty otherwise. `fallback_file` is only ever read, so a project that is already configured is detected through the file it actually has.
 
-`app_file` and `app_format` name the file the application itself reads, for a framework whose configuration is not a dotenv file at all: Drupal's database lives in a `$databases` array its installer writes into `settings.php`, and nothing lerd puts anywhere else reaches it. When a definition declares them, that file is what lerd both reads and writes, and `file`/`fallback_file` describe what an older binary should do with the same definition. That is why they are a separate pair rather than a change to the existing fields: a published definition reaches every install within a day, whatever version it runs, so one that renamed `format` to something an older release cannot parse would break those installs. An unknown field is ignored; an unknown *format* is not, and a binary too old for a format now refuses to write the file rather than treating it as dotenv.
+`app_file` and `app_format` name the file the application itself reads, for a framework whose configuration is not a dotenv file at all: Drupal's database lives in a `$databases` array its installer writes into `settings.php`, and nothing lerd puts anywhere else reaches it. When a definition declares them, that file is what lerd both reads and writes, from the point its installer has created it: before that lerd writes the `file` the definition names, because a framework reads the skeleton lerd would leave in its place as a site already configured and fails instead of serving the installer. A definition naming no `file` at all has nowhere else to write, so its app file is created as normal. `file`/`fallback_file` also describe what an older binary should do with the same definition. That is why they are a separate pair rather than a change to the existing fields: a published definition reaches every install within a day, whatever version it runs, so one that renamed `format` to something an older release cannot parse would break those installs. An unknown field is ignored; an unknown *format* is not, and a binary too old for a format now refuses to write the file rather than treating it as dotenv.
+
+lerd never seeds an `app_file` the application has not written yet. To a framework an empty one is not a blank slate but a claim that it is already configured: TYPO3 serves its installer while `config/system/settings.php` is absent and fails outright once an empty one exists. So `lerd env` writes the `file` the definition names in the meantime, which keeps the database and the service wiring happening on the way through, and `lerd site:doctor` points at the framework's own install rather than at `lerd env` when there is no example to seed from either. Once the installer has written the file, `lerd env` wires the project's services into it as usual. Magento's `app/etc/env.php` sits in the same position as TYPO3's settings file.
 
 That distinction matters for a framework whose own configuration is not the file lerd writes. Drupal keeps its database in a `$databases` array its installer writes into `settings.php`, and its `site:install` command sources a `.env` at the project root to build the `--db-url` it hands drush. So the definition names `.env` as its `file` and `settings.php` as a read-only `fallback_file`: lerd writes the former, Drupal writes the latter, and neither trips over the other.
 
@@ -226,6 +304,34 @@ npm: auto
 # Console command (without 'php' prefix)
 console: bin/console
 
+# Console commands that cannot run in the container and the binary that runs them
+# on the host (optional). `args` is a space-separated glob matched against the
+# arguments as typed, so one entry covers `lerd php artisan native:run` and
+# `lerd artisan native:run` alike; `binary` is relative to the project root. The
+# first match wins, so a package declaration is never shadowed by the framework
+# file it merges over, and a binary that is not installed is an error rather than
+# a fall back into the container. `install_command` names the `lerd run` command
+# that puts that binary on disk, and belongs to the entry rather than to the
+# package, since a project can carry two packages installed by differently named
+# commands. An entry declaring none says so rather than naming another's.
+# `requires_extensions` names the PHP extensions that binary has to carry for the
+# command to work. Bundled runtimes are trimmed static builds with dynamic
+# loading compiled out, so a missing extension cannot be added to one. lerd asks
+# the binary itself, and when it is short an extension the command needs, runs
+# that command with lerd's own pinned PHP, downloaded to ~/.local/share/lerd/bin
+# the first time a project needs it. The build matches the project's own PHP
+# version, since the command runs project code against a composer.lock resolved
+# for it, and falls back to the nearest pinned minor when lerd pins none.
+# Everything else about the command is unchanged: same host, same working
+# directory, same environment.
+host_commands:
+  - args: artisan native:*
+    binary: vendor/nativephp/electron/resources/js/resources/php/php
+    install_command: native:install
+  - args: artisan native:jump
+    binary: vendor/nativephp/php-bin/bin/host/php
+    requires_extensions: [posix, pcntl]
+
 # Background workers
 workers:
   messenger:
@@ -238,6 +344,22 @@ workers:
                                   # appends `--poll` since the container cannot observe
                                   # host filesystem events. Laravel's horizon worker sets
                                   # it to `php artisan horizon:listen`.
+    tune_command: ""              # parameterized variant of `command` (optional). Every
+                                  # {placeholder} becomes a flag on the worker's generated
+                                  # start command, so
+                                  # `messenger:consume {transport} --limit={limit}` gives
+                                  # `lerd messenger:start --transport --limit`. Each flag's
+                                  # default is read back out of `command`, so the values are
+                                  # declared once; a placeholder `command` does not spell has
+                                  # no default and must be passed.
+    restart_command: ""           # graceful in-container restart, e.g.
+                                  # `php artisan queue:restart` (optional)
+    requires_service: {}           # a lerd service the worker cannot run without (optional):
+                                  #   name: redis
+                                  #   when_env: QUEUE_CONNECTION=redis
+                                  # `when_env` narrows the requirement to sites whose .env
+                                  # carries that KEY=VALUE. lerd refuses the start and names
+                                  # the service instead of letting the worker crash-loop.
     restart: always               # always | on-failure (default: always)
     schedule: ""                  # systemd OnCalendar expression (optional). When set, the
                                   # worker is run as a Type=oneshot service triggered by a
@@ -249,11 +371,15 @@ workers:
                                   # `*:0/5`, `Mon..Fri *-*-* 02:00:00`). Linux only; on
                                   # macOS scheduled workers currently log a warning and skip.
     check:                        # only shown when check passes (optional)
-      composer: symfony/messenger
+      composer: symfony/messenger # matches a package composer installed, not
+                                  # only one composer.json names
     conflicts_with:               # workers to stop before starting (optional)
       - other-worker
     proxy:                        # nginx proxy config (optional)
       path: /ws
+      paths:                      # several paths on one port (optional)
+        - /ws
+        - /ws-api
       port_env_key: WS_PORT
       default_port: 8080
     host: false                   # run on the host via fnm instead of in the FPM
@@ -310,6 +436,8 @@ doctor:
       fix: storage:link               # names one of the framework's own commands
       detail: The public/storage link is missing.   # overrides the generated message (optional)
       severity: warn                  # warn | fail (optional, per-type default)
+      check:                          # drop the check unless the rule matches (optional)
+        composer: nativephp/electron
 
 # Extra nginx config spliced into the site's server block (optional)
 nginx:
@@ -392,7 +520,7 @@ The `commands:` list is the framework's own verbs: the things you would otherwis
 
 `broom`, `database`, `refresh`, `link`, `check`, `list`, `key`, `edit`, `arrow-down`, `arrow-up`, `play`, `terminal`
 
-`lerd check` validates a definition's commands, and it is the fastest way to catch a typo: an unknown `output` is an error, and an unknown `icon` is a warning.
+`lerd site:doctor` validates a definition's commands, and it is the fastest way to catch a typo: an unknown `output` is an error, and an unknown `icon` is a warning.
 
 ## Declining a warning
 
@@ -407,11 +535,13 @@ The repeated-query warning is the case that needs it. On a content management sy
 
 ## Doctor checks
 
-The `doctor:` section adds framework-specific health checks to the ones every site gets for free (env file present, every picked service wired into it, dependencies installed and locked, audit clean, PHP version in range, nginx vhost current). They run on `lerd site:doctor` and in the dashboard's doctor panel. Keeping them declarative is what stops the doctor from growing a Go branch per framework.
+The `doctor:` section adds framework-specific health checks to the ones every site gets for free (a valid `.lerd.yaml`, env file present, every picked service wired into it, dependencies installed and locked, audit clean, PHP version in range, nginx vhost current). They run on `lerd site:doctor` and in the dashboard's doctor panel. Keeping them declarative is what stops the doctor from growing a Go branch per framework.
 
-The section also takes a `migrate_command`, naming whichever of the framework's own `commands:` applies the schema. The universal database checks offer it as their fix, so an empty or missing database is reported with the button that fills it. Every framework spells it differently (Laravel `migrate`, Symfony `doctrine:migrations:migrate`, Drupal `updb`), so nothing but the definition can say; a framework that declares none, or names a command it does not have, gets a finding with no fix rather than a button that maps to nothing.
+The section also takes a `migrate_command`, naming whichever of the framework's own `commands:` applies the schema. The universal database checks offer it as their fix, so an empty or missing database is reported with the button that fills it. A server database that does not exist at all is the exception: migrations have nowhere to run until the schema is there, so that finding carries a button that creates it and the migrate button returns on the re-check. Every framework spells it differently (Laravel `migrate`, Symfony `doctrine:migrations:migrate`, Drupal `updb`), so nothing but the definition can say; a framework that declares none, or names a command it does not have, gets a finding with no fix rather than a button that maps to nothing.
 
-Each check carries a `name` (a stable id), a `type` that selects the evaluator, an optional `label` for display, an optional `detail` that overrides the generated message, an optional `severity`, and an optional `fix`.
+Each check carries a `name` (a stable id), a `type` that selects the evaluator, an optional `label` for display, an optional `detail` that overrides the generated message, an optional `severity`, an optional `fix`, and an optional `check`.
+
+`check` takes the same rule shape as a worker's or a command's, so `composer: <package>`, `file: <path>`, or `missing_file: <path>`. A check whose rule fails is dropped rather than run, which is what a check about an optional package wants: NativePHP's desktop runtime has nothing to say on a Laravel project that never installed it, and a permanently green row is clutter.
 
 A top-level `cache_command` names the console subcommand that clears the framework's compiled caches, `cr` for Drupal, `cache:clear` for Symfony, `optimize:clear` for Laravel. lerd runs it through `console` after rewriting a project's database connection: a framework caches the container definitions built from that configuration, and one built against the old database survives the swap and answers every request with an error about something it can no longer find. It runs only when a database key's value actually changed, and only when the project's dependencies are installed.
 

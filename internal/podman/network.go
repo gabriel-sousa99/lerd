@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -457,4 +458,27 @@ func friendlyNetworkCreateError(err error) error {
 		"releases (Ubuntu 22.04, Zorin 17, Debian 11/12) still ship older builds, see " +
 		"https://lerd.sh/getting-started/requirements for options"
 	return fmt.Errorf("%s: %w", prose, err)
+}
+
+// HostHasIPv6Loopback reports whether the host still carries ::1. It is a
+// weaker predicate than HostHasUsableIPv6 on purpose: a loopback publish only
+// needs ::1, and rootlessport takes the whole unit down when it cannot bind it.
+func HostHasIPv6Loopback() bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	data, err := os.ReadFile(ipv6IfInet6Path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		if scope, err := strconv.ParseUint(fields[3], 16, 32); err == nil && scope == 0x10 {
+			return true
+		}
+	}
+	return false
 }

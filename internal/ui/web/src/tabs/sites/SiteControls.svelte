@@ -12,6 +12,7 @@
     toggleStripe,
     setStripeConfig,
     toggleWorker,
+    saveWorkerOptions,
     setWorktreeDBIsolated,
     loadSites
   } from '$stores/sites';
@@ -26,6 +27,7 @@
   import OctaneControl from './OctaneControl.svelte';
   import OctaneReloadWatcherModal from './OctaneReloadWatcherModal.svelte';
   import StripeControl from './StripeControl.svelte';
+  import WorkerControl from './WorkerControl.svelte';
   import CommandsDropdown from '$components/CommandsDropdown.svelte';
   import SiteDoctorModal from './SiteDoctorModal.svelte';
   import Dropdown from '$components/Dropdown.svelte';
@@ -63,7 +65,8 @@
       $status.frankenphp_php_versions,
       effectivePhp,
       effectivePhpMin,
-      effectivePhpMax
+      effectivePhpMax,
+      $status.prerelease_php_versions
     )
   );
   // When host bun is available, the Node dropdown offers a "bun" entry that
@@ -195,6 +198,17 @@
     }
     // Kick a refresh so we pick up the change even if the WS push is late.
     await Promise.all([loadSites(), loadServices()]);
+  }
+
+  // Saving a worker's options restarts it server-side when it is running, so
+  // the refresh below is what puts the row back in sync.
+  async function saveOptions(worker: string, values: Record<string, string>) {
+    const r = await saveWorkerOptions(site, worker, values);
+    if (!r.ok) {
+      openErrorModal(m.sites_controls_workerOptionsFailed({ error: r.error || '' }));
+      return;
+    }
+    await loadSites();
   }
 
   let watcherModalOpen = $state(false);
@@ -380,14 +394,16 @@
       {/if}
     {:else}
       {#if site.has_queue_worker}
-        <ToggleButton
+        <WorkerControl
           label={m.sites_controls_queue()}
-          on={Boolean(site.queue_running)}
+          running={Boolean(site.queue_running)}
           asleep={asleepWorkers.has('queue')}
           failing={Boolean(site.queue_failing)}
           loading={isPending('queue')}
           disabled={isPending('queue')}
-          onclick={() => transition('queue', !site.queue_running, () => toggleQueue(site))}
+          options={site.worker_options?.queue || []}
+          onToggle={() => transition('queue', !site.queue_running, () => toggleQueue(site))}
+          onSaveOptions={(values) => saveOptions('queue', values)}
           title={site.queue_failing ? m.sites_controls_queueToggle_failing() : site.queue_running ? m.sites_controls_queueToggle_on() : m.sites_controls_queueToggle_off()}
         />
       {/if}
@@ -445,15 +461,17 @@
       {#each site.framework_workers || [] as w (w.name)}
         {@const isVite = w.name === 'vite'}
         {@const shortLabel = isVite ? m.sites_controls_vite() : w.label || w.name}
-        <ToggleButton
+        <WorkerControl
           label={shortLabel}
-          on={Boolean(w.running)}
+          running={Boolean(w.running)}
           asleep={asleepWorkers.has(w.name)}
           failing={Boolean(w.failing)}
           unreachable={Boolean(w.unreachable)}
           loading={isPending('worker:' + w.name)}
           disabled={isPending('worker:' + w.name)}
-          onclick={() => transition('worker:' + w.name, !w.running, () => toggleWorker(site, w))}
+          options={site.worker_options?.[w.name] || []}
+          onToggle={() => transition('worker:' + w.name, !w.running, () => toggleWorker(site, w))}
+          onSaveOptions={(values) => saveOptions(w.name, values)}
           title={isVite
             ? w.running
               ? m.sites_controls_viteToggle_on()

@@ -18,11 +18,13 @@ Directories with real TLDs are automatically normalised: dots are replaced with 
 
 For example: `admin.example.com` becomes `admin-example.test`
 
+`lerd domain add`, `lerd domain remove`, `lerd link --name` and the `domains:` list in `.lerd.yaml` all take the name with or without the TLD, so `shop.acme` and `shop.acme.test` both mean `shop.acme.test`. A trailing TLD used to be appended to rather than recognised, which put an unreachable `shop.acme.test.test` in the site's `.lerd.yaml`.
+
 ---
 
 ## Multiple domains
 
-A site can respond to multiple domains. The argument to `lerd link` is the domain name without the `.test` TLD; it is appended automatically from the global config.
+A site can respond to multiple domains. The argument to `lerd link` is the domain name, with or without the `.test` TLD; a missing one is appended from the global config.
 
 ```bash
 lerd link myapp                # links as myapp.test
@@ -40,13 +42,15 @@ lerd domain list
 lerd domain remove api         # removes api.test
 ```
 
-Domains are stored in `.lerd.yaml` as an array (without the TLD) so the file stays portable across machines with different TLD configurations:
+Domains are stored in `.lerd.yaml` as an array, written without the TLD so the file stays portable across machines with different TLD configurations:
 
 ```yaml
 domains:
   - myapp
   - admin
 ```
+
+Entries you write yourself may carry the TLD; `myapp.test` and `myapp` register the same domain. Note that the key is a mapping, not a list item, a `.lerd.yaml` whose top level is a sequence does not parse and `lerd link` refuses it with the YAML error rather than registering a site with none of the file applied.
 
 You can also manage domains from the web UI: click the pencil icon next to the domain in the site header to open the domain management modal. Changing the primary domain there also rewrites `APP_URL` in the project's `.env` to match the new primary, unless you have pinned a custom `app_url` (see [Custom `APP_URL`](#custom-app-url) below).
 

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -86,5 +87,109 @@ func TestExecProjectNew_UnknownStaysUnknown(t *testing.T) {
 	}
 	if text := resultText(t, resp); !strings.Contains(text, "unknown framework") {
 		t.Errorf("error should report an unknown framework, got: %s", text)
+	}
+}
+
+// projectNewMultiVersionStore publishes two majors of one framework, each with a
+// create command of its own, so a test can tell which definition was scaffolded
+// from rather than trusting the resolution.
+func projectNewMultiVersionStore(t *testing.T, name string, versions map[string]string, latest string) *httptest.Server {
+	t.Helper()
+	list := make([]string, 0, len(versions))
+	for v := range versions {
+		list = append(list, v)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(list)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.json", func(w http.ResponseWriter, _ *http.Request) {
+		data, _ := json.Marshal(store.Index{
+			Frameworks: []store.IndexEntry{{Name: name, Label: name, Versions: list, Latest: latest}},
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	})
+	for version, create := range versions {
+		body := "name: " + name + "\nlabel: " + name + "\nversion: \"" + version + "\"\npublic_dir: public\ncreate: \"" + create + "\"\n"
+		mux.HandleFunc("/"+name+"/"+version+".yaml", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A caller that names a major gets that major's create command, not the newest
+// one the store publishes, which is what `lerd new --framework-version` does.
+func TestExecProjectNew_ScaffoldsTheRequestedMajor(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	srv := projectNewMultiVersionStore(t, "codeigniter", map[string]string{"4": "touch", "5": "true"}, "5")
+	t.Setenv("LERD_STORE_BASE_URL", srv.URL)
+
+	path := filepath.Join(tmp, "proj")
+	resp, rpcErr := execProjectNew(map[string]any{
+		"path":      path,
+		"framework": "codeigniter",
+		"version":   "4",
+	})
+	if rpcErr != nil {
+		t.Fatalf("rpc error: %v", rpcErr)
+	}
+	if resultIsError(resp) {
+		t.Fatalf("project_new refused a published major: %s", resultText(t, resp))
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("expected major 4's create command to have run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(config.StoreFrameworksDir(), "codeigniter@4.yaml")); err != nil {
+		t.Errorf("expected major 4's definition cached locally: %v", err)
+	}
+}
+
+// A major the store does not publish is refused by name and version, rather than
+// silently scaffolding whatever is current.
+func TestExecProjectNew_UnpublishedMajorIsRefused(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	srv := projectNewMultiVersionStore(t, "codeigniter", map[string]string{"4": "touch", "5": "true"}, "5")
+	t.Setenv("LERD_STORE_BASE_URL", srv.URL)
+
+	resp, rpcErr := execProjectNew(map[string]any{
+		"path":      filepath.Join(tmp, "proj"),
+		"framework": "codeigniter",
+		"version":   "99",
+	})
+	if rpcErr != nil {
+		t.Fatalf("rpc error: %v", rpcErr)
+	}
+	if !resultIsError(resp) {
+		t.Fatalf("expected an unknown-major error, got: %s", resultText(t, resp))
+	}
+	if text := resultText(t, resp); !strings.Contains(text, "99") {
+		t.Errorf("error should name the major that is missing, got: %s", text)
+	}
+}
+
+// A version with no framework behind it is a mistake the CLI refuses too: the
+// default framework would silently absorb a major meant for another one.
+func TestExecProjectNew_VersionNeedsAFramework(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("XDG_DATA_HOME", tmp)
+
+	resp, rpcErr := execProjectNew(map[string]any{
+		"path":    filepath.Join(tmp, "proj"),
+		"version": "11",
+	})
+	if rpcErr != nil {
+		t.Fatalf("rpc error: %v", rpcErr)
+	}
+	if !resultIsError(resp) {
+		t.Fatalf("expected a version-without-framework error, got: %s", resultText(t, resp))
 	}
 }

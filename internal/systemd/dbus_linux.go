@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -17,8 +18,52 @@ import (
 
 // errUnitOpTimedOut is the sentinel a single unit-op attempt returns when the
 // job channel does not report a result within the per-attempt deadline. It is
-// mapped back to the historic "timed out after 30s" message by dbusUnitOp.
+// wrapped into the caller-facing message by unitOpTimeoutError.
 var errUnitOpTimedOut = errors.New("unit op timed out")
+
+// jobWaitFloor is the shortest a unit op waits for systemd to report its job
+// result, and the whole wait for anything that declares no window of its own.
+const jobWaitFloor = 30 * time.Second
+
+// jobWaitMargin is added to a declared stop window so the wait outlasts the
+// SIGKILL systemd sends at the end of it, leaving room for the container to be
+// reaped and the job result to arrive.
+const jobWaitMargin = 10 * time.Second
+
+// stopJobWait is how long a stop waits for its job result, given the window the
+// unit declares as TimeoutStopSec. A service that asks for a long graceful
+// shutdown is guaranteed to outlast a fixed wait, and the caller then acts on a
+// "stopped" that has not happened yet, so the wait is read from the unit. A
+// unit that declares nothing, or less than the floor, keeps the historic 30s.
+func stopJobWait(declared time.Duration) time.Duration {
+	if w := declared + jobWaitMargin; declared > 0 && w > jobWaitFloor {
+		return w
+	}
+	return jobWaitFloor
+}
+
+// unitOpTimeoutError builds the caller-facing timeout message, reporting the
+// wait that actually elapsed rather than the fixed number it used to name.
+func unitOpTimeoutError(verb, name string, wait time.Duration) error {
+	return fmt.Errorf("%s %s timed out after %s", verb, name, wait)
+}
+
+// declaredStopTimeout reads the unit's own TimeoutStopSec, which quadlet
+// generation sets from the service definition. Anything unreadable, absent or
+// infinite reports zero, which stopJobWait resolves to the floor.
+func declaredStopTimeout(conn *dbus.Conn, unit string) time.Duration {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	prop, err := conn.GetUnitTypePropertyContext(ctx, unit, "Service", "TimeoutStopUSec")
+	if err != nil || prop == nil {
+		return 0
+	}
+	usec, ok := prop.Value.Value().(uint64)
+	if !ok || usec == 0 || usec == math.MaxUint64 {
+		return 0
+	}
+	return time.Duration(usec) * time.Microsecond
+}
 
 // stopRetryAttempts bounds how many times a "stop" job is re-issued when
 // systemd reports the result "canceled". `lerd stop` deactivates many units
@@ -61,12 +106,19 @@ func dbusUnitOp(op, verb, name string) error {
 	}
 	unit := withServiceSuffix(name)
 
+	// A stop is the one op that has to outlast a window the unit itself sets,
+	// so it is read from the unit; the others keep the floor.
+	wait := jobWaitFloor
+	if op == "stop" {
+		wait = stopJobWait(declaredStopTimeout(conn, unit))
+	}
+
 	// attempt enqueues one job and waits for systemd to report its result,
 	// returning the result string ("done", "canceled", "failed", …) or a
 	// transport/timeout error.
 	attempt := func() (string, error) {
 		ch := make(chan string, 1)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), wait)
 		defer cancel()
 		var opErr error
 		switch op {
@@ -97,7 +149,7 @@ func dbusUnitOp(op, verb, name string) error {
 	result, err := runUnitOpWithRetry(maxAttempts, settleBetweenStops, attempt)
 	if err != nil {
 		if errors.Is(err, errUnitOpTimedOut) {
-			return fmt.Errorf("%s %s timed out after 30s", verb, name)
+			return unitOpTimeoutError(verb, name, wait)
 		}
 		return fmt.Errorf("%s %s failed: %w", verb, name, err)
 	}

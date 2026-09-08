@@ -19,7 +19,7 @@ Run `lerd mcp:enable-global` once and your AI assistant (Claude Code, Cursor, Ju
 ```bash [lerd new]
 cd ~/Lerd
 lerd new mysite --framework=cakephp
-# runs: composer create-project cakephp/app ./mysite
+# runs: composer create-project cakephp/app:^5.0 ./mysite
 ```
 
 ```bash [composer]

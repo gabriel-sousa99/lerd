@@ -39,31 +39,7 @@ func newWorkerStartCmd() *cobra.Command {
 		Use:   "start <name>",
 		Short: "Start a framework worker as a systemd service",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			workerName := args[0]
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			site, fw, phpVersion, err := resolveSiteAndFramework(cwd)
-			if err != nil {
-				return err
-			}
-			worker, ok := fw.Workers[workerName]
-			if !ok {
-				return fmt.Errorf("framework %q has no worker named %q\nRun 'lerd worker list' to see available workers", fw.Label, workerName)
-			}
-			if worker.Check != nil && !config.MatchesRule(cwd, *worker.Check) {
-				return fmt.Errorf("worker %q requires a dependency that is not installed\nCheck the framework definition for required packages", workerName)
-			}
-			if err := WorkerStartForSite(site.Name, cwd, phpVersion, workerName, worker, true); err != nil {
-				return err
-			}
-			if !site.Paused {
-				_ = config.SetProjectWorkers(site.Path, CollectRunningWorkerNames(site))
-			}
-			return nil
-		},
+		RunE:  func(_ *cobra.Command, args []string) error { return runWorkerStart(args[0], nil) },
 	}
 }
 
@@ -72,32 +48,7 @@ func newWorkerStopCmd() *cobra.Command {
 		Use:   "stop <name>",
 		Short: "Stop a framework worker",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			workerName := args[0]
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			site, fw, _, err := resolveSiteAndFramework(cwd)
-			if err != nil {
-				return err
-			}
-			// Allow stopping orphaned workers that have a running unit
-			// but are no longer in the framework definition.
-			if _, ok := fw.Workers[workerName]; !ok {
-				unitName := "lerd-" + workerName + "-" + site.Name
-				if !isServiceActiveOrRestarting(unitName) {
-					return fmt.Errorf("framework %q has no worker named %q\nRun 'lerd worker list' to see available workers", fw.Label, workerName)
-				}
-			}
-			if err := WorkerStopForSite(site.Name, cwd, workerName); err != nil {
-				return err
-			}
-			if !site.Paused {
-				_ = config.SetProjectWorkers(site.Path, CollectRunningWorkerNames(site))
-			}
-			return nil
-		},
+		RunE:  func(_ *cobra.Command, args []string) error { return runWorkerStop(args[0]) },
 	}
 }
 
@@ -201,24 +152,12 @@ func resolveSiteAndFramework(cwd string) (*config.Site, *config.Framework, strin
 	return site, fw, phpVersion, nil
 }
 
-// requireFrameworkWorker returns an error if the site's framework doesn't define the named worker.
-func requireFrameworkWorker(cwd, workerName string) error {
-	_, fw, _, err := resolveSiteAndFramework(cwd)
-	if err != nil {
-		return err
-	}
-	if fw.Workers == nil {
-		return fmt.Errorf("framework %q has no workers defined", fw.Label)
-	}
-	if _, ok := fw.Workers[workerName]; !ok {
-		return fmt.Errorf("framework %q has no worker named %q\nRun 'lerd worker list' to see available workers", fw.Label, workerName)
-	}
-	return nil
-}
-
-// resolveWorkerCommand returns the command to run for a worker, substituting the
-// worker's reload variant (restart on file changes) when the project opted the
-// worker into reload mode and the framework declares the variant. The variant
+// resolveWorkerCommand returns the command to run for a worker, substituting
+// the options the project persisted for the worker's tune_command placeholders
+// and the worker's reload variant (restart on file changes) when the project
+// opted the worker into reload mode and the framework declares the variant.
+// Every start path lands here, so a project that committed its own queues gets
+// them from the dashboard toggle and the post-reinstall restore too. The variant
 // text comes from the framework definition (FrameworkWorker.ReloadCommand), so
 // the store stays the single source of truth and core never rewrites command
 // strings.
@@ -236,13 +175,14 @@ func requireFrameworkWorker(cwd, workerName string) error {
 // package from the project's node_modules; when chokidar is missing we keep the
 // standard command and tell the user how to enable the watcher rather than
 // letting the worker fail to boot. Enabling reload from the CLI or UI refuses
-// up front when chokidar is absent (see ApplyHorizonReload), so this fallback
+// up front when chokidar is absent (see ApplyWorkerReload), so this fallback
 // only bites if the package is removed after the fact.
 func resolveWorkerCommand(sitePath, workerName string, w config.FrameworkWorker) string {
 	// A worker execs its command straight from its unit, so the framework's
 	// cli_ini has to be folded in here too. Magento cannot even bootstrap at
 	// PHP's 128M default, so a worker without it simply crash-loops.
 	ini := phpIniArgsForDir(sitePath)
+	w.Command = projectTunedCommand(sitePath, workerName, w)
 	if w.ReloadCommand == "" || !config.ProjectReloadsWorker(sitePath, workerName) {
 		return injectPHPIniIntoCommand(w.Command, ini)
 	}
@@ -372,16 +312,7 @@ func WorkerStartForSite(siteName, sitePath, phpVersion, workerName string, w con
 
 	// A host worker that starts a known dev server is pinned to a port and
 	// pointed at a generated config, so it answers on the site's own domain.
-	// Anything the mechanism cannot apply cleanly leaves the command as it was.
-	if w.Host {
-		if tool := config.DevServerToolFor(sitePath, command); tool != nil {
-			if args, err := devServerSetup(siteName, sitePath, tool); err != nil {
-				feedback.Warn("dev server stays on its own port: %v", err)
-			} else if args != "" {
-				command += " " + args
-			}
-		}
-	}
+	command = devServerCommand(siteName, sitePath, workerName, command, w.Host)
 
 	// Workers exec into the container that hosts the site's runtime —
 	// custom container, FrankenPHP, or shared FPM. resolveWorkerFPMUnit
@@ -399,7 +330,7 @@ func WorkerStartForSite(siteName, sitePath, phpVersion, workerName string, w con
 		label = workerName
 	}
 
-	changed, err := writeWorkerUnitFile(unitName, label, unitSiteName, sitePath, phpVersion, command, restart, w.Schedule, fpmUnit, w.Host)
+	changed, err := writeWorkerUnitFile(unitName, label, unitSiteName, sitePath, phpVersion, command, restart, w.Schedule, fpmUnit, requiredServiceUnit(sitePath, w), w.Host)
 	if err != nil {
 		return fmt.Errorf("writing worker unit: %w", err)
 	}
@@ -421,7 +352,7 @@ func WorkerStartForSite(siteName, sitePath, phpVersion, workerName string, w con
 		if err := podman.DaemonReloadFn(); err != nil {
 			feedback.Warn("daemon-reload: %v", err)
 		}
-		if err := services.Mgr.Enable(lifecycleTarget); err != nil {
+		if err := syncWorkerBootArming(lifecycleTarget); err != nil {
 			feedback.Warn("enable: %v", err)
 		}
 	}

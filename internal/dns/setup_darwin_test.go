@@ -108,7 +108,7 @@ func TestDarwinResolver_routesTheTLDThroughTheValidator(t *testing.T) {
 func TestDarwinSudoers_tldCannotEscapeTheResolverDir(t *testing.T) {
 	for _, bad := range []string{"../../etc/cron.d/x", "a/b", "x\nEXTRA"} {
 		tld := DefaultTLD
-		if tldPattern.MatchString(bad) {
+		if ValidTLD(bad) {
 			tld = bad
 		}
 		rules := ruleLines(renderDarwinSudoers("alice", tld))

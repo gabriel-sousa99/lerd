@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
@@ -69,8 +68,7 @@ func runDomainAdd(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	domainName := strings.ToLower(args[0])
-	fullDomain := domainName + "." + cfg.DNS.TLD
+	fullDomain := siteops.QualifyDomain(args[0], cfg.DNS.TLD)
 
 	if linker.IsReservedDomain(fullDomain) {
 		return fmt.Errorf("domain %q is reserved for internal Lerd use", fullDomain)
@@ -145,8 +143,7 @@ func runDomainRemove(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	domainName := strings.ToLower(args[0])
-	fullDomain := domainName + "." + cfg.DNS.TLD
+	fullDomain := siteops.QualifyDomain(args[0], cfg.DNS.TLD)
 
 	if !site.HasDomain(fullDomain) {
 		return fmt.Errorf("site %q does not have domain %q", site.Name, fullDomain)

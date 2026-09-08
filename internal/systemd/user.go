@@ -91,8 +91,6 @@ func IsServiceActiveOrRestarting(name string) bool {
 // IsTimerActive returns true if the worker's sibling .timer is active.
 func IsTimerActive(name string) bool { return DBusActiveState(name+".timer") == "active" }
 
-// FindOrphanedWorkers scans systemd unit files for worker units belonging to
-// the given site that are running but not present in the known workers set.
 // unitBelongsToLongerSite reports whether the unit file belongs to a registered
 // site whose name is longer than siteName and ends with "-<siteName>" worth of
 // collision (e.g. unit "...-admin-astrolov.service" belongs to "admin-astrolov",
@@ -107,7 +105,18 @@ func unitBelongsToLongerSite(unitFile, siteName string, sites []config.Site) boo
 	return false
 }
 
-func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
+// WorkerUnit pairs a worker name with the unit file that carries it, so a
+// caller that needs to act on the unit does not have to rebuild its name.
+type WorkerUnit struct {
+	Worker string
+	Unit   string
+}
+
+// scanUndeclaredWorkerUnits walks the user unit directory for lerd-<worker>-<site>
+// units whose worker is not in known, filtering out the units that only look like
+// this site's: another site's worktree, a longer site name whose suffix collides,
+// and lerd's own per-site infrastructure.
+func scanUndeclaredWorkerUnits(siteName string, known map[string]bool) []WorkerUnit {
 	suffix := "-" + siteName + ".service"
 	prefix := "lerd-"
 	entries, err := os.ReadDir(config.SystemdUserDir())
@@ -122,7 +131,7 @@ func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
 	}
 	// A host-proxy site's dev server (lerd-app-<site>) is the site's main
 	// process, never an orphan; recognised here so no caller has to special-case
-	// it around every FindOrphanedWorkers call.
+	// it around every scan.
 	hostProxySite := false
 	for _, s := range sites {
 		if s.Name == siteName && s.IsHostProxy() {
@@ -130,7 +139,7 @@ func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
 			break
 		}
 	}
-	var orphans []string
+	var found []WorkerUnit
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
@@ -163,13 +172,32 @@ func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
 		if unitBelongsToLongerSite(name, siteName, sites) {
 			continue
 		}
-		unitName := strings.TrimSuffix(name, ".service")
-		if IsServiceActiveOrRestarting(unitName) {
-			orphans = append(orphans, workerName)
+		found = append(found, WorkerUnit{Worker: workerName, Unit: strings.TrimSuffix(name, ".service")})
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].Unit < found[j].Unit })
+	return found
+}
+
+// FindOrphanedWorkers scans systemd unit files for worker units belonging to
+// the given site that are running but not present in the known workers set.
+func FindOrphanedWorkers(siteName string, known map[string]bool) []string {
+	var orphans []string
+	for _, wu := range scanUndeclaredWorkerUnits(siteName, known) {
+		if IsServiceActiveOrRestarting(wu.Unit) {
+			orphans = append(orphans, wu.Worker)
 		}
 	}
 	sort.Strings(orphans)
 	return orphans
+}
+
+// StaleWorkerUnits returns every unit file left behind for a worker the site no
+// longer declares, running or not. FindOrphanedWorkers answers the narrower
+// question of what to offer stopping right now; this one answers what is still
+// on disk, which is what a definition that dropped a worker leaves behind:
+// armed for boot, walked by the self-heal detector, and removable only by hand.
+func StaleWorkerUnits(siteName string, declared map[string]bool) []WorkerUnit {
+	return scanUndeclaredWorkerUnits(siteName, declared)
 }
 
 // UnitBelongsToOtherSiteWorktree reports whether the parsed candidate

@@ -176,7 +176,7 @@ func UpdateServiceStreaming(name, targetImage string, emit func(PhaseEvent)) err
 		return err
 	}
 
-	emit(PhaseEvent{Phase: "pulling_image", Image: chosenImage})
+	discloseImagePull(chosenImage, emit)
 	if err := podman.PullImageWithProgress(chosenImage, func(line string) {
 		emit(PhaseEvent{Phase: "pulling_image", Message: line})
 	}); err != nil {
@@ -453,7 +453,7 @@ func RollbackService(name string, emit func(PhaseEvent)) error {
 	if lastOp == "migrate" {
 		return fmt.Errorf("refusing rollback for %s: last op was a migrate. Restoring %s would mismatch binary against schema. Restore the pre-migrate data dir manually if you really want to revert", name, prev)
 	}
-	emit(PhaseEvent{Phase: "pulling_image", Image: prev})
+	discloseImagePull(prev, emit)
 	if err := podman.PullImageWithProgress(prev, func(line string) {
 		emit(PhaseEvent{Phase: "pulling_image", Message: line})
 	}); err != nil {

@@ -32,7 +32,7 @@
       // Pass the EXACT backup name the user just previewed in the diff so
       // a concurrent save that landed a newer backup between modal-open
       // and accept cannot silently swap a different file into place.
-      const res = await restoreSiteNginx(target.domain, target.backupName);
+      const res = await restoreSiteNginx(target.domain, target.scope, target.backupName);
       if (!res.ok) {
         error = res.error || m.nginxEditor_restoreFailed();
         return;

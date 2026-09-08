@@ -2,12 +2,15 @@ package ui
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 
+	lerdcli "github.com/gabriel-sousa99/lerd/internal/cli"
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	"github.com/gabriel-sousa99/lerd/internal/sitedoctor"
-
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 	"github.com/gabriel-sousa99/lerd/internal/serviceops"
+	"github.com/gabriel-sousa99/lerd/internal/sitedoctor"
 )
 
 // doctorRoute handles the doctor subroutes for a site. It requires
@@ -70,6 +73,20 @@ func handleDoctorFixRun(w http.ResponseWriter, r *http.Request, site *config.Sit
 	// than the request sitting silent until it finishes.
 	if key == sitedoctor.FixInstallServices || key == sitedoctor.FixStartServices {
 		handleDoctorServiceFix(w, r, site, key)
+		return
+	}
+	// Removing a stale worker unit touches the user's systemd units, which no
+	// container shell can reach, so it is a host action like the vhost one.
+	if key == sitedoctor.FixStaleWorkers {
+		n, err := lerdcli.RemoveStaleWorkerUnits(*site)
+		streamHostAction(w, fmt.Sprintf("removed %d stale worker unit(s) for %s", n, site.Name), err)
+		return
+	}
+	// Creating a schema runs in the engine's container, not the site's, so it is
+	// a host action as well: the site the finding belongs to could not create it
+	// from the inside even with a shell.
+	if key == sitedoctor.FixCreateDatabase {
+		handleDoctorDatabaseFix(w, r, site)
 		return
 	}
 	shell, ok := sitedoctor.DoctorFixCommands[key]
@@ -162,6 +179,35 @@ func handleDoctorServiceFix(w http.ResponseWriter, r *http.Request, site *config
 	send("done", string(body))
 }
 
+// handleDoctorDatabaseFix creates the databases the site points at that their
+// engine does not hold. Like the service fix it resolves the set again rather
+// than trusting the client, so it can only ever create what the check reported,
+// and it stops at the first failure instead of reporting a half-done run as done.
+func handleDoctorDatabaseFix(w http.ResponseWriter, r *http.Request, site *config.Site) {
+	path, ok := resolveDoctorPath(w, site, r.URL.Query().Get("branch"))
+	if !ok {
+		return
+	}
+	missing := sitedoctor.MissingDatabases(path)
+	if len(missing) == 0 {
+		streamHostAction(w, "nothing to create: every database this site points at exists, or its engine could not be reached", nil)
+		return
+	}
+	var created []string
+	var failed error
+	for _, t := range missing {
+		if _, err := serviceops.CreateDatabase(t.Service, t.Database); err != nil {
+			failed = fmt.Errorf("creating %s on %s: %w", t.Database, t.Service, err)
+			break
+		}
+		// lerd-ui outlives the request, so a stale list would answer the next
+		// check as well as this one's.
+		sitedoctor.ForgetDatabases(t.Service)
+		created = append(created, t.Database+" on "+t.Service)
+	}
+	streamHostAction(w, "created "+strings.Join(created, ", "), failed)
+}
+
 // installPhaseLine renders one install phase as a line of output, skipping the
 // pull's own progress chatter, which arrives many times a second and says
 // nothing a doctor fix log needs.
@@ -171,7 +217,7 @@ func installPhaseLine(name string, ev serviceops.PhaseEvent) string {
 		if ev.Message != "" {
 			return ""
 		}
-		return name + ": pulling " + ev.Image
+		return name + ": pulling " + ev.Image + imagepull.Note(ev.Bytes)
 	case "installing_config":
 		return name + ": writing config"
 	case "starting_deps":

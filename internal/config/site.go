@@ -85,6 +85,11 @@ type Site struct {
 	// on the host for this site (project-origin custom host workers and commands).
 	// Keyed by the exact string so a changed command re-prompts.
 	ApprovedCommands []string `yaml:"approved_commands,omitempty"`
+	// PinnedCommands holds this user's pin choices for the site's commands, keyed
+	// by command name. An entry overrides the `pinned:` default the framework or
+	// .lerd.yaml declared, so a preference stays personal instead of becoming a
+	// diff every teammate carries.
+	PinnedCommands map[string]bool `yaml:"pinned_commands,omitempty"`
 	// Group is the group key shared by a main site and its secondaries. It is
 	// set to the main site's name. Empty when the site is not grouped.
 	Group string `yaml:"group,omitempty"`
@@ -232,6 +237,7 @@ type siteYAML struct {
 	HostSSL               bool                `yaml:"host_ssl,omitempty"`
 	HostCommand           string              `yaml:"host_command,omitempty"`
 	ApprovedCommands      []string            `yaml:"approved_commands,omitempty"`
+	PinnedCommands        map[string]bool     `yaml:"pinned_commands,omitempty"`
 	Group                 string              `yaml:"group,omitempty"`
 	GroupSubdomain        string              `yaml:"group_subdomain,omitempty"`
 	GroupSharedDB         bool                `yaml:"group_shared_db,omitempty"`
@@ -268,6 +274,7 @@ func (s Site) toYAML() siteYAML {
 		HostSSL:               s.HostSSL,
 		HostCommand:           s.HostCommand,
 		ApprovedCommands:      s.ApprovedCommands,
+		PinnedCommands:        s.PinnedCommands,
 		Group:                 s.Group,
 		GroupSubdomain:        s.GroupSubdomain,
 		GroupSharedDB:         s.GroupSharedDB,
@@ -309,6 +316,7 @@ func (sy siteYAML) toSite() Site {
 		HostSSL:               sy.HostSSL,
 		HostCommand:           sy.HostCommand,
 		ApprovedCommands:      sy.ApprovedCommands,
+		PinnedCommands:        sy.PinnedCommands,
 		Group:                 sy.Group,
 		GroupSubdomain:        sy.GroupSubdomain,
 		GroupSharedDB:         sy.GroupSharedDB,
@@ -696,6 +704,29 @@ func SetSitePinned(name string, pinned bool) error {
 			reg.Sites[i].Pinned = pinned
 			return SaveSites(reg)
 		}
+	}
+	return fmt.Errorf("site %q not found", name)
+}
+
+// SetSiteCommandPinned atomically records the user's pin choice for one of the
+// site's commands, the same single-field rewrite under the write lock the other
+// registry mutators do.
+func SetSiteCommandPinned(name, command string, pinned bool) error {
+	siteWriteMu.Lock()
+	defer siteWriteMu.Unlock()
+	reg, err := LoadSites()
+	if err != nil {
+		return err
+	}
+	for i := range reg.Sites {
+		if reg.Sites[i].Name != name {
+			continue
+		}
+		if reg.Sites[i].PinnedCommands == nil {
+			reg.Sites[i].PinnedCommands = map[string]bool{}
+		}
+		reg.Sites[i].PinnedCommands[command] = pinned
+		return SaveSites(reg)
 	}
 	return fmt.Errorf("site %q not found", name)
 }

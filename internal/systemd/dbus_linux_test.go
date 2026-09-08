@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	godbus "github.com/godbus/dbus/v5"
 )
@@ -190,5 +191,44 @@ func TestUnitNotLoaded(t *testing.T) {
 	}
 	if unitNotLoaded(errors.New("stop lerd-mysql timed out after 30s")) {
 		t.Error("a timeout was swallowed")
+	}
+}
+
+// A stop has to outlast the graceful window the unit itself declares. mysql
+// and postgres declare stop_timeout 60, which reaches the unit as
+// TimeoutStopSec=75, so the fixed 30s wait returned as though the service had
+// come down while podman was still counting; the SIGKILL that followed left
+// the unit failed behind an uninstall that had already finished (#1510).
+func TestStopJobWait(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared time.Duration
+		want     time.Duration
+	}{
+		{"a unit that declares nothing keeps the historic wait", 0, jobWaitFloor},
+		{"an unreadable window keeps the historic wait", -1, jobWaitFloor},
+		{"a window shorter than the floor keeps the floor", 5 * time.Second, jobWaitFloor},
+		{"the default service window still fits the floor", 20 * time.Second, jobWaitFloor},
+		{"a database's window outlasts its own SIGKILL", 75 * time.Second, 85 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stopJobWait(tc.declared); got != tc.want {
+				t.Errorf("stopJobWait(%s) = %s, want %s", tc.declared, got, tc.want)
+			}
+		})
+	}
+}
+
+// The timeout message reports the wait that actually elapsed. It used to say
+// 30s unconditionally, which names the wrong number the moment the wait comes
+// from the unit, and unitNotLoaded reads these messages.
+func TestUnitOpTimeoutMessageReportsTheRealWait(t *testing.T) {
+	err := unitOpTimeoutError("stop", "lerd-mysql", 85*time.Second)
+	if got, want := err.Error(), "stop lerd-mysql timed out after 1m25s"; got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+	if unitNotLoaded(err) {
+		t.Error("a timeout must not read as an already-stopped unit")
 	}
 }

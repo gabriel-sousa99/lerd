@@ -252,7 +252,7 @@ func TestSyncProjectDomains_NoOpWhenMissing(t *testing.T) {
 
 func TestRemoveProjectDomain(t *testing.T) {
 	dir := setupProjectConfig(t, &ProjectConfig{Domains: []string{"myapp", "api", "admin"}})
-	if err := RemoveProjectDomain(dir, "api"); err != nil {
+	if err := RemoveProjectDomain(dir, "api", "test"); err != nil {
 		t.Fatal(err)
 	}
 	cfg := loadConfig(t, dir)
@@ -263,7 +263,7 @@ func TestRemoveProjectDomain(t *testing.T) {
 
 func TestRemoveProjectDomain_CaseInsensitive(t *testing.T) {
 	dir := setupProjectConfig(t, &ProjectConfig{Domains: []string{"MyApp", "api"}})
-	if err := RemoveProjectDomain(dir, "myapp"); err != nil {
+	if err := RemoveProjectDomain(dir, "myapp", "test"); err != nil {
 		t.Fatal(err)
 	}
 	cfg := loadConfig(t, dir)
@@ -274,7 +274,7 @@ func TestRemoveProjectDomain_CaseInsensitive(t *testing.T) {
 
 func TestRemoveProjectDomain_NotFound(t *testing.T) {
 	dir := setupProjectConfig(t, &ProjectConfig{Domains: []string{"myapp"}})
-	if err := RemoveProjectDomain(dir, "other"); err != nil {
+	if err := RemoveProjectDomain(dir, "other", "test"); err != nil {
 		t.Fatal(err)
 	}
 	cfg := loadConfig(t, dir)

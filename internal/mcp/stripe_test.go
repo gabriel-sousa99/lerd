@@ -40,18 +40,3 @@ func TestExecStripeListen_rejectsInjectableApiKey(t *testing.T) {
 		t.Fatalf("expected an error for an api_key with a newline, got: %s", mcpText(t, res))
 	}
 }
-
-func TestExecQueueStart_rejectsInjectableQueue(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	if err := config.AddSite(config.Site{Name: "acme", Path: t.TempDir(), Domains: []string{"acme.test"}}); err != nil {
-		t.Fatal(err)
-	}
-	res, _ := execQueueStart(map[string]any{
-		"site":  "acme",
-		"queue": "default\nExecStartPost=/bin/sh -c evil",
-	})
-	if !mcpIsError(res) {
-		t.Fatalf("expected an error for a queue name with a newline, got: %s", mcpText(t, res))
-	}
-}

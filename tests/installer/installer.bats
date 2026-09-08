@@ -23,6 +23,31 @@ teardown() {
   rm -rf "$BATS_TMPDIR/home-$$"
 }
 
+# setsid is util-linux and macOS ships no equivalent binary, so the only way to
+# drop the controlling terminal on both is perl's POSIX::setsid, which is in the
+# base install of each.
+run_without_tty() {
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash -c "$1"
+  else
+    perl -e 'use POSIX; POSIX::setsid(); exec @ARGV' bash -c "$1"
+  fi
+}
+
+# script(1) allocates the pty on both platforms but its calling convention
+# differs: util-linux takes -c CMD ahead of the file, BSD takes the file then the
+# command. The trailing sleep holds stdin open until the pty is up, or BSD reads
+# EOF before the prompt is printed.
+run_with_tty() {
+  if script --version 2>/dev/null | grep -qi util-linux; then
+    # script -c runs the command through $SHELL, and install.sh only skips main
+    # when BASH_SOURCE says it was sourced, which no other shell sets.
+    ( printf 'y\n'; sleep 1 ) | SHELL=/bin/bash script -qec "$1" /dev/null
+  else
+    ( printf 'y\n'; sleep 1 ) | script -q /dev/null bash -c "$1"
+  fi
+}
+
 # Pins the isolation the whole file rests on: whatever the environment running
 # the suite looks like, the directories the uninstall removes must sit inside
 # the throwaway HOME and never in the real one.
@@ -421,6 +446,45 @@ _force_linux_os() {
   [ "$status" -ne 0 ]
 }
 
+@test "version_is_dev is false for a prerelease" {
+  run version_is_dev "1.34.0-beta.3"
+  [ "$status" -ne 0 ]
+}
+
+@test "version_tag strips the git-describe tail from a prerelease" {
+  run version_tag "1.34.0-beta.3-11-g632148be-dirty"
+  [ "$output" = "1.34.0-beta.3" ]
+}
+
+@test "version_tag leaves a clean release alone" {
+  run version_tag "1.33.1"
+  [ "$output" = "1.33.1" ]
+}
+
+@test "installed_version keeps the prerelease suffix" {
+  FAKE_BIN="$BATS_TMPDIR/fake-bin-$$"
+  mkdir -p "$FAKE_BIN"
+  printf '#!/bin/sh\necho "lerd version 1.34.0-beta.3 (commit abc)"\n' > "$FAKE_BIN/lerd"
+  chmod +x "$FAKE_BIN/lerd"
+
+  OLD_PATH="$PATH"
+  export PATH="$FAKE_BIN:$PATH"
+
+  run installed_version
+  [ "$output" = "1.34.0-beta.3" ]
+
+  export PATH="$OLD_PATH"
+}
+
+@test "version_is_prerelease tells a beta apart from a release and a dev build" {
+  run version_is_prerelease "1.34.0-beta.3"
+  [ "$status" -eq 0 ]
+  run version_is_prerelease "1.33.1"
+  [ "$status" -ne 0 ]
+  run version_is_prerelease "1.25.0-6-g7d030096-dirty"
+  [ "$status" -ne 0 ]
+}
+
 # ── latest_version ────────────────────────────────────────────────────────────
 
 @test "latest_version parses version from redirect Location header" {
@@ -458,6 +522,54 @@ _force_linux_os() {
   [ "$output" = "" ]
 }
 
+# -- --beta ------------------------------------------------------------------
+
+@test "latest_prerelease_version takes the newest tag from the releases feed" {
+  function curl() {
+    echo '<entry><link rel="alternate" type="text/html" href="https://github.com/lerd-env/lerd/releases/tag/v1.34.0-beta.3"/></entry>'
+    echo '<entry><link rel="alternate" type="text/html" href="https://github.com/lerd-env/lerd/releases/tag/v1.33.1"/></entry>'
+  }
+  export -f curl
+
+  run latest_prerelease_version
+  [ "$status" -eq 0 ]
+  [ "$output" = "1.34.0-beta.3" ]
+}
+
+@test "latest_prerelease_version returns empty string when the feed carries no release" {
+  function curl() { echo "<feed></feed>"; }
+  export -f curl
+
+  run latest_prerelease_version
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+@test "resolve_version reads the feed under --beta and the latest redirect without it" {
+  function curl() {
+    case "$*" in
+      *releases.atom*) echo 'href="https://github.com/lerd-env/lerd/releases/tag/v1.34.0-beta.3"' ;;
+      *) echo "location: https://github.com/lerd-env/lerd/releases/tag/v1.33.1" ;;
+    esac
+  }
+  export -f curl
+
+  BETA=0
+  run resolve_version
+  [ "$output" = "1.33.1" ]
+
+  BETA=1
+  run resolve_version
+  [ "$output" = "1.34.0-beta.3" ]
+}
+
+@test "--beta is accepted alongside another flag" {
+  run bash "$INSTALLER" --beta --help
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Unknown option"* ]]
+  [[ "$output" == *"Usage:"* ]]
+}
+
 # ── --help flag ───────────────────────────────────────────────────────────────
 
 @test "--help prints usage and exits 0" {
@@ -467,6 +579,7 @@ _force_linux_os() {
   [[ "$output" == *"--update"* ]]
   [[ "$output" == *"--uninstall"* ]]
   [[ "$output" == *"--local"* ]]
+  [[ "$output" == *"--beta"* ]]
 }
 
 # ── --local flag ──────────────────────────────────────────────────────────────
@@ -762,7 +875,7 @@ _undeletable_dir() {
 }
 
 @test "have_tty is false when the process has no controlling terminal" {
-  run setsid bash -c "source '$INSTALLER'; have_tty && echo yes || echo no"
+  run run_without_tty "source '$INSTALLER'; have_tty && echo yes || echo no"
   [ "$status" -eq 0 ]
   [ "$output" = "no" ]
 }
@@ -770,7 +883,7 @@ _undeletable_dir() {
 # set -u is on, so a read that never ran leaves _ans unset and the script aborts
 # instead of taking the question as declined.
 @test "ask declines cleanly when there is no controlling terminal" {
-  run setsid bash -c "source '$INSTALLER'; ask 'proceed?' && echo GOT_YES || echo GOT_NO"
+  run run_without_tty "source '$INSTALLER'; ask 'proceed?' && echo GOT_YES || echo GOT_NO"
   [ "$status" -eq 0 ]
   [[ "$output" == *"GOT_NO"* ]]
   [[ "$output" != *"unbound variable"* ]]
@@ -778,6 +891,65 @@ _undeletable_dir() {
 
 @test "ask reads the answer from the terminal when one is present" {
   command -v script >/dev/null || skip "needs script(1) to allocate a pty"
-  run bash -c "printf 'y\n' | script -qec \"bash -c 'source $INSTALLER; ask proceed? && echo GOT_YES || echo GOT_NO'\" /dev/null"
+  run run_with_tty "source '$INSTALLER'; ask proceed? && echo GOT_YES || echo GOT_NO"
   [[ "$output" == *"GOT_YES"* ]]
+}
+
+# ── saved_dns_mode / the DNS question on a re-install ─────────────────────────
+# `lerd install` settles the DNS mode once and honours the saved choice on every
+# later run, flipped afterwards with dns:enable / dns:disable. Re-running the
+# installer used to ask again and pass --dns, which is the one input that beats
+# the saved choice, so a .localhost machine was converted to managed DNS, in
+# silence where there was no terminal to show the question (#1647).
+
+_write_dns_config() {
+  mkdir -p "$LERD_CONFIG_DIR"
+  cat > "$LERD_CONFIG_DIR/config.yaml" <<EOF
+php:
+    default: "8.5"
+dns:
+    enabled: $1
+    tld: $2
+auto_cleanup: true
+EOF
+}
+
+@test "saved_dns_mode reads managed from an existing config" {
+  _write_dns_config true test
+  run saved_dns_mode
+  [ "$output" = "managed" ]
+}
+
+@test "saved_dns_mode reads localhost from an existing config" {
+  _write_dns_config false localhost
+  run saved_dns_mode
+  [ "$output" = "localhost" ]
+}
+
+@test "saved_dns_mode says nothing when there is no config" {
+  run saved_dns_mode
+  [ -z "$output" ]
+}
+
+@test "saved_dns_mode ignores an enabled key outside the dns block" {
+  mkdir -p "$LERD_CONFIG_DIR"
+  cat > "$LERD_CONFIG_DIR/config.yaml" <<EOF
+telemetry:
+    enabled: false
+dns:
+    enabled: true
+    tld: test
+EOF
+  run saved_dns_mode
+  [ "$output" = "managed" ]
+}
+
+@test "should_pass_dns_mode names the mode on a first install" {
+  run should_pass_dns_mode ""
+  [ "$status" -eq 0 ]
+}
+
+@test "should_pass_dns_mode leaves the saved choice alone when lerd is installed" {
+  run should_pass_dns_mode "1.33.0"
+  [ "$status" -ne 0 ]
 }

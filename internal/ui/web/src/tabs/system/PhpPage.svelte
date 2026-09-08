@@ -84,6 +84,7 @@
           running={fpmFor(v)?.running ?? false}
           isDefault={v === phpDefault}
           updateAvailable={fpmFor(v)?.update_available ?? false}
+          prerelease={($status.prerelease_php_versions || []).includes(v)}
           selected={v === active}
           onselect={() => pickVersion(v)}
         />

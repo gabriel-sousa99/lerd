@@ -82,3 +82,14 @@ func TestTunnelCommandUsesResolvedBinary(t *testing.T) {
 		t.Fatalf("command = %q %v; want it to run %s", cmd.Path, cmd.Args, want)
 	}
 }
+
+// share:tool has to accept the same install lerd share and the dashboard accept,
+// or a tool outside PATH can be used but never made the default.
+func TestShareToolSetAcceptsToolOutsidePATH(t *testing.T) {
+	withBrewOnlyTunnelTools(t, "expose")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := runShareTool(nil, []string{"expose"}); err != nil {
+		t.Fatalf("runShareTool() = %v; want the tool accepted", err)
+	}
+}

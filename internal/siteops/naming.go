@@ -46,6 +46,14 @@ func SiteNameAndDomain(dirName, tld string) (string, string) {
 	return name, name + "." + tld
 }
 
+// QualifyDomain turns a domain a user wrote into a full domain. The docs ask
+// for the name without the TLD, but people type the hostname they want to end
+// up with, and appending to that turned shop.acme.test into shop.acme.test.test.
+func QualifyDomain(arg, tld string) string {
+	name := strings.TrimSuffix(strings.ToLower(arg), "."+tld)
+	return name + "." + tld
+}
+
 // unsafeNameChars matches characters that must never reach a site handle used
 // in systemd unit names and bodies.
 var unsafeNameChars = regexp.MustCompile(`[\n\r\x00/]`)

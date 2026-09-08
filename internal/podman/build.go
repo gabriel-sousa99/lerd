@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 	"github.com/gabriel-sousa99/lerd/internal/origin"
 )
 
@@ -249,6 +250,22 @@ func fpmImageCurrent(imageName, containerfileHash, customHash string) bool {
 		imageLabelFn(imageName, fpmCustomSetHashLabel) == customHash
 }
 
+// FPMImageCurrent reports whether the PHP image for version is already built
+// from the current recipe and extension set, so a non-forced build would be a
+// no-op. Exported so callers disclose only the downloads that really happen.
+func FPMImageCurrent(version string) bool {
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return false
+	}
+	hash, err := ContainerfileHash()
+	if err != nil {
+		return false
+	}
+	return fpmImageCurrent(FPMImageName(version), hash,
+		customSetHash(version, cfg.GetExtensions(), cfg.AllExtApkDeps(), cfg.GetPackages()))
+}
+
 // imageLabel reads a single label from a local image. Returns "" on any
 // error (image missing, podman unreachable, label absent) so callers
 // treat that as "doesn't match" and fall back to a rebuild.
@@ -350,6 +367,14 @@ func RebuildFPMImageTo(version string, local bool, w io.Writer) error {
 	return err
 }
 
+// mysqlClientCompatBlock keeps the image's MariaDB client able to talk to MySQL.
+// connector-c carries the caching_sha2_password plugin MySQL 8.4+ authenticates
+// root with, and ssl=0 skips MySQL's self-signed certs on the trusted lerd
+// network. The guard makes the apk a no-op on bases that already ship the
+// plugin, so a fast-path build stays offline-safe once the base catches up.
+const mysqlClientCompatBlock = "RUN [ -e /usr/lib/mariadb/plugin/caching_sha2_password.so ] || apk add --no-cache mariadb-connector-c\n" +
+	"RUN mkdir -p /etc/my.cnf.d && printf '[client]\\nssl=0\\n' > /etc/my.cnf.d/lerd-no-ssl.cnf\n"
+
 // baseContainerfileHash returns a 12-character SHA-256 prefix of the Containerfile
 // with user-specific sections stripped. This is used as the tag for pre-built base
 // images on ghcr.io, so lerd knows exactly which image matches its embedded template.
@@ -379,6 +404,21 @@ func basePullArgs(ref, authFile string) []string {
 		args = append(args, "--authfile="+authFile)
 	}
 	return append(args, ref)
+}
+
+// PHPBaseImageRef is the pre-built base image a non-local PHP build downloads
+// before it layers the mkcert CA and any custom extensions on top. Empty when
+// the recipe hash cannot be computed, in which case the size is undisclosed.
+func PHPBaseImageRef(version string) string {
+	hash, err := baseContainerfileHash()
+	if err != nil {
+		return ""
+	}
+	refs := origin.BaseImageRefs(strings.ReplaceAll(version, ".", ""), hash)
+	if len(refs) == 0 {
+		return ""
+	}
+	return refs[0]
 }
 
 // tryPullBaseImage attempts to pull the pre-built base image from ghcr.io.
@@ -462,9 +502,17 @@ func buildFPMImage(version string, force, local bool, customExts []string, extDe
 	if hashErr != nil {
 		return false, fmt.Errorf("computing Containerfile hash for label: %w", hashErr)
 	}
-	customHash := customSetHash(customExts, extDeps, packages)
+	customHash := customSetHash(version, customExts, extDeps, packages)
 
 	if !force && fpmImageCurrent(imageName, canonicalHash, customHash) {
+		return false, nil
+	}
+
+	// Offline defers a refresh of an image that still runs: the rebuild would
+	// re-download the whole base. A missing image is built anyway, and
+	// `lerd php:rebuild` forces its way through.
+	if !force && imagepull.Offline() && ImageExists(imageName) {
+		fmt.Fprintf(w, "  Offline: keeping the current PHP %s image, run `lerd php:rebuild` to refresh it\n", version)
 		return false, nil
 	}
 
@@ -487,8 +535,8 @@ func buildFPMImage(version string, force, local bool, customExts []string, extDe
 		if baseRef := tryPullBaseImage(version, w); baseRef != "" {
 			baseDigest, _ = refreshManifestDigestFn(baseRef)
 			containerfile = "FROM " + baseRef + "\n" +
-				"RUN mkdir -p /etc/my.cnf.d && printf '[client]\\nssl=0\\n' > /etc/my.cnf.d/lerd-no-ssl.cnf\n" +
-				buildCustomExtBlockWithToolchain(customExts, extDeps) +
+				mysqlClientCompatBlock +
+				buildCustomExtBlockWithToolchain(version, customExts, extDeps) +
 				buildCustomPackagesBlock(packages) +
 				mkcertCABlock(tmp)
 			goto build
@@ -508,9 +556,11 @@ func buildFPMImage(version string, force, local bool, customExts []string, extDe
 		if tmplErr != nil {
 			return false, tmplErr
 		}
-		containerfile = strings.ReplaceAll(tmpl, "{{.Version}}", version)
-		containerfile = strings.ReplaceAll(containerfile, "{{.CustomExtensions}}", buildCustomExtBlock(customExts, extDeps))
-		containerfile = strings.ReplaceAll(containerfile, "{{.CustomExtensionsRuntime}}", buildCustomExtRuntimeDeps(customExts, extDeps))
+		// The placeholder carries the upstream php image tag, which is not the
+		// lerd version for a prerelease: 8.6 has no plain -fpm-alpine tag yet.
+		containerfile = strings.ReplaceAll(tmpl, "{{.Version}}", config.UpstreamPHPTag(version))
+		containerfile = strings.ReplaceAll(containerfile, "{{.CustomExtensions}}", buildCustomExtBlock(version, customExts, extDeps))
+		containerfile = strings.ReplaceAll(containerfile, "{{.CustomExtensionsRuntime}}", buildCustomExtRuntimeDeps(version, customExts, extDeps))
 		containerfile = strings.ReplaceAll(containerfile, "{{.CustomPackages}}", buildCustomPackagesBlock(packages))
 		containerfile = strings.ReplaceAll(containerfile, "{{.MkcertCA}}", mkcertCABlock(tmp))
 	}
@@ -603,10 +653,10 @@ func apkDepsForExt(ext string, userDeps map[string][]string) []string {
 // buildCustomExtRuntimeDeps emits an apk RUN line that reinstalls the
 // builder-stage deps in the runtime stage so compiled .so files can
 // dlopen against those system libs. Empty when no custom exts have deps.
-func buildCustomExtRuntimeDeps(exts []string, userDeps map[string][]string) string {
+func buildCustomExtRuntimeDeps(phpVersion string, exts []string, userDeps map[string][]string) string {
 	seen := map[string]bool{}
 	var deps []string
-	for _, ext := range exts {
+	for _, ext := range WithoutBundled(phpVersion, exts) {
 		for _, pkg := range apkDepsForExt(ext, userDeps) {
 			if seen[pkg] {
 				continue
@@ -629,19 +679,20 @@ var phpizeToolchain = []string{"autoconf", "make", "g++", "linux-headers"}
 // buildCustomExtBlock generates Dockerfile RUN blocks for user-configured
 // extensions, apk-adding any extra build deps (built-in map ∪ userDeps) first.
 // This is the builder stage's block, which already has a toolchain to build in.
-func buildCustomExtBlock(exts []string, userDeps map[string][]string) string {
-	return customExtBlock(exts, userDeps, false)
+func buildCustomExtBlock(phpVersion string, exts []string, userDeps map[string][]string) string {
+	return customExtBlock(phpVersion, exts, userDeps, false)
 }
 
 // buildCustomExtBlockWithToolchain is the same block for the fast path, which
 // layers straight onto the pre-built runtime image and so has no toolchain to
 // build against. It installs one virtually and purges it inside the same layer,
 // leaving the runtime image the size it was.
-func buildCustomExtBlockWithToolchain(exts []string, userDeps map[string][]string) string {
-	return customExtBlock(exts, userDeps, true)
+func buildCustomExtBlockWithToolchain(phpVersion string, exts []string, userDeps map[string][]string) string {
+	return customExtBlock(phpVersion, exts, userDeps, true)
 }
 
-func customExtBlock(exts []string, userDeps map[string][]string, withToolchain bool) string {
+func customExtBlock(phpVersion string, exts []string, userDeps map[string][]string, withToolchain bool) string {
+	exts = WithoutBundled(phpVersion, exts)
 	if len(exts) == 0 {
 		return ""
 	}
@@ -813,7 +864,7 @@ func WriteXdebugIni(version, mode, start string) error {
 	if start == "" {
 		start = "trigger"
 	}
-	content := fmt.Sprintf("[xdebug]\nxdebug.mode=%s\nxdebug.start_with_request=%s\nxdebug.client_host=host.containers.internal\nxdebug.client_port=9003\n", mode, start)
+	content := fmt.Sprintf("[xdebug]\nxdebug.mode=%s\nxdebug.start_with_request=%s\nxdebug.client_host=host.containers.internal\nxdebug.client_port=%d\n", mode, start, config.XdebugClientPort)
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
@@ -1041,6 +1092,8 @@ func RewriteFPMQuadlets() error {
 
 	// Also rewrite nginx quadlet with the same extra volumes.
 	if nginxContent, err := GetQuadletTemplate("lerd-nginx.container"); err == nil {
+		httpPort, httpsPort := config.NginxPorts()
+		nginxContent = ApplyNginxPorts(nginxContent, httpPort, httpsPort)
 		nginxContent = InjectExtraVolumes(nginxContent, extraPaths)
 		if changed, err := WriteQuadletDiff("lerd-nginx", nginxContent); err == nil {
 			if changed || UnitMissingMounts("lerd-nginx", extraPaths) {

@@ -52,7 +52,7 @@ func TestDatabaseSiteIndex_WordPressSiteOwnsItsDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := databaseSiteIndexes()["mysql"]["blog"]; got.domain != "blog.test" {
+	if got := databaseSiteIndexes()["mysql"]["blog"]; got.Domain != "blog.test" {
 		t.Errorf("blog database = %+v, want domain blog.test", got)
 	}
 }
@@ -76,12 +76,12 @@ func TestDatabaseSiteIndex_IsolatedWorktreeDBCarriesItsBranch(t *testing.T) {
 
 	idx := databaseSiteIndexes()["mysql"]
 
-	if got := idx["astrolov"]; got.domain != "astrolov.test" || got.branch != "" {
+	if got := idx["astrolov"]; got.Domain != "astrolov.test" || got.Branch != "" {
 		t.Errorf("parent database = %+v, want domain astrolov.test with no branch", got)
 	}
 	for _, name := range []string{"astrolov_staging", "astrolov_staging_testing"} {
 		got := idx[name]
-		if got.domain != "astrolov.test" || got.branch != "staging" {
+		if got.Domain != "astrolov.test" || got.Branch != "staging" {
 			t.Errorf("%s = %+v, want domain astrolov.test on branch staging", name, got)
 		}
 	}

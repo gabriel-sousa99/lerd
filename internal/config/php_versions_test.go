@@ -100,3 +100,74 @@ func TestPHPVersionAtLeast(t *testing.T) {
 		}
 	}
 }
+
+func TestPrereleasePHPVersionsAreSupported(t *testing.T) {
+	for _, v := range PrereleasePHPVersions {
+		if !IsSupportedPHPVersion(v) {
+			t.Errorf("prerelease %q is not in SupportedPHPVersions", v)
+		}
+		if !IsPrereleasePHPVersion(v) {
+			t.Errorf("IsPrereleasePHPVersion(%q) = false, want true", v)
+		}
+	}
+	if IsPrereleasePHPVersion("8.5") {
+		t.Error("IsPrereleasePHPVersion(8.5) = true, want false")
+	}
+}
+
+func TestStablePHPVersionsDropsPrereleases(t *testing.T) {
+	got := StablePHPVersions()
+	for _, v := range got {
+		if IsPrereleasePHPVersion(v) {
+			t.Errorf("StablePHPVersions() = %v, includes prerelease %q", got, v)
+		}
+	}
+	if len(got)+len(PrereleasePHPVersions) != len(SupportedPHPVersions) {
+		t.Errorf("StablePHPVersions() = %v, want every supported version that is not a prerelease", got)
+	}
+	if got[0] != SupportedPHPVersions[0] {
+		t.Errorf("StablePHPVersions() = %v, want the supported order preserved", got)
+	}
+}
+
+func TestUpstreamPHPTag(t *testing.T) {
+	if got := UpstreamPHPTag("8.5"); got != "8.5" {
+		t.Errorf("UpstreamPHPTag(8.5) = %q, want 8.5", got)
+	}
+	for _, v := range PrereleasePHPVersions {
+		if got := UpstreamPHPTag(v); got != v+"-rc" {
+			t.Errorf("UpstreamPHPTag(%q) = %q, want %q", v, got, v+"-rc")
+		}
+	}
+}
+
+func TestPrereleaseIsNotAFrankenPHPVersion(t *testing.T) {
+	for _, v := range PrereleasePHPVersions {
+		if IsFrankenPHPVersion(v) {
+			t.Errorf("IsFrankenPHPVersion(%q) = true; frankenphp publishes released PHP only", v)
+		}
+		for _, f := range FrankenPHPVersions() {
+			if f == v {
+				t.Errorf("FrankenPHPVersions() offers prerelease %q", v)
+			}
+		}
+	}
+}
+
+func TestFrankenPHPUnavailableReason(t *testing.T) {
+	if got := FrankenPHPUnavailableReason("8.4"); got != "" {
+		t.Errorf("FrankenPHPUnavailableReason(8.4) = %q, want empty", got)
+	}
+	if got := FrankenPHPUnavailableReason("8.1"); !strings.Contains(got, "or newer") {
+		t.Errorf("FrankenPHPUnavailableReason(8.1) = %q, want the minimum-version reason", got)
+	}
+	for _, v := range PrereleasePHPVersions {
+		got := FrankenPHPUnavailableReason(v)
+		if !strings.Contains(got, "prerelease") {
+			t.Errorf("FrankenPHPUnavailableReason(%q) = %q, want the prerelease reason", v, got)
+		}
+		if strings.Contains(got, "or newer") {
+			t.Errorf("FrankenPHPUnavailableReason(%q) = %q, reads like the version is too old", v, got)
+		}
+	}
+}

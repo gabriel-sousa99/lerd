@@ -1,6 +1,7 @@
 import { writable, derived, get } from 'svelte/store';
 import { wsMessage, type NotificationEvent } from './ws';
 import { apiFetch } from './api';
+import { onFallbackOrigin } from './vhost';
 import { m } from '../paraglide/messages.js';
 
 const PREFS_KEY = 'lerd:notify:prefs';
@@ -459,10 +460,14 @@ export function initNotify() {
   // a browser reset, sub expiry, or pref change made while offline.
   // Skipped when the user has clicked Forget on this browser — otherwise
   // the row they just deleted would reappear on the next page load.
+  // Never on the loopback fallback origin: that page hands over to the vhost as
+  // soon as nginx is back, and subscribing here first would leave a second
+  // browser registered delivering every notification twice.
   if (
     typeof Notification !== 'undefined' &&
     Notification.permission === 'granted' &&
-    !isAutoSubscribeDisabled()
+    !isAutoSubscribeDisabled() &&
+    !onFallbackOrigin()
   ) {
     void ensurePushSubscription();
   }

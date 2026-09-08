@@ -267,8 +267,14 @@ func TestToolList_underSizeCeiling(t *testing.T) {
 	// (required by the MCP spec), then 22900 → 23050 for the `no_snapshot`
 	// property: a data wipe now snapshots the databases first and refuses when
 	// it cannot, so an assistant that does not know the flag reads a blocked
-	// remove as a broken service.
-	const ceiling = 23050
+	// remove as a broken service, then 23050 → 23250 for the site `scope`
+	// property: a site now has two nginx override files and the location one is
+	// the only place a fastcgi_param or proxy_set_header override takes effect,
+	// so an assistant without the property writes into the file nginx ignores,
+	// then 23250 → 23550 for the `confirm` an image download is disclosed for, on
+	// the two tools whose actions can pull: without it the assistant cannot
+	// answer the disclosure and the operation it was asked for never runs.
+	const ceiling = 23550
 	got, err := json.Marshal(toolList())
 	if err != nil {
 		t.Fatalf("marshal tool list: %v", err)

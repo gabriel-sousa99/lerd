@@ -458,6 +458,16 @@ func StoreFrameworksDir() string {
 	return filepath.Join(DataDir(), "frameworks")
 }
 
+// StorePackagesDir returns the directory for store-installed package
+// definitions, the layer that attaches workers, commands, setup steps and
+// doctor checks to a composer package instead of to one framework major. It is
+// a sibling of the framework store rather than a directory inside it, the way
+// the store itself publishes the two, since a package is not a version of a
+// framework. One file per package, named for the package.
+func StorePackagesDir() string {
+	return filepath.Join(DataDir(), "packages")
+}
+
 // StoreIndexFile returns the path to the locally cached framework store index.
 // The store package refreshes it in the background; offline detection and
 // listing read it so a fresh machine can resolve any framework without a

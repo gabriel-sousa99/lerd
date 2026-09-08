@@ -35,6 +35,9 @@ INSTALL_DIR="${LERD_INSTALL_DIR:-$HOME/.local/bin}"
 LERD_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lerd"
 LERD_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/lerd"
 LERD_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/lerd"
+# Set by --beta: install and update from the newest release including
+# prereleases, rather than from the stable line alone.
+BETA=0
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -139,6 +142,28 @@ MISSING_PKGS=()
 # prompt isn't shown twice, and it lets us skip the HTTPS-only packages
 # (certutil / nss-tools) when the user only wants .localhost.
 DNS_MODE="managed"
+
+# saved_dns_mode echoes the DNS mode already recorded in the config, or nothing
+# when there is no config to read. Scoped to the dns block so an enabled: key
+# belonging to some other section is never mistaken for this one.
+saved_dns_mode() {
+  local cfg="${LERD_CONFIG_DIR}/config.yaml"
+  [ -f "$cfg" ] || return 0
+  awk '
+    /^[^[:space:]#]/ { in_dns = ($0 ~ /^dns:/) }
+    in_dns && /^[[:space:]]+enabled:/ {
+      print ($0 ~ /false/) ? "localhost" : "managed"; exit
+    }
+  ' "$cfg"
+}
+
+# should_pass_dns_mode reports whether `lerd install` should be told the mode.
+# Only a first install names it: the binary settles the question once and
+# honours the saved choice on every run after that, and --dns is the one input
+# that overrides it. The argument is the version already installed, if any.
+should_pass_dns_mode() {
+  [ -z "${1:-}" ]
+}
 
 ask_dns_mode() {
   local _ans=""
@@ -444,6 +469,26 @@ latest_version() {
   echo "$location" | sed -E 's|.*/releases/tag/v?([^[:space:]]+).*|\1|' | tr -d '\r'
 }
 
+# The newest release including prereleases. GitHub's releases/latest redirect
+# skips a prerelease by design, so the beta line is read off the atom feed,
+# which is newest-first and needs no API token either.
+latest_prerelease_version() {
+  local tag
+  tag="$(fetch_stdout "https://github.com/${REPO}/releases.atom" 2>/dev/null \
+    | grep -oE 'releases/tag/v[^"<[:space:]]+' | head -1 || true)"
+  echo "${tag#releases/tag/v}" | tr -d '\r'
+}
+
+# The release this run installs: the newest one under --beta, the newest stable
+# one otherwise.
+resolve_version() {
+  if [ "$BETA" = "1" ]; then
+    latest_prerelease_version
+  else
+    latest_version
+  fi
+}
+
 # download_binary <version> <arch> <destdir>
 # Downloads and extracts the release archive into <destdir>.
 # The extracted binary will be at <destdir>/lerd.
@@ -464,19 +509,13 @@ download_binary() {
   fi
 }
 
-# Extracts the full version string from `lerd --version`, including any
-# pre-release suffix used by this fork (e.g. "1.21.2-oracle.13").
-# The expected stdout from the binary is:
-#   "1.21.2-oracle.13 (commit <sha>, built <date>)"
+# The version of the installed binary, prerelease and all, without the
+# git-describe tail a local build carries. 1.34.0-beta.3 is a release and has to
+# compare equal to the tag it came from.
 installed_version() {
-  if command -v lerd &>/dev/null; then
-    lerd --version 2>/dev/null \
-      | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+\.[0-9]+)?' \
-      | head -1 \
-      || echo "unknown"
-  else
-    echo ""
-  fi
+  local raw; raw="$(installed_version_raw)"
+  [ -n "$raw" ] || { echo ""; return; }
+  version_tag "$raw"
 }
 
 # Full version token including any git-describe suffix (e.g.
@@ -490,11 +529,22 @@ installed_version_raw() {
   fi
 }
 
-# True when the version token carries a git-describe suffix. Release binaries
-# report a clean X.Y.Z, so a suffix means an ahead-of-release local build that
-# the installer must not silently overwrite with the matching base release.
+# The release tag a version token was built from: everything up to the
+# git-describe tail. 1.34.0-beta.3-11-g632148be-dirty came from 1.34.0-beta.3.
+version_tag() {
+  echo "$1" | sed -E 's/(-[0-9]+-g[0-9a-f]+)?(-dirty)?$//'
+}
+
+# True when the token carries a git-describe tail, which means an
+# ahead-of-release local build the installer must not silently overwrite with
+# the release it was built on top of. A prerelease tag is not one of these.
 version_is_dev() {
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]
+  [ "$1" != "$(version_tag "$1")" ]
+}
+
+# True for a tag carrying a semver prerelease, so a beta rather than a stable.
+version_is_prerelease() {
+  [[ "$(version_tag "$1")" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z] ]]
 }
 
 # Guards an overwrite of a local development build. Prints a warning and asks
@@ -508,6 +558,22 @@ guard_dev_build() {
     return 0
   fi
   info "Keeping your local build. Reinstall a dev build with: install.sh --local <path>"
+  exit 0
+}
+
+# Guards a move off the beta line. Someone running the plain installer on a
+# prerelease is reinstalling, not asking to be taken back to stable, so the
+# downgrade is confirmed first. $1 is the stable version about to be installed.
+guard_prerelease() {
+  local target="$1"
+  [ "$BETA" = "1" ] && return 0
+  local current; current="$(installed_version)"
+  version_is_prerelease "$current" || return 0
+  warn "A prerelease (v${current}) is installed."
+  if have_tty && ask "Replace it with the stable release v${target}?"; then
+    return 0
+  fi
+  info "Keeping your prerelease. Stay on the beta line with: install.sh --update --beta"
   exit 0
 }
 
@@ -594,7 +660,15 @@ cmd_install() {
     [ -f "$local_binary" ] || die "File not found: $local_binary"
   fi
 
-  ask_dns_mode
+  # Only a first install asks. A machine that already has lerd keeps the mode it
+  # settled on, read back here so the prerequisite check knows whether this run
+  # needs certutil, and left to the binary rather than forced with --dns.
+  if [ -z "$was_installed" ]; then
+    ask_dns_mode
+  else
+    DNS_MODE="$(saved_dns_mode)"
+    DNS_MODE="${DNS_MODE:-managed}"
+  fi
   check_prerequisites
 
   if ! command -v podman &>/dev/null; then
@@ -615,7 +689,7 @@ cmd_install() {
   else
     # ── Download from GitHub releases ──
     local arch; arch="$(detect_arch)"
-    local version; version="$(latest_version)"
+    local version; version="$(resolve_version)"
     if [ -z "$version" ]; then
       die "No releases found at https://github.com/${REPO}/releases\n\nIf you built lerd locally, install with:\n  bash install.sh --local ./build/lerd"
     fi
@@ -626,6 +700,7 @@ cmd_install() {
       exit 0
     fi
     guard_dev_build "$version"
+    guard_prerelease "$version"
 
     local tmpdir; tmpdir="$(mktemp -d)"
     download_binary "$version" "$arch" "$tmpdir"
@@ -643,10 +718,16 @@ cmd_install() {
   # When this script is piped through `curl|bash`, our own stdin is the pipe
   # and lerd's prompts would silently hit EOF. Hand it /dev/tty when one is
   # available so [Y/n] questions reach the user.
+  # The +expansion keeps an empty array from tripping set -u on the bash 3.2
+  # macOS still ships.
+  local dns_args=()
+  if should_pass_dns_mode "$was_installed"; then
+    dns_args=(--dns "$DNS_MODE")
+  fi
   if have_tty; then
-    "${INSTALL_DIR}/${BINARY}" install --dns "$DNS_MODE" </dev/tty
+    "${INSTALL_DIR}/${BINARY}" install ${dns_args[@]+"${dns_args[@]}"} </dev/tty
   else
-    "${INSTALL_DIR}/${BINARY}" install --dns "$DNS_MODE"
+    "${INSTALL_DIR}/${BINARY}" install ${dns_args[@]+"${dns_args[@]}"}
   fi
 
   # Offer the desktop app on a fresh Linux install. Its own installer does the
@@ -683,7 +764,7 @@ cmd_update() {
   header "Updating Lerd"
 
   local arch; arch="$(detect_arch)"
-  local latest; latest="$(latest_version)"
+  local latest; latest="$(resolve_version)"
   [ -n "$latest" ] || die "Could not fetch latest version."
 
   local current; current="$(installed_version)"
@@ -693,6 +774,7 @@ cmd_update() {
     exit 0
   fi
   guard_dev_build "$latest"
+  guard_prerelease "$latest"
 
   info "Updating v${current:-unknown} → v${latest}"
   local tmpdir; tmpdir="$(mktemp -d)"
@@ -949,6 +1031,18 @@ main() {
   echo "  and PHP-extension manager."
   echo ""
 
+  # --beta is a modifier rather than a command, so it is taken out of the
+  # argument list first and whatever is left goes through the same dispatch.
+  local args=()
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --beta) BETA=1 ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+  set -- "${args[@]:-}"
+
   case "${1:-install}" in
     --update|-u|update)     cmd_update ;;
     --uninstall|uninstall)  cmd_uninstall ;;
@@ -964,13 +1058,14 @@ main() {
       cmd_install "$2"
       ;;
     --help|-h)
-      echo "Usage: $0 [--update | --uninstall | --check | --local <path>]"
+      echo "Usage: $0 [--update | --uninstall | --check | --local <path>] [--beta]"
       echo ""
       echo "  (no args)       Install Lerd Oracle Edition from latest GitHub release"
       echo "  --local <path>  Install from a locally built binary (e.g. ./build/lerd)"
       echo "  --update        Update to the latest release on ${REPO}"
       echo "  --uninstall     Remove Lerd and optionally its data"
-      echo "  --check         Check prerequisites only (no install)"
+      echo "  --check         Check prerequisites only"
+      echo "  --beta          Install or update from the newest prerelease"
       echo ""
       echo "Release scheme:  vX.Y.Z-oracle.N  (X.Y.Z tracks the upstream lerd-env/lerd release)"
       echo "Latest releases: https://github.com/${REPO}/releases"

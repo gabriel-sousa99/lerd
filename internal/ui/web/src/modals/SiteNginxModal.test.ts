@@ -31,6 +31,15 @@ describe('SiteNginxModal', () => {
     expect(screen.getByTestId('nginx-editor-stub')).toHaveTextContent('feat.acme.test');
   });
 
+  it('switches the editor to the location-scope file from the Location tab', async () => {
+    render(Harness, { props: { open: true, site, domain: 'acme.test', onclose: () => {} } });
+    expect(screen.getByTestId('nginx-editor-stub')).toHaveAttribute('data-scope', 'server');
+    await fireEvent.click(screen.getByText('Location'));
+    expect(screen.getByTestId('nginx-editor-stub')).toHaveAttribute('data-scope', 'location');
+    await fireEvent.click(screen.getByText('Server block'));
+    expect(screen.getByTestId('nginx-editor-stub')).toHaveAttribute('data-scope', 'server');
+  });
+
   it('closes the editor after a successful save', async () => {
     const onclose = vi.fn();
     render(Harness, { props: { open: true, site, domain: 'acme.test', onclose } });
@@ -50,7 +59,7 @@ describe('SiteNginxModal', () => {
     render(Harness, { props: { open: true, site, domain: 'acme.test', onclose } });
     modal.set({
       kind: 'nginxSave',
-      nginxSave: { domain: 'acme.test', content: '', original: '', exists: true }
+      nginxSave: { domain: 'acme.test', scope: 'server', content: '', original: '', exists: true }
     });
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     expect(onclose).not.toHaveBeenCalled();

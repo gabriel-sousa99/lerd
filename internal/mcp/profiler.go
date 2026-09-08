@@ -76,16 +76,12 @@ func execProfilerReport(args map[string]any) (any, *rpcError) {
 		return toolErr(`args is required: the argv to run under php and profile, e.g. ["artisan","app:import"] or ["repro.php"]`), nil
 	}
 
-	phpVersion, err := phpDet.DetectVersion(projectPath)
+	phpVersion, err := phpDet.VersionForDir(projectPath)
 	if err != nil {
-		cfg, cfgErr := config.LoadGlobal()
-		if cfgErr != nil {
-			return toolErr("failed to detect PHP version: " + err.Error()), nil
-		}
-		phpVersion = cfg.PHP.DefaultVersion
+		return toolErr(err.Error()), nil
 	}
 	short := strings.ReplaceAll(phpVersion, ".", "")
-	container := "lerd-php" + short + "-fpm"
+	container := phpDet.FPMContainerForDir(projectPath, phpVersion)
 	if errBody := ensureFPMStartedMCP(phpVersion, short, container); errBody != nil {
 		return errBody, nil
 	}

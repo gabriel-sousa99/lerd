@@ -22,8 +22,11 @@ your change against all three before writing code.
    as versioned YAML. If a change adds a framework, a service, a worker, an env
    wiring, a doctor check, a custom command, or a proxy, it belongs in a store
    YAML file, **not** in Go. New workers go in the framework store YAML — never
-   in hardcoded Go, and never add a merger that backfills them. Copy the closest
-   existing YAML; those files are the schema of record.
+   in hardcoded Go, and never add a merger that backfills them. A worker,
+   command or doctor check a composer package owns rather than a framework goes
+   in `lerd-frameworks/packages/<vendor>-<name>.yaml` instead, where
+   it is declared once for every framework major. Copy the closest existing
+   YAML; those files are the schema of record.
 
 2. **Framework-agnostic.** No feature may know the name "Laravel" (or Symfony,
    WordPress…) in Go. Behaviour is driven by the YAML definition. If you find

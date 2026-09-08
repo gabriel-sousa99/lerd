@@ -489,3 +489,102 @@ func TestMergeServerJSON_IdempotentOnUnchangedEntry(t *testing.T) {
 		t.Fatal("updated lerd entry must be written")
 	}
 }
+
+// OpenCode does not use the mcpServers shape every other JSON client shares: the
+// entry lives under "mcp", carries type "local" rather than "stdio", and takes
+// the whole invocation as one command array (#1542).
+func TestOpenCodeEntryShape(t *testing.T) {
+	home := t.TempDir()
+	var oc aiClient
+	for _, c := range aiClients {
+		if c.Name == "opencode" {
+			oc = c
+		}
+	}
+	if oc.Name == "" {
+		t.Fatal("opencode client not registered")
+	}
+	if oc.ProjectMCP != "opencode.json" {
+		t.Errorf("project config should be opencode.json in the project root, got %q", oc.ProjectMCP)
+	}
+	if want := filepath.Join(".config", "opencode", "opencode.json"); oc.GlobalMCP != want {
+		t.Errorf("global config = %q, want %q", oc.GlobalMCP, want)
+	}
+
+	if err := writeClientMCP(filepath.Join(home, oc.GlobalMCP), oc); err != nil {
+		t.Fatalf("writeClientMCP: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "opencode.json"))
+	if err != nil {
+		t.Fatalf("read opencode config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	servers, _ := cfg["mcp"].(map[string]any)
+	lerd, ok := servers["lerd"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcp.lerd missing: %s", data)
+	}
+	if lerd["type"] != "local" {
+		t.Errorf(`type = %v, want "local": %s`, lerd["type"], data)
+	}
+	if lerd["enabled"] != true {
+		t.Errorf("entry should be enabled: %s", data)
+	}
+	cmd, ok := lerd["command"].([]any)
+	if !ok {
+		t.Fatalf("command should be an array, got %T: %s", lerd["command"], data)
+	}
+	if len(cmd) != 2 || cmd[0] != "lerd" || cmd[1] != "mcp" {
+		t.Errorf(`command = %v, want ["lerd","mcp"]: %s`, cmd, data)
+	}
+	if _, hasArgs := lerd["args"]; hasArgs {
+		t.Errorf("OpenCode folds args into command, so args must not be written: %s", data)
+	}
+}
+
+// The lerd entry must be removable again without disturbing a user's own servers.
+func TestOpenCodeRemoveKeepsOtherServers(t *testing.T) {
+	home := t.TempDir()
+	var oc aiClient
+	for _, c := range aiClients {
+		if c.Name == "opencode" {
+			oc = c
+		}
+	}
+	path := filepath.Join(home, oc.GlobalMCP)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"$schema":"https://opencode.ai/config.json","mcp":{"other":{"type":"local","command":["x"]}}}`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeClientMCP(path, oc); err != nil {
+		t.Fatalf("writeClientMCP: %v", err)
+	}
+	if !mcpConfigHasLerd(path, oc) {
+		t.Fatal("lerd entry not detected after write")
+	}
+	changed, err := removeClientMCP(path, oc)
+	if err != nil || !changed {
+		t.Fatalf("removeClientMCP: changed=%v err=%v", changed, err)
+	}
+	data, _ := os.ReadFile(path)
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse after remove: %v", err)
+	}
+	servers, _ := cfg["mcp"].(map[string]any)
+	if _, still := servers["lerd"]; still {
+		t.Errorf("lerd entry survived removal: %s", data)
+	}
+	if _, other := servers["other"]; !other {
+		t.Errorf("removal took the user's own server with it: %s", data)
+	}
+	if cfg["$schema"] == nil {
+		t.Errorf("removal dropped the $schema key: %s", data)
+	}
+}

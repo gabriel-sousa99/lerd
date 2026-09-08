@@ -132,6 +132,7 @@ The installer walks you through starter kit selection, database setup, and other
 
 `lerd new` is a framework-agnostic shortcut that runs the framework's scaffold command:
 
+
 ```bash
 lerd new                                # ask for the name, the framework and the version
 lerd new myapp                          # ask which framework to use
@@ -142,7 +143,7 @@ lerd new myapp -- --no-interaction      # pass extra flags to the scaffold comma
 ```
 
 On a terminal it asks which framework to scaffold rather than assuming one,
-offering the catalogue [`lerd framework list`](#lerd-framework-list) shows, which
+offering the catalogue [`lerd framework list`](#available-frameworks) shows, which
 your install seeds from the store. When the framework you pick has more than one
 major published it asks which, defaulting to the current release and pulling that
 major's definition before scaffolding. Called with no name at all it asks for
@@ -151,6 +152,12 @@ with no terminal skips all of them and scaffolds the default, so scripts and CI
 never start blocking on a prompt. `--framework-version` answers the version
 question the same way, which is how the dashboard's site wizard scaffolds a
 chosen major; it needs a `--framework` to apply to.
+
+The major you pick reaches composer as well as lerd. Each definition's create
+command names its own major, `composer create-project laravel/laravel:^11.0`, so
+the release that lands on disk is the one you asked for rather than whatever is
+newest, and the PHP range, workers and env wiring the definition brings match the
+code beside them.
 
 The command then carries the project the rest of the way: it links the new
 directory, which routes a project with no `.lerd.yaml` through the
@@ -204,12 +211,34 @@ Laravel has a built-in definition compiled into the binary as a fallback. When a
 
 Default workers:
 
-| Worker     | Label            | Command                                                         | Check             | Extra                                                                                            |
-| ---------- | ---------------- | --------------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------- |
-| `queue`    | Queue Worker     | `php artisan queue:work --queue=default --tries=3 --timeout=60` | -                 | -                                                                                               |
-| `schedule` | Task Scheduler   | `php artisan schedule:work`                                     | -                 | -                                                                                               |
-| `reverb`   | Reverb WebSocket | `php artisan reverb:start`                                      | `laravel/reverb`  | proxy at `/app`, auto-assigned port                                                             |
-| `horizon`  | Horizon          | `php artisan horizon`                                           | `laravel/horizon` | conflicts with `queue`; auto-reload via `horizon:listen` (see [queue workers](queue-workers.md)) |
+| Worker | Label | Command | Check | Extra |
+|---|---|---|---|---|
+| `queue` | Queue Worker | `php artisan queue:work --queue=default --tries=3 --timeout=60` | - | - |
+| `schedule` | Task Scheduler | `php artisan schedule:work` | - | - |
+| `reverb` | Reverb WebSocket | `php artisan reverb:start` | `laravel/reverb` | proxy at `/app`, auto-assigned port |
+| `horizon` | Horizon | `php artisan horizon` | `laravel/horizon` | conflicts with `queue`; auto-reload via `horizon:listen` (see [queue workers](queue-workers.md)) |
+| `native` | NativePHP | `php artisan native:serve` | `nativephp/electron` | runs on the host, see [NativePHP](#nativephp) |
+| `jump` | NativePHP Jump | `php artisan native:jump` | `nativephp/mobile` | runs on the host, see [NativePHP](#nativephp) |
+
+### NativePHP
+
+[NativePHP](https://nativephp.com) turns a Laravel app into a native application, and it is two products with two toolchains. `nativephp/electron` builds a desktop app; `nativephp/mobile` builds iOS and Android apps. Both register the same `native:*` artisan commands, so a project picks one. lerd links and serves either like any other Laravel site, at its own `.test` domain, and adds workers, commands and health checks gated on whichever package is installed, so a plain Laravel project sees none of it.
+
+The full end-to-end is in the [NativePHP walkthrough](../getting-started/nativephp.md); what follows is what the definition actually declares.
+
+**Where the artisan process runs.** Everything native shells out to tools that exist only on the host: Electron needs a display, `native:run` needs Gradle and adb or xcodebuild and simctl, and the PHP-FPM container has none of them. lerd's commands and `host: true` workers already run on the host, but `php` there is lerd's shim, which routes straight back into the container. So the artisan process itself runs through a real host PHP, the per-platform binary NativePHP ships in `nativephp/php-bin`. The desktop package already depends on it; the mobile `native:install` adds it as a dev dependency and unpacks the build matching the site's PHP version, which is the version `composer.lock` was resolved against.
+
+**Desktop** gets a `native` worker running `native:serve`, and `native:install` and `native:build` commands. Starting and stopping the worker opens and closes the Electron window, the same as any other worker.
+
+**Mobile** gets a `jump` worker running `native:jump`, the development server that puts a build on an address a phone can reach, and `native:install`, `native:run` and `native:open` as commands. Those three finish rather than staying up, and `native:run` and `native:open` produce terminal output because they ask which platform and which device.
+
+**Doctor checks.** Each product gets one for the runtime lerd can install, carrying `native:install` as its fix, since a fresh clone always arrives without it. Mobile adds two more for the toolchain lerd cannot install: one when neither Xcode nor the Android SDK is present, and one when the Android SDK is there but the JDK Gradle would pick is older than 17. Both report and offer no button, because installing either is a multi-gigabyte vendor download.
+
+**The site keeps its vhost.** On desktop the app runs its own PHP server on its own port and the `.test` domain is a convenience. On mobile it is more: `native:run` takes a `--start-url` and `native:jump` exists precisely to serve the app to a device over the network, which is the problem [LAN sharing](lan-sharing.md) already solves.
+
+`native:install` and `native:build` appear twice in the definition, once per product, with mutually exclusive `composer` gates, so `lerd run native:install` means the right thing whichever package you have and only one is ever resolved.
+
+Plugins, code signing and store uploads are not covered.
 
 ### Adding workers to Laravel
 
@@ -230,7 +259,6 @@ lerd framework add laravel --from-file horizon.yaml
 ```
 
 To remove the overlay (built-in workers remain):
-
 ```bash
 lerd framework remove laravel
 ```

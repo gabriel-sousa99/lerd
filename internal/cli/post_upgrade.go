@@ -29,6 +29,17 @@ var upgradeSkipCommands = map[string]bool{
 	"dns-forwarder": true,
 }
 
+// installInProgressEnv marks the process tree of a running `lerd install`.
+// The version stamp is only written when the install finishes, so a helper the
+// install shells out to would otherwise read the install it belongs to as a
+// pending upgrade and reapply the whole environment from inside it.
+const installInProgressEnv = "LERD_INSTALL_IN_PROGRESS"
+
+// markInstallInProgress makes every process the install spawns skip the reapply.
+func markInstallInProgress() {
+	_ = os.Setenv(installInProgressEnv, "1")
+}
+
 // devVersion matches the `git describe` versions a build from a checkout
 // carries, which change with every commit.
 var devVersion = regexp.MustCompile(`-\d+-g[0-9a-f]+`)
@@ -60,6 +71,9 @@ func ApplyPendingUpgrade(cmd *cobra.Command) {
 // command at a terminal that can afford the wait.
 func shouldApplyUpgrade(command, running, installed string, setUp, interactive bool) bool {
 	if !isReleaseVersion(running) || !setUp || !interactive {
+		return false
+	}
+	if os.Getenv(installInProgressEnv) != "" {
 		return false
 	}
 	if upgradeSkipCommands[command] {

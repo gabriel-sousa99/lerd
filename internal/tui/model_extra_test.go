@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/gabriel-sousa99/lerd/internal/dumps"
 	"github.com/gabriel-sousa99/lerd/internal/siteinfo"
 )
 
@@ -277,5 +278,27 @@ func TestSiteByName(t *testing.T) {
 	}
 	if s := m.siteByName("missing"); s != nil {
 		t.Fatalf("siteByName(missing) should be nil")
+	}
+}
+
+// TestSpaceKey_TogglesTheFocusedRow guards the key name itself: bubbletea
+// reports the space bar as "space", so a handler matching " " never fires and
+// every documented space toggle silently does nothing.
+func TestSpaceKey_TogglesTheFocusedRow(t *testing.T) {
+	if got := (tea.KeyPressMsg{Code: ' ', Text: " "}).String(); got != "space" {
+		t.Fatalf("space stringifies as %q; the key cases must match it", got)
+	}
+	m := NewModel("test")
+	m.activeTab = tabSites
+	m.focus = paneDetail
+	m.detailMode = detailDumps
+	setLens(m, dumps.KindQuery)
+	m.appendDebug(qEv("1", "r1", "select 1", 1))
+	m.dumpsCursor = 0
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: ' ', Text: " "})
+	m = next.(*Model)
+	if !m.dumpsExpanded["1"] {
+		t.Fatal("space should have expanded the focused row")
 	}
 }

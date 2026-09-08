@@ -5,7 +5,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 )
@@ -47,13 +46,9 @@ type dnsStatusDeps struct {
 // defaultDNSStatusDeps wires the production resolver and bus.
 func defaultDNSStatusDeps() dnsStatusDeps {
 	return dnsStatusDeps{
-		tld: func() string {
-			cfg, _ := config.LoadGlobal()
-			if cfg == nil {
-				return "test"
-			}
-			return cfg.DNS.TLD
-		},
+		// The same function the dnsmasq config was written from: a refused
+		// tld leaves this probing a suffix nothing ever served.
+		tld:     dns.ConfiguredTLD,
 		check:   dns.CheckStatus,
 		visible: func() bool { return visibleClients.Load() > 0 },
 		publish: func() { eventbus.Default.Publish(eventbus.KindStatus) },

@@ -19,10 +19,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// pestBrowserPkg is the Alpine package baked into the shared FPM image so
-// Playwright has a musl-native browser to drive. Playwright's own downloaded
-// Chromium is a glibc binary and cannot run on Alpine's musl libc.
-const pestBrowserPkg = "chromium"
+// pestBrowserPkgs are the Alpine packages baked into the shared FPM image for
+// Pest browser testing: chromium because Playwright's own download is a glibc
+// binary that cannot run on Alpine's musl libc, and Xvfb because a container has
+// no display, so a headed run dies asking for an XServer.
+var pestBrowserPkgs = []string{"chromium", "xvfb", "xvfb-run"}
 
 // pestBrowserCachePath is where the Playwright registry and lerd's chromium
 // shims live: a persistent volume, baked into the image as PLAYWRIGHT_BROWSERS_PATH
@@ -43,16 +44,28 @@ const playwrightBinRel = "node_modules/.bin/playwright"
 // host HOME, and musl chromium crashes writing its config into the bind-mounted
 // host home, so the browser needs an isolated, writable home. The find globs the
 // cache (an undocumented Playwright layout, but the only handle Pest leaves us),
-// so it stays correct across browser revisions; if a future Playwright renames
-// the binaries the install fails loudly via `test "$n" -gt 0`.
+// so it stays correct across browser revisions. The count guard only catches a
+// rename of every name at once: headless_shell was missed for a while because
+// chrome still matched, leaving headless runs on a glibc binary musl can't exec.
+//
+// A headed launch gets a virtual display from xvfb-run, since the container has
+// none and chromium would otherwise refuse to start. --headless is the flag
+// Playwright itself appends for a headless launch, so its absence is the signal.
 var pestBrowserShim = fmt.Sprintf(`set -e
 cache="${PLAYWRIGHT_BROWSERS_PATH:-%s}"
 if [ ! -d "$cache" ]; then echo "no Playwright browser cache at $cache" >&2; exit 1; fi
-find "$cache" -type f \( -name chrome-headless-shell -o -name chrome \) -print0 2>/dev/null | while IFS= read -r -d '' b; do
-  printf '#!/bin/sh\nexport HOME=/root\nexec /usr/bin/chromium --no-sandbox "$@"\n' > "$b"
+find "$cache" -type f \( -name chrome-headless-shell -o -name headless_shell -o -name chrome \) -print0 2>/dev/null | while IFS= read -r -d '' b; do
+  cat > "$b" <<'LERDSHIM'
+#!/bin/sh
+export HOME=/root
+case " $* " in
+  *" --headless"*) exec /usr/bin/chromium --no-sandbox "$@" ;;
+esac
+exec xvfb-run -a /usr/bin/chromium --no-sandbox "$@"
+LERDSHIM
   chmod +x "$b"
 done
-n=$(find "$cache" -type f \( -name chrome-headless-shell -o -name chrome \) 2>/dev/null | wc -l)
+n=$(find "$cache" -type f \( -name chrome-headless-shell -o -name headless_shell -o -name chrome \) 2>/dev/null | wc -l)
 echo "  shimmed $n browser binary(ies) to system chromium"
 test "$n" -gt 0
 `, pestBrowserCachePath)
@@ -119,8 +132,9 @@ printf '%%s\n' "$plan" | while IFS="$(printf '\t')" read -r dir url mirror; do
   mkdir -p "$dir"
   unzip -q -o "$zip" -d "$dir"
   rm -f "$zip"
-  find "$dir" -type f \( -name 'chrome' -o -name 'chrome-headless-shell' -o -name 'chrome_sandbox' \
-    -o -name 'chrome_crashpad_handler' -o -name 'ffmpeg-linux' -o -name '*.sh' \) -exec chmod +x {} +
+  find "$dir" -type f \( -name 'chrome' -o -name 'chrome-headless-shell' -o -name 'headless_shell' \
+    -o -name 'chrome_sandbox' -o -name 'chrome_crashpad_handler' -o -name 'ffmpeg-linux' \
+    -o -name '*.sh' \) -exec chmod +x {} +
   touch "$dir/INSTALLATION_COMPLETE"
 done
 `, pestBrowserCachePath, pestBrowserPlanAwk)
@@ -139,6 +153,19 @@ pkill -f "lerd-playwrigh[t]" >/dev/null 2>&1
 rm -rf "${PLAYWRIGHT_BROWSERS_PATH:-%s}/__dirlock" /tmp/playwright-download-* /tmp/lerd-playwrigh[t]-*.zip
 exit 0
 `, pestBrowserCachePath)
+
+// missingPestBrowserPkgs returns the browser packages not yet in the declared
+// set, so a rebuild is paid for only when something is genuinely missing and a
+// failed one can put back exactly what it added.
+func missingPestBrowserPkgs(cfg *config.GlobalConfig) []string {
+	var missing []string
+	for _, pkg := range pestBrowserPkgs {
+		if !slices.Contains(cfg.GetPackages(), pkg) {
+			missing = append(missing, pkg)
+		}
+	}
+	return missing
+}
 
 // pestBrowserSupportedVersion rejects the frozen legacy PHP tier, whose base
 // image ships a Node too old for current Playwright (see docs). Returning early
@@ -227,13 +254,14 @@ func installPestBrowser(version string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	added := false
-	if !slices.Contains(cfg.GetPackages(), pestBrowserPkg) {
-		cfg.AddPackage(pestBrowserPkg)
+	added := missingPestBrowserPkgs(cfg)
+	for _, pkg := range added {
+		cfg.AddPackage(pkg)
+	}
+	if len(added) > 0 {
 		if err := config.SaveGlobal(cfg); err != nil {
 			return fmt.Errorf("saving config: %w", err)
 		}
-		added = true
 	}
 
 	if err := podman.WriteFPMQuadlet(version); err != nil {
@@ -246,12 +274,14 @@ func installPestBrowser(version string, w io.Writer) error {
 
 	// Rebuild when chromium was just opted in, or when an image from an older
 	// install lacks the baked PLAYWRIGHT_BROWSERS_PATH the test runner relies on.
-	needRebuild := added || !playwrightEnvBaked(container)
+	needRebuild := len(added) > 0 || !playwrightEnvBaked(container)
 	if needRebuild {
-		fmt.Fprintf(w, "Baking chromium into the PHP %s image...\n", version)
+		fmt.Fprintf(w, "Baking chromium and Xvfb into the PHP %s image...\n", version)
 		if err := podman.RebuildFPMImageTo(version, false, w); err != nil {
-			if added {
-				cfg.RemovePackage(pestBrowserPkg)
+			if len(added) > 0 {
+				for _, pkg := range added {
+					cfg.RemovePackage(pkg)
+				}
 				_ = config.SaveGlobal(cfg)
 			}
 			return fmt.Errorf("rebuild failed: %w", err)
@@ -342,20 +372,28 @@ func removePestBrowser(version string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if !slices.Contains(cfg.GetPackages(), pestBrowserPkg) {
+	var removed []string
+	for _, pkg := range pestBrowserPkgs {
+		if slices.Contains(cfg.GetPackages(), pkg) {
+			cfg.RemovePackage(pkg)
+			removed = append(removed, pkg)
+		}
+	}
+	if len(removed) == 0 {
 		fmt.Fprintf(w, "Pest browser testing is not enabled for PHP %s — nothing to remove.\n", version)
 		return nil
 	}
-	cfg.RemovePackage(pestBrowserPkg)
 	if err := config.SaveGlobal(cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 
-	fmt.Fprintf(w, "Removing chromium from the PHP %s image...\n", version)
+	fmt.Fprintf(w, "Removing chromium and Xvfb from the PHP %s image...\n", version)
 	if err := podman.RebuildFPMImageTo(version, false, w); err != nil {
-		// Restore config so it doesn't claim chromium is gone while the live
-		// image still carries it (mirrors installPestBrowser's revert).
-		cfg.AddPackage(pestBrowserPkg)
+		// Restore config so it doesn't claim the packages are gone while the
+		// live image still carries them (mirrors installPestBrowser's revert).
+		for _, pkg := range removed {
+			cfg.AddPackage(pkg)
+		}
 		_ = config.SaveGlobal(cfg)
 		return fmt.Errorf("rebuild failed (config restored): %w", err)
 	}
@@ -409,8 +447,8 @@ func doctorPestBrowser(version string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	check(slices.Contains(cfg.GetPackages(), pestBrowserPkg),
-		"chromium baked into the FPM image", "lerd pest:browser install")
+	check(len(missingPestBrowserPkgs(cfg)) == 0,
+		"chromium and Xvfb baked into the FPM image", "lerd pest:browser install")
 
 	running, _ := podman.ContainerRunning(container)
 	check(running, "PHP "+version+" FPM container is running", serviceStartHint(container))
@@ -421,11 +459,14 @@ func doctorPestBrowser(version string, w io.Writer) error {
 	chromiumOK := podman.Cmd("exec", container, "chromium", "--version").Run() == nil
 	check(chromiumOK, "chromium present in the container", "lerd pest:browser install")
 
+	xvfbOK := podman.Cmd("exec", container, "sh", "-c", "command -v xvfb-run >/dev/null").Run() == nil
+	check(xvfbOK, "Xvfb present for headed runs", "lerd pest:browser install")
+
 	playwrightOK := podman.Cmd("exec", "-w", cwd, container, "sh", "-c", "test -x ./node_modules/.bin/playwright").Run() == nil
 	check(playwrightOK, "playwright npm package installed", "lerd npm install playwright")
 
 	shimOK := podman.Cmd("exec", container, "sh", "-c",
-		`fs=$(find "${PLAYWRIGHT_BROWSERS_PATH:-`+pestBrowserCachePath+`}" -type f \( -name chrome-headless-shell -o -name chrome \) 2>/dev/null); [ -n "$fs" ] || exit 1; for b in $fs; do head -1 "$b" | grep -q '#!/bin/sh' || exit 1; done`).Run() == nil
+		`fs=$(find "${PLAYWRIGHT_BROWSERS_PATH:-`+pestBrowserCachePath+`}" -type f \( -name chrome-headless-shell -o -name headless_shell -o -name chrome \) 2>/dev/null); [ -n "$fs" ] || exit 1; for b in $fs; do head -1 "$b" | grep -q '#!/bin/sh' || exit 1; done`).Run() == nil
 	check(shimOK, "Playwright browser shimmed to musl chromium", "lerd pest:browser install")
 
 	// The checks above can pass while `lerd test` still fails: pest-plugin-browser

@@ -83,7 +83,7 @@ Prefer your package manager? Lerd is also available through an [apt PPA, a Fedor
 | Multiple PHP versions, switched from the tray | PHP 7.4 and 8.0 to 8.5, picked per project by `lerd isolate 8.4` or auto-detected from `composer.json` |
 | Bundled MySQL, PostgreSQL, Redis, Memcached | `lerd service start mysql`, plus PostgreSQL, Redis, Meilisearch, MongoDB, S3-compatible storage and Mailpit, shared across every site |
 | The tray menu, start/stop, logs, terminal | A [system tray](/features/system-tray), a [web dashboard](/features/web-ui) at `127.0.0.1:7073` and a [terminal dashboard](/features/tui) |
-| Cmder terminal with the right PHP on `PATH` | `lerd php`, `lerd composer` and `lerd php:shell`, always on the version that project is registered on |
+| Cmder terminal with the right PHP on `PATH` | `lerd php`, `lerd composer` and `lerd shell`, always on the version that project is registered on |
 | Portable, everything in `C:\laragon` | Everything under `~/.config/lerd` and `~/.local/share/lerd`, XDG-compliant, nothing written to system directories |
 | Node, npm, Python and Go bundled alongside PHP | Per-project Node, plus [any other runtime](/getting-started/containers) through a `Containerfile.lerd` |
 
@@ -98,7 +98,7 @@ Prefer your package manager? Lerd is also available through an [apt PPA, a Fedor
 | `.test` domains | Automatic, through a dnsmasq container | Automatic, through hosts file entries written by the tray app |
 | HTTPS | `lerd secure`, mkcert certificate trusted system-wide | One-click self-signed certificate, trusted after you install it manually |
 | PHP versions | 7.4, 8.0 to 8.5, per project | Multiple versions, downloaded into the Laragon folder |
-| Per-project config | [`.lerd.yaml`](/configuration#per-project-config-lerdyaml) committed to the repo, covering PHP, Node, services and workers | None, configuration lives in the Laragon install |
+| Per-project config | [`.lerd.yaml`](/configuration#per-project-config-lerd-yaml) committed to the repo, covering PHP, Node, services and workers | None, configuration lives in the Laragon install |
 | Queue and scheduler workers | `lerd worker start queue` / `schedule`, as systemd user services | Not built in |
 | Dashboard | Web UI, system tray, terminal dashboard, installable PWA | Native tray application |
 | AI / MCP | Built-in [MCP server](/features/mcp) for Claude Code, Cursor, Junie and Windsurf | Not built in |
@@ -151,7 +151,7 @@ Full detail lives in the [quick start](/getting-started/quick-start) and the [si
 
 Be aware of these before you switch, they are the places where the mental model changes:
 
-- **Containers, not a portable folder.** PHP and the services run in rootless Podman containers, so there is no `C:\laragon` you can copy to another machine. What you commit instead is [`.lerd.yaml`](/configuration#per-project-config-lerdyaml), which rebuilds the same environment anywhere.
+- **Containers, not a portable folder.** PHP and the services run in rootless Podman containers, so there is no `C:\laragon` you can copy to another machine. What you commit instead is [`.lerd.yaml`](/configuration#per-project-config-lerd-yaml), which rebuilds the same environment anywhere.
 - **Services are shared, not per project.** One MySQL, one Redis, one Mailpit across every site, which is why five running projects cost around 200 MB of RAM rather than five full stacks.
 - **Nginx by default.** Lerd serves through Nginx and PHP-FPM. If a project depends on `.htaccess` rules, translate them into an [nginx override](/usage/nginx-overrides).
 - **One `sudo` at install time.** Only to point the system resolver at the `.test` domains. Everything after that runs as your own user.

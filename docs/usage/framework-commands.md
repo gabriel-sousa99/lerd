@@ -31,6 +31,16 @@ Clicking a command (or pressing Enter on a palette entry, or running `lerd run <
 
 The dashboard modal streams output as it arrives via Server-Sent Events from `POST /api/sites/:domain/commands/:name/run`; the CLI streams straight to your terminal (`lerd run` is stdio-passthrough).
 
+## Pinned commands
+
+The command a project runs twenty times a day shouldn't cost the same two clicks as the one it runs twice a year, so a command can be pinned: it then draws its own button on the site's control row, next to the PHP and Node pickers and the doctor button, and clicking it runs exactly what the dropdown entry would, confirm gate and terminal spawn included.
+
+Pin and unpin from the pin icon on the right of each entry in the Commands dropdown. Two pinned commands per site is the limit, because the row folds its secondary actions into a menu on a narrow panel and an unbounded set would land on that fold first. Once two are pinned the other pin icons go inert until you free a slot.
+
+A definition can ship a command pinned by default with `pinned: true`, for the one a project's developers all reach for. Laravel does it for NativePHP's `native:run`, which is the loop of mobile development and only surfaces at all once the mobile runtime is installed. Your own pin choice is stored per site in lerd's registry, not in `.lerd.yaml`, so it stays personal: unpinning a default doesn't turn into a diff every teammate carries, and pinning one of your own doesn't either.
+
+Note this is a different pin from `lerd idle pin`, which excludes a site from idle-suspend. One keeps a site's workers awake, the other keeps a command in reach.
+
 ## Project commands
 
 Any `.lerd.yaml` can add or override commands via a `commands:` block:
@@ -63,7 +73,7 @@ The merge rules are:
 - A project entry with a new `name` is **appended** after the framework set.
 - Framework entries whose `check:` rule fails are dropped before the merge.
 
-Validation runs as part of `lerd check`. Invalid `output:` values, unknown icons, duplicate names, and missing commands all surface there.
+Validation runs as part of `lerd site:doctor`. Invalid `output:` values, unknown icons, duplicate names, and missing commands all surface there.
 
 Because a `.lerd.yaml` `commands:` entry comes from the project (an untrusted cloned repo), lerd asks before running one on your host: the first run via `lerd run` or the dashboard shows the exact command and prompts, and the approval is remembered per site so later runs don't re-prompt. `lerd run --yes` bypasses the prompt, and `host_commands.skip_confirmation: true` (or `host_commands.disabled: true` to refuse them) in the global config changes the default. Framework-provided commands (store, built-in, user overlay) run without this prompt.
 
@@ -77,6 +87,7 @@ commands:
     description: Clear config, route, view, event, and compiled caches
     output: silent                # silent | text | url | terminal (default: text)
     confirm: false                # ask before running
+    pinned: false                 # draw it as a button on the site's control row (max 2 per site)
     icon: broom                   # from the known icon set
     cwd: .                        # optional, relative to project root
     check:                        # optional; hide when this rule fails
@@ -84,9 +95,9 @@ commands:
     # `disabled: true` is only meaningful in .lerd.yaml; ignored in framework yamls
 ```
 
-**Known icons**: `broom`, `database`, `refresh`, `link`, `check`, `list`, `key`, `edit`, `arrow-down`, `arrow-up`, `play`, `terminal`. An unknown icon falls back to a generic glyph; `lerd check` warns.
+**Known icons**: `broom`, `database`, `refresh`, `link`, `check`, `list`, `key`, `edit`, `arrow-down`, `arrow-up`, `play`, `terminal`. An unknown icon falls back to a generic glyph; `lerd site:doctor` warns.
 
-**Output values:** invalid values fail `lerd check`. Defaults to `text`.
+**Output values:** invalid values fail `lerd site:doctor`. Defaults to `text`.
 
 **Check rules**: reuse `FrameworkRule`. The two common forms are `composer: <package>` (the package must be in `composer.json`) and `file: <path>` (the file must exist relative to the project root).
 
@@ -99,7 +110,7 @@ When the lerd MCP server is registered, an AI assistant can:
 - `command_add(site, name, command, ...)`: write a new entry into `.lerd.yaml`'s `commands:` block. Same `name` as a framework default replaces it. Use `disabled: true` to suppress a framework default
 - `command_remove(site, name)`: delete a project entry
 
-Agents should prefer `commands_run` over invoking `php artisan` / `drush` / `wp` directly so per-project overrides are honored, and `command_add` over hand-editing yaml so the entry passes the same validation `lerd check` runs.
+Agents should prefer `commands_run` over invoking `php artisan` / `drush` / `wp` directly so per-project overrides are honored, and `command_add` over hand-editing yaml so the entry passes the same validation `lerd site:doctor` runs.
 
 ## CLI
 

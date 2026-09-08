@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -374,5 +375,42 @@ func TestAardvarkNetworkDrifted_readsExistingConfig_v4Only(t *testing.T) {
 	first := strings.SplitN(content, "\n", 2)[0]
 	if aardvarkListenHasV6(first) {
 		t.Errorf("drifted first line %q should not contain v6 listen", first)
+	}
+}
+
+func TestHostHasIPv6Loopback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the ::1 probe reads /proc; every other platform short-circuits to true")
+	}
+	tests := []struct {
+		name    string
+		ifInet6 string
+		want    bool
+	}{
+		{
+			name: "loopback only is enough",
+			ifInet6: "00000000000000000000000000000001 01 80 10 80       lo\n" +
+				"fe80000000000000505400fffed9f609 02 40 20 80   enp1s0\n",
+			want: true,
+		},
+		{
+			name:    "ipv6 disabled host-wide leaves no addresses",
+			ifInet6: "",
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "if_inet6")
+			if err := os.WriteFile(path, []byte(tt.ifInet6), 0644); err != nil {
+				t.Fatal(err)
+			}
+			old := ipv6IfInet6Path
+			ipv6IfInet6Path = path
+			defer func() { ipv6IfInet6Path = old }()
+			if got := HostHasIPv6Loopback(); got != tt.want {
+				t.Errorf("HostHasIPv6Loopback() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

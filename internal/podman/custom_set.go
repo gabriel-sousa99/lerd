@@ -19,11 +19,16 @@ import (
 // declared, so a second label carries what the first cannot.
 const fpmCustomSetHashLabel = "dev.lerd.fpm.custom-set-hash"
 
-// customSetHash fingerprints the declared set. Sorted, so the order entries were
-// added in never rebuilds an image; empty for an empty set, so images built
-// before this label existed (which read back as "") still count as current for
-// the users who declare nothing.
-func customSetHash(exts []string, extDeps map[string][]string, packages []string) string {
+// customSetHash fingerprints the declared set the build will actually realise.
+// Sorted, so the order entries were added in never rebuilds an image; empty for
+// an empty set, so images built before this label existed (which read back as
+// "") still count as current for the users who declare nothing.
+//
+// Bundled names are dropped because the build skips them: an image built while
+// a declared ftp still clobbered the base image's own keeps the fingerprint of
+// that set, so leaving the name in would leave it looking current forever.
+func customSetHash(phpVersion string, exts []string, extDeps map[string][]string, packages []string) string {
+	exts = WithoutBundled(phpVersion, exts)
 	if len(exts) == 0 && len(packages) == 0 {
 		return ""
 	}
@@ -33,6 +38,9 @@ func customSetHash(exts []string, extDeps map[string][]string, packages []string
 	}
 	deps := make([]string, 0, len(extDeps))
 	for ext, d := range extDeps {
+		if len(WithoutBundled(phpVersion, []string{ext})) == 0 {
+			continue
+		}
 		deps = append(deps, ext+"="+strings.Join(sortedCopy(d), ","))
 	}
 	parts = append(parts, sortedCopy(deps)...)
@@ -129,7 +137,7 @@ func FPMImageStale(version string) bool {
 	if err != nil {
 		return false
 	}
-	want := customSetHash(cfg.GetExtensions(), cfg.AllExtApkDeps(), cfg.GetPackages())
+	want := customSetHash(version, cfg.GetExtensions(), cfg.AllExtApkDeps(), cfg.GetPackages())
 	return imageLabelFn(FPMImageName(version), fpmCustomSetHashLabel) != want
 }
 
@@ -163,7 +171,7 @@ func RecordRealisedSet(version string, declaredExts, declaredPkgs []string) {
 	if err != nil {
 		return
 	}
-	set.Hash = customSetHash(declaredExts, cfg.AllExtApkDeps(), declaredPkgs)
+	set.Hash = customSetHash(version, declaredExts, cfg.AllExtApkDeps(), declaredPkgs)
 	cfg.SetRealised(version, set)
 	_ = config.SaveGlobal(cfg)
 }

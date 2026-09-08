@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/gabriel-sousa99/lerd/internal/config"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
@@ -12,8 +13,10 @@ import (
 // NewPhpShellCmd returns the shell command — opens an interactive sh session in the PHP-FPM container.
 func NewPhpShellCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:          "shell",
+		Use:          "shell [version]",
 		Short:        "Open a shell in the project's PHP-FPM container",
+		Long:         "Opens an interactive shell in the PHP-FPM container serving the current project.\nPass a version to open one in that version's shared container instead, from anywhere.",
+		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE:         runPhpShell,
 	}
@@ -32,18 +35,66 @@ func shellWorkDir(cwd string) string {
 	return phpDet.SiteRootFor(cwd)
 }
 
-// phpShellExecArgs builds the interactive shell exec. It puts the opt-in
+// phpShellInnerScript is what runs inside the container: the opt-in
 // in-container bun (lerd php:bun install) on PATH so a bare `bun` resolves,
-// harmless when bun isn't installed, and forwards the terminal's colour
-// capability so starship and the tools run in the session render as they do
-// on the host.
-func phpShellExecArgs(container, workDir string) []string {
-	args := append([]string{"exec", "-it"}, terminalColorEnvArgs()...)
-	return append(args, "-w", workDir, container,
-		"sh", "-c", `export PATH="/root/.bun/bin:$PATH"; `+podman.InteractiveShellScript())
+// harmless when bun isn't installed, then lerd's interactive shell.
+func phpShellInnerScript() string {
+	return `export PATH="/root/.bun/bin:$PATH"; ` + podman.InteractiveShellScript()
 }
 
-func runPhpShell(_ *cobra.Command, _ []string) error {
+// phpShellExecArgs builds the interactive shell exec. It forwards the
+// terminal's colour capability so starship and the tools run in the session
+// render as they do on the host. An empty workDir leaves the container on its
+// own default, which is what a version shell with no project behind it wants.
+func phpShellExecArgs(container, workDir string) []string {
+	args := append([]string{"exec", "-it"}, terminalColorEnvArgs()...)
+	if workDir != "" {
+		args = append(args, "-w", workDir)
+	}
+	return append(args, container, "sh", "-c", phpShellInnerScript())
+}
+
+// runVersionShell opens a shell in a version's shared FPM container with no
+// project in play, so an image can be looked inside from anywhere. It starts a
+// stopped container but never offers to build a missing one: there is no
+// project here whose pin would justify a five-minute build.
+func runVersionShell(input string) error {
+	version, err := config.NormalizePHPVersion(input)
+	if err != nil {
+		return err
+	}
+	container := podman.SharedFPMContainerName(version)
+	handled, err := startInstalledFPM(version, container)
+	if err != nil {
+		return err
+	}
+	if !handled {
+		return notInstalledErr(version)
+	}
+	return runPhpShellExec(container, "")
+}
+
+// runPhpShellExec hands the terminal over to the container shell, exiting with
+// its status so a shell that ends on an error is not reported as a clean run.
+func runPhpShellExec(container, workDir string) error {
+	cmd := podman.Cmd(phpShellExecArgs(container, workDir)...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			os.Exit(exit.ExitCode())
+		}
+		return err
+	}
+	return nil
+}
+
+func runPhpShell(_ *cobra.Command, args []string) error {
+	if len(args) == 1 {
+		return runVersionShell(args[0])
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -66,15 +117,5 @@ func runPhpShell(_ *cobra.Command, _ []string) error {
 	podman.EnsurePathMounted(workDir, version)
 	ensureServicesForCwd(workDir)
 
-	cmd := podman.Cmd(phpShellExecArgs(container, workDir)...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		if exit, ok := err.(*exec.ExitError); ok {
-			os.Exit(exit.ExitCode())
-		}
-		return err
-	}
-	return nil
+	return runPhpShellExec(container, workDir)
 }

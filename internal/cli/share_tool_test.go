@@ -76,7 +76,7 @@ func TestRunShareTool_rejectsToolWithoutItsBinary(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
-	if !strings.Contains(err.Error(), "not in PATH") {
+	if !strings.Contains(err.Error(), "not installed") {
 		t.Errorf("error = %v, want it to say the binary is missing", err)
 	}
 }

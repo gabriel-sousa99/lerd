@@ -1,6 +1,6 @@
 # Sharing Sites
 
-`lerd share` exposes the current site via a public tunnel. Requires [ngrok](https://ngrok.com/download), [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), or [Expose](https://expose.dev) to be installed, or an ngrok auth token so lerd can run ngrok as a container. A tool installed with Homebrew is found by the dashboard too, which does not inherit your shell's `PATH`.
+`lerd share` exposes the current site via a public tunnel. Requires [ngrok](https://ngrok.com/download), [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), or [Expose](https://expose.dev) to be installed, or an ngrok auth token so lerd can run ngrok as a container. A tool installed with Homebrew, or dropped into lerd's own `bin` directory, is found by the dashboard too, which does not inherit your shell's `PATH`.
 
 For sharing on your local network instead of the public internet, see [LAN sharing](lan-sharing.md).
 
@@ -25,6 +25,8 @@ The three SSH tunnels need nothing installed beyond `ssh` itself and no account.
 Every tunnel is served through a small local proxy rather than pointed straight at nginx. The proxy sets the `Host` nginx routes on, dials a secured site over HTTPS without tripping on the local mkcert certificate, and rewrites the site's own `.test` domain out of redirects and asset URLs so the public hostname survives. Without it a secured site answers the first request with a redirect to its `.test` address, which means nothing to whoever opened the public URL.
 
 That rewrite covers more than the plain form of an address. JSON escapes its slashes, so the same URL reaches the browser as `https:\/\/site.test\/path` inside a payload embedded in the page or returned from an XHR, and it is matched in that form too. An external redirect does not always travel in a `Location` header either, since a framework can hand its own client one through a header of its own, so `Content-Location` and `X-Inertia-Location` are rewritten alongside it. Rewritten URLs always come back over `https`, because the tunnel is TLS and a plain-http one would be refused as mixed content.
+
+Expose names a tunnel after the host it is pointed at, and every lerd share goes through the local proxy on loopback, so lerd asks Expose for the site's own label instead: `payments.test` is shared as `payments`, and a worktree of it as `feature-payments`. Custom subdomains are an Expose Pro feature, so a free account is told the request was ignored and gets a random subdomain, which still beats a share that fails outright because the proxy's port number was already taken as a name.
 
 ## ngrok without installing it
 

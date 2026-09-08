@@ -49,8 +49,8 @@ Use --check to compare local definitions against the store and show update statu
 func runFrameworkList(check bool) error {
 	frameworks := config.ListFrameworksDetailed()
 
-	// Try to resolve versions from composer.lock in cwd for frameworks
-	// that don't have a static version (e.g. built-in laravel).
+	// Try to resolve versions from the project in cwd for frameworks that don't
+	// have a static version (e.g. built-in laravel).
 	cwd, _ := os.Getwd()
 
 	// Fetch store index if --check is requested.
@@ -99,7 +99,74 @@ func runFrameworkList(check bool) error {
 		}
 	}
 	feedback.Table(headers, rows)
+	listStorePackages(cwd)
 	return nil
+}
+
+// listStorePackages prints the package layer under the definitions: what the
+// store publishes, what each package contributes, and which of them this
+// project requires. The layer is otherwise invisible, since everything it
+// declares surfaces as an ordinary worker or command, so this is the only place
+// that says where a declaration came from.
+func listStorePackages(cwd string) {
+	pkgs := config.ListStorePackages(cwd)
+	if len(pkgs) == 0 {
+		return
+	}
+	rows := make([][]string, 0, len(pkgs))
+	for _, p := range pkgs {
+		rows = append(rows, []string{p.Name, packageDeclares(p), packageFileLabel(p), packageUse(p, cwd)})
+	}
+	feedback.Header("Packages")
+	feedback.Table([]string{"Package", "Declares", "File", "This project"}, rows)
+}
+
+// packageDeclares summarises a package's contributions: workers and commands by
+// name, since those are what a user recognises, and the rest by count.
+func packageDeclares(p config.StorePackageInfo) string {
+	if !p.Cached {
+		return "—"
+	}
+	var parts []string
+	for _, w := range p.Workers {
+		parts = append(parts, w+" worker")
+	}
+	if len(p.Commands) > 0 {
+		parts = append(parts, strings.Join(p.Commands, ", "))
+	}
+	if p.Setup > 0 {
+		parts = append(parts, fmt.Sprintf("%d setup", p.Setup))
+	}
+	if p.Doctor > 0 {
+		parts = append(parts, fmt.Sprintf("%d check%s", p.Doctor, pluralS(p.Doctor)))
+	}
+	if len(parts) == 0 {
+		return "—"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// packageFileLabel names the file serving this project, or says the store
+// publishes one this machine has not pulled yet.
+func packageFileLabel(p config.StorePackageInfo) string {
+	if !p.Cached {
+		return "not installed"
+	}
+	if p.Version == "" {
+		return "any version"
+	}
+	return "@" + p.Version
+}
+
+func packageUse(p config.StorePackageInfo, cwd string) string {
+	switch {
+	case p.Required:
+		return "yes"
+	case cwd == "":
+		return "—"
+	default:
+		return "no"
+	}
 }
 
 func storeStatus(info config.FrameworkInfo, idx *store.Index) (latest, status string) {
@@ -661,36 +728,57 @@ func updateAllFrameworks(client *store.Client, showDiff bool) error {
 		return err
 	}
 
-	local := config.ListFrameworksDetailed()
+	// Refresh the same version that's cached; previously this fetched
+	// entry.Latest for every entry, so users with multiple versions
+	// (laravel@10..@13) ended up only refreshing the latest file and the others
+	// stayed stale forever.
+	var installed []config.FrameworkInfo
+	for _, info := range config.ListFrameworksDetailed() {
+		if info.Source == config.SourceBuiltIn || !frameworkInIndex(idx, info.Name) {
+			continue
+		}
+		installed = append(installed, info)
+	}
+	packages := packageRefreshTargets(idx)
+	total := len(installed) + len(packages)
+	if total == 0 {
+		feedback.Line("no frameworks to update")
+		return nil
+	}
+
+	// A diff per definition is the point of --check, so that run keeps its lines
+	// and only the plain update collapses into one.
+	var bar *feedback.Progress
+	if !showDiff {
+		bar = feedback.StartProgress(fmt.Sprintf("updating %d definition%s", total, pluralS(total)), total)
+	}
 	updated := 0
-	for _, info := range local {
-		if info.Source == config.SourceBuiltIn {
-			continue
+	report := func(label string, err error) {
+		switch {
+		case bar != nil && err != nil:
+			bar.Failed(label, err.Error())
+		case bar != nil:
+			bar.Step(label)
+			updated++
+		case err != nil:
+			feedback.Warn("%s: %v", label, err)
+		default:
+			feedback.Note("updated " + label)
+			updated++
 		}
-		// Refresh the same version that's cached; previously this fetched
-		// entry.Latest for every entry, so users with multiple versions
-		// (laravel@10..@13) ended up only refreshing the latest file and
-		// the others stayed stale forever.
-		inIndex := false
-		for _, entry := range idx.Frameworks {
-			if entry.Name == info.Name {
-				inIndex = true
-				break
-			}
-		}
-		if !inIndex {
-			continue
-		}
+	}
+
+	for _, info := range installed {
+		label := info.Name + "@" + info.Version
 		remote, fetchErr := client.FetchFramework(info.Name, info.Version)
 		if fetchErr != nil {
-			feedback.Warn("%s@%s: %v", info.Name, info.Version, fetchErr)
+			report(label, fetchErr)
 			continue
 		}
-
 		if showDiff {
 			changed, diffErr := showFrameworkDiff(info.Name, info.Framework, remote)
 			if diffErr != nil {
-				feedback.Warn("%s@%s: %v", info.Name, info.Version, diffErr)
+				report(label, diffErr)
 				continue
 			}
 			if !changed {
@@ -698,21 +786,38 @@ func updateAllFrameworks(client *store.Client, showDiff bool) error {
 				continue
 			}
 		}
-
 		if saveErr := config.SaveStoreFramework(remote); saveErr != nil {
-			feedback.Warn("%s@%s: %v", info.Name, info.Version, saveErr)
+			report(label, saveErr)
 			continue
 		}
 		config.RemoveUserFramework(info.Name)
-		feedback.Note(fmt.Sprintf("updated %s@%s", remote.Name, versionOrLatest(remote)))
-		updated++
+		report(info.Name+"@"+versionOrLatest(remote), nil)
+	}
+
+	for _, t := range packages {
+		report(t.label, t.fetch(client))
+	}
+
+	if bar != nil {
+		bar.Done(storeRefreshTally(bar.Completed(), bar.Failures()))
+		return nil
 	}
 	if updated == 0 {
 		feedback.Line("no frameworks to update")
 	} else {
-		feedback.Done(fmt.Sprintf("updated %d framework(s)", updated))
+		feedback.Done(fmt.Sprintf("updated %d definition(s)", updated))
 	}
 	return nil
+}
+
+// frameworkInIndex reports whether the store still publishes a framework.
+func frameworkInIndex(idx *store.Index, name string) bool {
+	for _, entry := range idx.Frameworks {
+		if entry.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func versionOrLatest(fw *config.Framework) string {

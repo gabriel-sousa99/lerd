@@ -9,6 +9,7 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/desktopapp"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
@@ -41,8 +42,6 @@ func runUninstall(force bool) error {
 		}
 	}
 
-	// Ask about data removal up front — the StepRunner puts stdin into raw
-	// mode and its reader goroutine would consume bytes meant for this prompt.
 	removeData := force || confirmRemoveData()
 
 	// Global npm packages the npm shim captured into lerd's prefix would
@@ -108,6 +107,12 @@ func runUninstall(force bool) error {
 	step("Removing service units")
 	removeServiceUnits()
 	ok()
+
+	if desktopapp.Path() != "" {
+		step("Removing the " + desktopapp.Name + " launcher")
+		_ = desktopapp.Remove()
+		ok()
+	}
 
 	step("Reloading service manager")
 	_ = podman.DaemonReloadFn()

@@ -67,7 +67,7 @@ func TestBaseImagePullResolvesFromRegistry(t *testing.T) {
 }
 
 func TestBuildCustomExtBlock_Empty(t *testing.T) {
-	if got := buildCustomExtBlock(nil, nil); got != "" {
+	if got := buildCustomExtBlock("8.5", nil, nil); got != "" {
 		t.Errorf("expected empty block for no extensions, got:\n%s", got)
 	}
 }
@@ -123,7 +123,7 @@ func TestBaseContainerfileHash_StripsCustomPackages(t *testing.T) {
 func TestBuildCustomExtBlock_BuiltinDeps(t *testing.T) {
 	// imap's PECL build needs Alpine packages that aren't in the base image
 	// (otherwise "U8T_CANONICAL is missing"), and it asks interactive prompts.
-	block := buildCustomExtBlock([]string{"imap"}, nil)
+	block := buildCustomExtBlock("8.5", []string{"imap"}, nil)
 	if !strings.Contains(block, "apk add --no-cache imap-dev krb5-dev openssl-dev c-client && ") {
 		t.Errorf("imap block must apk add its built-in deps before installing:\n%s", block)
 	}
@@ -140,7 +140,7 @@ func TestBuildCustomExtBlock_UserDepsUnionedWithBuiltin(t *testing.T) {
 		"imap": {"krb5-dev", "extra-pkg"}, // krb5-dev is also built-in → deduped
 		"ssh2": {"libssh2-dev"},
 	}
-	block := buildCustomExtBlock([]string{"imap", "ssh2", "redis"}, userDeps)
+	block := buildCustomExtBlock("8.5", []string{"imap", "ssh2", "yaml"}, userDeps)
 	// imap: built-in (imap-dev krb5-dev openssl-dev c-client) ∪ user (krb5-dev extra-pkg)
 	if !strings.Contains(block, "apk add --no-cache imap-dev krb5-dev openssl-dev c-client extra-pkg && ") {
 		t.Errorf("imap block must union built-in + user deps without duplicates:\n%s", block)
@@ -149,20 +149,20 @@ func TestBuildCustomExtBlock_UserDepsUnionedWithBuiltin(t *testing.T) {
 	if !strings.Contains(block, "apk add --no-cache libssh2-dev && ") {
 		t.Errorf("ssh2 block must apk add the user-supplied dep:\n%s", block)
 	}
-	// redis: no deps anywhere → no apk add
+	// yaml: no deps anywhere → no apk add
 	for _, line := range strings.Split(block, "\n") {
-		if strings.Contains(line, "pecl install redis") && strings.Contains(line, "apk add") {
-			t.Errorf("redis block should not have an apk add line:\n%s", line)
+		if strings.Contains(line, "pecl install yaml") && strings.Contains(line, "apk add") {
+			t.Errorf("yaml block should not have an apk add line:\n%s", line)
 		}
 	}
 }
 
 func TestBuildCustomExtBlockWithToolchain(t *testing.T) {
-	if got := buildCustomExtBlockWithToolchain(nil, nil); got != "" {
+	if got := buildCustomExtBlockWithToolchain("8.5", nil, nil); got != "" {
 		t.Errorf("expected empty block for no extensions, got:\n%s", got)
 	}
 	// The prebuilt base is the runtime image, so phpize has no toolchain there.
-	block := buildCustomExtBlockWithToolchain([]string{"yaml"}, map[string][]string{"yaml": {"yaml-dev"}})
+	block := buildCustomExtBlockWithToolchain("8.5", []string{"yaml"}, map[string][]string{"yaml": {"yaml-dev"}})
 	for _, pkg := range phpizeToolchain {
 		if !strings.Contains(block, pkg) {
 			t.Errorf("fast-path block must install %q for phpize:\n%s", pkg, block)
@@ -190,17 +190,17 @@ func TestBuildCustomExtBlockWithToolchain(t *testing.T) {
 // The builder stage already carries the toolchain, so the local path must not
 // install or purge it: purging there would take the stage's own compilers out.
 func TestBuildCustomExtBlock_NoToolchainOnLocalPath(t *testing.T) {
-	block := buildCustomExtBlock([]string{"yaml"}, nil)
+	block := buildCustomExtBlock("8.5", []string{"yaml"}, nil)
 	if strings.Contains(block, ".lerd-ext-build") {
 		t.Errorf("builder-stage block must not manage the toolchain:\n%s", block)
 	}
 }
 
 func TestBuildCustomExtRuntimeDeps_Empty(t *testing.T) {
-	if got := buildCustomExtRuntimeDeps(nil, nil); got != "" {
+	if got := buildCustomExtRuntimeDeps("8.5", nil, nil); got != "" {
 		t.Errorf("empty input should produce empty runtime block, got: %q", got)
 	}
-	if got := buildCustomExtRuntimeDeps([]string{"redis"}, nil); got != "" {
+	if got := buildCustomExtRuntimeDeps("8.5", []string{"yaml"}, nil); got != "" {
 		t.Errorf("extension with no apk deps should produce empty block, got: %q", got)
 	}
 }
@@ -219,8 +219,8 @@ func TestBuildCustomExtRuntimeDeps_MatchesBuilderDeps(t *testing.T) {
 		{[]string{"imap"}, map[string][]string{"imap": {"extra-pkg"}}},
 	}
 	for _, c := range cases {
-		runtime := buildCustomExtRuntimeDeps(c.exts, c.userDeps)
-		builder := buildCustomExtBlock(c.exts, c.userDeps)
+		runtime := buildCustomExtRuntimeDeps("8.5", c.exts, c.userDeps)
+		builder := buildCustomExtBlock("8.5", c.exts, c.userDeps)
 		if runtime == "" {
 			t.Errorf("exts=%v deps=%v: runtime block unexpectedly empty", c.exts, c.userDeps)
 			continue
@@ -245,6 +245,7 @@ func TestBuildCustomExtRuntimeDeps_DedupsAcrossExts(t *testing.T) {
 	// Two extensions sharing the same dep (krb5-dev appears in imap's
 	// built-in list and is also a user dep) must list it exactly once.
 	got := buildCustomExtRuntimeDeps(
+		"8.5",
 		[]string{"imap", "ssh2"},
 		map[string][]string{
 			"imap": {"krb5-dev"},
@@ -307,6 +308,52 @@ func TestPhpFpmContainerfile_RuntimeIncludesGit(t *testing.T) {
 	}
 	if !strings.Contains(runtime, "\n        git \\\n") {
 		t.Errorf("runtime stage must apk add git so composer can clone VCS repos:\n%s", runtime)
+	}
+}
+
+// ext/ftp compiles FTPS in only when OpenSSL was configured; a phpize build
+// leaves PHP_OPENSSL unset and silently ships an ftp without ftp_ssl_connect
+// (#1576). The configure flag was renamed in 8.4, so both branches matter.
+func TestPhpFpmContainerfile_BuildsFTPWithSSL(t *testing.T) {
+	tmpl, err := GetQuadletTemplate("lerd-php-fpm.Containerfile")
+	if err != nil {
+		t.Fatalf("read containerfile: %v", err)
+	}
+	builder, _, ok := strings.Cut(tmpl, "# ── Runtime stage")
+	if !ok {
+		t.Fatal("runtime stage marker missing from Containerfile")
+	}
+	for _, want := range []string{
+		"openssl-dev",
+		"docker-php-ext-configure ftp --with-openssl-dir=/usr",
+		"docker-php-ext-configure ftp --with-ftp-ssl",
+	} {
+		if !strings.Contains(builder, want) {
+			t.Errorf("builder stage must contain %q or ext-ftp loses FTPS support", want)
+		}
+	}
+}
+
+// PHP 8.6 ships no pecl, so a bare `pecl install` fails the whole build under
+// set -e. Every PECL install has to go through lerd-pecl-install, which falls
+// back to a phpize build. The Oracle layer is the one that regressed: it was
+// fork-only, so it never showed up as a merge conflict when upstream moved.
+func TestPhpFpmContainerfile_InstallsPECLThroughTheWrapper(t *testing.T) {
+	tmpl, err := GetQuadletTemplate("lerd-php-fpm.Containerfile")
+	if err != nil {
+		t.Fatalf("read containerfile: %v", err)
+	}
+	_, body, ok := strings.Cut(tmpl, "chmod +x /usr/local/bin/lerd-pecl-install")
+	if !ok {
+		t.Fatal("lerd-pecl-install wrapper missing from Containerfile")
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "pecl install") && !strings.Contains(line, "lerd-pecl-install") {
+			t.Errorf("PECL install must go through lerd-pecl-install, PHP 8.6 has no pecl: %s", strings.TrimSpace(line))
+		}
+	}
+	if !strings.Contains(body, `lerd-pecl-install "$OCI8_PKG" instantclient,/opt/oracle/instantclient`) {
+		t.Error("oci8 must pass the Instant Client path to the wrapper, or the phpize build cannot find libclntsh")
 	}
 }
 
@@ -574,4 +621,46 @@ func sliceContainsPair(haystack []string, flag, value string) bool {
 		}
 	}
 	return false
+}
+
+// A prerelease has no plain <version>-fpm-alpine tag upstream until GA, so the
+// FROM lines must resolve to the -rc tag the registry actually publishes.
+func TestPhpFpmContainerfile_PrereleaseBuildsFromPrereleaseTag(t *testing.T) {
+	tmpl, err := GetQuadletTemplate("lerd-php-fpm.Containerfile")
+	if err != nil {
+		t.Fatalf("read containerfile: %v", err)
+	}
+	for _, v := range config.PrereleasePHPVersions {
+		cf := strings.ReplaceAll(tmpl, "{{.Version}}", config.UpstreamPHPTag(v))
+		if strings.Contains(cf, "php:"+v+"-fpm-alpine") {
+			t.Errorf("PHP %s builds FROM php:%s-fpm-alpine, a tag upstream does not publish yet", v, v)
+		}
+		if !strings.Contains(cf, "php:"+v+"-rc-fpm-alpine") {
+			t.Errorf("PHP %s does not build FROM the prerelease tag", v)
+		}
+	}
+}
+
+// The custom-extension block must skip anything the image already ships: a bare
+// `docker-php-ext-install ftp` layered on the base image rebuilds ext/ftp
+// without the OpenSSL configure flags the base build passes, so ftp_ssl_connect
+// disappears again (#1576).
+func TestBuildCustomExtBlock_SkipsBundledExtensions(t *testing.T) {
+	for name, block := range map[string]string{
+		"builder":   buildCustomExtBlock("8.5", []string{"ftp", "yaml"}, nil),
+		"toolchain": buildCustomExtBlockWithToolchain("8.5", []string{"ftp", "yaml"}, nil),
+	} {
+		if strings.Contains(block, "ftp") {
+			t.Errorf("%s block rebuilds the bundled ftp extension:\n%s", name, block)
+		}
+		if !strings.Contains(block, "yaml") {
+			t.Errorf("%s block dropped the custom yaml extension:\n%s", name, block)
+		}
+	}
+	if got := buildCustomExtBlock("8.5", []string{"ftp"}, nil); got != "" {
+		t.Errorf("a bundled-only set must produce no block, got:\n%s", got)
+	}
+	if got := buildCustomExtRuntimeDeps("8.5", []string{"ftp"}, map[string][]string{"ftp": {"openssl-dev"}}); got != "" {
+		t.Errorf("a bundled extension must not pull runtime deps, got:\n%s", got)
+	}
 }

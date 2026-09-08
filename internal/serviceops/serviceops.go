@@ -20,6 +20,7 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/freeport"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
 	"github.com/gabriel-sousa99/lerd/internal/imgledger"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/registry"
@@ -331,6 +332,16 @@ type PhaseEvent struct {
 	Dep     string `json:"dep,omitempty"`
 	State   string `json:"state,omitempty"`
 	Unit    string `json:"unit,omitempty"`
+	// Bytes is the estimated download size of Image, read from the registry
+	// manifest before the pull starts. 0 when the registry did not answer.
+	Bytes int64 `json:"bytes,omitempty"`
+}
+
+// discloseImagePull announces a pull with the size it is about to download,
+// so no service operation commits to bytes the user never saw coming.
+func discloseImagePull(image string, emit func(PhaseEvent)) {
+	bytes, _ := imagepull.Size(image)
+	emit(PhaseEvent{Phase: "pulling_image", Image: image, Bytes: bytes})
 }
 
 // InstallPresetStreaming runs the full install flow and emits a PhaseEvent
@@ -347,7 +358,7 @@ func InstallPresetStreaming(name, version string, emit func(PhaseEvent)) (*confi
 	}
 
 	if svc.Image != "" && !podman.ImageExists(svc.Image) {
-		emit(PhaseEvent{Phase: "pulling_image", Image: svc.Image})
+		discloseImagePull(svc.Image, emit)
 		pullErr := podman.PullImageWithProgress(svc.Image, func(line string) {
 			emit(PhaseEvent{Phase: "pulling_image", Message: line})
 		})
@@ -1047,6 +1058,16 @@ func EnsureServiceRunning(name string) error {
 			return err
 		}
 		if err := EnsureCustomServiceQuadlet(svc); err != nil {
+			return err
+		}
+	}
+	// Starting a unit whose image is absent lets podman pull it silently in the
+	// middle of the start, with no size and no way to opt out. Pull it here
+	// instead, so the download is announced first and offline mode sees it.
+	if img, _ := serviceImageRefs(name); img != "" && !podman.ImageExists(img) {
+		bytes, _ := imagepull.Size(img)
+		fmt.Printf("  Pulling %s%s for %s\n", img, imagepull.Note(bytes), name)
+		if err := podman.PullImageTo(img, os.Stdout); err != nil {
 			return err
 		}
 	}

@@ -41,8 +41,12 @@ share:
                             # share:tool; omitted (the default) means
                             # auto-detect.
 nginx:
-  http_port: 80
-  https_port: 443
+  http_port: 80        # host ports nginx publishes. Change these when another
+  https_port: 443      # service already owns 80/443; nginx still listens on
+                       # 80/443 inside its container, so only the host side
+                       # moves and sites are then reached at
+                       # https://myapp.test:10443. Applied on the next
+                       # `lerd start` or `lerd install`.
   request_timeout: 60   # optional, default 60. Seconds nginx waits on a slow
                         # request before returning 504. Maps to
                         # fastcgi_read_timeout/fastcgi_send_timeout for PHP-FPM
@@ -54,7 +58,11 @@ dns:
                          # once at first install, then flipped with lerd dns:enable
                          # / dns:disable, never re-prompted. dns:repair re-runs the
                          # setup to fix a broken but enabled resolver.
-  tld: "test"
+  tld: "test"            # the suffix sites are served under. Dot-separated DNS
+                         # labels (letters, digits, hyphens), so "test" or
+                         # "internal.example.com". An unusable value is refused
+                         # and lerd serves .test instead, which lerd doctor
+                         # reports rather than applying silently.
   upstream:              # optional. Pins the upstream DNS servers dnsmasq
     - 192.168.100.129    # forwards non-.test queries to. Leave unset to
                          # auto-detect from the system resolver. Set this when
@@ -70,6 +78,16 @@ host_proxy:
                           # "start this command on your host?" confirmation.
                           # Default false so a command from a cloned repo is
                           # never run unconfirmed. See usage/host-proxy.md.
+tray:
+  disabled: false         # optional. Set true (or run lerd tray off) to keep the
+                          # system tray applet out of lerd start and lerd install,
+                          # for a desktop that already shows lerd's state elsewhere
+                          # or has no tray host at all. Turning it off also takes
+                          # lerd-tray.service out of the autostart set. Also
+                          # switchable from the dashboard's System page.
+  high_contrast_icon: false # optional. Swaps the running icon for a single green
+                          # glyph that reads on any panel, for mixed themes like
+                          # KDE Breeze Twilight. Toggled with lerd tray icon.
 auto_cleanup: true      # when true (default), lerd reclaims its own orphaned
                         # podman images on its own: the lerd-watcher runs a safe
                         # daily sweep, and a PHP rebuild or a service update/remove
@@ -139,11 +157,12 @@ A portable, self-contained description of a project's local environment. Created
 | `public_dir` | Override for the framework's default document-root subdirectory, e.g. `public_html` for a Laravel skeleton that doesn't use the conventional `public/` folder. Empty means use the framework default |
 | `request_timeout` | nginx request timeout in seconds for this site. Maps to `fastcgi_read_timeout`/`fastcgi_send_timeout` for PHP-FPM sites and `proxy_read_timeout`/`proxy_send_timeout` for proxy and custom-container sites. Overrides the global `nginx.request_timeout`. Omit (or `0`) to inherit the global default of 60s. Raise it for apps with deliberately long-running requests |
 | `secured` | When `true`, HTTPS is enabled on apply |
-| `domains` | Site hostnames without the TLD (e.g. `[myapp, api]`). The first entry is the primary; additional entries become aliases. Conflict-filtered domains stay in this list on disk but are not registered. A hostname may not contain whitespace, a slash, or nginx punctuation (`{`, `}`, `;`, `#`), since it is written into the generated vhost's `server_name` |
+| `domains` | Site hostnames, with or without the TLD (e.g. `[myapp, api]` or `[myapp.test, api.test]`, both register the same pair). The first entry is the primary; additional entries become aliases. Conflict-filtered domains stay in this list on disk but are not registered. A hostname may not contain whitespace, a slash, or nginx punctuation (`{`, `}`, `;`, `#`), since it is written into the generated vhost's `server_name` |
 | `app_url` | Override for `APP_URL` (or the framework's URL key) written to `.env`. Highest priority, it beats the per-machine `sites.yaml` override and the default `<scheme>://<primary-domain>` generator. Use for custom path prefixes, ports, or unrelated hostnames you want shared across machines |
 | `env_overrides` | Map of env var names to templated or static values applied to `.env` on `lerd setup` and to per-worktree `.env` files when worktrees are created. Values may use <code v-pre>{{domain}}</code>, <code v-pre>{{scheme}}</code>, <code v-pre>{{site}}</code>, <code v-pre>{{branch}}</code>, and <code v-pre>{{parent}}</code> placeholders, or be plain strings. When `APP_URL` is in `env_overrides` it takes precedence over the default rewrite; declared keys override defaults, undeclared defaults still apply. The one exception is `DB_DATABASE` on a worktree whose `db_isolated` is true: the isolation flow owns that key and the watcher won't re-render it from the parent's template until isolation is turned back off. See [Env overrides](./features/git-worktrees.md#env-overrides) |
 | `services` | Services to start on apply. Accepts built-in names, custom service names, or full inline definitions |
 | `workers` | Active worker names for the site (e.g. `queue`, `horizon`, `schedule`, `reverb`, `stripe`). Automatically kept in sync by start/stop commands. Used by `lerd start` to restore workers after reinstall |
+| `worker_options` | Values for a worker's tunable options, keyed by worker name then option (e.g. `queue: {queue: high,default,low}`). Written by `lerd queue:start --queue …` and by the dashboard's worker gear; read by every later start, so the project's own queues and limits survive a restart, a reinstall and a fresh clone. See [Worker options](./usage/queue-workers.md#worker-options) |
 | `container` | Custom container config for non-PHP sites. When present, lerd builds a dedicated container from the project's Containerfile and nginx reverse-proxies to it. See below and [Custom Containers](./usage/custom-containers.md) |
 | `custom_workers` | Custom worker definitions (name to config map). Works for both PHP and custom container sites. See below |
 | `db` | Database targeting for non-PHP projects: `service` (e.g. `mysql`, `postgres`) and `database` name |
@@ -239,7 +258,20 @@ custom_workers:
 
 Worker definitions stay in `custom_workers` permanently. The `workers` field (a separate list of names) tracks which are currently active and is synced automatically by start/stop commands.
 
-Framework yamls (under `lerd-frameworks/frameworks/<framework>/<version>.yaml`) declare workers under a sibling `workers:` block with the same shape, so `host`, `per_worktree`, and `replaces_build` apply there too. The shipped Laravel 11 / 12 / 13 yamls use this for `vite` (`host: true`, `per_worktree: true`, `replaces_build: true`), and any custom framework can do the same to teach lerd about per-branch dev servers.
+#### Worker options
+
+A framework worker that declares a `tune_command` exposes the values a project may want to change (Laravel's queue worker: `queue`, `tries`, `timeout`). They are persisted per worker under `worker_options` and applied on every start, so tuning survives the restart that produced it:
+
+```yaml
+worker_options:
+  queue:
+    queue: high,default,low
+    tries: "5"
+```
+
+A value equal to the framework's own default is not written, values may not contain whitespace, and an option the definition does not declare is ignored. See [Worker options](./usage/queue-workers.md#worker-options).
+
+Framework yamls (under `lerd-frameworks/frameworks/<framework>/<version>.yaml`) declare workers under a sibling `workers:` block with the same shape, so `host`, `per_worktree`, and `replaces_build` apply there too. Every framework yaml that builds assets with vite (Laravel 9+, Statamic 4+, Symfony 5+, CakePHP 4+, Tempest) uses this for `vite` (`host: true`, `per_worktree: true`, `replaces_build: true`), gated on `node_modules/vite` so the worker only appears once the project actually installs a dev server, and any custom framework can do the same to teach lerd about per-branch dev servers.
 
 ### Inline custom service definitions
 

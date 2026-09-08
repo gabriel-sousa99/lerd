@@ -86,7 +86,7 @@ lerd service remove selenium    # uninstall
 
 Pest v4's native [browser testing](https://pestphp.com/docs/browser-testing) (`pestphp/pest-plugin-browser`) does **not** use Selenium or WebDriver. It drives [Playwright](https://playwright.dev) locally, in the same place the test process runs, and Playwright always launches its own browser there, so the Selenium preset above does not apply.
 
-In lerd your tests run inside the PHP-FPM container, so the browser has to live there too. Two facts make that tricky: Playwright's own Chromium is a glibc binary that cannot run on the container's musl libc, and Pest exposes no hook to point Playwright at a remote browser. lerd solves both by baking Alpine's musl-native Chromium into the FPM image and transparently shimming Playwright's browser to it.
+In lerd your tests run inside the PHP-FPM container, so the browser has to live there too. Two facts make that tricky: Playwright's own Chromium is a glibc binary that cannot run on the container's musl libc, and Pest exposes no hook to point Playwright at a remote browser. lerd solves both by baking Alpine's musl-native Chromium into the FPM image and transparently shimming Playwright's browser to it. Xvfb is baked in alongside it so headed runs have a display to draw on.
 
 ### 1. Install the Pest browser plugin
 
@@ -101,13 +101,13 @@ lerd npm install playwright
 lerd pest:browser install
 ```
 
-This adds `chromium` to your declared package set (the same mechanism as `lerd php:pkg`, so it applies to every PHP image and the container is not split off onto its own image), rebuilds the current version, downloads the Playwright browser registry into a persistent volume, and shims Playwright's glibc browser to the musl Chromium with `--no-sandbox`. It is safe to re-run, and you should re-run it after bumping the Playwright version in your project.
+This adds `chromium`, `xvfb` and `xvfb-run` to your declared package set (the same mechanism as `lerd php:pkg`, so it applies to every PHP image and the container is not split off onto its own image), rebuilds the current version, downloads the Playwright browser registry into a persistent volume, and shims Playwright's glibc browser to the musl Chromium with `--no-sandbox`. It is safe to re-run, and you should re-run it after bumping the Playwright version in your project.
 
 The registry download is driven by your project's own Playwright (it decides which components and revisions are needed), but lerd fetches and unpacks the archives itself with `curl` and `unzip` inside the container. Playwright's Node extractor deadlocks partway through writing into the bind-mounted cache on some hosts, which used to leave the install hanging silently with no output. A stalled download now aborts with an error instead, and interrupting the command cleans up the in-container downloader and its install lock so a retry starts clean.
 
 Components that Playwright mirrors are retried against that mirror when the primary download server does not answer, so networks that block the CDN still work. Each site's browsers are registered against its own Playwright package the way Playwright itself does it, which keeps a second site's install from garbage-collecting them.
 
-Check the setup at any time with `lerd pest:browser doctor`, and tear it back down with `lerd pest:browser remove` (un-bakes chromium and rebuilds; the cache volume is left intact):
+Check the setup at any time with `lerd pest:browser doctor`, and tear it back down with `lerd pest:browser remove` (un-bakes the browser packages and rebuilds; the cache volume is left intact):
 
 ```bash
 lerd pest:browser doctor
@@ -124,6 +124,18 @@ lerd pest
 ```
 
 Pest serves your app itself and drives the in-container Chromium headlessly. Because the browser is the system musl build, only **Chromium** is supported (Alpine does not ship musl Firefox or WebKit builds). This requires a current PHP version; the legacy 7.4/8.0 tier ships an older Node and is not supported for browser testing.
+
+### Headed runs
+
+Headed mode works too, with no extra setup:
+
+```bash
+lerd pest --headed
+```
+
+A container has no display, and Playwright reacts to that by refusing to launch and telling you to start an XServer. lerd's shim gives a headed launch a virtual one through `xvfb-run`, so the browser really does run with a window, chrome UI and all the behaviour that differs from headless.
+
+There is nothing to watch, though: the window lives on a virtual screen inside the container. Use screenshots to see what the browser saw, or the Selenium preset above with its noVNC dashboard when you need to watch a session live.
 
 ---
 

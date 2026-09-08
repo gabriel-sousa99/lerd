@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lerd v1.34.0 — dev digest</title>
+<meta name="description" content="Engineering digest for lerd v1.34.0: NativePHP end to end, a worker declared once instead of once per framework major, and no image downloading before you have seen its size.">
+<meta name="theme-color" content="#ff4538">
+<link rel="canonical" href="https://lerd.sh/digest/v1.34.0.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-09-02T00:00:00Z">
+<meta property="article:section" content="Release notes">
+<meta property="og:site_name" content="Lerd">
+<meta property="og:locale" content="en_US">
+<meta property="og:title" content="lerd v1.34.0 — dev digest">
+<meta property="og:description" content="Engineering digest for lerd v1.34.0: NativePHP end to end, a worker declared once instead of once per framework major, and no image downloading before you have seen its size.">
+<meta property="og:url" content="https://lerd.sh/digest/v1.34.0.html">
+<meta property="og:image" content="https://lerd.sh/assets/digest/v1.34.0.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="Lerd v1.34.0 dev digest">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="lerd v1.34.0 — dev digest">
+<meta name="twitter:description" content="NativePHP end to end, a worker declared once instead of once per framework major, and no image downloading before you have seen its size.">
+<meta name="twitter:image" content="https://lerd.sh/assets/digest/v1.34.0.png">
+<meta name="twitter:image:alt" content="Lerd v1.34.0 dev digest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700;800;900&family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;0,800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0b;
+    --bg-2: #0f0f11;
+    --panel: #131316;
+    --panel-2: #18181c;
+    --line: #232329;
+    --line-2: #2e2e36;
+    --text: #ece9e2;
+    --muted: #9b978e;
+    --dim: #67645c;
+    --red: #ff4538;
+    --red-soft: rgba(255,69,56,0.12);
+    --amber: #eda33b;
+    --amber-soft: rgba(237,163,59,0.12);
+    --green: #3dd68c;
+    --green-soft: rgba(61,214,140,0.11);
+    --blue: #6cb2ff;
+    --blue-soft: rgba(108,178,255,0.11);
+    --violet: #b394ff;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+    --sans: "Archivo", system-ui, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  ::selection { background: var(--red); color: #0a0a0b; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  body::after {
+    content: "";
+    position: fixed; inset: 0;
+    pointer-events: none; z-index: 999;
+    opacity: 0.05;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: #2a2a30; border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a42; }
+
+  code, .mono { font-family: var(--mono); }
+  a { color: inherit; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 clamp(20px, 4vw, 48px); }
+
+  /* ---------- brand bar ---------- */
+  .brandbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px clamp(20px, 4vw, 48px);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; }
+  .brand-mark {
+    width: 30px; height: 30px;
+    background: var(--red); border-radius: 7px;
+    display: grid; place-items: center;
+    font-family: var(--mono); font-weight: 800; font-size: 17px; color: #fff;
+    box-shadow: 0 0 22px rgba(255,69,56,0.35);
+  }
+  .brand-name { font-weight: 700; font-size: 16px; }
+  .brand-path { font-family: var(--mono); font-size: 13px; color: var(--dim); }
+  .brand-path b { color: var(--red); font-weight: 400; }
+  .gh-link {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    text-decoration: none; border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 13px; transition: 0.2s;
+  }
+  .gh-link:hover { border-color: var(--red); color: var(--text); }
+
+  /* ---------- hero ---------- */
+  .hero {
+    padding: clamp(48px, 7vw, 88px) 0 clamp(36px, 5vw, 56px);
+    border-bottom: 1px solid var(--line);
+    background:
+      radial-gradient(ellipse 55% 60% at 12% 0%, rgba(255,69,56,0.09), transparent 60%),
+      radial-gradient(ellipse 40% 40% at 95% 90%, rgba(237,163,59,0.04), transparent 60%);
+  }
+  .hero-kicker {
+    font-family: var(--mono); font-size: 13px; color: var(--muted);
+    display: flex; align-items: center; gap: 10px; margin-bottom: 22px;
+  }
+  .hero-kicker .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 12px var(--red); animation: blink 1.6s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0.25; } }
+  .hero-kicker em { color: var(--amber); font-style: normal; }
+
+  .hero h1 {
+    font-stretch: 125%; font-weight: 900;
+    font-size: clamp(56px, 10vw, 118px);
+    line-height: 0.95; letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+  }
+  .hero h1 em { font-style: normal; color: var(--red); text-shadow: 0 0 38px rgba(255,69,56,0.45); }
+  .hero .sub {
+    font-stretch: 115%; font-weight: 800; text-transform: uppercase;
+    letter-spacing: 0.06em; font-size: clamp(14px, 1.8vw, 19px);
+    color: var(--dim); margin-top: 8px;
+  }
+  .hero .sub b { color: var(--text); }
+  .hero .lede {
+    margin-top: 24px; max-width: 700px;
+    color: var(--muted); font-size: 16px; line-height: 1.7;
+  }
+  .hero .lede b { color: var(--text); font-weight: 600; }
+
+  .stats {
+    margin-top: 32px;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden; background: var(--bg-2);
+  }
+  .stat { padding: 16px 18px; border-right: 1px solid var(--line); }
+  .stat:last-child { border-right: 0; }
+  .stat .n { font-stretch: 120%; font-weight: 900; font-size: clamp(20px, 2.4vw, 28px); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .stat .l { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); margin-top: 2px; }
+  .stat.red .n { color: var(--red); }
+  .stat.green .n { color: var(--green); }
+  .stat.amber .n { color: var(--amber); }
+
+  .diffbar { margin-top: 18px; }
+  .diffbar .bar { display: flex; height: 10px; border-radius: 99px; overflow: hidden; border: 1px solid var(--line); }
+  .diffbar .bar i { display: block; height: 100%; }
+  .diffbar .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .diffbar .legend s { text-decoration: none; display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+
+  /* ---------- pill nav ---------- */
+  .pillnav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(10,10,11,0.85);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+    padding: 12px clamp(20px, 4vw, 48px);
+    display: flex; gap: 8px; overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .pillnav::-webkit-scrollbar { display: none; }
+  .pillnav a {
+    font-family: var(--mono); font-size: 12px; white-space: nowrap;
+    color: var(--muted); text-decoration: none;
+    border: 1px solid var(--line); border-radius: 99px;
+    padding: 6px 15px; transition: 0.2s;
+  }
+  .pillnav a i { font-style: normal; color: var(--dim); margin-right: 6px; }
+  .pillnav a:hover { color: var(--text); border-color: var(--line-2); }
+  .pillnav a.active { color: var(--red); border-color: rgba(255,69,56,0.5); background: var(--red-soft); }
+  .pillnav a.active i { color: var(--red); }
+
+  /* ---------- breaking ---------- */
+  .breaking {
+    margin: 36px 0 0;
+    border: 1px solid rgba(255,69,56,0.35); border-radius: 12px;
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(255,69,56,0.06), rgba(255,69,56,0.01) 60%);
+  }
+  .breaking-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 13px 20px; border-bottom: 1px solid rgba(255,69,56,0.25);
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.16em; font-weight: 700; color: var(--red);
+  }
+  .breaking-head .sig { animation: blink 1.4s steps(1) infinite; }
+  .breaking-body { padding: 18px 20px 20px; color: var(--muted); font-size: 14px; }
+  .breaking-body b { color: var(--text); }
+  .breaking-body code { font-size: 12.5px; background: rgba(255,255,255,0.05); border: 1px solid var(--line); padding: 1px 7px; border-radius: 5px; color: var(--amber); }
+
+  /* ---------- sections ---------- */
+  section.chapter { padding: clamp(48px, 6vw, 76px) 0 0; }
+  .ch-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+  .ch-num {
+    font-family: var(--mono); font-size: 13px; color: var(--red);
+    border: 1px solid rgba(255,69,56,0.4); border-radius: 6px; padding: 3px 9px;
+  }
+  .ch-head h2 {
+    font-stretch: 122%; font-weight: 900; text-transform: uppercase;
+    letter-spacing: -0.015em; font-size: clamp(26px, 4vw, 40px); line-height: 1.05;
+  }
+  .ch-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: 0.1em;
+    padding: 3px 10px; border-radius: 99px;
+  }
+  .pill.feat { color: var(--green); background: var(--green-soft); border: 1px solid rgba(61,214,140,0.35); }
+  .pill.fix { color: var(--blue); background: var(--blue-soft); border: 1px solid rgba(108,178,255,0.35); }
+  .pill.brk { color: var(--red); background: var(--red-soft); border: 1px solid rgba(255,69,56,0.4); }
+  .pill.sec { color: var(--red); background: var(--red-soft); border: 1px solid rgba(255,69,56,0.4); }
+  .pill.ref { color: var(--amber); background: var(--amber-soft); border: 1px solid rgba(237,163,59,0.35); }
+  .pill.ui { color: var(--violet); background: rgba(179,148,255,0.1); border: 1px solid rgba(179,148,255,0.3); }
+
+  .ch-intro { margin-top: 18px; max-width: 760px; color: var(--muted); font-size: 15px; line-height: 1.7; }
+  .ch-intro b { color: var(--text); font-weight: 600; }
+  .ch-intro code { font-family: var(--mono); font-size: 12.5px; background: rgba(255,255,255,0.05); border: 1px solid var(--line); padding: 1px 6px; border-radius: 4px; color: var(--amber); }
+
+  /* ---------- flow diagrams ---------- */
+  .flow-wrap { margin-top: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-2); overflow: hidden; }
+  .flow-title {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--dim); padding: 12px 18px; border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; gap: 12px;
+  }
+  .flow { display: flex; align-items: stretch; padding: 24px 18px; overflow-x: auto; }
+  .fnode {
+    flex: 0 0 auto;
+    border: 1px solid var(--line-2); border-radius: 10px;
+    background: var(--panel); padding: 12px 16px;
+    min-width: 132px; max-width: 200px;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .fnode .t { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); margin-bottom: 4px; }
+  .fnode .v { font-weight: 700; font-size: 13.5px; line-height: 1.35; }
+  .fnode .d { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+  .fnode.hot { border-color: rgba(255,69,56,0.55); box-shadow: 0 0 22px rgba(255,69,56,0.12); }
+  .fnode.hot .t { color: var(--red); }
+  .fnode.ok { border-color: rgba(61,214,140,0.45); }
+  .fnode.ok .t { color: var(--green); }
+  .fnode.warn { border-color: rgba(237,163,59,0.45); }
+  .fnode.warn .t { color: var(--amber); }
+  .farr {
+    flex: 0 0 auto; display: flex; align-items: center;
+    font-family: var(--mono); font-size: 12px; color: var(--dim);
+    padding: 0 10px; white-space: nowrap;
+  }
+  .flow-note {
+    padding: 12px 18px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11.5px; color: var(--dim); line-height: 1.7;
+  }
+  .flow-note em { color: var(--amber); font-style: normal; }
+  .flow-note b { color: var(--green); font-weight: 600; }
+  .flow-note s { color: var(--red); text-decoration: none; }
+
+  /* vertical pipeline */
+  .pipe { padding: 20px 18px; }
+  .pipe-step { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 0 16px; position: relative; padding-bottom: 18px; }
+  .pipe-step:last-child { padding-bottom: 4px; }
+  .pipe-step::before { content: ""; position: absolute; left: 16px; top: 30px; bottom: 0; width: 1px; background: var(--line-2); }
+  .pipe-step:last-child::before { display: none; }
+  .pipe-n {
+    width: 33px; height: 33px; border-radius: 50%;
+    border: 1px solid var(--line-2); background: var(--panel);
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--muted);
+    position: relative; z-index: 1;
+  }
+  .pipe-step.hot .pipe-n { border-color: var(--red); color: var(--red); }
+  .pipe-b { padding-top: 4px; }
+  .pipe-b h5 { font-size: 14px; font-weight: 700; }
+  .pipe-b p { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.6; }
+  .pipe-b p code { color: var(--amber); }
+
+  /* ---------- cards ---------- */
+  .cards { margin-top: 26px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .cards.three { grid-template-columns: repeat(3, 1fr); }
+  .cards.one { grid-template-columns: 1fr; }
+  .card {
+    border: 1px solid var(--line); border-radius: 12px;
+    background: var(--panel); padding: 20px;
+    transition: border-color 0.25s, transform 0.25s;
+    min-width: 0;
+  }
+  .card:hover { border-color: var(--line-2); transform: translateY(-2px); }
+  .card .card-pills { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .card h4 { font-size: 15.5px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.4; }
+  .card h4 .pr {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 500; color: var(--dim);
+    text-decoration: none; border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 6px; margin-left: 6px; vertical-align: 2px; transition: 0.2s;
+  }
+  .card h4 .pr:hover { color: var(--red); border-color: rgba(255,69,56,0.5); }
+  .card p { color: var(--muted); font-size: 13px; line-height: 1.65; margin-top: 7px; }
+  .card p code, .card li code { font-family: var(--mono); font-size: 11.5px; background: rgba(255,255,255,0.05); border: 1px solid var(--line); padding: 0.5px 5px; border-radius: 4px; color: var(--amber); }
+  .card p b { color: var(--text); font-weight: 600; }
+  .card ul { margin-top: 8px; padding-left: 0; list-style: none; }
+  .card li { color: var(--muted); font-size: 12.5px; line-height: 1.6; padding-left: 16px; position: relative; margin-top: 4px; }
+  .card li::before { content: "▸"; position: absolute; left: 0; color: var(--red); font-size: 10px; top: 3px; }
+  .card .file { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-top: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .file::before { content: "◇ "; color: var(--line-2); }
+
+  /* ---------- code blocks ---------- */
+  .code {
+    margin-top: 16px;
+    background: #0c0c0e; border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden;
+  }
+  .code-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 14px; border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+    background: var(--panel);
+  }
+  .code-bar .lang { color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 7px; font-size: 10px; }
+  .code pre {
+    padding: 14px 16px; overflow-x: auto;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.75;
+    color: #c9c5bd;
+  }
+  .code pre .k { color: var(--red); }
+  .code pre .s { color: var(--green); }
+  .code pre .c { color: var(--dim); font-style: italic; }
+  .code pre .f { color: var(--amber); }
+  .code pre .t { color: var(--blue); }
+  .code pre .del { color: #e2766c; background: rgba(255,69,56,0.08); display: inline-block; width: 100%; }
+  .code pre .add { color: #6fdca6; background: rgba(61,214,140,0.08); display: inline-block; width: 100%; }
+
+  /* ---------- tables ---------- */
+  .tbl-wrap { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px; }
+  thead th {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--dim); text-align: left; padding: 11px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    font-weight: 600;
+  }
+  tbody td { padding: 11px 16px; border-bottom: 1px solid rgba(255,255,255,0.04); color: var(--muted); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: rgba(255,255,255,0.015); }
+  tbody td b { color: var(--text); font-weight: 600; }
+  tbody td code { font-family: var(--mono); font-size: 11.5px; color: var(--amber); }
+  td .mini { font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
+
+  /* group chips for MCP */
+  .groups { margin-top: 22px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+  .group-chip {
+    border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+    padding: 13px 14px; transition: border-color 0.2s;
+  }
+  .group-chip:hover { border-color: rgba(255,69,56,0.45); }
+  .group-chip .g { font-family: var(--mono); font-weight: 700; font-size: 13.5px; color: var(--red); }
+  .group-chip .a { font-family: var(--mono); font-size: 10px; color: var(--dim); margin-top: 5px; line-height: 1.6; word-break: break-word; }
+
+  /* before/after MCP visual */
+  .ba { display: grid; grid-template-columns: 1fr auto 1.2fr; gap: 0; align-items: center; padding: 26px 18px; }
+  .ba-col { min-width: 0; }
+  .ba-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--dim); margin-bottom: 12px; }
+  .ba-flat { position: relative; display: flex; flex-wrap: wrap; gap: 4px; max-height: 150px; overflow: hidden; }
+  .ba-flat i {
+    font-family: var(--mono); font-size: 9px; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-style: normal;
+  }
+  .ba-flat::after {
+    content: "× ~80 flat tools · manifest ~32 KB · reshapes mid-session";
+    position: absolute; inset: auto 0 0 0;
+    padding: 38px 0 2px;
+    background: linear-gradient(transparent, var(--bg-2) 70%);
+    font-family: var(--mono); font-size: 10.5px; color: var(--red);
+  }
+  .ba-arrow { font-family: var(--mono); color: var(--dim); padding: 0 22px; font-size: 14px; white-space: nowrap; }
+  .ba-after { display: flex; flex-direction: column; gap: 8px; }
+  .ba-after .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ba-after .gten {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text);
+    border: 1px solid rgba(255,69,56,0.4); background: var(--red-soft);
+    border-radius: 5px; padding: 2px 8px;
+  }
+  .ba-after .dis {
+    font-family: var(--mono); font-size: 11px; color: var(--amber);
+    border: 1px dashed rgba(237,163,59,0.5); border-radius: 8px; padding: 8px 14px;
+  }
+  .ba-after .han { font-family: var(--mono); font-size: 11px; color: var(--green); }
+
+  .footnote { margin-top: 14px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); line-height: 1.7; }
+  .footnote em { color: var(--amber); font-style: normal; }
+
+  /* ---------- footer ---------- */
+  footer {
+    margin-top: clamp(56px, 8vw, 96px);
+    border-top: 1px solid var(--line);
+    padding: clamp(44px, 6vw, 72px) clamp(20px, 4vw, 48px);
+    background: radial-gradient(ellipse 50% 60% at 88% 100%, rgba(255,69,56,0.07), transparent 60%);
+  }
+  .foot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; max-width: 1180px; margin: 0 auto; align-items: start; }
+  footer h2 { font-stretch: 125%; font-weight: 900; font-size: clamp(26px, 3.4vw, 40px); text-transform: uppercase; line-height: 1; letter-spacing: -0.02em; }
+  footer h2 span { color: var(--red); }
+  footer .fn { margin-top: 14px; color: var(--muted); font-size: 14px; max-width: 430px; }
+  footer .fn code { font-family: var(--mono); font-size: 12px; color: var(--amber); background: rgba(255,255,255,0.05); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; }
+  .term { background: #0c0c0e; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.5); }
+  .term-bar { display: flex; align-items: center; gap: 7px; padding: 11px 15px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .term-bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--line-2); }
+  .term-bar i:first-child { background: var(--red); }
+  .term-bar span { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .term-body { padding: 18px 20px; font-family: var(--mono); font-size: 12.5px; line-height: 2.05; overflow-x: auto; }
+  .term-body div { white-space: pre; }
+  .term-body .c { color: var(--dim); }
+  .term-body .p { color: var(--red); }
+  .term-body .out { color: var(--green); }
+  .foot-end { max-width: 1180px; margin: 48px auto 0; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  .foot-end a { color: var(--muted); text-decoration: none; }
+  .foot-end a:hover { color: var(--red); }
+
+  /* reveal */
+  .fx { opacity: 0; transform: translateY(18px); transition: opacity 0.7s cubic-bezier(0.2,0.7,0.2,1), transform 0.7s cubic-bezier(0.2,0.7,0.2,1); }
+  .fx.in { opacity: 1; transform: none; }
+  .rise { opacity: 0; transform: translateY(14px); animation: rise 0.8s cubic-bezier(0.2,0.7,0.2,1) forwards; }
+  .d1 { animation-delay: 0.05s; } .d2 { animation-delay: 0.16s; } .d3 { animation-delay: 0.28s; } .d4 { animation-delay: 0.4s; } .d5 { animation-delay: 0.52s; }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+
+  @media (max-width: 880px) {
+    .stats { grid-template-columns: repeat(3, 1fr); }
+    .stat:nth-child(3) { border-right: 0; }
+    .stat:nth-child(n+4) { border-top: 1px solid var(--line); }
+    .cards, .cards.three { grid-template-columns: 1fr; }
+    .groups { grid-template-columns: repeat(2, 1fr); }
+    .ba { grid-template-columns: 1fr; gap: 18px; }
+    .ba-arrow { padding: 0; transform: rotate(90deg); width: fit-content; }
+    .foot-grid { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    .fx, .rise { opacity: 1; transform: none; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "lerd v1.34.0 \u2014 dev digest",
+  "description": "Engineering digest for lerd v1.34.0: NativePHP end to end, a worker declared once instead of once per framework major, and no image downloading before you have seen its size.",
+  "image": "https://lerd.sh/assets/digest/v1.34.0.png",
+  "datePublished": "2026-09-02",
+  "dateModified": "2026-09-02",
+  "inLanguage": "en-US",
+  "author": { "@type": "Organization", "name": "Lerd", "url": "https://github.com/lerd-env" },
+  "publisher": {
+    "@type": "Organization",
+    "name": "Lerd",
+    "url": "https://lerd.sh",
+    "logo": { "@type": "ImageObject", "url": "https://lerd.sh/assets/logo.svg" }
+  },
+  "mainEntityOfPage": { "@type": "WebPage", "@id": "https://lerd.sh/digest/v1.34.0.html" },
+  "about": {
+    "@type": "SoftwareApplication",
+    "name": "Lerd",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Linux, macOS",
+    "softwareVersion": "1.34.0"
+  }
+}
+</script>
+</head>
+<body>
+<header class="brandbar">
+  <a class="brand" href="https://github.com/lerd-env/lerd">
+    <span class="brand-mark">L</span>
+    <span><span class="brand-name">lerd</span> <span class="brand-path">lerd-env/<b>lerd</b></span></span>
+  </a>
+  <a class="gh-link" href="https://github.com/lerd-env/lerd/compare/v1.33.1...v1.34.0">v1.33.1…v1.34.0 ↗</a>
+</header>
+
+<nav class="pillnav">
+  <a href="#workers"><i>01</i> Workers</a>
+  <a href="#terminal"><i>02</i> No Terminal</a>
+  <a href="#bandwidth"><i>03</i> Bandwidth</a>
+  <a href="#surfaces"><i>04</i> Surfaces</a>
+  <a href="#doctor"><i>05</i> Doctor</a>
+  <a href="#fixes"><i>06</i> Fixes</a>
+</nav>
+
+<section class="hero"><div class="wrap">
+  <div class="hero-kicker rise d1"><span class="dot"></span> ENGINEERING DIGEST <em>· 2026-08-14 → 2026-09-02</em></div>
+  <h1 class="rise d2">v1.<em>34</em>.0</h1>
+  <div class="sub rise d2">NATIVEPHP, DESKTOP AND MOBILE · <b>and a worker the binary no longer knows about</b></div>
+  <p class="lede rise d3"><b>NativePHP runs end to end</b>, desktop and mobile, and everything it declares is written once in the store instead of into every Laravel major, because a worker belongs to a <b>composer package</b> and the store finally has a way to say so. The named worker commands are <b>generated from the definition</b> now, which took the last of the Laravel knowledge out of Go. Alongside it, two things lerd never had: a way <b>in without a terminal</b>, and a rule that <b>nothing downloads before you have seen its size</b>.</p>
+
+  <div class="stats rise d4">
+    <div class="stat"><div class="n">117</div><div class="l">commits</div></div>
+    <div class="stat"><div class="n">68</div><div class="l">merged PRs</div></div>
+    <div class="stat"><div class="n">456</div><div class="l">files</div></div>
+    <div class="stat green"><div class="n">+21,738</div><div class="l">insertions</div></div>
+    <div class="stat red"><div class="n">−2,981</div><div class="l">deletions</div></div>
+    <div class="stat amber"><div class="n">4</div><div class="l">contributors</div></div>
+  </div>
+
+  <div class="diffbar rise d5">
+    <div class="bar">
+      <i style="width:26%;background:var(--red)"></i>
+      <i style="width:18%;background:var(--amber)"></i>
+      <i style="width:10%;background:var(--green)"></i>
+      <i style="width:8%;background:var(--blue)"></i>
+      <i style="width:6%;background:var(--violet)"></i>
+      <i style="width:32%;background:var(--line-2)"></i>
+    </div>
+    <div class="legend">
+      <span><s style="background:var(--red)"></s>cli 26%</span>
+      <span><s style="background:var(--amber)"></s>web UI 18%</span>
+      <span><s style="background:var(--green)"></s>config 10%</span>
+      <span><s style="background:var(--blue)"></s>docs 8%</span>
+      <span><s style="background:var(--violet)"></s>podman 6%</span>
+      <span><s style="background:var(--line-2)"></s>rest 32%</span>
+    </div>
+  </div>
+</div></section>
+
+<!-- ============ 01 WORKERS ============ -->
+<section id="workers" class="chapter fx"><div class="wrap">
+  <div class="ch-head">
+    <span class="ch-num">01</span>
+    <h2>Workers</h2>
+    <div class="ch-pills"><span class="pill feat">FEAT</span><span class="pill ref">REFACTOR</span></div>
+  </div>
+  <p class="ch-intro">A worker belongs to a <b>composer package</b>, not to the framework that happens to require it, and the store had no way to say so. Everything gated on a package was repeated in every version file of every framework that might install it, which is how adding NativePHP meant putting the same worker, two commands and three checks into three files and then correcting all three twice in one afternoon.</p>
+
+  <div class="flow-wrap">
+    <div class="flow-title"><span>ONE PACKAGE, WRITTEN ONCE</span><span>instead of once per framework major</span></div>
+    <div class="flow">
+      <div class="fnode warn"><div class="t">laravel/horizon</div><div class="v">×8</div><div class="d">one Laravel version file each</div></div>
+      <div class="fnode warn"><div class="t">drush/drush</div><div class="v">×4</div><div class="d">one Drupal version file each</div></div>
+      <div class="farr">──►</div>
+      <div class="fnode ok"><div class="t">packages/</div><div class="v">×1</div><div class="d">merged onto the resolved definition</div></div>
+    </div>
+    <div class="flow-note"><b>The package wins a name collision with a version file</b> — which is what lets a declaration move out of the framework file without being shadowed by the copy it leaves behind. A user overlay and a project's own <code>.lerd.yaml</code> still sit above both.</div>
+  </div>
+
+  <div class="cards three">
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>The package layer <a class="pr" href="https://github.com/lerd-env/lerd/pull/1574">#1574</a></h4><p>One file per composer package, beside the definitions rather than inside them, narrowed by an optional framework list and major range, so a queue driver stays unscoped while <code>nativephp/electron</code> says it is Laravel's alone. Only packages the store index lists are looked up, so a project's dependency list <b>never turns into a request for a file that does not exist</b>, and an install that cannot reach a version it has never fetched falls back to the newest cached file below it.</p><span class="file">internal/config/framework_package.go</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span><span class="pill ref">REFACTOR</span></div><h4>The named commands are generated <a class="pr" href="https://github.com/lerd-env/lerd/pull/1356">#1356</a></h4><p>Four hand-written cobra commands that each ended up doing what <code>lerd worker start</code> already does from the definition, so a worker added to the store <b>could never get a start command without a binary release</b>. The flags come from the <code>tune_command</code> placeholders rather than a fixed queue, tries and timeout set, and each default is read back out of the plain command so the value is declared once.</p><span class="file">internal/cli/worker_cmds.go</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Options live in the project <a class="pr" href="https://github.com/lerd-env/lerd/pull/1569">#1569</a></h4><p>A worker's tunable values came from the store but nothing kept them, so a project running several queues spelled them on every start and the dashboard toggle, a restore after a reinstall and a fresh clone all fell back to the defaults. They live under <code>worker_options</code> now. A value equal to the framework's default is <b>not stored</b>, so a later store change to that default still lands.</p><span class="file">.lerd.yaml</span></div>
+  </div>
+
+  <div class="cards one">
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>A command that has to leave the container <a class="pr" href="https://github.com/lerd-env/lerd/pull/1651">#1651</a></h4><p>A console command that opens a desktop window cannot run where lerd runs every other one. NativePHP's <code>native:run</code> starts Electron and shows a window, and the PHP-FPM container has neither. What made it worse than a plain failure is that <b>nobody could see it coming</b>: upstream documents <code>php artisan native:run</code>, and on a lerd machine <code>php</code> is the shim on PATH ahead of <code>/usr/bin</code>, so the documented command quietly re-entered the container, ran npm in there and died two seconds later saying only that the dev script failed. A definition names an argument pattern and the binary that runs it, matched against the arguments as typed so one entry covers <code>lerd php artisan native:run</code> and <code>lerd artisan native:run</code> alike. A declared binary that is not installed is an <b>error naming the install command</b>, never a fall back into the container, since falling back is precisely the failure the declaration exists to prevent.</p><span class="file">internal/cli/host_command.go</span></div>
+  </div>
+
+  <div class="code">
+    <div class="code-bar"><span>what a start resolves through, and where each piece comes from</span><span class="lang">yaml</span></div>
+    <pre><span class="c"># the framework definition: the command, and the same command with its knobs named</span>
+<span class="k">workers</span>:
+  <span class="k">queue</span>:
+    <span class="k">command</span>: <span class="s">php artisan queue:work --queue=default --tries=3 --timeout=60</span>
+    <span class="k">tune_command</span>: <span class="s">php artisan queue:work --queue={queue} --tries={tries} --timeout={timeout}</span>
+    <span class="k">requires_service</span>:
+      <span class="k">name</span>: <span class="s">redis</span>
+      <span class="k">when_env</span>: <span class="s">QUEUE_CONNECTION=redis</span>   <span class="c"># the unit orders after it instead of racing it at boot</span>
+
+<span class="c"># the project's own .lerd.yaml: what this project committed to</span>
+<span class="k">worker_options</span>:
+  <span class="k">queue</span>:
+    <span class="k">queue</span>: <span class="s">emails,default</span>
+    <span class="k">tries</span>: <span class="f">5</span>
+
+<span class="c"># and the command nobody had to write</span>
+<span class="k">lerd queue:start</span>   <span class="add"># one flag per placeholder, each default read back out of `command`</span></pre>
+  </div>
+</div></section>
+
+<!-- ============ 02 NO TERMINAL ============ -->
+<section id="terminal" class="chapter fx"><div class="wrap">
+  <div class="ch-head">
+    <span class="ch-num">02</span>
+    <h2>No Terminal</h2>
+    <div class="ch-pills"><span class="pill feat">FEAT</span><span class="pill ui">UI</span></div>
+  </div>
+  <p class="ch-intro">Opening the dashboard on a stopped lerd left you looking at a page you could not act on, and the only way back was a terminal. <b>That is a strange thing to require of a tool whose whole point is that you stop thinking about the infrastructure.</b> Three ways in now, and all of them report the start rather than hanging on it.</p>
+
+  <div class="flow-wrap">
+    <div class="flow-title"><span>THREE WAYS IN, ONE START</span><span>each streaming the same progress back</span></div>
+    <div class="flow">
+      <div class="fnode hot"><div class="t">dashboard</div><div class="v">Start Lerd</div><div class="d">unit by unit in the banner</div></div>
+      <div class="fnode hot"><div class="t">macOS</div><div class="v">~/Applications</div><div class="d">splash with a progress bar</div></div>
+      <div class="fnode hot"><div class="t">Linux</div><div class="v">desktop entry</div><div class="d">notification rewritten in place</div></div>
+      <div class="farr">──►</div>
+      <div class="fnode ok"><div class="t">served</div><div class="v">lerd.localhost</div><div class="d">nothing typed</div></div>
+    </div>
+    <div class="flow-note"><b>The splash waits for the start to report itself finished, not for nginx to answer</b> — the vhost is up well before the databases behind it, so the earlier signal would have handed you a dashboard whose services were still coming up.</div>
+  </div>
+
+  <div class="cards three">
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span><span class="pill ui">UI</span></div><h4>Start from the banner <a class="pr" href="https://github.com/lerd-env/lerd/pull/1529">#1529</a></h4><p>The core services banner runs the same start the CLI does and streams its progress back, counting units as they come up and naming the stage it is in <b>rather than hanging on a request that takes the better part of a minute</b>. <code>lerd dashboard</code> and the tray's Open Dashboard start lerd first, and the offline page offers the same button whenever the daemon still answers on its own port.</p><span class="file">internal/ui/server.go</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>In the app list, on both platforms <a class="pr" href="https://github.com/lerd-env/lerd/pull/1536">#1536</a></h4><p>macOS gets a Lerd app in Launchpad and Finder; Linux gets a desktop entry written by <code>lerd install</code> and removed by <code>lerd uninstall</code>, reporting its cold start <b>over the session bus</b> rather than through a dialog tool the desktop may not ship. It is named Lerd on its own, and steps aside as Start Lerd when the desktop app is already listed, rather than shadowing the entry that carries the <code>lerd://</code> association.</p><span class="file">internal/desktopapp</span></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>The terminal you actually chose <a class="pr" href="https://github.com/lerd-env/lerd/pull/1535">#1535</a></h4><p>Open in terminal walked a fixed list, so an emulator that <b>merely happened to be on PATH</b> won over the one you had picked, and Warp never appeared at all. macOS reads the LaunchServices handler for shell scripts; Linux asks the freedesktop launcher, then alternatives, then what KDE or GNOME records. A chosen terminal is launched with its own flags, since the generic <code>cd</code> wrapper is not something every emulator accepts.</p></div>
+  </div>
+
+  <div class="cards one">
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>The tray is optional <a class="pr" href="https://github.com/lerd-env/lerd/pull/1525">#1525</a></h4><p>A desktop that already carries lerd's running state elsewhere, the Omarchy bar widget being the case that prompted this, got the applet as a second copy of the same information <b>with no supported way to turn it off</b>: masking the unit did not work, because start enabled it again or launched the helper directly. There is an on/off preference in the global config now, checked by both start and install before they touch the applet, and turning it off quits the running one and takes the unit out of the autostart set. It is reachable from all three places someone might look, <code>lerd tray on</code> and <code>off</code>, the dashboard's system settings, and an item in the tray menu itself, which is deliberately one way since a gone applet has no menu left to bring it back from.</p><span class="file">internal/tray</span></div>
+  </div>
+</div></section>
+
+<!-- ============ 03 BANDWIDTH ============ -->
+<section id="bandwidth" class="chapter fx"><div class="wrap">
+  <div class="ch-head">
+    <span class="ch-num">03</span>
+    <h2>Bandwidth</h2>
+    <div class="ch-pills"><span class="pill feat">FEAT</span><span class="pill brk">SAFETY</span></div>
+  </div>
+  <p class="ch-intro">Several commands quietly committed to pulling or rebuilding container images, and the PHP base images are republished often enough that a rebuild is <b>a whole base download</b>. On a metered connection, or a hotel wifi, or a phone tether, that is a decision somebody should get to make before it is made for them.</p>
+
+  <div class="code">
+    <div class="code-bar"><span>said before the first byte moves, and three ways to refuse it</span><span class="lang">bash</span></div>
+    <pre><span class="k">lerd start</span> <span class="t">--dry-run</span>
+<span class="out">lerd would download 2 images (~486 MB total); nothing was downloaded</span>
+<span class="out">  rebuild  PHP 8.4 image                 ~412 MB  missing, needed by php84-fpm</span>
+<span class="out">  pull     docker.io/library/mysql:8.4    ~74 MB  missing, needed by mysql</span>
+
+<span class="k">lerd start</span> <span class="t">--no-pull</span>              <span class="c"># skip it, unless the image is missing outright</span>
+<span class="k">LERD_OFFLINE=1</span>                     <span class="c"># the dashboard, the watcher and the MCP server</span></pre>
+  </div>
+
+  <div class="cards three">
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Sizes that cost nothing to ask for <a class="pr" href="https://github.com/lerd-env/lerd/pull/1524">#1524</a></h4><p>Read from the registry manifest over the OCI distribution API, so working out what a pull costs <b>downloads nothing at all</b>, and a registry that does not answer in time leaves the line without a number rather than holding the command up. The disclosure covers <code>start</code>, <code>install</code>, <code>fetch</code>, <code>php:rebuild</code>, the whole service install and update path, the implicit pull mid-start and the FrankenPHP switch.</p><span class="file">internal/imagepull</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span><span class="pill ui">UI</span></div><h4>A confirmation, not a spinner <a class="pr" href="https://github.com/lerd-env/lerd/pull/1524">#1524</a></h4><p>The dashboard turns the same estimate into a dialog naming the image and roughly how much it will download. An image <b>already in the local store costs nothing to use</b>, so it still runs with no extra click; the point is to interrupt a download, not to add a step to everything.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>An assistant has to come back with your answer <a class="pr" href="https://github.com/lerd-env/lerd/pull/1618">#1618</a></h4><p>An assistant installing a preset or adding an extension started the same download <b>on a connection belonging to someone who never typed the command</b>. The MCP actions that can pull answer with the image and its size instead of fetching it, so the assistant relays the cost and returns with <code>confirm: true</code> once the person paying for it has agreed.</p><span class="file">internal/mcp/download.go</span></div>
+  </div>
+</div></section>
+
+<!-- ============ 04 SURFACES ============ -->
+<section id="surfaces" class="chapter fx"><div class="wrap">
+  <div class="ch-head">
+    <span class="ch-num">04</span>
+    <h2>Surfaces</h2>
+    <div class="ch-pills"><span class="pill feat">FEAT</span><span class="pill ui">UI</span></div>
+  </div>
+  <p class="ch-intro">The most asked-for thing this cycle was <b>NativePHP</b>, and it is supported end to end, desktop and mobile. The rest is spread across the places lerd is met from: a PHP version nothing picks for you, a shell into any image, one command promoted out of a dropdown, and the two panes the TUI was missing.</p>
+
+  <div class="cards one">
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>NativePHP, desktop and mobile <a class="pr" href="https://github.com/lerd-env/lerd/pull/1545">#1545</a></h4><p><code>nativephp/electron</code> runs the desktop app as a host worker and <code>nativephp/mobile</code> builds onto an emulator, a simulator or a device, with a walkthrough for the parts that catch people out because <b>neither toolchain reports itself clearly</b>: an Xcode shipping an SDK without the matching simulator runtime, a Gradle picking up whichever JDK leads PATH when <code>JAVA_HOME</code> is unset. Several things had to become framework-agnostic to carry it. A doctor check can take the gate rule workers and commands already use, so a check about an optional package is dropped rather than drawing a permanently green row on every project that never installed it. A worker declares whether its command <b>outlives what it started</b>, so a <code>native:serve</code> that ends with the window the user just closed is no longer reported as drift asking to be started again, which was never NativePHP's alone since vite ends with its dev server the same way. A start refuses when the command names a project-relative program that is not there and says which one, instead of launching a unit that dies on "Can't spawn program" and flaps every few seconds. And a host worker's teardown reaps the whole process group, since launchd signals only the job leader and a worker that hands off to a launcher was leaving <b>the Electron window on screen throwing EPIPE dialogs</b> once its parent's stdio had gone.</p><span class="file">packages/nativephp-*.yaml</span></div>
+  </div>
+
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>What landed</th><th>Where</th><th>The problem it answers</th></tr></thead>
+    <tbody>
+      <tr><td><b>PHP 8.6, as a prerelease tier</b> <a class="pr" href="https://github.com/lerd-env/lerd/pull/1584">#1584</a></td><td><code>lerd fetch 8.6</code></td><td>There was nowhere to run a suite against the next PHP, and adding it as an ordinary version offers a beta to people who read a version list as supported. A bare <code>lerd fetch</code> leaves it alone, FrankenPHP does not offer it, and release day is one edit</td></tr>
+      <tr><td><b>A shell in any PHP image</b> <a class="pr" href="https://github.com/lerd-env/lerd/pull/1592">#1592</a></td><td><code>lerd shell 8.4</code></td><td>Looking at what a version actually holds meant finding a site on it first, or reaching for podman by hand</td></tr>
+      <tr><td><b>A pinned command</b> <a class="pr" href="https://github.com/lerd-env/lerd/pull/1575">#1575</a></td><td>site control row</td><td>The command a project runs twenty times a day cost the same two clicks as the one it runs twice a year</td></tr>
+      <tr><td><b>Databases and service facets</b> <a class="pr" href="https://github.com/lerd-env/lerd/pull/1362">#1362</a> <a class="pr" href="https://github.com/lerd-env/lerd/pull/1363">#1363</a></td><td><code>lerd tui</code></td><td>Someone debugging in the terminal could not see that a database existed, how large it had grown or whether it had a snapshot to fall back on</td></tr>
+      <tr><td><b>A location-scope nginx override</b></td><td><code>custom.d/…location.conf</code></td><td>A server-scope override can never win against what the generated vhost sets inside a location, so the forwarded host wiring could not be changed for one site</td></tr>
+      <tr><td><b><code>lerd cpx</code></b> <a class="pr" href="https://github.com/lerd-env/lerd/pull/1543">#1543</a></td><td>host shim</td><td>Running a Composer package's binary without adding it to the project, on the PHP the site is registered on rather than the host's</td></tr>
+      <tr><td><b>OpenCode</b> <a class="pr" href="https://github.com/lerd-env/lerd/pull/1542">#1542</a></td><td><code>lerd mcp:inject</code></td><td>The one client sharing neither JSON shape lerd already writes: an <code>mcp</code> key, a transport named local, command and arguments in one array</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="cards three">
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>A tier, not a version <a class="pr" href="https://github.com/lerd-env/lerd/pull/1584">#1584</a></h4><p>The prerelease tier decides everything that follows: the image builds from the <code>8.6-rc</code> tag until release, and every place a version is picked marks it, so <b>it is never chosen in the belief that it gets security updates</b>. 8.6 removed PEAR, so <code>pecl</code> is gone from the upstream image and every PECL install goes through one wrapper that falls back to the release tarball.</p><span class="file">internal/php</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span><span class="pill ui">UI</span></div><h4>Two per site, enforced by the API <a class="pr" href="https://github.com/lerd-env/lerd/pull/1575">#1575</a></h4><p>Not only by the UI, because the control row folds its secondary actions into a menu on a narrow panel and <b>an unbounded set would land on that fold first</b>. A definition can ship a command pinned for the one everyone on a project reaches for, and the user's own choice overrides that default, so a preference stays personal instead of turning into a diff every teammate carries.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill ui">UI</span></div><h4>Informative, plus what is reversible <a class="pr" href="https://github.com/lerd-env/lerd/pull/1362">#1362</a> <a class="pr" href="https://github.com/lerd-env/lerd/pull/1363">#1363</a></h4><p>Taking a snapshot adds a file and takes nothing away, so it runs under <code>n</code>; a client shim toggle writes or removes a file and flipping it back undoes it exactly, so it sits under space. <b>Restore, drop, import and export destroy data and stay in the CLI</b>, with the pane saying where to find them.</p><span class="file">internal/tui</span></div>
+  </div>
+</div></section>
+
+<!-- ============ 05 DOCTOR ============ -->
+<section id="doctor" class="chapter fx"><div class="wrap">
+  <div class="ch-head">
+    <span class="ch-num">05</span>
+    <h2>Doctor</h2>
+    <div class="ch-pills"><span class="pill feat">FEAT</span><span class="pill fix">FIX</span></div>
+  </div>
+  <p class="ch-intro">The environment doctor reported on the host and stopped there, <b>so a machine where every check passed could still be serving nothing</b>. It ends with a sites section now, and two of the checks underneath it stopped ending in a command you had to go and type somewhere else.</p>
+
+  <div class="flow-wrap">
+    <div class="flow-title"><span>ONE RUN, THE WHOLE ENVIRONMENT</span><span>and one engine's database list reused across it</span></div>
+    <div class="flow">
+      <div class="fnode"><div class="t">host</div><div class="v">[Podman] [DNS] [Ports]</div><div class="d">what lerd itself depends on</div></div>
+      <div class="farr">──►</div>
+      <div class="fnode hot"><div class="t">every linked site</div><div class="v">[Sites]</div><div class="d">one line each, first thing wrong</div></div>
+      <div class="farr">──►</div>
+      <div class="fnode ok"><div class="t">the detail</div><div class="v">lerd site:doctor</div><div class="d">audits, commands, timings</div></div>
+    </div>
+    <div class="flow-note"><b>The cheap half runs for every site; the expensive half stays on the per-site command</b> — framework command checks, <code>composer audit</code>, <code>npm audit</code> and the response-time lookup are not things to pay for once per site on a doctor run.</div>
+  </div>
+
+  <div class="cards three">
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>The finding creates the database</h4><p>A site pointing at a schema its engine does not hold was told to go and run <code>lerd db:create</code>, <b>the one finding on the panel ending in a command to type somewhere else</b>, while the button it did carry ran migrate, which has nowhere to run until the database exists. It creates it now, resolving the missing set again on the way in so it can only ever create what the check reported, and a database that does not exist suppresses the migration check so the two steps stay in the order they have to happen in.</p><span class="file">internal/sitedoctor</span></div>
+    <div class="card"><div class="card-pills"><span class="pill feat">FEAT</span></div><h4>Can a container resolve a name? <a class="pr" href="https://github.com/lerd-env/lerd/pull/1522">#1522</a></h4><p>Every DNS check was about <code>.test</code> resolving on the host, and aardvark-dns answers container names from its own records, so those keep working while every other lookup goes to the forwarders the network was handed. A stale one there <b>stayed invisible until composer timed out mid-download with a clean bill of health</b>. The check asks the running nginx container to resolve the store's own hostname, capped on wall clock because the failure it exists to catch hangs rather than answers.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>A fix undone by its own cache <a class="pr" href="https://github.com/lerd-env/lerd/pull/1649">#1649</a></h4><p>The fix created the schema, said so, and the re-check underneath it reported the same database as still missing. An engine's contents are read through a list memoised for five seconds so a sweep does not pay a container exec per site, and the re-run is <b>always inside that window</b>. Creating a database drops that engine's entry now, scoped to the engine that changed, and the dashboard's copy gets the same call where it matters more, since lerd-ui outlives the request.</p></div>
+  </div>
+</div></section>
+
+<!-- ============ 06 FIXES ============ -->
+<section id="fixes" class="chapter fx"><div class="wrap">
+  <div class="ch-head">
+    <span class="ch-num">06</span>
+    <h2>Fixes</h2>
+    <div class="ch-pills"><span class="pill fix">FIX</span><span class="pill sec">SEC</span></div>
+  </div>
+  <p class="ch-intro">The fixed list covers bugs that shipped in 1.33.1 or earlier. Regressions introduced and fixed inside this cycle never reached anyone, so they are folded into the feature that carried them. <b>Five of these left nothing working</b>, so they lead.</p>
+
+  <div class="flow-wrap">
+    <div class="flow-title"><span>THE ONES THAT LEFT NOTHING WORKING</span><span>ordered by how much of the environment they took with them</span></div>
+    <div class="pipe">
+      <div class="pipe-step hot"><div class="pipe-n">1</div><div class="pipe-b"><h5>Every container exited on a host with IPv6 off <a class="pr" href="https://github.com/lerd-env/lerd/pull/1634">#1634</a></h5><p>Every service quadlet paired a <code>[::1]</code> publish onto its <code>127.0.0.1</code> one, and rootlessport cannot bind an address the kernel does not have. A host booted with <code>ipv6.disable=1</code>, or one whose VPN client turns IPv6 off while connected, had podman treat that bind failure as fatal: nginx, mysql, redis and everything else exited with status 126, and <b>there was no working environment left to diagnose it from</b>. Units written by an earlier build are repaired on the next start, and the host is read every time, so a machine that regains IPv6 gets its dual-stack pairs back with it.</p></div></div>
+      <div class="pipe-step hot"><div class="pipe-n">2</div><div class="pipe-b"><h5>An uninstall that reported keeping the data had already emptied it <a class="pr" href="https://github.com/lerd-env/lerd/pull/1635">#1635</a></h5><p>The Linux desktop entry's icon lives inside lerd's own data directory rather than an icon directory of its own, and the launcher removal cleared the icon's parent. That step ran whatever the answer to the data prompt was, so an uninstall that went on to say the data was kept had taken the site registry, the vhosts, the certificates and the request stats, <b>with nothing in the output connecting the two</b>. Only the icon file goes now.</p></div></div>
+      <div class="pipe-step hot"><div class="pipe-n">3</div><div class="pipe-b"><h5>Re-running the installer flipped a .localhost machine onto managed DNS <a class="pr" href="https://github.com/lerd-env/lerd/pull/1647">#1647</a></h5><p>The DNS mode is settled once, and <code>lerd install</code> honours the saved choice on every later run. <code>install.sh</code> did not know that, asking on every run and passing the answer on as an explicit flag, <b>the one input that wins ahead of the saved choice</b>. Where there was no terminal the question was never shown, since it reads from <code>/dev/tty</code>, so it silently resolved to managed: dnsmasq came up, the sudoers grant was written and every site domain was rewritten, on nothing more than a reinstall. Only a first install asks now.</p></div></div>
+      <div class="pipe-step hot"><div class="pipe-n">4</div><div class="pipe-b"><h5>nginx never bound the ports it was configured with <a class="pr" href="https://github.com/lerd-env/lerd/pull/1544">#1544</a></h5><p><code>nginx.http_port</code> and <code>nginx.https_port</code> were read by the share commands, the profiler probe, the watcher and the install-time port check, but never by the thing that actually binds: both writers rendered a template publishing <code>80:80</code> and <code>443:443</code>. Doctor was the visible half of the same problem, reporting on the literal 80 and 443 <b>without probing at all when nginx was up</b>, so a host demonstrably on 10080 was told about port 80 either way.</p></div></div>
+      <div class="pipe-step"><div class="pipe-n">5</div><div class="pipe-b"><h5>A stop returned before the service had finished stopping <a class="pr" href="https://github.com/lerd-env/lerd/pull/1510">#1510</a></h5><p>Every stop waited a fixed thirty seconds, so a service declaring a longer graceful window was <b>guaranteed to outlast the wait</b>: mysql and postgres declare sixty, which reaches the unit as <code>TimeoutStopSec=75</code>. The uninstall is where it left a mark, deleting the units and resetting their failed state while podman killed mysql a minute later, so systemd recorded a failure after the reset that would have cleared it. The wait is read off the unit now.</p></div></div>
+    </div>
+  </div>
+
+  <div class="cards three">
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>ftp_ssl_connect existed in no image <a class="pr" href="https://github.com/lerd-env/lerd/pull/1576">#1576</a></h4><p>ext/ftp only compiles its SSL half when OpenSSL is configured in the same run, and installing it through phpize against an already built PHP never sets that. <code>php -m</code> cannot see this class of bug, because the module loads either way, so the base image workflow <b>probes the function on the image it just built</b>. A declared extension naming a bundled one then replaced it with a worse build of itself, which is how ftp lost the flag a second time, immediately after the fix.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>stripe:listen could stop the listener <a class="pr" href="https://github.com/lerd-env/lerd/pull/1609">#1609</a></h4><p>The stop command was declared as <code>stripe:listen stop</code> and registered on the root beside the start command, and cobra takes a name from the first word, so the root carried <b>two commands both called stripe:listen</b>. The plain form resolved to whichever cobra reached first, which on a current build is the stopper. This had been there since the listener became a systemd service in 0.6.0.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>A worker that went down stopped coming back <a class="pr" href="https://github.com/lerd-env/lerd/pull/1627">#1627</a></h4><p>The workers list in <code>.lerd.yaml</code> was rewritten after every worker action as the set running at that moment, so a worker merely <b>down</b> when an unrelated one was touched was written out of the file with nothing to put it back. A crash-looping worker is down by definition, which is how one disappeared for good. The list is a declaration, so it follows the units on disk now.</p></div>
+  </div>
+
+  <div class="cards three">
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>mysql died on a missing auth plugin</h4><p>MySQL 8.4 authenticates root with <code>caching_sha2_password</code> and Alpine's <code>mysql-client</code> is the MariaDB one, which carries no such plugin, so <code>artisan migrate</code> on any project with a stored schema dump went down with it. Naming <code>mysql_native_password</code> in the shared config had been the old answer, and MySQL 9.x removed that plugin entirely and refused to initialise. The image installs the plugin from <code>mariadb-connector-c</code> instead.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill fix">FIX</span></div><h4>A service could take the Xdebug port <a class="pr" href="https://github.com/lerd-env/lerd/pull/1555">#1555</a></h4><p>The port guard knew nothing about 9003, so a service whose own ports were busy could be published there. Nothing then failed: Xdebug connected back exactly as configured, reached the container that took the port, and the session died against a peer that does not speak DBGp, so <b>the IDE simply never saw a breakpoint</b>. A request stopped at a breakpoint also outlived the vhost's 60s read timeout, answering a debugging session with a 504.</p></div>
+    <div class="card"><div class="card-pills"><span class="pill sec">SEC</span></div><h4>DOMPurify GHSA-55q2-fjhq-7xh7</h4><p>The editor pulls DOMPurify in through monaco-editor, and 3.4.12 and earlier leave a detached subtree executable when an <code>IN_PLACE</code> hook removes an element. Nothing in the dashboard calls the sanitizer that way, so <b>no shipped build was exploitable</b>, but the pin moves to 3.4.14 so the vulnerable code is not in the bundle at all.</p></div>
+  </div>
+</div></section>
+
+<footer>
+  <div class="foot-grid">
+    <div>
+      <h2>SHIP <span>IT</span></h2>
+      <p class="fn">Install on Linux or macOS, or <code>lerd update</code> if you're already on board. Full
+      story in the <a href="https://lerd.sh/changelog" style="color:var(--amber)">changelog</a>.</p>
+    </div>
+    <div class="term">
+      <div class="term-bar"><i></i><i></i><i></i><span>bash</span></div>
+      <div class="term-body">
+        <div class="c"># Linux &amp; macOS</div>
+        <div><span class="p">$</span> curl -fsSL https://lerd.sh/install.sh | bash</div>
+        <div class="c"># macOS via Homebrew</div>
+        <div><span class="p">$</span> brew install lerd-env/lerd/lerd &amp;&amp; lerd install</div>
+        <div class="c"># already installed</div>
+        <div><span class="p">$</span> lerd update <span class="out"># → v1.34.0</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="foot-end">
+    <span>lerd v1.34.0 · 2026-09-02 · <a href="/digest/v1.33.0.html">← v1.33.0 digest</a></span>
+    <span><a href="https://github.com/lerd-env/lerd/compare/v1.33.1...v1.34.0">v1.33.1…v1.34.0</a> · <a href="https://lerd.sh/">docs</a> · <a href="https://github.com/lerd-env/lerd">github</a></span>
+  </div>
+</footer>
+
+<script>
+  const reveal = new IntersectionObserver((es) => {
+    es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); reveal.unobserve(e.target); } });
+  }, { threshold: 0.08 });
+  document.querySelectorAll('.fx').forEach(el => reveal.observe(el));
+  addEventListener('load', () => document.querySelectorAll('.fx').forEach(el => el.classList.add('in')));
+
+  const links = [...document.querySelectorAll('.pillnav a')];
+  const spy = new IntersectionObserver((es) => {
+    es.forEach(e => { if (e.isIntersecting) links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id)); });
+  }, { rootMargin: '-40% 0px -55% 0px' });
+  document.querySelectorAll('section.chapter').forEach(s => spy.observe(s));
+</script>
+</body>
+</html>

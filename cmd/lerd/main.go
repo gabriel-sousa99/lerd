@@ -23,10 +23,13 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/cleanup"
 	"github.com/gabriel-sousa99/lerd/internal/cli"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/daemon"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/eventbus"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/imagepull"
+	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
@@ -37,10 +40,6 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/ui"
 	"github.com/gabriel-sousa99/lerd/internal/version"
 	"github.com/gabriel-sousa99/lerd/internal/watcher"
-
-	"github.com/gabriel-sousa99/lerd/internal/daemon"
-	"github.com/gabriel-sousa99/lerd/internal/lifecycle"
-
 	"github.com/spf13/cobra"
 )
 
@@ -63,6 +62,10 @@ func notifyLerdUI(_ string) {
 	}
 	resp.Body.Close()
 }
+
+// noPull is bound to the root --no-pull flag and read once the flags are
+// parsed, in PersistentPreRunE.
+var noPull bool
 
 func main() {
 	// Cross-process bridge from CLI unit mutations to the running lerd-ui.
@@ -92,6 +95,9 @@ func main() {
 		// this runs for every command.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
+			if noPull {
+				imagepull.SetOffline(true)
+			}
 			// A package manager that upgraded lerd swapped the binary and ran
 			// nothing else, so the environment step `lerd update` performs for a
 			// self-updating install happens here instead. No-op otherwise.
@@ -106,6 +112,9 @@ func main() {
 			}
 		},
 	}
+
+	root.PersistentFlags().BoolVar(&noPull, "no-pull", false,
+		"Skip image pulls and rebuilds unless the image is missing outright (same as LERD_OFFLINE=1)")
 
 	// Register all subcommands
 	root.AddCommand(cli.NewInstallCmd())
@@ -160,6 +169,7 @@ func main() {
 	root.AddCommand(cli.NewNpmCmd())
 	root.AddCommand(cli.NewNpxCmd())
 	root.AddCommand(cli.NewComposerCmd())
+	root.AddCommand(cli.NewCpxCmd())
 	root.AddCommand(cli.NewAuthCmd())
 	root.AddCommand(cli.NewServiceCmd())
 	root.AddCommand(cli.NewStatusCmd())
@@ -178,19 +188,6 @@ func main() {
 	root.AddCommand(cli.NewOpenCmd())
 	root.AddCommand(cli.NewCodeCmd())
 	root.AddCommand(cli.NewDashboardCmd())
-	root.AddCommand(cli.NewQueueCmd())
-	root.AddCommand(cli.NewQueueStartCmd())
-	root.AddCommand(cli.NewQueueStopCmd())
-	root.AddCommand(cli.NewScheduleCmd())
-	root.AddCommand(cli.NewScheduleStartCmd())
-	root.AddCommand(cli.NewScheduleStopCmd())
-	root.AddCommand(cli.NewReverbCmd())
-	root.AddCommand(cli.NewReverbStartCmd())
-	root.AddCommand(cli.NewReverbStopCmd())
-	root.AddCommand(cli.NewHorizonCmd())
-	root.AddCommand(cli.NewHorizonStartCmd())
-	root.AddCommand(cli.NewHorizonStopCmd())
-	root.AddCommand(cli.NewHorizonReloadCmd())
 	root.AddCommand(cli.NewOctaneCmd())
 	root.AddCommand(cli.NewOctaneReloadCmd())
 	root.AddCommand(cli.NewAutostartCmd())
@@ -268,6 +265,17 @@ func main() {
 	root.AddCommand(cli.NewRemoteControlFullAccessCmd())
 	root.AddCommand(newWatchCmd())
 	root.AddCommand(newServeUICmd())
+
+	// queue:start, horizon:reload and the rest are generated from the workers the
+	// current project's framework declares, so a worker added to the store gets
+	// its own commands without a binary release. Building them reads the
+	// definition from disk and may refresh it from the store, so an invocation
+	// that already matches a registered command never pays for it.
+	if cli.WantsFrameworkWorkerCmds(root, os.Args[1:]) {
+		for _, cmd := range cli.NewFrameworkWorkerCmds() {
+			root.AddCommand(cmd)
+		}
+	}
 
 	maybeDispatchVendorBin(root)
 
@@ -348,12 +356,13 @@ func newDNSCheckCmd() *cobra.Command {
 				return err
 			}
 
+			tld := dns.ConfiguredTLD()
 			if !cfg.DNS.Enabled {
-				fmt.Printf("DNS managed externally: lerd-dns is disabled, sites use *.%s.\n", cfg.DNS.TLD)
+				fmt.Printf("DNS managed externally: lerd-dns is disabled, sites use *.%s.\n", tld)
 				return nil
 			}
 
-			diag := dns.Diagnose(cfg.DNS.TLD)
+			diag := dns.Diagnose(tld)
 			printDNSDiagnostic(os.Stdout, diag)
 			if diag.FirstFailure >= 0 {
 				os.Exit(1)

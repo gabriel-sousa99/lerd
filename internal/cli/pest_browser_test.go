@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -185,9 +188,37 @@ func TestPestBrowserCleanup_ClearsLockAndOrphans(t *testing.T) {
 	}
 }
 
-func TestPestBrowserPkgIsChromium(t *testing.T) {
-	if pestBrowserPkg != "chromium" {
-		t.Errorf("pest:browser must bake the Alpine chromium package, got %q", pestBrowserPkg)
+// chromium is what Playwright drives, and Xvfb is what a headed launch draws on:
+// without it Playwright dies telling the user to start an XServer (#1538).
+// chromium must stay in the set for another reason too, see the test below.
+func TestPestBrowserPkgs_ChromiumAndXvfb(t *testing.T) {
+	for _, want := range []string{"chromium", "xvfb", "xvfb-run"} {
+		if !slices.Contains(pestBrowserPkgs, want) {
+			t.Errorf("pest:browser must bake %q, got %v", want, pestBrowserPkgs)
+		}
+	}
+}
+
+// The image build derives PLAYWRIGHT_BROWSERS_PATH from the chromium package
+// alone, so dropping that name would silently unbake the cache path the test
+// runner needs.
+func TestPestBrowserPkgs_ChromiumDrivesTheBakedEnv(t *testing.T) {
+	if !slices.Contains(pestBrowserPkgs, "chromium") {
+		t.Fatal("chromium is the marker the FPM build keys PLAYWRIGHT_BROWSERS_PATH off")
+	}
+}
+
+// A headed launch has to go through xvfb-run, and a headless one has to stay
+// direct: Playwright appends --headless itself, so the flag is the only signal
+// the shim gets about which mode it was launched for.
+func TestPestBrowserShim_HeadedRunsUnderXvfb(t *testing.T) {
+	for _, want := range []string{
+		`*" --headless"*) exec /usr/bin/chromium --no-sandbox "$@" ;;`,
+		`exec xvfb-run -a /usr/bin/chromium --no-sandbox "$@"`,
+	} {
+		if !strings.Contains(pestBrowserShim, want) {
+			t.Errorf("shim missing %q:\n%s", want, pestBrowserShim)
+		}
 	}
 }
 
@@ -206,13 +237,89 @@ func TestPestBrowserSupportedVersion(t *testing.T) {
 	}
 }
 
-// The shim must shim both browser binaries and use a NUL-delimited find so paths
-// with spaces or newlines can't corrupt the rewrite.
+// The shim must shim every browser binary and use a NUL-delimited find so paths
+// with spaces or newlines can't corrupt the rewrite. headless_shell is the name
+// the chromium_headless_shell build ships, and missing it leaves a glibc binary
+// that musl cannot exec while the count guard still passes on chrome alone.
 func TestPestBrowserShim_HandlesBothBinariesSafely(t *testing.T) {
-	for _, want := range []string{"-name chrome-headless-shell", "-name chrome", "-print0", "read -r -d ''"} {
+	for _, want := range []string{"-name chrome-headless-shell", "-name chrome", "-name headless_shell", "-print0", "read -r -d ''"} {
 		if !strings.Contains(pestBrowserShim, want) {
 			t.Errorf("shim missing %q:\n%s", want, pestBrowserShim)
 		}
+	}
+}
+
+// Running the generated wrapper is the only way to prove the mode split works:
+// the heredoc, the case glob and the flag Playwright appends all have to line up,
+// and a string match would pass on a wrapper that picks the wrong branch.
+func TestPestBrowserShim_WrapperPicksModeAtRuntime(t *testing.T) {
+	cache := t.TempDir()
+	bin := filepath.Join(cache, "chrome-linux")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	browser := filepath.Join(bin, "chrome")
+	if err := os.WriteFile(browser, []byte("glibc binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// bash, not sh: the rewrite loop reads NUL-delimited paths with `read -d`,
+	// which the container's busybox ash supports and a host /bin/sh may not.
+	// Under a shell that lacks it the loop silently rewrites nothing while the
+	// count guard still passes, so the wrapper check below is what catches it.
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available to run the generator")
+	}
+	gen := exec.Command(bash, "-c", pestBrowserShim)
+	gen.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+cache)
+	if out, err := gen.CombinedOutput(); err != nil {
+		t.Fatalf("generating the shim failed: %v\n%s", err, out)
+	}
+
+	// The wrapper hardcodes the container's chromium path and looks xvfb-run up
+	// on PATH; point both at stubs that just announce which one ran.
+	wrapper, err := os.ReadFile(browser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(wrapper), "#!/bin/sh") {
+		t.Fatalf("the browser binary was not rewritten to a wrapper:\n%s", wrapper)
+	}
+	stub := filepath.Join(cache, "fake-chromium")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"chromium $*\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "xvfb-run"), []byte("#!/bin/sh\necho \"xvfb-run $*\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(browser, []byte(strings.ReplaceAll(string(wrapper), "/usr/bin/chromium", stub)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) string {
+		cmd := exec.Command(browser, args...)
+		cmd.Env = append(os.Environ(), "PATH="+cache+string(os.PathListSeparator)+os.Getenv("PATH"))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("wrapper %v failed: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	if got := run("--headless", "--remote-debugging-pipe"); strings.Contains(got, "xvfb-run") {
+		t.Errorf("headless launch went through xvfb-run: %s", got)
+	}
+	if got := run("--remote-debugging-pipe"); !strings.HasPrefix(got, "xvfb-run -a ") {
+		t.Errorf("headed launch did not get a virtual display: %s", got)
+	}
+}
+
+// The extractor marks the binaries executable by name, so it has to know the
+// same set the shim rewrites or headless_shell lands without the +x bit.
+func TestPestBrowserExtract_ChmodsHeadlessShell(t *testing.T) {
+	if !strings.Contains(pestBrowserInstall, "-name 'headless_shell'") {
+		t.Errorf("extractor does not chmod headless_shell:\n%s", pestBrowserInstall)
 	}
 }
 

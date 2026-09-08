@@ -46,6 +46,7 @@ Settings       ▸   Autostart at login: ✔ On   ← enables/disables every ler
                    Debug bridge: Off          ← `lerd dump on/off`
                    Notifications: ✔ On        ← `lerd notify on/off`
                    High-contrast icon: Off    ← `lerd tray icon default/high-contrast`
+                   Turn off system tray       ← `lerd tray off`, quits the applet for good
 ```
 
 The menu refreshes every 30 seconds, and again right after any click so it redraws against the result instead of waiting for the next poll. Clicking a service toggles it on/off. Clicking a PHP version sets it as the global default. "Quit Lerd" stops the entire environment before closing.
@@ -86,11 +87,28 @@ If you would rather the OS own the colouring entirely, use `lerd tray --mono`, w
 
 ---
 
+## Turning the tray off
+
+Some desktops already show what the tray shows. On Omarchy the lerd Glance widget carries the same running state and site list in the bar, which makes the applet a second copy of the same information, and on WSL2 there is no tray host to draw it at all. So the tray is optional:
+
+```bash
+lerd tray off   # quit the applet and stop lerd from launching it
+lerd tray on    # bring it back
+```
+
+Turning it off quits the running applet, takes `lerd-tray.service` out of the autostart set, and stops `lerd start` and `lerd install` from launching it again, which masking the unit alone never achieved: both would relaunch the helper directly on the next start. Turning it back on re-enables the unit when autostart is on and starts the applet straight away.
+
+The same switch is in the dashboard under **System**, and the tray menu itself carries a **Turn off system tray** item under **Settings**. That one is deliberately one-way: once the applet is gone there is no menu left to bring it back from, so use the CLI or the dashboard for that. The preference is persisted to `config.yaml` under `tray.disabled` and defaults to on, so an install that never touches it keeps the tray it has always had.
+
+---
+
 ## Autostart
 
 The tray follows the global `lerd autostart` toggle: when autostart is on (the default), `lerd install` writes and enables `lerd-tray.service` so the tray comes up on every graphical login. Run `lerd autostart disable` to turn off autostart for the entire environment, including the tray.
 
 The tray is also started automatically by `lerd start` if it isn't already running.
+
+The tray preference wins over the autostart one: with the tray off, `lerd autostart enable` arms everything else at login and leaves `lerd-tray.service` disabled, so turning autostart back on never brings back a tray you removed.
 
 The unit is wired to `graphical-session.target`, which is reached automatically by GNOME, KDE Plasma, and any Wayland compositor launched through `uwsm` (including Omarchy's Hyprland setup). On bare Hyprland / Sway / i3 launched without `uwsm`, `graphical-session.target` is never started, so the tray will not autostart. Either run the compositor under `uwsm` or replace `WantedBy=graphical-session.target` with `WantedBy=default.target` in `~/.config/systemd/user/lerd-tray.service`.
 

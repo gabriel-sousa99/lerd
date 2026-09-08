@@ -19,7 +19,7 @@ func TestAllEndpointsServeTheirPublisher(t *testing.T) {
 		"releases":        {ReleaseBaseURLs(), "gabriel-sousa99"},
 		"downloads":       {ReleaseDownloadBases(), "gabriel-sousa99"},
 		"api":             {ReleaseAPIBaseURLs(), "gabriel-sousa99"},
-		"changelog":       {ChangelogURLs(), "gabriel-sousa99"},
+		"changelog":       {ChangelogURLs(""), "gabriel-sousa99"},
 		"baseimage":       {BaseImageRefs("85", "h"), "gabriel-sousa99"},
 	}
 	for name, tc := range lists {
@@ -43,7 +43,7 @@ func TestAllEndpointsServeTheirPublisher(t *testing.T) {
 // *path* with a 200. Both shipped at once in v1.30.1-oracle.0 and left `lerd
 // whatsnew` blank, so pin the branch and the real file.
 func TestChangelogURLNamesForkBranchAndRealFile(t *testing.T) {
-	got := ChangelogURLs()
+	got := ChangelogURLs("")
 	if len(got) == 0 {
 		t.Fatal("empty changelog list")
 	}
@@ -119,5 +119,53 @@ func TestEnvOverrideIgnoredWhenEmpty(t *testing.T) {
 	got := StoreBaseURLs()
 	if len(got) == 0 || !strings.Contains(got[0], "lerd-env") {
 		t.Fatalf("empty override must fall back to the lerd-env framework store, got %v", got)
+	}
+}
+
+// ChangelogURLs pins to docs/changelog.md at the given tag, not the root
+// symlink at the default branch, since raw.githubusercontent does not follow
+// symlinks. The changelog is the fork's own, so the repo is the fork's.
+func TestChangelogURLsAtTag(t *testing.T) {
+	got := ChangelogURLs("1.33.1")
+	if len(got) != 1 {
+		t.Fatalf("got %d URLs, want 1", len(got))
+	}
+	want := "https://raw.githubusercontent.com/" + mainRepo + "/v1.33.1/docs/changelog.md"
+	if got[0] != want {
+		t.Errorf("got %q, want %q", got[0], want)
+	}
+}
+
+// An empty tag falls back to the fork's default branch, not main: main tracks
+// upstream and carries none of the fork's entries.
+func TestChangelogURLsEmptyTagFallsBackToDefaultBranch(t *testing.T) {
+	got := ChangelogURLs("")
+	if len(got) != 1 {
+		t.Fatalf("got %d URLs, want 1", len(got))
+	}
+	want := "https://raw.githubusercontent.com/" + mainRepo + "/" + defaultBranch + "/docs/changelog.md"
+	if got[0] != want {
+		t.Errorf("got %q, want %q", got[0], want)
+	}
+}
+
+// The container DNS probe resolves the store's own host, so a self-hosted
+// store is probed instead of a name the install never fetches.
+func TestStoreHostFollowsTheStoreOverride(t *testing.T) {
+	if got := StoreHost(); got != "raw.githubusercontent.com" {
+		t.Errorf("default store host = %q, want raw.githubusercontent.com", got)
+	}
+	t.Setenv("LERD_STORE_BASE_URL", "https://store.example.test:8443/frameworks")
+	if got := StoreHost(); got != "store.example.test" {
+		t.Errorf("overridden store host = %q, want store.example.test", got)
+	}
+}
+
+// A store base that is not a URL leaves nothing to probe; the caller skips
+// rather than resolving an empty name.
+func TestStoreHostEmptyWhenBaseIsNotAURL(t *testing.T) {
+	t.Setenv("LERD_STORE_BASE_URL", "not a url")
+	if got := StoreHost(); got != "" {
+		t.Errorf("store host = %q, want empty", got)
 	}
 }

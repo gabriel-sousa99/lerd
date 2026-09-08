@@ -40,3 +40,39 @@ func TestNewStripeCmds_ConfigCommandAndFlags(t *testing.T) {
 		}
 	}
 }
+
+// The stop command used to be registered at the root under the name
+// stripe:listen, which left two root commands sharing that name and made
+// `lerd stripe:listen` resolve to whichever cobra walked into first.
+func TestNewStripeCmds_ListenStopIsASubcommand(t *testing.T) {
+	root := &cobra.Command{Use: "lerd"}
+	for _, c := range NewStripeCmds() {
+		root.AddCommand(c)
+	}
+
+	listen := 0
+	for _, c := range root.Commands() {
+		if c.Name() == "stripe:listen" {
+			listen++
+		}
+	}
+	if listen != 1 {
+		t.Fatalf("root has %d commands named stripe:listen, want 1", listen)
+	}
+
+	start, _, err := root.Find([]string{"stripe:listen"})
+	if err != nil {
+		t.Fatalf("finding stripe:listen: %v", err)
+	}
+	if start.Flags().Lookup("api-key") == nil {
+		t.Error("lerd stripe:listen must resolve to the starter, which carries --api-key")
+	}
+
+	stop, _, err := root.Find([]string{"stripe:listen", "stop"})
+	if err != nil {
+		t.Fatalf("finding stripe:listen stop: %v", err)
+	}
+	if stop.Name() != "stop" {
+		t.Errorf("lerd stripe:listen stop resolved to %q, want the stop subcommand", stop.Name())
+	}
+}

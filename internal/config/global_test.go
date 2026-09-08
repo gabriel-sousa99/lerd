@@ -694,6 +694,47 @@ func TestTrayIcon_RoundTripsThroughYAML(t *testing.T) {
 	}
 }
 
+// ── Tray toggle ───────────────────────────────────────────────────────────────
+
+func TestTray_EnabledByDefault(t *testing.T) {
+	var nilCfg *GlobalConfig
+	if !nilCfg.IsTrayEnabled() {
+		t.Error("nil config should keep the tray, matching every install before the toggle")
+	}
+	if !(&GlobalConfig{}).IsTrayEnabled() {
+		t.Error("zero-value config should keep the tray")
+	}
+}
+
+func TestTray_ToggleRoundTripsThroughYAML(t *testing.T) {
+	setConfigDir(t)
+	invalidateGlobalCache()
+	t.Cleanup(invalidateGlobalCache)
+
+	cfg, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	cfg.SetTrayEnabled(false)
+	if cfg.IsTrayEnabled() {
+		t.Fatal("after SetTrayEnabled(false), IsTrayEnabled should be false")
+	}
+	if err := SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	got, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.IsTrayEnabled() {
+		t.Error("a disabled tray should persist across a YAML round trip")
+	}
+	got.SetTrayEnabled(true)
+	if !got.IsTrayEnabled() {
+		t.Error("after SetTrayEnabled(true), IsTrayEnabled should be true")
+	}
+}
+
 func TestDNSManaged(t *testing.T) {
 	var nilCfg *GlobalConfig
 	if !nilCfg.DNSManaged() {
@@ -917,5 +958,17 @@ func TestHostPortsFor_UnknownService(t *testing.T) {
 	setConfigDir(t)
 	if got := HostPortsFor("not-a-real-service"); got != nil {
 		t.Errorf("HostPortsFor(unknown) = %v, want nil", got)
+	}
+}
+
+// The IDE listens on the Xdebug port, so no allocator may hand it to a
+// container: one that published it would answer the debugger's connect-back
+// itself and the IDE would never see a session (#1555).
+func TestReservedHostPorts_ReservesTheXdebugPort(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	if !ReservedHostPorts()[XdebugClientPort] {
+		t.Errorf("port %d is not reserved, so a service shift can land on it", XdebugClientPort)
 	}
 }
