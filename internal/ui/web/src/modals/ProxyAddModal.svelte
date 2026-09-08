@@ -218,8 +218,8 @@
   }
 </script>
 
-<Modal open title={editing ? m.proxies_modal_editTitle() : m.proxies_modal_addTitle()} onclose={closeModal} size="md">
-  <form id="proxy-add-form" class="px-5 py-4 space-y-4" onsubmit={submit}>
+<Modal open title={editing ? m.proxies_modal_editTitle() : m.proxies_modal_addTitle()} onclose={closeModal} size="lg">
+  <form id="proxy-add-form" class="@container px-5 py-4 space-y-4 max-h-[60vh] overflow-y-auto" onsubmit={submit}>
     <label class="block space-y-1">
       <span class="text-xs font-medium text-gray-600 dark:text-gray-300">{m.proxies_modal_domain()}</span>
       <input
@@ -245,7 +245,9 @@
       ></textarea>
     </label>
 
-    <fieldset class="grid grid-cols-1 sm:grid-cols-2 gap-3 border border-gray-200 dark:border-lerd-border rounded-md p-3">
+    <!-- @lg, not sm: the panel is a fixed max-w-lg, so a viewport breakpoint
+         put two columns in 464px of form. The container query asks the form. -->
+    <fieldset class="grid grid-cols-1 @lg:grid-cols-2 gap-3 border border-gray-200 dark:border-lerd-border rounded-md p-3">
       <legend class="px-1 text-xs font-medium text-gray-600 dark:text-gray-300">{m.proxies_upstream()}</legend>
       <label class="block space-y-1">
         <span class="text-xs font-medium text-gray-600 dark:text-gray-300">{m.proxies_protocol()}</span>
