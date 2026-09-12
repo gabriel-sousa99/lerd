@@ -31,6 +31,25 @@ The fixes fall into three groups. lerd applies the safe ones itself, creating a 
 
 Reclaimable disk is listed separately as optional, because nothing is wrong when there is disk to reclaim. It runs the same interactive reclaim as `lerd cleanup`, so it takes the deep scope and can remove an unreferenced catalog image whoever pulled it, and the size doctor quotes is that same deep scope. If you run other podman workloads on the machine, run [`lerd cleanup --safe`](usage/cleanup.md) yourself instead. Optional fixes never count towards what a re-check reports as still outstanding.
 
+## Logging out or shutting down hangs for about a minute
+
+If shutdown stalls and `lerd-dns` is the unit still stopping, AppArmor is blocking podman from signalling the container:
+
+```bash
+journalctl --user -b -1 -u lerd-dns.service | tail
+journalctl -b -1 | grep 'apparmor="DENIED".*dnsmasq'
+```
+
+A denial naming `profile="dnsmasq"` with `peer="crun"` confirms it. AppArmor attaches profiles by executable path and cannot tell a binary inside a container from the host's, so a container running `/usr/sbin/dnsmasq` inherits the host's dnsmasq profile. That profile accepts signals only from libvirtd, so the SIGTERM *and* the SIGKILL podman sends are both denied, `podman rm -f` gives up with `given PID did not die within timeout`, and the unit holds the session open until systemd times out and kills the whole user manager.
+
+lerd ships the binary as `/usr/local/bin/lerd-dnsmasq` so that no stock profile claims it. Seeing this means the install is still on the older image, and rebuilding is the fix:
+
+```bash
+lerd install
+```
+
+That rewrites the unit and builds the current image. `systemctl --user stop lerd-dns` should then return in well under a second rather than hanging.
+
 ## Filing a bug report
 
 If you need help on the [issue tracker](https://github.com/gabriel-sousa99/lerd/issues), run:

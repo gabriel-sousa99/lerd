@@ -6,14 +6,25 @@ import (
 	"strings"
 )
 
-// DNSMasqImage is the local tag of the dnsmasq image lerd-dns runs.
-const DNSMasqImage = "lerd-dnsmasq:local"
+// DNSMasqImage is the local tag of the dnsmasq image lerd-dns runs. The tag
+// carries a version because the rebuild trigger everywhere is "does this tag
+// exist": the older lerd-dnsmasq:local has no binary under the name Exec= asks
+// for, so an install holding it has to build again rather than keep it.
+const DNSMasqImage = "lerd-dnsmasq:v2"
+
+// DNSMasqExec is the name the binary carries inside the image. Not "dnsmasq" on
+// purpose: AppArmor attaches profiles by executable path and cannot tell the
+// container's /usr/sbin/dnsmasq from the host's, and the host profile permits
+// only `signal (receive) peer=libvirtd`, so podman's SIGTERM and SIGKILL are
+// both denied and `podman rm -f` never stops the container.
+const DNSMasqExec = "lerd-dnsmasq"
 
 // DNSMasqBaseImage is the base the dnsmasq image is built from, and the only
 // thing that build downloads.
 const DNSMasqBaseImage = "docker.io/library/alpine:latest"
 
-const dnsmasqContainerfile = "FROM " + DNSMasqBaseImage + "\nRUN apk add --no-cache dnsmasq\n"
+const dnsmasqContainerfile = "FROM " + DNSMasqBaseImage +
+	"\nRUN apk add --no-cache dnsmasq && mv /usr/sbin/dnsmasq /usr/local/bin/" + DNSMasqExec + "\n"
 
 // BuildDNSMasqImage builds the dnsmasq image, falling back when apk cannot
 // resolve names. apk resolves from inside the build's own network namespace

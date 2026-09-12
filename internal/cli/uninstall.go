@@ -293,7 +293,9 @@ func isLerdBuiltImage(ref string) bool {
 		return true
 	case strings.HasPrefix(ref, "lerd-custom-") && strings.HasSuffix(ref, ":local"):
 		return true
-	case ref == "lerd-dnsmasq:local":
+	// Prefix, not an exact tag: a version bump on the dnsmasq image leaves the
+	// tag it replaced behind, and that one is still lerd's to purge.
+	case strings.HasPrefix(ref, "lerd-dnsmasq:"):
 		return true
 	}
 	return false
