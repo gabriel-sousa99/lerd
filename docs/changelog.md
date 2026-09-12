@@ -7,6 +7,30 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.34.3-oracle.1] — 2026-09-12
+
+Fork (Oracle Edition). Correção pontual sobre a 1.34.3-oracle.0, sem mudança de
+comportamento fora do serviço de DNS.
+
+### Fixed
+
+- **O `lerd-dns` não segura mais o desligamento da máquina.** O AppArmor casa
+  perfis pelo caminho do executável e não distingue o binário dentro do container
+  do binário do host, então o container que rodava `/usr/sbin/dnsmasq` herdava o
+  perfil `dnsmasq` do host. Esse perfil aceita sinais apenas do `libvirtd`, de
+  modo que o SIGTERM **e** o SIGKILL enviados pelo podman eram ambos negados: o
+  `podman rm -f` desistia com `given PID did not die within timeout` e a unit
+  segurava a sessão aberta até o `user@` estourar o próprio timeout e ser morto
+  com SIGABRT. Num host afetado, uma parada levava 60 segundos; depois da
+  correção, 0,16. A imagem passa a instalar o binário como
+  `/usr/local/bin/lerd-dnsmasq`, caminho que nenhum perfil padrão reivindica, e a
+  tag vai para `v2` para que uma instalação existente reconstrua em vez de
+  continuar com a imagem antiga. O `TimeoutStopSec` da unit limita a espera como
+  segunda linha de defesa; o `StopTimeout=` fica de fora de propósito, porque
+  podman anterior ao 5.0 aborta nessa chave e deixa a instalação sem unit nenhuma.
+
+---
+
 ## [1.34.3-oracle.0] — 2026-09-08 — merge upstream v1.33.1 → v1.34.3
 
 Fork (Oracle Edition). Integra 284 commits do upstream (`lerd-env/lerd`), de
