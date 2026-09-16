@@ -710,6 +710,23 @@ func TestPHPFPMContainerfileBuildsLegacyPHP(t *testing.T) {
 	}
 }
 
+func TestPHPFPMContainerfileFallsBackOnLegacyOpenssl(t *testing.T) {
+	// Alpine 3.8 (PHP 5.6's base) has postgresql-dev/openldap-dev/curl-dev pull
+	// libressl-dev transitively, which conflicts with openssl-dev in the same
+	// apk add and hard-fails the build (#lerd php:install 5.6). openssl-dev
+	// must be requested on its own with a libressl-dev fallback.
+	content, err := GetQuadletTemplate("lerd-php-fpm.Containerfile")
+	if err != nil {
+		t.Fatalf("GetQuadletTemplate: %v", err)
+	}
+	if strings.Contains(content, "openldap-dev \\\n        openssl-dev \\") {
+		t.Error("openssl-dev must not sit in the same apk add as postgresql-dev/openldap-dev/curl-dev; it conflicts with the libressl-dev they pull in on Alpine 3.8")
+	}
+	if !strings.Contains(content, `apk add --no-cache openssl-dev || apk add --no-cache libressl-dev`) {
+		t.Error("lerd-php-fpm.Containerfile must fall back from openssl-dev to libressl-dev for legacy Alpine bases")
+	}
+}
+
 func TestSortPaths(t *testing.T) {
 	paths := []string{"/var/www/app", "/opt", "/var/www"}
 	sortPaths(paths)
