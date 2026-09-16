@@ -48,10 +48,13 @@ RUN apk update && apk add --no-cache \
         gmp-dev \
         bzip2-dev \
         openldap-dev \
-        openssl-dev \
         sqlite-dev \
         libxslt-dev \
         zlib-dev \
+    # Alpine 3.8 (PHP 5.6 base) makes openssl-dev conflict with libressl-dev,
+    # pulled in transitively by postgresql-dev/openldap-dev/curl-dev above;
+    # fall back to the already-installed libressl-dev, same openssl headers.
+    && { apk add --no-cache openssl-dev || apk add --no-cache libressl-dev; } \
     && PHP_ID="$(php -r 'echo PHP_VERSION_ID;')" \
     && if [ "$PHP_ID" -lt 70400 ]; then \
            docker-php-ext-configure gd --with-freetype-dir=/usr --with-jpeg-dir=/usr --with-png-dir=/usr --with-webp-dir=/usr; \
