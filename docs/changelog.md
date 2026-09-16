@@ -7,13 +7,26 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.34.3-oracle.1] — 2026-09-12
+## [1.34.3-oracle.1] — 2026-09-16
 
-Fork (Oracle Edition). Correção pontual sobre a 1.34.3-oracle.0, sem mudança de
-comportamento fora do serviço de DNS.
+Fork (Oracle Edition). Duas correções pontuais sobre a 1.34.3-oracle.0: o
+desligamento do `lerd-dns` e o build do PHP 5.6.
 
 ### Fixed
 
+- **O `lerd php:install 5.6` nunca completava.** O único `apk add` do estágio de
+  build pedia `openssl-dev` junto de `postgresql-dev`, `openldap-dev` e
+  `curl-dev`, que no Alpine 3.8 (a base congelada do PHP 5.6) puxam
+  `libressl-dev` de forma transitiva. Os dois pacotes fornecem o mesmo
+  `pc:openssl` e o `apk` não resolvia o conflito, então o build morria sempre no
+  mesmo passo, antes de compilar qualquer extensão; como a matriz do
+  `base-images.yml` nunca incluiu a 5.6, também não havia imagem pré-construída
+  que evitasse o problema. Agora o `openssl-dev` é pedido sozinho, com fallback
+  para o `libressl-dev` já instalado, que expõe os mesmos headers em
+  `/usr/include/openssl`. Verificado com um build real: a imagem sobe, `php -m`
+  relata 64 módulos, o PDO expõe 3 drivers e o `ftp_ssl_connect` existe. A
+  imagem pré-construída para PHP 5.6 continua fora da matriz do CI, então essa
+  instalação sempre compila a partir do código-fonte.
 - **O `lerd-dns` não segura mais o desligamento da máquina.** O AppArmor casa
   perfis pelo caminho do executável e não distingue o binário dentro do container
   do binário do host, então o container que rodava `/usr/sbin/dnsmasq` herdava o
