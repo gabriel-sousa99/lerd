@@ -7,10 +7,10 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.34.3-oracle.1] — 2026-09-16
+## [1.34.3-oracle.2] — 2026-09-16
 
-Fork (Oracle Edition). Duas correções pontuais sobre a 1.34.3-oracle.0: o
-desligamento do `lerd-dns` e o build do PHP 5.6.
+Fork (Oracle Edition). Correção pontual sobre a 1.34.3-oracle.1, sem mudança de
+comportamento fora do build do PHP 5.6.
 
 ### Fixed
 
@@ -27,6 +27,16 @@ desligamento do `lerd-dns` e o build do PHP 5.6.
   relata 64 módulos, o PDO expõe 3 drivers e o `ftp_ssl_connect` existe. A
   imagem pré-construída para PHP 5.6 continua fora da matriz do CI, então essa
   instalação sempre compila a partir do código-fonte.
+
+---
+
+## [1.34.3-oracle.1] — 2026-09-12
+
+Fork (Oracle Edition). Correção pontual sobre a 1.34.3-oracle.0, sem mudança de
+comportamento fora do serviço de DNS.
+
+### Fixed
+
 - **O `lerd-dns` não segura mais o desligamento da máquina.** O AppArmor casa
   perfis pelo caminho do executável e não distingue o binário dentro do container
   do binário do host, então o container que rodava `/usr/sbin/dnsmasq` herdava o
