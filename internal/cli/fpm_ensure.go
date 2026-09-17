@@ -117,12 +117,25 @@ func ensureFPMStarted(version, container string) error {
 // The start/wait itself is shared with the MCP exec path via phpDet.StartFPM; the
 // spinner goes to stderr so the transparent `php` shim's stdout stays clean.
 func startFPM(version, container string) error {
+	// StartFPM runs the stale-mount preflight before it starts the unit; collect
+	// what it dropped instead of printing mid-spinner, and report it after the
+	// step resolves so the line isn't overwritten.
+	var repairs []podman.MountRepair
+	prevReporter := phpDet.MountRepairReporter
+	phpDet.MountRepairReporter = func(r []podman.MountRepair) { repairs = append(repairs, r...) }
+	defer func() { phpDet.MountRepairReporter = prevReporter }()
+
 	step := feedback.StartOn(os.Stderr, fmt.Sprintf("Starting PHP %s FPM", version))
-	if err := phpDet.StartFPM(version, container); err != nil {
+	err := phpDet.StartFPM(version, container)
+	if err != nil {
 		step.Fail(err)
+	} else {
+		step.OK("running")
+	}
+	warnStaleMountRepairs(os.Stderr, repairs)
+	if err != nil {
 		return fmt.Errorf("%w (try: %s)", err, serviceStartHint(container))
 	}
-	step.OK("running")
 	return nil
 }
 
