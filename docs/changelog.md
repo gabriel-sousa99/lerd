@@ -7,6 +7,31 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.34.3-oracle.3] — 2026-09-17
+
+Fork (Oracle Edition). Correção pontual sobre a 1.34.3-oracle.2, sem mudança de
+comportamento fora do start sob demanda do PHP-FPM.
+
+### Fixed
+
+- **Um worktree apagado derrubava o `php` até alguém editar o quadlet à mão.**
+  Quando um `Volume=` do quadlet aponta para um diretório que sumiu do host — um
+  worktree removido fora do lerd, um projeto apagado — o podman recusa o start do
+  container com `statfs <caminho>: no such file or directory` e sai com 125; a
+  unit entra em loop de restart e todos os sites daquela versão de PHP ficam
+  fora. O `lerd start` já varria os quadlets atrás desses mounts desde o #1083,
+  mas os starts sob demanda (os shims `php`, `artisan` e `console` e os handlers
+  de exec do MCP, que é o que se usa primeiro no dia a dia) iam direto para o
+  start da unit, então um `php -v` batia na falha sem saída. Agora o
+  `php.StartFPM` roda o mesmo preflight entre a checagem de "instalado" e o start
+  da unit, e avisa o que removeu ao lado do spinner; o caminho do MCP continua
+  sem imprimir nada. O caminho quente (container já rodando) não lê nem reescreve
+  quadlet nenhum. Verificado com uma reprodução real: com um `Volume=` apontando
+  para um worktree inexistente, o `systemctl --user start lerd-php84-fpm` falha e
+  o `lerd php -v` seguinte repara o quadlet, avisa e sobe o PHP.
+
+---
+
 ## [1.34.3-oracle.2] — 2026-09-16
 
 Fork (Oracle Edition). Correção pontual sobre a 1.34.3-oracle.1, sem mudança de

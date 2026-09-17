@@ -617,13 +617,7 @@ func startLerd(emit func(StartEvent), skip []string) error {
 	// checkout that removed it, a deleted project). Podman refuses to start a
 	// container with a missing bind source, so one such path otherwise takes
 	// nginx and every site down with it (#1083).
-	for _, r := range podman.RepairMissingMounts() {
-		if r.Site != "" {
-			fmt.Printf("  WARN: %s no longer exists (site %s), removed from %s\n", r.Path, r.Site, r.Unit)
-		} else {
-			fmt.Printf("  WARN: %s no longer exists, removed from %s\n", r.Path, r.Unit)
-		}
-	}
+	warnStaleMountRepairs(os.Stdout, podman.RepairMissingMounts())
 
 	// Pre-flight: repair SSL vhosts with missing cert files so nginx can start.
 	if repairs := nginx.RepairVhosts(); len(repairs) > 0 {
