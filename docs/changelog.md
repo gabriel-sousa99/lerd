@@ -7,6 +7,41 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.35.0-oracle.0] — 2026-10-01 — merge upstream v1.34.3 → v1.35.0
+
+Fork (Oracle Edition). Integra 166 commits do upstream (`lerd-env/lerd`), de
+v1.34.3 a v1.35.0, a última release estável; as betas da 1.36 ficam de fora. Nenhuma
+feature nova do fork nesta versão: as que existiam foram preservadas, e o resumo
+abaixo cobre o que **mudou de comportamento** na integração.
+
+### Changed
+
+- **O template de proxy de serviço virou um arquivo à parte.** O upstream passou a
+  servir os serviços (o rustfs, por exemplo) com CORS, sem limite de corpo e sem
+  buffering, e fez isso no mesmo `vhost-proxy-ssl.conf.tmpl` que o fork já usava
+  para os proxies manuais com aliases, esquema e timeout próprios. Os dois ficaram
+  separados: o do upstream está em `vhost-service-proxy-ssl.conf.tmpl` e só o
+  `GenerateServiceProxyVhost` o usa, então os proxies de desenvolvimento do fork
+  não herdam as regras de object store.
+- **O vhost do profiler usa a correção do upstream para o 500 do SPX.** Os dois
+  lados tinham resolvido o mesmo defeito, a ponte de dumps compilada duas vezes por
+  requisição: o fork apontava o `SCRIPT_FILENAME` para um `spx-entry.php`, o upstream
+  zera o `auto_prepend_file` no vhost. Ficou a solução do upstream. O
+  `spx-entry.php` continua sendo gravado em disco, mas nada mais o usa.
+- **A aba de sites do PHP deu lugar ao popover do upstream**, e o modo de execução
+  dos workers passou para a entrada única "Runtime" do dashboard. O instalador de
+  versões do PHP, o editor de `.env` dos serviços e as abas Container/Erros dos
+  logs do PHP foram religados ao novo layout.
+
+### Fixed
+
+- **O fundo dos campos do editor de `.env` e do formulário de extensões PHP não
+  renderizava.** Usavam o token `lerd-dark-2`, que nunca foi definido no tema, e o
+  Tailwind o descartava em silêncio. O upstream passou a barrar tokens indefinidos
+  e a integração expôs o defeito; os campos agora usam `lerd-card`.
+
+---
+
 ## [1.34.3-oracle.3] — 2026-09-17
 
 Fork (Oracle Edition). Correção pontual sobre a 1.34.3-oracle.2, sem mudança de

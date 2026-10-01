@@ -18,7 +18,7 @@
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Flerd-ff2d20?logo=reddit)](https://reddit.com/r/lerd)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/5JK54s7xCC)
 
-[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.34.3-blue)](https://github.com/lerd-env/lerd)
+[![Fork base](https://img.shields.io/badge/forked%20from-lerd--env%2Flerd%20v1.35.0-blue)](https://github.com/lerd-env/lerd)
 [![Oracle Instant Client](https://img.shields.io/badge/Oracle%20Instant%20Client-21.18-red)]()
 [![PHP](https://img.shields.io/badge/PHP-5.6%20%E2%80%93%208.6-777BB4)]()
 
@@ -163,7 +163,7 @@ Esta fork adiciona, por cima de tudo isso:
 | Instalar versão PHP                | só CLI                       | **botão no dashboard + SSE logs ao vivo**                           |
 | Service presets adicionais         | mysql/postgres/redis/…       | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**             |
 | Xdebug por padrão                  | `start_with_request=yes`     | **`=trigger`** (sem spam em CLI sem IDE)                            |
-| Versão                             | `1.34.3`                     | `1.34.3-oracle.3`                                                   |
+| Versão                             | `1.35.0`                     | `1.35.0-oracle.0`                                                   |
 
 ### Extensões PHP nas imagens
 
@@ -278,7 +278,7 @@ O script verifica `podman`/`git`/`mkcert`, baixa o binário para
 NÃO** → sites em `http://meusite.localhost/` (sem sudo, RFC 6761).
 
 ```bash
-lerd about    # confirma "Lerd Oracle Edition" e versão 1.34.3-oracle.3
+lerd about    # confirma "Lerd Oracle Edition" e versão 1.35.0-oracle.0
 ```
 
 ### macOS
