@@ -19,20 +19,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Bump pinned tool versions
+        env:
+          GH_AUTH: ${{ github.token }}
         run: |
           set -euo pipefail
           FILE=internal/tools/tools.yaml
 
-          FNM=$(curl -fsSL https://api.github.com/repos/Schniz/fnm/releases/latest | jq -r .tag_name)
-          MKCERT=$(curl -fsSL https://api.github.com/repos/FiloSottile/mkcert/releases/latest | jq -r .tag_name)
-          COMPOSER=$(curl -fsSL https://getcomposer.org/versions | jq -r '.stable[0].version')
+          github_api() {
+            curl --fail --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_AUTH" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$1"
+          }
+
+          FNM=$(github_api https://api.github.com/repos/Schniz/fnm/releases/latest | jq -er '.tag_name')
+          MKCERT=$(github_api https://api.github.com/repos/FiloSottile/mkcert/releases/latest | jq -er '.tag_name')
+          COMPOSER=$(curl -fsSL https://getcomposer.org/versions | jq -er '.stable[0].version')
 
           for pair in "composer=${COMPOSER}" "fnm=${FNM}" "mkcert=${MKCERT}"; do
             tool="${pair%%=*}" version="${pair#*=}"
-            if [ -z "$version" ] || [ "$version" = "null" ]; then
-              echo "Skipping ${tool}: upstream lookup failed"
-              continue
-            fi
             yq -i ".tools.${tool}.version = \"${version}\"" "$FILE"
           done
           git diff --stat
