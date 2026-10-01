@@ -29,9 +29,13 @@ type Site struct {
 	// Pinned excludes the site from idle-suspend: its workers stay running even
 	// when the global idle policy is on, so a site you want always-warm never
 	// sleeps.
-	Pinned    bool   `yaml:"pinned,omitempty"`
-	Framework string `yaml:"framework,omitempty"`
-	PublicDir string `yaml:"public_dir,omitempty"`
+	Pinned bool `yaml:"pinned,omitempty"`
+	// AutoSnapshot overrides the global automatic-snapshot policy for this site:
+	// "on" always snapshots it, "off" never does, and the empty default follows
+	// the global config. See AutoSnapshotCovers.
+	AutoSnapshot string `yaml:"auto_snapshot,omitempty"`
+	Framework    string `yaml:"framework,omitempty"`
+	PublicDir    string `yaml:"public_dir,omitempty"`
 	// AppURL, when set, is the per-machine override for APP_URL in the
 	// project's env file. Lower priority than ProjectConfig.AppURL (which is
 	// committed to the repo) and higher priority than the default generator
@@ -108,6 +112,11 @@ type Site struct {
 	// itself is configured globally (config.yaml idle_suspend), not per site.
 	IdleSuspendedWorkers []string `yaml:"idle_suspended_workers,omitempty"`
 
+	// WorkerPorts holds the port lerd allocated for each worker whose proxy
+	// asked for a pinned one, keyed by worker name. The vhost proxies to it and
+	// the worker unit is handed it, so both sides agree without the project
+	// having to name a port anywhere.
+	WorkerPorts map[string]int `yaml:"worker_ports,omitempty"`
 	// WorktreeDevPorts pins each worktree's dev server to its own host
 	// port, keyed by the worktree's directory base like the idle map. A
 	// worktree runs its own dev server, so it cannot share the parent's pin.
@@ -142,6 +151,22 @@ func (s *Site) IsCustomContainer() bool {
 // dunglas/frankenphp container instead of the shared PHP-FPM image.
 func (s *Site) IsFrankenPHP() bool {
 	return s.Runtime == "frankenphp"
+}
+
+// IsNative returns true when the site is served by a PHP-FPM running on the
+// host instead of in a container. nginx still speaks fastcgi to it, so the site
+// stays an FPM site in every other respect.
+//
+// The runtime is an install-wide setting, not a per-site one: the FPM container
+// is shared by every site on a PHP version, so half of them cannot be moved off
+// it. LoadGlobal is mtime-cached, which keeps this cheap enough for the vhost
+// and worker loops that call it per site.
+func (s *Site) IsNative() bool {
+	cfg, err := LoadGlobal()
+	if err != nil {
+		return false
+	}
+	return s.ServedNatively(cfg.PHPRuntimeMode())
 }
 
 // IsCustomFPM returns true when the site is a PHP project served by fastcgi
@@ -221,6 +246,7 @@ type siteYAML struct {
 	Paused                bool                `yaml:"paused,omitempty"`
 	PausedWorkers         []string            `yaml:"paused_workers,omitempty"`
 	Pinned                bool                `yaml:"pinned,omitempty"`
+	AutoSnapshot          string              `yaml:"auto_snapshot,omitempty"`
 	Framework             string              `yaml:"framework,omitempty"`
 	PublicDir             string              `yaml:"public_dir,omitempty"`
 	AppURL                string              `yaml:"app_url,omitempty"`
@@ -228,6 +254,7 @@ type siteYAML struct {
 	PublicPort            int                 `yaml:"public_port,omitempty"`
 	WorktreePublicPorts   map[string]int      `yaml:"worktree_public_ports,omitempty"`
 	DevServerPort         int                 `yaml:"dev_server_port,omitempty"`
+	WorkerPorts           map[string]int      `yaml:"worker_ports,omitempty"`
 	WorktreeDevPorts      map[string]int      `yaml:"worktree_dev_server_ports,omitempty"`
 	ContainerPort         int                 `yaml:"container_port,omitempty"`
 	ContainerSSL          bool                `yaml:"container_ssl,omitempty"`
@@ -258,6 +285,7 @@ func (s Site) toYAML() siteYAML {
 		Paused:                s.Paused,
 		PausedWorkers:         s.PausedWorkers,
 		Pinned:                s.Pinned,
+		AutoSnapshot:          s.AutoSnapshot,
 		Framework:             s.Framework,
 		PublicDir:             s.PublicDir,
 		AppURL:                s.AppURL,
@@ -265,6 +293,7 @@ func (s Site) toYAML() siteYAML {
 		PublicPort:            s.PublicPort,
 		WorktreePublicPorts:   s.WorktreePublicPorts,
 		DevServerPort:         s.DevServerPort,
+		WorkerPorts:           s.WorkerPorts,
 		WorktreeDevPorts:      s.WorktreeDevPorts,
 		ContainerPort:         s.ContainerPort,
 		ContainerSSL:          s.ContainerSSL,
@@ -300,6 +329,7 @@ func (sy siteYAML) toSite() Site {
 		Paused:                sy.Paused,
 		PausedWorkers:         sy.PausedWorkers,
 		Pinned:                sy.Pinned,
+		AutoSnapshot:          sy.AutoSnapshot,
 		Framework:             sy.Framework,
 		PublicDir:             sy.PublicDir,
 		AppURL:                sy.AppURL,
@@ -307,6 +337,7 @@ func (sy siteYAML) toSite() Site {
 		PublicPort:            sy.PublicPort,
 		WorktreePublicPorts:   sy.WorktreePublicPorts,
 		DevServerPort:         sy.DevServerPort,
+		WorkerPorts:           sy.WorkerPorts,
 		WorktreeDevPorts:      sy.WorktreeDevPorts,
 		ContainerPort:         sy.ContainerPort,
 		ContainerSSL:          sy.ContainerSSL,
@@ -383,13 +414,9 @@ func LoadSites() (*SiteRegistry, error) {
 		return nil, err
 	}
 
-	var raw siteRegistryYAML
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	reg, err := decodeSiteRegistry(data)
+	if err != nil {
 		return nil, err
-	}
-	reg := &SiteRegistry{Sites: make([]Site, len(raw.Sites))}
-	for i, sy := range raw.Sites {
-		reg.Sites[i] = sy.toSite()
 	}
 
 	if statErr == nil {
@@ -398,6 +425,20 @@ func LoadSites() (*SiteRegistry, error) {
 		sitesCacheAt = info.ModTime()
 		sitesCacheSz = info.Size()
 		sitesCacheMu.Unlock()
+	}
+	return reg, nil
+}
+
+// decodeSiteRegistry parses sites.yaml bytes, shared by the live file and the
+// rolling backups so both go through one schema.
+func decodeSiteRegistry(data []byte) (*SiteRegistry, error) {
+	var raw siteRegistryYAML
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	reg := &SiteRegistry{Sites: make([]Site, len(raw.Sites))}
+	for i, sy := range raw.Sites {
+		reg.Sites[i] = sy.toSite()
 	}
 	return reg, nil
 }
@@ -450,6 +491,7 @@ func SaveSites(reg *SiteRegistry) error {
 	if err != nil {
 		return err
 	}
+	backupSitesFile(data)
 	if err := writeFileAtomic(SitesFile(), data, 0644); err != nil {
 		return err
 	}

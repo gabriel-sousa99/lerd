@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -63,11 +64,19 @@ func BinDir() string {
 // An empty inherited PATH yields the dir alone: a trailing separator would make
 // the shell search the working directory.
 func PathWithBinDir() string {
-	path := BinDir()
-	if existing := os.Getenv("PATH"); existing != "" {
-		path += string(os.PathListSeparator) + existing
+	parts := []string{BinDir()}
+	// A doctor fix or a custom command may call `lerd` itself, and the daemons
+	// that run those are started by launchd, whose PATH is the system default
+	// and carries neither ~/.local/bin nor the shim dir.
+	if exe, err := os.Executable(); err == nil {
+		if dir := filepath.Dir(exe); dir != "" && dir != BinDir() {
+			parts = append(parts, dir)
+		}
 	}
-	return path
+	if existing := os.Getenv("PATH"); existing != "" {
+		parts = append(parts, existing)
+	}
+	return strings.Join(parts, string(os.PathListSeparator))
 }
 
 // NodeGlobalDir is the npm prefix lerd points its node shim at, so
@@ -159,6 +168,12 @@ func SitesFile() string {
 // ProxiesFile returns the path to proxies.yaml.
 func ProxiesFile() string {
 	return filepath.Join(DataDir(), "proxies.yaml")
+}
+
+// SitesBackupDir holds the rolling copies of sites.yaml taken before each
+// change, so a registry that loses its sites can be put back.
+func SitesBackupDir() string {
+	return filepath.Join(DataDir(), "sites.bkp")
 }
 
 // GlobalConfigFile returns the path to config.yaml.
@@ -275,6 +290,13 @@ func DevtoolsCollectorFile() string {
 	return filepath.Join(DumpsAssetsDir(), "devtools-collector.php")
 }
 
+// DevtoolsSeamsFile is the host path for the store-declared capture seams the
+// extension reads at startup, one line per observed method. Lives beside the
+// collector in the dumps assets dir, mounted at /usr/local/etc/lerd.
+func DevtoolsSeamsFile() string {
+	return filepath.Join(DumpsAssetsDir(), "devtools-seams.conf")
+}
+
 // LaravelAdapterFile is the host path for the Laravel devtools adapter, loaded
 // by the lerd_devtools extension at Application::boot. It lives in the dumps
 // assets dir because that directory is bind-mounted into FPM at
@@ -328,6 +350,14 @@ func SpxKeyFile() string {
 // read-write into every FPM container at /var/spx.
 func SpxDataDir() string {
 	return filepath.Join(DataDir(), "spx")
+}
+
+// SpxWebUIDir is where the SPX profiler's web UI lives on the host. SPX ships
+// it as files rather than inside the extension, and the image path it is built
+// with does not exist on a machine running PHP natively, so the copy lerd
+// installs beside its other assets is pointed at from the ini instead.
+func SpxWebUIDir() string {
+	return filepath.Join(DataDir(), "php-spx", "assets", "web-ui")
 }
 
 // DumpsListenNetwork reports the net.Listen network lerd-ui should bind
@@ -674,6 +704,43 @@ func ConsumeWatcherManagedStop() bool {
 	return err == nil && time.Since(st.ModTime()) < watcherManagedStopTTL
 }
 
+// runtimeSwitchMarkerPath is the sentinel lerd writes while it moves the install
+// between the container and native PHP runtimes. The switch stops containers,
+// rewrites every site's env and starts the other runtime, so for a few seconds
+// nginx, the pools and the sites are all legitimately down. Without this the
+// status surfaces read that transient as breakage and tell the reader to repair
+// something that is already being rebuilt.
+func runtimeSwitchMarkerPath() string {
+	return filepath.Join(RunDir(), "php-runtime-switch")
+}
+
+// runtimeSwitchTTL bounds how long the marker is believed. A switch killed
+// part-way would otherwise leave lerd claiming to be switching forever, and a
+// real failure after that would never be reported.
+const runtimeSwitchTTL = 30 * time.Minute
+
+// MarkRuntimeSwitch records that a runtime switch is under way.
+func MarkRuntimeSwitch() error {
+	if err := os.MkdirAll(RunDir(), 0755); err != nil {
+		return err
+	}
+	guardRealWrite(runtimeSwitchMarkerPath())
+	return os.WriteFile(runtimeSwitchMarkerPath(), []byte("switching\n"), 0644)
+}
+
+// ClearRuntimeSwitch drops the marker once the switch has finished, however it
+// finished: a failed switch is over too, and the reader needs the real state.
+func ClearRuntimeSwitch() {
+	guardRealWrite(runtimeSwitchMarkerPath())
+	_ = os.Remove(runtimeSwitchMarkerPath())
+}
+
+// RuntimeSwitchInProgress reports whether a switch is running right now.
+func RuntimeSwitchInProgress() bool {
+	st, err := os.Stat(runtimeSwitchMarkerPath())
+	return err == nil && time.Since(st.ModTime()) < runtimeSwitchTTL
+}
+
 // PprofMarkerPath is the sentinel that unlocks lerd-ui's profiling endpoints.
 // Exported so the CLI and docs can name the exact file a user has to create.
 func PprofMarkerPath() string {
@@ -700,4 +767,9 @@ func ContainerHostsFile() string {
 // the Podman network instead of going through the host gateway.
 func BrowserHostsFile() string {
 	return filepath.Join(DataDir(), "browser-hosts")
+}
+
+// ThemesDir returns the directory for user-defined dashboard theme YAML files.
+func ThemesDir() string {
+	return filepath.Join(ConfigDir(), "themes")
 }

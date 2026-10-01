@@ -2,8 +2,6 @@
   import ButtonMenu, { type ButtonMenuAction } from '$components/ButtonMenu.svelte';
   import DetailTabs, { type TabItem } from '$components/DetailTabs.svelte';
   import LogViewer from '$components/LogViewer.svelte';
-  import DetailButton from '$components/DetailButton.svelte';
-  import InfoRow from '$components/InfoRow.svelte';
   import PhpIniTab from './PhpIniTab.svelte';
   import PhpPortsTab from './PhpPortsTab.svelte';
   import PhpExtensionsTab from './PhpExtensionsTab.svelte';
@@ -20,13 +18,20 @@
   import { sites, sitesByPhp } from '$stores/sites';
   import { xdebugOn, xdebugOff, XDEBUG_MODES, type XdebugMode } from '$stores/xdebug';
   import { openPhpRemoveModal, openPhpRebuildModal } from '$stores/modals';
+  import { phpRuntime, loadPHPRuntime } from '$stores/phpRuntime';
   import { notifyLocalInfo } from '$lib/notify';
+  import { onMount } from 'svelte';
   import { m } from '../../paraglide/messages.js';
 
   interface Props {
     version: string;
   }
   let { version }: Props = $props();
+
+  // The side panel that loads this on desktop is not mounted on mobile, where
+  // an unloaded store reads as the container runtime and offers image actions
+  // to an install that has no images.
+  onMount(loadPHPRuntime);
 
   const isDefault = $derived($status.php_default === version);
   const siteCount = $derived($sitesByPhp.get(version) ?? 0);
@@ -35,6 +40,12 @@
   const xdebugEnabled = $derived(Boolean(fpm?.xdebug_enabled));
   const xdebugMode = $derived<XdebugMode>((fpm?.xdebug_mode as XdebugMode) || 'debug');
   const container = $derived('lerd-php' + version.replace('.', '') + '-fpm');
+  // Under the native runtime the version's output comes from the launchd pool
+  // on the host. Streaming the container instead reported it as not running,
+  // which is true and useless: nothing has served from it since the switch.
+  const logUnit = $derived(
+    $phpRuntime === 'native' ? 'lerd-native-php' + version.replace('.', '') : container
+  );
   const sitesUsing = $derived($sites.filter((s) => s.php_version === version).map((s) => s.domain));
   const baseUpdate = $derived(Boolean(fpm?.update_available));
 
@@ -76,16 +87,25 @@
     };
   });
 
+  // On the native runtime there is no image to rebuild and no container to
+  // enter, and an update is a newer build being published rather than a base
+  // image moving. Offering those actions there names work that cannot be done.
+  const native = $derived($phpRuntime === 'native');
+
   type TabId = 'logs' | 'config' | 'ports' | 'extensions';
   let active = $state<TabId>('logs');
   const tabs = $derived<TabItem<TabId>[]>([
     { id: 'logs', label: m.services_tabs_logs(), hidden: !running },
     { id: 'config', label: m.system_php_iniTab() },
-    { id: 'ports', label: m.system_php_portsTab() },
+    // The ports are published on the FPM container's quadlet. A host pool
+    // listens on the port its version owns and there is nothing to map, so the
+    // tab would offer a setting that changes nothing.
+    { id: 'ports', label: m.system_php_portsTab(), hidden: native },
     { id: 'extensions', label: m.system_php_extensionsTab() }
   ]);
 
   $effect(() => {
+    if (active === 'ports' && native) active = 'config';
     if (active === 'logs' && !running) active = 'config';
   });
 
@@ -231,7 +251,30 @@
     }
   });
 
+  const updateAction = $derived<ButtonMenuAction>({
+    id: 'update',
+    icon: rebuildIcon,
+    label: m.system_php_updateBuild(),
+    title: m.system_php_updateBuildTitle(),
+    disabled: !baseUpdate,
+    onclick: () => openPhpRebuildModal(version)
+  });
+
   const versionActions = $derived.by<ButtonMenuAction[]>(() => {
+    if (native) {
+      const nativeActs: ButtonMenuAction[] = [updateAction];
+      if (!isDefault) {
+        nativeActs.push({
+          id: 'remove',
+          tone: 'danger',
+          icon: trashIcon,
+          label: m.common_remove(),
+          title: siteCount > 0 ? m.system_php_removeWarn({ count: siteCount }) : m.system_php_removeTitle(),
+          onclick: () => openPhpRemoveModal({ version, siteCount })
+        });
+      }
+      return nativeActs;
+    }
     const acts: ButtonMenuAction[] = [];
     // Rebuild is only worth a button of its own when the base has actually
     // moved, the way an available service update is; with nothing to pick up it
@@ -392,29 +435,11 @@
 {#if active === 'logs' && running}
   <DetailTabs tabs={logTabs} active={logTab} onchange={(id) => (logTab = id)} />
   <LogViewer
-    path={'/api/logs/' + container}
+    path={'/api/logs/' + logUnit}
     highlight={highlightLogLine}
     filter={logTab === 'errors' ? isErrorLine : undefined}
     emptyLabel={logTab === 'errors' ? m.system_php_logsErrorsEmpty() : undefined}
   />
-{:else if active === 'sites'}
-  <div class="px-3 sm:px-5 py-3 shrink-0">
-    {#if sitesUsing.length === 0}
-      <p class="text-sm text-gray-400">{m.system_noSitesUsingPhp({ version })}</p>
-    {:else}
-      <div class="flex flex-wrap gap-2">
-        {#each sitesUsing as s (s.domain)}
-          <button
-            onclick={() => goToTab('sites', s.domain)}
-            class="inline-flex items-center gap-1.5 text-xs font-medium bg-gray-100 dark:bg-white/5 hover:bg-gray-200 dark:hover:bg-white/10 border border-gray-200 dark:border-lerd-border text-gray-700 dark:text-gray-300 rounded-full px-2.5 py-1 transition-colors"
-          >
-            <span class="w-1.5 h-1.5 rounded-full shrink-0 {s.fpm_running ? 'bg-emerald-500' : 'bg-gray-400'}"></span>
-            {s.domain}
-          </button>
-        {/each}
-      </div>
-    {/if}
-  </div>
 {:else if active === 'config'}
   <PhpIniTab {version} />
 {:else if active === 'ports'}

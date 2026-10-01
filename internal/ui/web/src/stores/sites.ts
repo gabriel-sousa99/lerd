@@ -38,6 +38,7 @@ export interface Site {
   node_version?: string;
   js_runtime?: string;
   runtime?: string;
+  php_log_unit?: string;
   runtime_worker?: boolean;
   tls?: boolean;
   fpm_running?: boolean;
@@ -689,6 +690,9 @@ export interface ShareToolsInfo {
   base_domain_answered?: boolean;
   // Whether an ngrok token is stored. The token itself never leaves the host.
   ngrok_token_set?: boolean;
+  // Extra flags every ngrok share passes to ngrok. Not a credential, so it is
+  // read back for the form to show.
+  ngrok_args?: string;
   // Domain a public (reverse-proxy) share is served under, as <site>.<base>.
   public_base_domain?: string;
 }
@@ -719,16 +723,21 @@ export async function saveShareDomain(
     return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
   }
 }
-// Stores the ngrok auth token, or clears it when empty. Only ever sent to the
-// host; the token is never read back out of the API.
-export async function saveShareNgrokToken(
-  token: string
-): Promise<{ ok: boolean; error?: string }> {
+// Stores the ngrok settings: the auth token (cleared when empty) and the extra
+// flags every share passes to ngrok. An omitted field leaves the stored value
+// alone, and the token is only ever sent, never read back out of the API.
+export async function saveShareNgrok(p: {
+  token?: string;
+  args?: string;
+}): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await apiFetch('/api/share-tools', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ngrok_token: token })
+      body: JSON.stringify({
+        ...(p.token !== undefined ? { ngrok_token: p.token } : {}),
+        ...(p.args !== undefined ? { ngrok_args: p.args } : {})
+      })
     });
     const data = (await res.json()) as { ok?: boolean; error?: string };
     return { ok: Boolean(data.ok), error: data.error };
@@ -930,7 +939,25 @@ export async function setSiteVersion(
   }
 }
 
+// Switch a site's PHP between the shared FPM container and a PHP-FPM on the
+// host. The daemon does the whole switch (env, vhost, framework cache,
+// workers), so this only reports what it said.
+export async function setSiteRuntime(s: Site, target: 'native' | 'fpm') {
+  try {
+    const res = await apiFetch(site(s.domain, 'runtime') + '?target=' + target, {
+      method: 'POST'
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : m.common_requestFailed() };
+  }
+}
+
 export function fpmContainer(s: Site): string {
+  // A native site is served by a process on the host; there is no container to
+  // name, and inventing one would send logs and shells at something absent.
+  if (s.runtime === 'native') return '';
   if (s.custom_container) return 'lerd-custom-' + (s.name || s.domain);
   if (s.runtime === 'frankenphp') return 'lerd-fp-' + (s.name || s.domain);
   if (s.runtime === 'fpm-custom') return 'lerd-cfpm-' + (s.name || s.domain);
@@ -939,6 +966,7 @@ export function fpmContainer(s: Site): string {
 }
 
 export function fpmTabLabel(s: Site): string {
+  if (s.runtime === 'native') return 'PHP';
   if (s.custom_container) return 'Container';
   if (s.runtime === 'frankenphp') return 'FrankenPHP';
   if (s.runtime === 'fpm-custom') return 'Custom FPM';

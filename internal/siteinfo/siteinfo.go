@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
+	"github.com/gabriel-sousa99/lerd/internal/nativephp"
 	nodePkg "github.com/gabriel-sousa99/lerd/internal/node"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
+	"gopkg.in/yaml.v3"
 )
 
 // EnrichFlag controls which enrichment steps run during site loading.
@@ -101,6 +101,9 @@ type EnrichedSite struct {
 	PausedWorkers []string
 	PublicDir     string
 	AppURL        string
+	// AutoSnapshot is the site's automatic-snapshot override: "on", "off", or
+	// empty to follow the global policy.
+	AutoSnapshot string
 
 	// Framework
 	FrameworkName    string
@@ -238,6 +241,11 @@ var (
 	containerRunningFn = func(name string) (bool, error) {
 		return podman.Cache.Running(name), nil
 	}
+	nativeRuntimeFn = func() bool {
+		cfg, err := config.LoadGlobal()
+		return err == nil && cfg.PHPRuntimeMode() == config.PHPRuntimeNative
+	}
+	nativePoolRunningFn = nativephp.Loaded
 )
 
 // LoadAll loads all non-ignored sites and enriches them according to flags.
@@ -294,6 +302,7 @@ func Enrich(s config.Site, flags EnrichFlag) EnrichedSite {
 		PausedWorkers:         s.PausedWorkers,
 		PublicDir:             s.PublicDir,
 		AppURL:                s.AppURL,
+		AutoSnapshot:          s.AutoSnapshot,
 		LANPort:               s.LANPort,
 		ContainerPort:         s.ContainerPort,
 		ContainerSSL:          s.ContainerSSL,
@@ -517,10 +526,19 @@ func (e *EnrichedSite) enrichFPM() {
 		e.FPMRunning, _ = containerRunningFn("lerd-fp-" + e.Name)
 		return
 	}
-	if e.PHPVersion != "" {
-		short := strings.ReplaceAll(e.PHPVersion, ".", "")
-		e.FPMRunning, _ = containerRunningFn("lerd-php" + short + "-fpm")
+	if e.PHPVersion == "" {
+		return
 	}
+	// Under the native runtime a plain FPM site is served by the version's host
+	// pool, and the container it used to look for does not exist. This runs per
+	// site on every poll, so it reads the pool's job rather than dialling its
+	// port: a dial is handed to a child and resets the ondemand idle timer.
+	if nativeRuntimeFn() {
+		e.FPMRunning = nativePoolRunningFn(e.PHPVersion)
+		return
+	}
+	short := strings.ReplaceAll(e.PHPVersion, ".", "")
+	e.FPMRunning, _ = containerRunningFn("lerd-php" + short + "-fpm")
 }
 
 func (e *EnrichedSite) enrichStripe() {

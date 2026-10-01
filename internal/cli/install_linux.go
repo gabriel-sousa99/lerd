@@ -8,9 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/composer"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
@@ -18,11 +18,10 @@ import (
 )
 
 func downloadBinaries(w io.Writer) error {
-	binDir := config.BinDir()
 	var pins pinnedTools
 
 	// composer
-	composerPharPath := filepath.Join(binDir, "composer.phar")
+	composerPharPath := composer.PharPath()
 	if _, err := os.Stat(composerPharPath); os.IsNotExist(err) {
 		if err := replaceTool(&pins, "composer", composerPharPath, w); err != nil {
 			return fmt.Errorf("composer download: %w", err)

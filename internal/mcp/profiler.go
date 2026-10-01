@@ -9,6 +9,7 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/agentenv"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envpass"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/profiler"
@@ -92,6 +93,7 @@ func execProfilerReport(args map[string]any) (any, *rpcError) {
 	for _, e := range agentenv.MCPInject(os.Environ()) {
 		cmdArgs = append(cmdArgs, "--env", e)
 	}
+	cmdArgs = append(cmdArgs, envpass.Args(projectPath, os.Environ())...)
 	cmdArgs = append(cmdArgs, container, "php")
 	cmdArgs = append(cmdArgs, argv...)
 

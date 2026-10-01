@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "embed"
@@ -37,8 +38,10 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	"github.com/gabriel-sousa99/lerd/internal/eventbus"
+	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	gitpkg "github.com/gabriel-sousa99/lerd/internal/git"
 	"github.com/gabriel-sousa99/lerd/internal/grouping"
+	"github.com/gabriel-sousa99/lerd/internal/nativephp"
 	"github.com/gabriel-sousa99/lerd/internal/nginx"
 	lerdNode "github.com/gabriel-sousa99/lerd/internal/node"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
@@ -241,6 +244,9 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/project/setup-steps", withCORS(handleProjectSetupSteps))
 	mux.HandleFunc("/api/services/presets/", withCORS(publishAfter(handleServicePresetInstall, eventbus.KindServices, eventbus.KindStatus)))
 	mux.HandleFunc("/api/services/", withCORS(publishAfter(handleServiceAction, eventbus.KindServices, eventbus.KindStatus, eventbus.KindSites)))
+	mux.HandleFunc("/api/internal/snapshot-run", handleInternalSnapshotNotify)
+	mux.HandleFunc("/api/auto-snapshot", withCORS(handleAutoSnapshot))
+	mux.HandleFunc("/api/auto-snapshot/", withCORS(handleAutoSnapshotSite))
 	mux.HandleFunc("/api/databases", withCORS(handleDatabases))
 	mux.HandleFunc("/api/databases/", withCORS(handleDatabaseAction))
 	mux.HandleFunc("/api/entities/", withCORS(handleEntities))
@@ -309,8 +315,13 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/api/settings/tray", withCORS(handleSettingsTray))
 	mux.HandleFunc("/api/settings/start-on-open", withCORS(handleSettingsStartOnOpen))
 	mux.HandleFunc("/api/settings/worker-mode", withCORS(handleSettingsWorkerMode))
+	mux.HandleFunc("/api/settings/php-runtime", withCORS(handleSettingsPHPRuntime))
 	mux.HandleFunc("/api/settings/idle-suspend", withCORS(publishAfter(handleSettingsIdleSuspend, eventbus.KindSites)))
 	mux.HandleFunc("/api/settings/dns-upstream", withCORS(handleSettingsDNSUpstream))
+	mux.HandleFunc("/api/settings/theme", withCORS(handleSettingsTheme))
+	mux.HandleFunc("/api/settings/beta-updates", withCORS(handleSettingsBetaUpdates))
+	mux.HandleFunc("/api/themes", withCORS(handleThemes))
+	mux.HandleFunc("/api/themes/", withCORS(handleThemeItem))
 	mux.HandleFunc("/api/workers/health", withCORS(handleWorkersHealth))
 	mux.HandleFunc("/api/workers/heal", withCORS(handleWorkersHeal))
 	mux.HandleFunc("/api/workers/stop", withCORS(handleWorkersStop))
@@ -333,7 +344,13 @@ func Start(currentVersion string) error {
 	mux.HandleFunc("/manifest.webmanifest", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/manifest+json")
 		base := "http://" + r.Host
-		w.Write([]byte(`{"name":"Lerd","short_name":"Lerd","description":"Local Laravel development environment","start_url":"` + base + `/","display":"standalone","background_color":"#0d0d0d","theme_color":"#FF2D20","protocol_handlers":[{"protocol":"web+lerd","url":"` + base + `/?lerd=%s"}],"icons":[{"src":"` + base + `/icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"` + base + `/icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"` + base + `/icons/icon-maskable-192.png","sizes":"192x192","type":"image/png","purpose":"maskable"},{"src":"` + base + `/icons/icon-maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"},{"src":"` + base + `/icons/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}`)) //nolint:errcheck
+		// The dashboard appends its theme's tones so an install picks up the
+		// colours in use rather than the brand default. The browser reads these
+		// once at install, which is why they arrive on the URL rather than being
+		// looked up: the choice lives in the browser, not on this side.
+		theme := manifestColor(r.URL.Query().Get("theme_color"), "#ff2d20")
+		background := manifestColor(r.URL.Query().Get("background_color"), "#0d0d0d")
+		w.Write([]byte(`{"name":"Lerd","short_name":"Lerd","description":"Local Laravel development environment","start_url":"` + base + `/","display":"standalone","background_color":"` + background + `","theme_color":"` + theme + `","protocol_handlers":[{"protocol":"web+lerd","url":"` + base + `/?lerd=%s"}],"icons":[{"src":"` + base + `/icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"` + base + `/icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"` + base + `/icons/icon-maskable-192.png","sizes":"192x192","type":"image/png","purpose":"maskable"},{"src":"` + base + `/icons/icon-maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"},{"src":"` + base + `/icons/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}`)) //nolint:errcheck
 	})
 	mux.HandleFunc("/icons/icon.svg", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
@@ -803,22 +820,39 @@ func buildStatus() StatusResponse {
 	nginxRunning := podman.Cache.Running("lerd-nginx")
 	watcherRunning := services.Mgr.IsActive("lerd-watcher")
 
-	versions, _ := phpPkg.ListInstalled()
+	versions, _ := phpPkg.InstalledForRuntime()
 	var phpStatuses []PHPStatus
+	native := nativeRuntimeActive()
+	// Loaded once rather than per version: the pins are what says whether a
+	// host build is behind, and they are the same for all of them.
+	var pins *tools.Manifest
+	if native {
+		pins = nativePins()
+	}
 	for _, v := range versions {
 		short := strings.ReplaceAll(v, ".", "")
-		running := podman.Cache.Running("lerd-php" + short + "-fpm")
+		running := phpVersionRunning(v, native,
+			func(string) bool { return podman.Cache.Running("lerd-php" + short + "-fpm") },
+			nativeListenerRunning)
 		xdebugMode := ""
 		var ports []string
 		if cfg != nil {
 			xdebugMode = cfg.GetXdebugMode(v)
 			ports = cfg.PHP.FPMPorts[v]
 		}
-		baseStale := false
-		if base := podman.BaseImageFreshness(v); base != nil {
-			baseStale = base.Stale
+		// The image and its base describe nothing that is serving under the
+		// native runtime, where the patch is the build on the host and an
+		// update is a newer one having been published.
+		patch, updateAvailable := "", false
+		if native {
+			patch, updateAvailable = nativePHPStatusFor(pins, v)
+		} else {
+			patch = podman.FPMPHPVersion(v)
+			if base := podman.BaseImageFreshness(v); base != nil {
+				updateAvailable = base.Stale
+			}
 		}
-		phpStatuses = append(phpStatuses, PHPStatus{Version: v, Patch: podman.FPMPHPVersion(v), Running: running, XdebugEnabled: xdebugMode != "", XdebugMode: xdebugMode, Ports: ports, UpdateAvailable: baseStale})
+		phpStatuses = append(phpStatuses, PHPStatus{Version: v, Patch: patch, Running: running, XdebugEnabled: xdebugMode != "", XdebugMode: xdebugMode, Ports: ports, UpdateAvailable: updateAvailable})
 	}
 
 	phpDefault := ""
@@ -1005,18 +1039,21 @@ type SiteResponse struct {
 	Services []string `json:"services,omitempty"`
 	// DBDatabase is the site's DB_DATABASE, so the overview's database card can
 	// open the admin tool straight to this site's database.
-	DBDatabase       string `json:"db_database,omitempty"`
-	LANPort          int    `json:"lan_port,omitempty"`
-	LANShareURL      string `json:"lan_share_url,omitempty"`
-	PublicShared     bool   `json:"public_shared,omitempty"`
-	PublicShareURL   string `json:"public_share_url,omitempty"`
-	TunnelURL        string `json:"tunnel_url,omitempty"`
-	TunnelTool       string `json:"tunnel_tool,omitempty"`
-	TunnelExternal   bool   `json:"tunnel_external,omitempty"`
-	CustomContainer  bool   `json:"custom_container,omitempty"`
-	ContainerPort    int    `json:"container_port,omitempty"`
-	ContainerImage   string `json:"container_image,omitempty"`
-	Runtime          string `json:"runtime,omitempty"`
+	DBDatabase      string `json:"db_database,omitempty"`
+	LANPort         int    `json:"lan_port,omitempty"`
+	LANShareURL     string `json:"lan_share_url,omitempty"`
+	PublicShared    bool   `json:"public_shared,omitempty"`
+	PublicShareURL  string `json:"public_share_url,omitempty"`
+	TunnelURL       string `json:"tunnel_url,omitempty"`
+	TunnelTool      string `json:"tunnel_tool,omitempty"`
+	TunnelExternal  bool   `json:"tunnel_external,omitempty"`
+	CustomContainer bool   `json:"custom_container,omitempty"`
+	ContainerPort   int    `json:"container_port,omitempty"`
+	ContainerImage  string `json:"container_image,omitempty"`
+	Runtime         string `json:"runtime,omitempty"`
+	// PHPLogUnit is the unit the site's PHP log tab streams. Under the native
+	// runtime that is the host listener's launchd log, not a container.
+	PHPLogUnit       string `json:"php_log_unit,omitempty"`
 	RuntimeWorker    bool   `json:"runtime_worker,omitempty"`
 	HostProxy        bool   `json:"host_proxy,omitempty"`
 	HostPort         int    `json:"host_port,omitempty"`
@@ -1089,6 +1126,8 @@ func buildSites() ([]SiteResponse, error) {
 	// Traffic per site key, read once per snapshot, so the sites list can order by
 	// what has actually been used rather than by log-file mtime.
 	siteUsage := loadSiteUsage()
+	// Read once rather than per site: it is an install-wide setting.
+	nativeRuntime := nativeRuntimeActive()
 
 	// Per-site list of workers the engine suspended, so the dashboard can keep
 	// showing their dots dimmed instead of dropping them.
@@ -1273,12 +1312,17 @@ func buildSites() ([]SiteResponse, error) {
 			CustomContainer:      e.ContainerPort > 0,
 			ContainerPort:        e.ContainerPort,
 			ContainerImage:       e.ContainerImage,
-			Runtime:              e.Runtime,
-			RuntimeWorker:        e.RuntimeWorker,
-			HostProxy:            e.HostPort > 0,
-			HostPort:             e.HostPort,
-			HostHasDevServer:     e.HostPort > 0 && e.HostCommand != "",
-			DoctorApplicable:     sitedoctor.AppliesForPath(e.Path, e.FrameworkName),
+			Runtime:              reportedRuntime(e.Runtime, nativeRuntime, e.ContainerPort, e.HostPort),
+			PHPLogUnit: phpLogUnit(
+				config.Site{Name: e.Name, Runtime: e.Runtime, ContainerPort: e.ContainerPort, HostPort: e.HostPort},
+				e.PHPVersion,
+				nativeRuntime,
+			),
+			RuntimeWorker:    e.RuntimeWorker,
+			HostProxy:        e.HostPort > 0,
+			HostPort:         e.HostPort,
+			HostHasDevServer: e.HostPort > 0 && e.HostCommand != "",
+			DoctorApplicable: sitedoctor.AppliesForPath(e.Path, e.FrameworkName),
 			CanProfile: profiler.ProfilableSite(config.Site{
 				Runtime: e.Runtime, ContainerPort: e.ContainerPort, HostPort: e.HostPort,
 			}, e.UsesPHP),
@@ -2986,11 +3030,9 @@ func buildVersionResponse(currentVersion string, info *lerdUpdate.UpdateInfo) Ve
 }
 
 func handlePHPVersions(w http.ResponseWriter, _ *http.Request) {
-	versions, _ := phpPkg.ListInstalled()
-	if versions == nil {
-		versions = []string{}
-	}
-	writeJSON(w, versions)
+	writeJSON(w, installedPHPVersions(nativeRuntimeActive(),
+		func() []string { v, _ := phpPkg.ListInstalled(); return v },
+		nativephp.ListInstalled))
 }
 
 func handleNodeVersions(w http.ResponseWriter, _ *http.Request) {
@@ -3547,6 +3589,9 @@ func handleShareTools(w http.ResponseWriter, r *http.Request) {
 			// NgrokToken is only present when the token form was submitted, so
 			// a base-domain save cannot clear a stored token by omitting it.
 			NgrokToken *string `json:"ngrok_token"`
+			// NgrokArgs rides along with the token form, and is optional in the
+			// same way: absent means "leave the stored flags alone".
+			NgrokArgs *string `json:"ngrok_args"`
 			// PublicBaseDomain is only present when the public-share base form
 			// was submitted, for the same reason.
 			PublicBaseDomain *string `json:"public_base_domain"`
@@ -3562,6 +3607,16 @@ func handleShareTools(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, SiteActionResponse{OK: true})
 			return
+		}
+		if body.NgrokArgs != nil {
+			if err := cli.SetShareNgrokArgs(*body.NgrokArgs); err != nil {
+				writeJSON(w, SiteActionResponse{Error: err.Error()})
+				return
+			}
+			if body.NgrokToken == nil {
+				writeJSON(w, SiteActionResponse{OK: true})
+				return
+			}
 		}
 		if body.NgrokToken != nil {
 			if err := cli.SetShareNgrokToken(*body.NgrokToken); err != nil {
@@ -3916,9 +3971,6 @@ func handlePHPExtensions(w http.ResponseWriter, r *http.Request, version string)
 // never silently lands a site on an image missing its extensions.
 func phpSwitchWarning(res siteops.PHPVersionResult) string {
 	var parts []string
-	if res.Clamped {
-		parts = append(parts, fmt.Sprintf("PHP %s is outside the range this framework supports, so %s was used instead.", res.Requested, res.Version))
-	}
 	if res.Demoted {
 		parts = append(parts, fmt.Sprintf("FrankenPHP has no image for PHP %s, so the site was switched to FPM.", res.Version))
 	}
@@ -4502,7 +4554,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			_ = certs.ReissueCertForWorktree(*site)
 		}
 		_ = podman.WriteContainerHosts()
-		_ = nginx.Reload()
+		_ = nginx.ReloadAndSettle()
 		if err := siteops.SyncEnvIfPrimaryChanged(site, oldPrimary); err != nil {
 			fmt.Fprintf(os.Stderr, "lerd-ui: syncing .env to new primary domain: %v\n", err)
 		}
@@ -4552,7 +4604,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			_ = certs.ReissueCertForWorktree(*site)
 		}
 		_ = podman.WriteContainerHosts()
-		_ = nginx.Reload()
+		_ = nginx.ReloadAndSettle()
 		if err := siteops.SyncEnvIfPrimaryChanged(site, oldPrimary); err != nil {
 			fmt.Fprintf(os.Stderr, "lerd-ui: syncing .env to new primary domain: %v\n", err)
 		}
@@ -4632,7 +4684,7 @@ func handleSiteAction(w http.ResponseWriter, r *http.Request) {
 			_ = certs.ReissueCertForWorktree(*site)
 		}
 		_ = podman.WriteContainerHosts()
-		_ = nginx.Reload()
+		_ = nginx.ReloadAndSettle()
 		if err := siteops.SyncEnvIfPrimaryChanged(site, oldPrimary); err != nil {
 			fmt.Fprintf(os.Stderr, "lerd-ui: syncing .env to new primary domain: %v\n", err)
 		}
@@ -4888,6 +4940,14 @@ func hostProxyAppLifecycleOp(isHostProxy bool, workerName, branch, op string) (s
 // terminal emulator.
 var containerRunning = podman.Cache.Running
 
+// The runtime-dependent halves of the version actions, as seams: a test can
+// drive either runtime without a global config, a live podman or a download.
+var (
+	removeNativePHP  = nativephp.Remove
+	updateNativePHP  = cli.UpdateNativePHPVersion
+	teardownPHPFPMFn = teardownPHPFPM
+)
+
 // phpShellScript is what the spawned terminal runs: lerd's own shell command,
 // not a hand-built podman exec. The container script it ends up running
 // contains "$PATH", which the host shell would expand on the way through,
@@ -5017,17 +5077,13 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]any{"ok": true, "php_default": version})
 	case "start":
-		short := strings.ReplaceAll(version, ".", "")
-		unit := "lerd-php" + short + "-fpm"
-		if err := podman.StartUnit(unit); err != nil {
+		if err := startPHPVersion(nativeRuntimeActive(), version); err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
 	case "stop":
-		short := strings.ReplaceAll(version, ".", "")
-		unit := "lerd-php" + short + "-fpm"
-		if err := podman.StopUnit(unit); err != nil {
+		if err := stopPHPVersion(nativeRuntimeActive(), version); err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -5043,7 +5099,14 @@ func handlePHPVersionAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]any{"ok": true})
 	case "remove":
-		if err := teardownPHPFPM(version); err != nil {
+		// The native runtime serves from binaries on disk and lists what is
+		// installed from them, so removing the quadlet there reports success
+		// and leaves the version exactly where it was.
+		remove := teardownPHPFPMFn
+		if nativeRuntimeActive() {
+			remove = removeNativePHP
+		}
+		if err := remove(version); err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -5175,6 +5238,10 @@ func handlePHPInstall(w http.ResponseWriter, r *http.Request) {
 		done(map[string]any{"ok": false, "error": "unsupported PHP version"})
 		return
 	}
+	if err := nativeInstallRefusal(nativeRuntimeActive(), version); err != nil {
+		done(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	// Reject a second concurrent install of the same version so two clients can't
 	// race on the same image build and quadlet file.
 	if _, busy := phpBuildInFlight.LoadOrStore(version, struct{}{}); busy {
@@ -5241,6 +5308,10 @@ func handlePHPRebuild(w http.ResponseWriter, r *http.Request, version string) {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
+	if nativeRuntimeActive() {
+		handleNativePHPUpdate(sw, done, version)
+		return
+	}
 	if !slices.Contains(fullyInstalledPHPVersions(), version) {
 		done(map[string]any{"ok": false, "error": "PHP " + version + " is not installed"})
 		return
@@ -5261,6 +5332,25 @@ func handlePHPRebuild(w http.ResponseWriter, r *http.Request, version string) {
 		return
 	}
 	refreshAfterPHPBuild(version)
+	done(map[string]any{"ok": true, "version": version})
+}
+
+// handleNativePHPUpdate is the native half of the update action: there is no
+// image to rebuild, so it downloads the published build and restarts the pool,
+// streaming the same log the container rebuild does.
+func handleNativePHPUpdate(sw *sseLineWriter, done func(map[string]any), version string) {
+	if _, busy := phpBuildInFlight.LoadOrStore(version, struct{}{}); busy {
+		done(map[string]any{"ok": false, "error": "PHP " + version + " is already updating"})
+		return
+	}
+	defer phpBuildInFlight.Delete(version)
+
+	err := updateNativePHP(version, sw)
+	sw.flushTail()
+	if err != nil {
+		done(map[string]any{"ok": false, "error": err.Error(), "version": version})
+		return
+	}
 	done(map[string]any{"ok": true, "version": version})
 }
 
@@ -5355,6 +5445,11 @@ func runNodeMgmtCmd(w http.ResponseWriter, r *http.Request, sub string, extra ..
 }
 
 var validVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
+
+// phpRuntimeSwitching keeps two switches from overlapping: the feedback
+// redirect the stream depends on is package-wide, and the switch itself rewrites
+// every site.
+var phpRuntimeSwitching atomic.Bool
 
 func handleInstallNodeVersion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -5482,12 +5577,17 @@ type SettingsResponse struct {
 	StartOnDashboardOpen      bool     `json:"start_on_dashboard_open"`
 	WorkerExecMode            string   `json:"worker_exec_mode"`
 	WorkerModeApplies         bool     `json:"worker_mode_applies"` // true on macOS only
+	PHPRuntime                string   `json:"php_runtime"`
+	PHPRuntimeApplies         bool     `json:"php_runtime_applies"`   // macOS only, both architectures
+	PHPRuntimeSwitching       bool     `json:"php_runtime_switching"` // a switch is running; every red row below is transient
 	IdleSuspendEnabled        bool     `json:"idle_suspend_enabled"`
 	IdleSuspendTimeoutMinutes int      `json:"idle_suspend_timeout_minutes"`
 	DNSEnabled                bool     `json:"dns_enabled"`
 	DNSUpstream               []string `json:"dns_upstream"`          // pinned upstreams, empty = auto-detect
 	DNSUpstreamDetected       []string `json:"dns_upstream_detected"` // what auto-detection currently sees
 	TrayEnabled               bool     `json:"tray_enabled"`
+	BetaUpdates               bool     `json:"beta_updates"`
+	Theme                     string   `json:"theme"` // dashboard colour theme id, empty = the default
 }
 
 func handleSettings(w http.ResponseWriter, _ *http.Request) {
@@ -5498,6 +5598,8 @@ func handleSettings(w http.ResponseWriter, _ *http.Request) {
 	dnsEnabled := true
 	startOnOpen := false
 	trayEnabled := true
+	theme := ""
+	betaUpdates := false
 	var dnsUpstream []string
 	if cfg != nil {
 		mode = cfg.WorkerExecMode()
@@ -5507,11 +5609,16 @@ func handleSettings(w http.ResponseWriter, _ *http.Request) {
 		dnsUpstream = cfg.DNS.Upstream
 		startOnOpen = cfg.Autostart.OnDashboardOpen
 		trayEnabled = cfg.IsTrayEnabled()
+		theme = cfg.UI.Theme
+		betaUpdates = cfg.IsBetaChannel()
 	}
 	writeJSON(w, SettingsResponse{
 		AutostartOnLogin:          lerdSystemd.IsAutostartEnabled(),
 		StartOnDashboardOpen:      startOnOpen,
 		WorkerExecMode:            mode,
+		PHPRuntime:                cfg.PHPRuntimeMode(),
+		PHPRuntimeSwitching:       config.RuntimeSwitchInProgress(),
+		PHPRuntimeApplies:         nativeRuntimeApplies(runtime.GOOS, runtime.GOARCH),
 		WorkerModeApplies:         runtime.GOOS == "darwin",
 		IdleSuspendEnabled:        idleEnabled,
 		IdleSuspendTimeoutMinutes: idleMinutes,
@@ -5519,6 +5626,8 @@ func handleSettings(w http.ResponseWriter, _ *http.Request) {
 		DNSUpstream:               dnsUpstream,
 		DNSUpstreamDetected:       dns.ReadUpstreamDNS(),
 		TrayEnabled:               trayEnabled,
+		Theme:                     theme,
+		BetaUpdates:               betaUpdates,
 	})
 }
 
@@ -5742,6 +5851,35 @@ func handleSettingsStartOnOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "start_on_dashboard_open": body.Enabled})
+}
+
+// handleSettingsBetaUpdates opts a stable install into the prerelease line, so
+// the update notice and `lerd update` offer betas. Config only: the update check
+// reads the flag. An install already running a beta follows the beta line with
+// or without it.
+func handleSettingsBetaUpdates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil || cfg == nil {
+		writeJSON(w, map[string]any{"ok": false, "error": "loading config"})
+		return
+	}
+	cfg.SetBetaChannel(body.Enabled)
+	if err := config.SaveGlobal(cfg); err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "beta_updates": body.Enabled})
 }
 
 // uiUnit is the unit this process runs as, and runStart is cli.RunStart
@@ -6540,4 +6678,67 @@ func syncLerdYAMLWorkersDelayed(site *config.Site) {
 	if !site.Paused {
 		_ = config.SetProjectWorkers(site.Path, cli.CollectDeclaredWorkerNames(site))
 	}
+}
+
+// handleSettingsPHPRuntime switches the install between the container and
+// native PHP runtimes. Install-wide rather than per site: the FPM container is
+// shared by every site on a PHP version, so sites cannot be moved one at a time.
+func handleSettingsPHPRuntime(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Mode string `json:"mode"`
+		// Removing the FPM images is a separate decision from the switch, and
+		// only offered when moving to native, where nothing serves from them.
+		RemoveImages bool `json:"remove_images"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.Mode != config.PHPRuntimeContainer && body.Mode != config.PHPRuntimeNative {
+		writeJSON(w, map[string]any{"ok": false, "error": "unknown runtime"})
+		return
+	}
+	if body.Mode == config.PHPRuntimeNative && runtime.GOOS != "darwin" {
+		writeJSON(w, map[string]any{"ok": false, "error": "the native runtime is macOS only"})
+		return
+	}
+	// Streamed rather than answered once: a switch rewrites every site and can
+	// spend minutes building images that were removed, and a spinner with
+	// nothing behind it reads as a hang.
+	sw, done, ok := startPHPBuildStream(w)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	if !phpRuntimeSwitching.CompareAndSwap(false, true) {
+		done(map[string]any{"ok": false, "error": "a runtime switch is already running"})
+		return
+	}
+	defer phpRuntimeSwitching.Store(false)
+
+	// The switch reports through the feedback package, so that is what the
+	// stream carries. Package-wide, which the guard above keeps to one at once.
+	restore := feedback.Redirect(sw)
+	err := cli.ApplyPHPRuntime(body.Mode)
+	// After the switch, never instead of it: the runtime has already moved, so
+	// a reclaim that cannot finish is reported without failing the switch.
+	out := map[string]any{"ok": err == nil}
+	if err == nil && body.RemoveImages && body.Mode == config.PHPRuntimeNative {
+		versions, _ := phpPkg.ListInstalled()
+		removed, rmErr := cli.RemoveFPMImages(versions)
+		out["images_removed"] = removed
+		if rmErr != nil {
+			out["images_error"] = rmErr.Error()
+		}
+	}
+	restore()
+	sw.flushTail()
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	done(out)
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	crand "crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,6 +36,20 @@ import (
 // through the loopback ports those services publish rather than container DNS.
 const hostProxyLoopback = "127.0.0.1"
 
+// usesLoopbackServices reports whether a site's PHP runs on the host rather than
+// in a container, which decides how it reaches lerd services: loopback and the
+// published host ports instead of container DNS names.
+func usesLoopbackServices(site *config.Site) bool {
+	return site.IsHostProxy() || site.IsNative()
+}
+
+// usesLoopbackServicesIn is usesLoopbackServices against a runtime mode given to
+// it rather than read from the config, so the callers that already know the mode
+// (or have to work without a config on disk) share the same rule.
+func usesLoopbackServicesIn(site *config.Site, mode string) bool {
+	return site.IsHostProxy() || site.ServedNatively(mode)
+}
+
 // rewriteEnvForHostProxy adapts lerd's computed service connection values for a
 // host-proxy app. Bare "lerd-*" hostnames become 127.0.0.1, and *_PORT values
 // map from the container port to the service's published host port (e.g. mariadb
@@ -55,7 +70,125 @@ func rewriteEnvForHostProxy(updates map[string]string, serviceNames []string) {
 			}
 		}
 	}
-	applyHostProxyEnv(updates, containerToHost)
+	// Which container port each service listens on, so a host-only value can
+	// keep a port that has no sibling key to live in.
+	serviceContainerPort := map[string]string{}
+	for _, name := range names {
+		for _, mapping := range servicePortMappings(name) {
+			if _, container, ok := splitHostContainerPort(mapping); ok {
+				if _, seen := serviceContainerPort[name]; !seen {
+					serviceContainerPort[name] = container
+				}
+			}
+		}
+	}
+	applyHostProxyEnvWithPorts(updates, containerToHost, serviceContainerPort)
+}
+
+// loopbackServiceNames lists the services whose container port must be mapped
+// to the published host port. Every known service is included, not just the
+// ones a .lerd.yaml declares: a project without that file still has a DSN
+// naming lerd-mysql:3306, and leaving it out of the map rewrites the host to
+// loopback while keeping the container's port, which on a machine running its
+// own MySQL on 3306 connects successfully to the wrong database. Mapping a
+// service the project does not use costs nothing, since only tokens actually
+// present in the values are rewritten.
+func loopbackServiceNames(declared map[string]bool, known []string) []string {
+	seen := make(map[string]bool, len(declared)+len(known))
+	names := make([]string, 0, len(declared)+len(known))
+	add := func(n string) {
+		if n == "" || seen[n] {
+			return
+		}
+		seen[n] = true
+		names = append(names, n)
+	}
+	for n := range declared {
+		add(n)
+	}
+	for _, n := range known {
+		add(n)
+	}
+	return names
+}
+
+// applyServiceDomainEnv repoints URL-shaped values at the domain a service is
+// served on. A service with a domain is one whose URLs leave the machine's own
+// processes and reach a browser, and the container name lerd otherwise writes
+// resolves nowhere out there. Only values carrying a scheme are touched, so a
+// bare connection host (REDIS_HOST=lerd-redis) is left where it belongs.
+func applyServiceDomainEnv(updates map[string]string, domains map[string]string, ports map[string]int) {
+	if len(domains) == 0 {
+		return
+	}
+	// Sorted so a value naming two services rewrites the same way every run.
+	names := make([]string, 0, len(domains))
+	for name := range domains {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for key, value := range updates {
+		if !strings.Contains(value, "://") {
+			continue
+		}
+		rewritten := value
+		for _, name := range names {
+			target := "https://" + domains[name]
+			rewritten = strings.ReplaceAll(rewritten, "http://lerd-"+name, target)
+			if port := ports[name]; port > 0 {
+				host := fmt.Sprintf(":%d", port)
+				rewritten = strings.ReplaceAll(rewritten, "http://localhost"+host, target)
+				rewritten = strings.ReplaceAll(rewritten, "http://127.0.0.1"+host, target)
+			}
+		}
+		// The container port survives the host swap ("https://rustfs.test:9000"),
+		// and nginx serves the domain on 443; strip what the scheme now implies.
+		rewritten = stripServiceDomainPorts(rewritten, domains)
+		if rewritten != value {
+			updates[key] = rewritten
+		}
+	}
+}
+
+// stripServiceDomainPorts removes an explicit port left on a service domain by
+// the rewrite above. Scoped to the domains lerd itself just substituted, so a
+// port on any other host in the value is untouched.
+func stripServiceDomainPorts(value string, domains map[string]string) string {
+	for _, domain := range domains {
+		prefix := "https://" + domain + ":"
+		for {
+			i := strings.Index(value, prefix)
+			if i < 0 {
+				break
+			}
+			rest := value[i+len(prefix):]
+			j := 0
+			for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+				j++
+			}
+			if j == 0 {
+				break
+			}
+			value = value[:i+len("https://"+domain)] + rest[j:]
+		}
+	}
+	return value
+}
+
+// serviceDomainPorts pairs each service that has a domain with the host port it
+// publishes, so a value written against localhost is recognised too.
+func serviceDomainPorts(domains map[string]string) map[string]int {
+	ports := map[string]int{}
+	for name := range domains {
+		sc := config.ServiceConfigFor(name)
+		if sc.PublishedPort > 0 {
+			ports[name] = sc.PublishedPort
+			continue
+		}
+		ports[name] = sc.Port
+	}
+	return ports
 }
 
 // hostProxyConnKey reports whether an env key names a service connection target
@@ -65,6 +198,16 @@ func rewriteEnvForHostProxy(updates map[string]string, serviceNames []string) {
 func hostProxyConnKey(k string) bool {
 	for _, suf := range []string{"_HOST", "_PORT", "_URL", "_DSN", "_ENDPOINT", "_SERVER"} {
 		if strings.HasSuffix(k, suf) {
+			return true
+		}
+	}
+	// Frameworks that keep configuration in a PHP array address it with dotted
+	// paths instead (TYPO3 writes DB.Connections.Default.host). Match the last
+	// segment so those are covered without loosening the guard for everything
+	// else: a key like DB.Connections.Default.charset still has to be left be.
+	if idx := strings.LastIndex(k, "."); idx >= 0 {
+		switch strings.ToLower(k[idx+1:]) {
+		case "host", "port", "url", "dsn", "endpoint", "server":
 			return true
 		}
 	}
@@ -81,14 +224,24 @@ var lerdContainerHostRe = regexp.MustCompile(`lerd-[a-z0-9-]+(?::\d+)?`)
 // port, and a discrete *_PORT value with no host alongside is remapped too.
 // Split from rewriteEnvForHostProxy so the logic is testable without services.
 func applyHostProxyEnv(updates, containerToHost map[string]string) {
+	applyHostProxyEnvWithPorts(updates, containerToHost, nil)
+}
+
+// applyHostProxyEnvWithPorts is applyHostProxyEnv plus the container port each
+// service listens on, which is what lets a bare host token keep a port that
+// would otherwise be lost. Frameworks differ here: Laravel splits DB_HOST and
+// DB_PORT, while WordPress writes the port into DB_HOST and has no DB_PORT
+// constant at all, so a bare rewrite there silently retargets the app at
+// whatever owns the container's port on the host.
+func applyHostProxyEnvWithPorts(updates, containerToHost, serviceContainerPort map[string]string) {
 	for k, v := range updates {
 		if !hostProxyConnKey(k) {
 			continue
 		}
 		nv := lerdContainerHostRe.ReplaceAllStringFunc(v, func(m string) string {
-			_, port, found := strings.Cut(m, ":")
+			name, port, found := strings.Cut(m, ":")
 			if !found {
-				return hostProxyLoopback
+				return hostProxyLoopback + bareHostPortSuffix(k, name, updates, containerToHost, serviceContainerPort)
 			}
 			if mapped, ok := containerToHost[port]; ok {
 				port = mapped
@@ -99,9 +252,9 @@ func applyHostProxyEnv(updates, containerToHost map[string]string) {
 			updates[k] = nv
 			continue
 		}
-		// No host token to anchor on: a standalone *_PORT (e.g. DB_PORT=3306)
-		// still needs remapping to its published host port.
-		if strings.HasSuffix(k, "_PORT") {
+		// No host token to anchor on: a standalone port key (DB_PORT=3306, or
+		// TYPO3's DB.Connections.Default.port) still needs remapping.
+		if isPortKey(k) {
 			if mapped, ok := containerToHost[v]; ok {
 				updates[k] = mapped
 			}
@@ -109,30 +262,49 @@ func applyHostProxyEnv(updates, containerToHost map[string]string) {
 	}
 }
 
+// isPortKey reports whether a key holds a bare port number, in either the
+// SCREAMING_SNAKE or the dotted php-array spelling.
+func isPortKey(k string) bool {
+	if strings.HasSuffix(k, "_PORT") {
+		return true
+	}
+	idx := strings.LastIndex(k, ".")
+	return idx >= 0 && strings.EqualFold(k[idx+1:], "port")
+}
+
+// bareHostPortSuffix returns ":<port>" when a host-only value has to carry the
+// published port itself, and "" when it must not. It carries the port only if
+// the service is published somewhere other than its container port and no
+// sibling *_PORT key is there to hold it.
+func bareHostPortSuffix(key, token string, updates, containerToHost, serviceContainerPort map[string]string) string {
+	svc := strings.TrimPrefix(token, "lerd-")
+	container, ok := serviceContainerPort[svc]
+	if !ok {
+		return ""
+	}
+	host, ok := containerToHost[container]
+	if !ok || host == container {
+		return ""
+	}
+	if sibling, found := strings.CutSuffix(key, "_HOST"); found {
+		if _, has := updates[sibling+"_PORT"]; has {
+			return ""
+		}
+	}
+	if idx := strings.LastIndex(key, "."); idx >= 0 && strings.EqualFold(key[idx+1:], "host") {
+		if _, has := updates[key[:idx+1]+"port"]; has {
+			return ""
+		}
+	}
+	return ":" + host
+}
+
 // servicePortMappings returns the "host:container" port mappings a service
 // publishes. The installed/custom service is consulted first so a pinned or
 // non-canonical version reports its real published port; the default preset is
 // the fallback for services not separately registered.
 func servicePortMappings(name string) []string {
-	var ports []string
-	if svc, err := config.LoadCustomService(name); err == nil && len(svc.Ports) > 0 {
-		ports = svc.Ports
-	} else if svc, err := config.DefaultPresetMeta(name); err == nil && len(svc.Ports) > 0 {
-		ports = svc.Ports
-	}
-	if len(ports) == 0 {
-		return nil
-	}
-	// Apply a published-port override so a host-proxy app's loopback target
-	// follows the moved port (e.g. lerd-mysql 3306 → 3307 when a host MySQL owns
-	// 3306, set manually via `lerd service port` or by the port-ownership guard).
-	// The override lives in global config, not the preset/quadlet meta the lookups
-	// above read, so without this the host-proxy .env would keep pointing at the
-	// vacated default — and connect to the host server instead of lerd's container.
-	if pp := config.ServicePublishedPort(name); pp > 0 {
-		ports = podman.SetPrimaryHostPort(ports, pp)
-	}
-	return ports
+	return serviceops.HostPortMappings(name)
 }
 
 // splitHostContainerPort parses a podman port mapping ("3411:3306", or
@@ -333,6 +505,11 @@ func emptyEnvFile(envFormat string) []byte {
 func frameworkManagesEnv(cwd string) bool {
 	name, ok := config.DetectFrameworkForDir(cwd)
 	if !ok {
+		// Nothing declares one either: there is no env mapping to write, and
+		// running anyway only prints "no framework detected" on every sweep.
+		if proj, err := config.LoadProjectConfig(cwd); err == nil && proj != nil && proj.Framework == "" {
+			return false
+		}
 		return true // unknown framework: let runEnv decide as before
 	}
 	fw, ok := config.GetFrameworkForDir(name, cwd)
@@ -663,6 +840,17 @@ var serviceDetectors = map[string]func(map[string]string) bool{
 	},
 }
 
+// envProvisionFailure turns the per-site state an env run could not create into
+// the error the run ends with. The .env has already been written by then, which
+// is what makes the silent version dangerous: the file names a database or a
+// bucket that does not exist, and the app is the first thing to find out.
+func envProvisionFailure(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf(".env was written but service state is missing, rerun `lerd env` once the service is reachable: %w", errors.Join(errs...))
+}
+
 func runEnv(_ *cobra.Command, _ []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -672,6 +860,9 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	if envDomainOnly {
 		return runEnvDomainOnly(cwd)
 	}
+	// State lerd was asked to create for this site and could not. Collected
+	// rather than warned about in passing, so the run exits non-zero.
+	var provisionErrs []error
 
 	// Determine framework-specific env file path and format
 	site, err := ensureSiteForCwd()
@@ -738,14 +929,15 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		// can inspect what changed and restore with `lerd env:restore`), but only
 		// if lerd hasn't already written to it — detected by presence of the word
 		// "lerd" in the file (e.g. DB_HOST=lerd-mysql).
-		backupPath := filepath.Join(cwd, ".env.before_lerd")
+		backupRelPath := envBackupPath(envRelPath)
+		backupPath := filepath.Join(cwd, backupRelPath)
 		if !envFileHasLerd(envPath) {
 			if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 				if err := copyEnvFile(envPath, backupPath); err != nil {
 					feedback.Warn("could not back up %s: %v", envRelPath, err)
 				} else {
-					envInfo("  Backed up original %s → .env.before_lerd\n", envRelPath)
-					addToGitignore(cwd, ".env.before_lerd")
+					envInfo("  Backed up original %s → %s\n", envRelPath, backupRelPath)
+					addToGitignore(cwd, backupRelPath)
 				}
 			}
 		}
@@ -919,12 +1111,12 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			}
 			if isDB {
 				if err := ensureServiceRunning(svc); err != nil {
-					feedback.Warn("could not start %s: %v", svc, err)
+					provisionErrs = append(provisionErrs, fmt.Errorf("%s did not start, so its databases were not created: %w", svc, err))
 				} else {
 					for _, name := range []string{dbName, dbName + "_testing"} {
 						created, err := createDatabase(svc, name)
 						if err != nil {
-							feedback.Warn("could not create database %q: %v", name, err)
+							provisionErrs = append(provisionErrs, fmt.Errorf("database %q: %w", name, err))
 						} else if created {
 							envInfo("  Created database %q\n", name)
 						} else {
@@ -949,7 +1141,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 				}
 				created, err := createS3Bucket(bucketName)
 				if err != nil {
-					feedback.Warn("could not create bucket %q: %v", bucketName, err)
+					provisionErrs = append(provisionErrs, fmt.Errorf("bucket %q: %w", bucketName, err))
 				} else if created {
 					envInfo("  Created bucket %q\n", bucketName)
 				} else {
@@ -999,12 +1191,12 @@ func runEnv(_ *cobra.Command, _ []string) error {
 
 			if isDB {
 				if err := ensureServiceRunning(svc); err != nil {
-					feedback.Warn("could not start %s: %v", svc, err)
+					provisionErrs = append(provisionErrs, fmt.Errorf("%s did not start, so its databases were not created: %w", svc, err))
 				} else {
 					for _, name := range []string{dbName, dbName + "_testing"} {
 						created, err := createDatabase(svc, name)
 						if err != nil {
-							feedback.Warn("could not create database %q: %v", name, err)
+							provisionErrs = append(provisionErrs, fmt.Errorf("database %q: %w", name, err))
 						} else if created {
 							envInfo("  Created database %q\n", name)
 						} else {
@@ -1033,7 +1225,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 				// up, or rustfs was already running before lerd env ran.
 				created, err := createS3Bucket(bucketName)
 				if err != nil {
-					feedback.Warn("could not create bucket %q: %v", bucketName, err)
+					provisionErrs = append(provisionErrs, fmt.Errorf("bucket %q: %w", bucketName, err))
 				} else if created {
 					envInfo("  Created bucket %q\n", bucketName)
 				} else {
@@ -1169,14 +1361,18 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			continue
 		}
 		if err := ensureServiceRunning(svc.Name); err != nil {
-			feedback.Warn("could not start %s: %v", svc.Name, err)
+			if isDB {
+				provisionErrs = append(provisionErrs, fmt.Errorf("%s did not start, so its databases were not created: %w", svc.Name, err))
+			} else {
+				feedback.Warn("could not start %s: %v", svc.Name, err)
+			}
 			continue
 		}
 		if isDB {
 			for _, name := range []string{dbName, dbName + "_testing"} {
 				created, err := createDatabase(svc.Name, name)
 				if err != nil {
-					feedback.Warn("could not create database %q: %v", name, err)
+					provisionErrs = append(provisionErrs, fmt.Errorf("database %q: %w", name, err))
 				} else if created {
 					envInfo("  Created database %q\n", name)
 				} else {
@@ -1230,14 +1426,17 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		envInfo("  Setting %s=%s\n", urlKey, url)
 	}
 
-	// 4d. Host-proxy apps run on the host, so point service connections at
-	// loopback and the published host ports instead of container DNS names.
-	if site.IsHostProxy() {
-		names := make([]string, 0, len(lerdYAMLServices))
-		for n := range lerdYAMLServices {
-			names = append(names, n)
-		}
-		rewriteEnvForHostProxy(updates, names)
+	// 4d. Apps whose PHP runs on the host reach services over loopback and the
+	// published host ports instead of container DNS names.
+	if usesLoopbackServices(site) {
+		rewriteEnvForHostProxy(updates, loopbackServiceNames(lerdYAMLServices, knownServices()))
+	}
+
+	// 4d-bis. A service served on its own domain is reachable at that name from
+	// the app container and the browser alike, which is the only shape that
+	// works for a URL whose host is inside its signature.
+	if domains := config.ServiceDomains(); len(domains) > 0 {
+		applyServiceDomainEnv(updates, domains, serviceDomainPorts(domains))
 	}
 
 	// 4e. Apply personal .env.lerd_override values last so they win over lerd's
@@ -1345,6 +1544,10 @@ func runEnv(_ *cobra.Command, _ []string) error {
 		envInfo("  IDE database connection updated in .idea\n")
 	}
 
+	if err := envProvisionFailure(provisionErrs); err != nil {
+		return err
+	}
+
 	envInfo("Done.\n")
 	return nil
 }
@@ -1412,16 +1615,12 @@ func alignWorktreeEnvDBConnection(site *config.Site, mainEnvPath, envRelPath, en
 
 // frameworkServiceDetected returns true if any detect rule in def matches the env map.
 func frameworkServiceDetected(def config.FrameworkServiceDef, envMap map[string]string) bool {
-	for _, rule := range def.Detect {
-		val, exists := envMap[rule.Key]
-		if !exists {
-			continue
-		}
-		if rule.ValuePrefix == "" || strings.HasPrefix(val, rule.ValuePrefix) {
-			return true
-		}
+	// Unlike the database-target lookup, a service declaring no rules here is
+	// not written: there is nothing saying the project uses it.
+	if len(def.Detect) == 0 {
+		return false
 	}
-	return false
+	return config.DetectRulesMatch(def.Detect, envMap)
 }
 
 // CreateDatabase is the exported variant of createDatabase. Used by callers
@@ -1445,8 +1644,9 @@ func s3BucketName(name string) string { return serviceops.S3BucketName(name) }
 func createS3Bucket(name string) (bool, error) { return serviceops.EnsureS3Bucket(name) }
 
 // ensureServiceRunning starts the service if it is not already active, then
-// waits until it is ready to accept connections before returning.
-func ensureServiceRunning(name string) error {
+// waits until it is ready to accept connections before returning. A var so the
+// link and env flows can be driven in tests without a live podman.
+var ensureServiceRunning = func(name string) error {
 	unit := "lerd-" + name
 	status, _ := podman.UnitStatus(unit)
 	if status != "active" {
@@ -1658,13 +1858,37 @@ func runSiteInit(svc *config.CustomService, ctx siteTemplateCtx) {
 func NewEnvRestoreCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "env:restore",
-		Short: "Restore .env from the pre-lerd backup (.env.before_lerd)",
-		Long: `Restores the .env file from the backup that 'lerd env' created the first
-time it was run on this project (.env.before_lerd).
+		Short: "Restore the env file from the pre-lerd backup",
+		Long: `Restores the project's env file from the backup that 'lerd env' created the
+first time it was run on this project, kept next to the file itself
+(.env.before_lerd for a plain dotenv project).
 
 Useful when switching back from lerd to Laravel Sail or another environment.`,
 		RunE: runEnvRestore,
 	}
+}
+
+// envBackupPath names the pre-lerd copy of an env file, next to the file it was
+// taken from. A project whose env is the root .env keeps the long-standing
+// .env.before_lerd; one whose configuration lives elsewhere (CakePHP's
+// config/app_local.php, WordPress's wp-config.php) keeps its backup beside it
+// rather than as PHP source under a dotenv name at the project root.
+func envBackupPath(envRelPath string) string {
+	return envRelPath + ".before_lerd"
+}
+
+// restoreEnvBackup copies the pre-lerd backup back over the env file it was
+// taken from.
+func restoreEnvBackup(cwd, envRelPath string) error {
+	backupRelPath := envBackupPath(envRelPath)
+	backupPath := filepath.Join(cwd, backupRelPath)
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		return fmt.Errorf("%s not found — run 'lerd env' first to create a backup", backupRelPath)
+	}
+	if err := copyEnvFile(backupPath, filepath.Join(cwd, envRelPath)); err != nil {
+		return fmt.Errorf("restoring %s: %w", envRelPath, err)
+	}
+	return nil
 }
 
 func runEnvRestore(_ *cobra.Command, _ []string) error {
@@ -1673,16 +1897,21 @@ func runEnvRestore(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	backupPath := filepath.Join(cwd, ".env.before_lerd")
-	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-		return fmt.Errorf(".env.before_lerd not found — run 'lerd env' first to create a backup")
+	// The file to restore is the one the framework declares, not a root .env:
+	// writing there would leave the real configuration lerd edited untouched.
+	envRelPath := ".env"
+	if fwName, ok := config.DetectFrameworkForDir(cwd); ok {
+		if fw, found := config.GetFrameworkForDir(fwName, cwd); found {
+			if rel, _ := fw.Env.ResolveWrite(cwd); rel != "" {
+				envRelPath = rel
+			}
+		}
 	}
 
-	envPath := filepath.Join(cwd, ".env")
-	if err := copyEnvFile(backupPath, envPath); err != nil {
-		return fmt.Errorf("restoring .env: %w", err)
+	if err := restoreEnvBackup(cwd, envRelPath); err != nil {
+		return err
 	}
-	fmt.Println("Restored .env from .env.before_lerd")
+	fmt.Printf("Restored %s from %s\n", envRelPath, envBackupPath(envRelPath))
 	fmt.Println("Run 'lerd env' again to re-apply lerd connection settings.")
 	return nil
 }

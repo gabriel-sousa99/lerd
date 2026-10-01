@@ -68,6 +68,11 @@ type Framework struct {
 	// dropdown. See FrameworkCommand for the schema. Projects extend or
 	// override this list in .lerd.yaml; use ResolveCommands to merge.
 	Commands []FrameworkCommand `yaml:"commands,omitempty"`
+	// VendorBinArgs are arguments lerd puts in front of a composer binary run
+	// through the vendor/bin fallback, keyed by the binary's name. wp-cli
+	// refuses to start as root and lerd's containers are root, so WordPress
+	// declares --allow-root here rather than making every user type it.
+	VendorBinArgs map[string][]string `yaml:"vendor_bin_args,omitempty" json:"vendor_bin_args,omitempty"`
 	// HostCommands names the console commands that must run on the host rather
 	// than in the container, and the binary that runs them. See HostCommand.
 	HostCommands []HostCommand `yaml:"host_commands,omitempty"`
@@ -104,6 +109,11 @@ type Framework struct {
 	// doctor runs in addition to the universal defaults (env, dependency, and
 	// audit checks every framework gets). See FrameworkDoctor.
 	Doctor *FrameworkDoctor `yaml:"doctor,omitempty"`
+
+	// Devtools declares where the lerd_devtools extension should observe this
+	// framework for the Debug window, so a framework's queue can be reported
+	// without any Go code knowing its name.
+	Devtools *FrameworkDevtools `yaml:"devtools,omitempty"`
 	// Nginx, when set, declares extra server-block config the framework needs
 	// (Magento's /setup, /static, and /media handling). See FrameworkNginx.
 	Nginx *FrameworkNginx `yaml:"nginx,omitempty"`
@@ -111,6 +121,38 @@ type Framework struct {
 	// (Magento 2.4 has no MySQL catalog search engine, so it needs opensearch).
 	// Link installs and starts them; the doctor reports one that goes missing.
 	Requires []string `yaml:"requires,omitempty"`
+}
+
+// FrameworkDevtools declares engine-level capture seams. Jobs are the only kind
+// so far: one entry per method that runs a queued job, which the extension
+// observes and reports as processing then processed or failed.
+type FrameworkDevtools struct {
+	Jobs []DevtoolsSeam `yaml:"jobs,omitempty"`
+}
+
+// DevtoolsSeam is one observed method. Exactly one of Class, Implements or
+// Extends selects which classes it applies to, and Name says where the job's
+// name comes from: "this" or "arg:N", each optionally with a ".method:getHook"
+// or ".prop:queue" accessor. An object with no accessor yields its class.
+type DevtoolsSeam struct {
+	Class      string `yaml:"class,omitempty"`
+	Implements string `yaml:"implements,omitempty"`
+	Extends    string `yaml:"extends,omitempty"`
+	Method     string `yaml:"method"`
+	Name       string `yaml:"name,omitempty"`
+}
+
+// Target is the class, interface or parent this seam matches on, with the kind
+// of match it is: "class", "implements" or "extends".
+func (s DevtoolsSeam) Target() (kind, name string) {
+	switch {
+	case s.Implements != "":
+		return "implements", s.Implements
+	case s.Extends != "":
+		return "extends", s.Extends
+	default:
+		return "class", s.Class
+	}
 }
 
 // FrameworkNginx carries a raw nginx block spliced into the site's server block
@@ -223,16 +265,17 @@ type FrameworkWorker struct {
 	// definitions under workers/<icon>.svg. Color is the tone it is inked in;
 	// a worker that declares none takes its framework's, which is what tells a
 	// Laravel queue apart from a Symfony one at a glance.
-	Icon          string         `yaml:"icon,omitempty"`
-	Color         string         `yaml:"color,omitempty"`
-	Restart       string         `yaml:"restart,omitempty"`        // always | on-failure (default: always)
-	Schedule      string         `yaml:"schedule,omitempty"`       // systemd OnCalendar expression (e.g. "minutely"); when set, the worker is run as a Type=oneshot service triggered by a .timer rather than a long-running daemon. Use this for Laravel <=10 schedule:run, cron-style cleanup tasks, etc.
-	Check         *FrameworkRule `yaml:"check,omitempty"`          // only show when check passes (file exists or composer package installed)
-	ExcludeCheck  *FrameworkRule `yaml:"exclude_check,omitempty"`  // only show when check FAILS (e.g. queue is hidden when laravel/horizon is installed because horizon supersedes it)
-	ConflictsWith []string       `yaml:"conflicts_with,omitempty"` // workers to stop before starting this one (e.g. horizon conflicts_with queue)
-	Proxy         *WorkerProxy   `yaml:"proxy,omitempty"`          // WebSocket/HTTP proxy config for nginx
-	Health        *WorkerHealth  `yaml:"health,omitempty"`         // reachability probe: process alive but server not accepting = unhealthy
-	Host          bool           `yaml:"host,omitempty"`           // run on the host via fnm instead of inside the PHP-FPM container
+	Icon          string           `yaml:"icon,omitempty"`
+	Color         string           `yaml:"color,omitempty"`
+	Restart       string           `yaml:"restart,omitempty"`        // always | on-failure (default: always)
+	Schedule      string           `yaml:"schedule,omitempty"`       // systemd OnCalendar expression (e.g. "minutely"); when set, the worker is run as a Type=oneshot service triggered by a .timer rather than a long-running daemon. Use this for Laravel <=10 schedule:run, cron-style cleanup tasks, etc.
+	Check         *FrameworkRule   `yaml:"check,omitempty"`          // only show when check passes (file exists or composer package installed)
+	ExcludeCheck  *FrameworkRule   `yaml:"exclude_check,omitempty"`  // only show when check FAILS (e.g. queue is hidden when laravel/horizon is installed because horizon supersedes it)
+	ConflictsWith []string         `yaml:"conflicts_with,omitempty"` // workers to stop before starting this one (e.g. horizon conflicts_with queue)
+	Proxy         *WorkerProxy     `yaml:"proxy,omitempty"`          // WebSocket/HTTP proxy config for nginx
+	DevServer     *WorkerDevServer `yaml:"dev_server,omitempty"`     // the dev server this worker starts
+	Health        *WorkerHealth    `yaml:"health,omitempty"`         // reachability probe: process alive but server not accepting = unhealthy
+	Host          bool             `yaml:"host,omitempty"`           // run on the host via fnm instead of inside the PHP-FPM container
 	// PerWorktree opts the worker into running independently per git worktree
 	// (lerd-<wname>-<site>-<wt>). Defaults to false; set true on workers that
 	// need a separate process per checkout (e.g. dev servers like vite).
@@ -254,6 +297,15 @@ func (w FrameworkWorker) IsPerWorktree() bool {
 	return w.PerWorktree != nil && *w.PerWorktree
 }
 
+// WorkerDevServer names the dev server a worker starts, for a worker that
+// starts it through something else: a framework's own console command reaches
+// vite as surely as `npm run dev` does, and reading the command cannot tell.
+// Declaring it here is what opts the framework into lerd's dev server handling
+// rather than lerd inferring it from a command string.
+type WorkerDevServer struct {
+	Tool string `yaml:"tool"` // the dev server, e.g. "vite"
+}
+
 // WorkerProxy describes an HTTP/WebSocket proxy that nginx should configure
 // for this worker. When present, nginx adds a location block that proxies
 // requests to the worker inside the PHP-FPM container.
@@ -266,7 +318,23 @@ type WorkerProxy struct {
 	Paths       []string `yaml:"paths,omitempty"`
 	PortEnvKey  string   `yaml:"port_env_key,omitempty"` // env key holding the port (e.g. "REVERB_SERVER_PORT")
 	DefaultPort int      `yaml:"default_port,omitempty"` // fallback port if env key is missing (default: 8080)
+	// Upstream names where the worker listens: "host" for a worker that runs on
+	// the host (host: true), "container" (the default) for one inside the site's
+	// FPM container. A host worker proxied to the container answers nothing.
+	Upstream string `yaml:"upstream,omitempty"`
+	// Port is "pinned" when lerd owns the port rather than reading it from the
+	// site's .env: it allocates one, keeps it clear of other sites and hands it
+	// to the worker through PortEnvKey. For a server configured from .env, leave
+	// this empty and name the key it reads.
+	Port string `yaml:"port,omitempty"`
 }
+
+// OnHost reports whether the worker's server listens on the host rather than
+// inside the site's FPM container.
+func (p *WorkerProxy) OnHost() bool { return p != nil && p.Upstream == "host" }
+
+// PinnedPort reports whether lerd allocates and owns this worker's port.
+func (p *WorkerProxy) PinnedPort() bool { return p != nil && p.Port == "pinned" }
 
 // WorkerService is a running lerd service a worker depends on. WhenEnv is a
 // "KEY=VALUE" pair the site's .env has to carry for the dependency to apply, so
@@ -683,10 +751,40 @@ type FrameworkServiceDef struct {
 
 // FrameworkServiceDetect is a single detection condition.
 // The service is considered active when Key exists in the env file and,
-// if ValuePrefix is set, its value starts with that prefix.
+// if ValuePrefix is set, its value starts with that prefix. With Absent the
+// condition inverts: it matches when the key is not set at all, which is how a
+// framework whose scaffold leaves the engine unset still resolves to the engine
+// that framework itself defaults to.
 type FrameworkServiceDetect struct {
 	Key         string `yaml:"key"`
 	ValuePrefix string `yaml:"value_prefix,omitempty"`
+	Absent      bool   `yaml:"absent,omitempty"`
+}
+
+// DetectRulesMatch reports whether any of a declaration's detect rules matches
+// the values read from a project. No rules means nothing rules it out, so the
+// declaration applies. Shared by every caller so the three that evaluate these
+// rules cannot drift apart.
+func DetectRulesMatch(rules []FrameworkServiceDetect, vals map[string]string) bool {
+	if len(rules) == 0 {
+		return true
+	}
+	for _, rule := range rules {
+		val, exists := vals[rule.Key]
+		if rule.Absent {
+			if !exists || val == "" {
+				return true
+			}
+			continue
+		}
+		if !exists {
+			continue
+		}
+		if rule.ValuePrefix == "" || strings.HasPrefix(val, rule.ValuePrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveWrite returns the env file lerd writes for a project, and its format.
@@ -1136,7 +1234,48 @@ func GetFrameworkForScaffold(name, version string) (*Framework, bool) {
 	if base == nil || (base.Create == "" && builtinFramework(name) != nil) {
 		return GetFramework(name)
 	}
+	// A framework's newest major can ship no project skeleton at all while the
+	// ones before it do. Only a run that pinned that major asked for it, so an
+	// unpinned one starts from the newest definition that can still scaffold.
+	if base.Create == "" && version == "" {
+		if creatable := newestScaffoldableFramework(name); creatable != nil {
+			base = creatable
+		}
+	}
 	return mergeBuiltinTinker(mergeBuiltinFrankenPHP(mergeUserOverlay(base))), true
+}
+
+// newestScaffoldableFramework returns the highest major of a framework whose
+// definition carries a create command, or nil when none does. It walks the
+// majors this install knows of, published as well as installed, since a machine
+// that has only ever fetched the newest definition has nothing older on disk.
+func newestScaffoldableFramework(name string) *Framework {
+	vers := availableFrameworkVersions(name)
+	for i := len(vers) - 1; i >= 0; i-- {
+		v := strconv.Itoa(vers[i])
+		fw := loadFrameworkYAML(filepath.Join(StoreFrameworksDir(), name+"@"+v+".yaml"))
+		if fw == nil && frameworkFetchHook != nil {
+			fw, _ = frameworkFetchHook(name, v)
+		}
+		if fw != nil && fw.Create != "" {
+			return fw
+		}
+	}
+	return nil
+}
+
+// FrameworkScaffoldSupport reports, for every major this install holds a
+// definition of, whether that definition can start a project. Scaffolding is a
+// question per major rather than per framework: the newest one can ship no
+// skeleton while the ones before it do.
+func FrameworkScaffoldSupport(name string) map[string]bool {
+	out := map[string]bool{}
+	for _, path := range versionedFrameworkPaths(name) {
+		if fw := loadFrameworkYAML(path); fw != nil && fw.Version != "" {
+			out[fw.Version] = fw.Create != ""
+		}
+	}
+	return out
 }
 
 // loadBaseFramework returns the base definition for a framework:
@@ -1809,6 +1948,9 @@ func SanitizeProjectFrameworkDef(def *Framework) *Framework {
 	// auto_prepend_file would make every PHP process lerd runs execute a file from
 	// the repo, so php.ini directives come only from the trusted store.
 	safe.PHP.CLIIni = nil
+	// Injecting arguments into a binary the user asked for is the project
+	// steering a command it does not own, so only the trusted store may.
+	safe.VendorBinArgs = nil
 	return safe
 }
 
@@ -1854,18 +1996,31 @@ func DetectFramework(dir string) (string, bool) {
 	// Frameworks built on top of Laravel (e.g. Statamic) are more specific
 	// than the generic Laravel detection, so they should win.
 	var matches []string
+	matched := map[string]bool{}
 	seen := map[string]bool{}
 	for _, fwDir := range []string{FrameworksDir(), StoreFrameworksDir()} {
 		entries, _ := filepath.Glob(filepath.Join(fwDir, "*.yaml"))
+		// Every major of a framework gets a look, because majors can detect on
+		// entirely different evidence: CodeIgniter 3 keys off
+		// system/core/CodeIgniter.php and CodeIgniter 4 off spark, so stopping at
+		// the first file the glob returns leaves one of them undetectable. Names
+		// are claimed per directory instead, so a user definition still shadows
+		// the store's copy of the same framework outright.
+		claimed := map[string]bool{}
 		for _, yamlPath := range entries {
 			fw := loadFrameworkYAML(yamlPath)
 			if fw == nil || seen[fw.Name] {
 				continue
 			}
-			seen[fw.Name] = true
-			if matchesFramework(dir, fw) {
-				matches = append(matches, fw.Name)
+			claimed[fw.Name] = true
+			if matched[fw.Name] || !matchesFramework(dir, fw) {
+				continue
 			}
+			matched[fw.Name] = true
+			matches = append(matches, fw.Name)
+		}
+		for name := range claimed {
+			seen[name] = true
 		}
 	}
 
@@ -1876,14 +2031,17 @@ func DetectFramework(dir string) (string, bool) {
 			continue
 		}
 		seen[e.Name] = true
-		if matchesFramework(dir, &Framework{Name: e.Name, Detect: e.Detect}) {
-			matches = append(matches, e.Name)
+		if matched[e.Name] || !matchesFramework(dir, &Framework{Name: e.Name, Detect: e.Detect}) {
+			continue
 		}
+		matched[e.Name] = true
+		matches = append(matches, e.Name)
 	}
 
 	// Built-in Laravel and Symfony as fallbacks.
 	for _, fw := range builtinFrameworks() {
-		if !seen[fw.Name] && matchesFramework(dir, fw) {
+		if !seen[fw.Name] && !matched[fw.Name] && matchesFramework(dir, fw) {
+			matched[fw.Name] = true
 			matches = append(matches, fw.Name)
 		}
 	}
@@ -2424,19 +2582,46 @@ func (fw *Framework) HasWorker(name, dir string) bool {
 	return true
 }
 
-// WorkerProxy returns the proxy configuration for the first worker that has one
-// and whose check rule passes for the project at dir. Returns nil if no proxy is configured.
-func (fw *Framework) DetectProxy(dir string) (*WorkerProxy, string) {
-	for name, w := range fw.Workers {
+// NamedProxy is one worker's proxy together with the worker it belongs to, so a
+// caller can find the port that worker was given.
+type NamedProxy struct {
+	Worker string
+	Proxy  *WorkerProxy
+}
+
+// DetectProxies returns every worker proxy whose check rule passes for the
+// project at dir, in worker-name order so a vhost renders the same way twice. A
+// project can run an asset server next to a websocket server, and each needs its
+// own location.
+func (fw *Framework) DetectProxies(dir string) []NamedProxy {
+	names := make([]string, 0, len(fw.Workers))
+	for name := range fw.Workers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var out []NamedProxy
+	for _, name := range names {
+		w := fw.Workers[name]
 		if w.Proxy == nil {
 			continue
 		}
 		if w.Check != nil && !MatchesRule(dir, *w.Check) {
 			continue
 		}
-		return w.Proxy, name
+		out = append(out, NamedProxy{Worker: name, Proxy: w.Proxy})
 	}
-	return nil, ""
+	return out
+}
+
+// DetectProxy returns the first worker proxy that applies, for callers that
+// only need to know whether the project has one at all.
+func (fw *Framework) DetectProxy(dir string) (*WorkerProxy, string) {
+	found := fw.DetectProxies(dir)
+	if len(found) == 0 {
+		return nil, ""
+	}
+	return found[0].Proxy, found[0].Worker
 }
 
 // MatchesRule returns true if the given rule matches the project directory. It
@@ -2498,10 +2683,32 @@ func matchesFramework(dir string, fw *Framework) bool {
 func frameworkDetectRules(frameworkName string) []FrameworkRule {
 	matches, _ := filepath.Glob(filepath.Join(StoreFrameworksDir(), frameworkName+"@*.yaml"))
 	matches = append(matches, filepath.Join(StoreFrameworksDir(), frameworkName+".yaml"))
+	// Every major contributes its rules. DetectMajorVersion walks them looking
+	// for the package the project actually locked, and two majors can name
+	// different packages (codeigniter/framework vs codeigniter4/framework), so
+	// one file's rules alone can never tell them apart.
+	var rules []FrameworkRule
+	seen := map[string]bool{}
 	for _, path := range matches {
-		if fw := loadFrameworkYAML(path); fw != nil && len(fw.Detect) > 0 {
-			return fw.Detect
+		fw := loadFrameworkYAML(path)
+		if fw == nil {
+			continue
 		}
+		for _, rule := range fw.Detect {
+			key := strings.Join([]string{
+				rule.File, rule.MissingFile, rule.Composer,
+				strings.Join(rule.ComposerSections, ","),
+				rule.VersionKey, rule.VersionFile, rule.VersionPattern,
+			}, "\x00")
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			rules = append(rules, rule)
+		}
+	}
+	if len(rules) > 0 {
+		return rules
 	}
 	if e := cachedStoreEntryByName(frameworkName); e != nil && len(e.Detect) > 0 {
 		return e.Detect

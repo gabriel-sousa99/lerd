@@ -2,12 +2,18 @@ package update
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/origin"
 )
 
@@ -137,26 +143,50 @@ func FetchLatestPrerelease() (string, error) {
 	return "", fmt.Errorf("fetching latest pre-release: %s", strings.Join(errs, "; "))
 }
 
+// BetaChannel reports whether this install asked to be offered prereleases from
+// a stable version. Overridable in tests.
+var BetaChannel = func() bool {
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return false
+	}
+	return cfg.IsBetaChannel()
+}
+
+// FollowsBetas reports whether currentVersion should be offered prereleases:
+// either it is one already, or the user opted the install into the beta line.
+func FollowsBetas(currentVersion string) bool {
+	return IsPrerelease(StripGitDescribe(StripV(currentVersion))) || BetaChannel()
+}
+
+// LatestFor returns the release tag a user on currentVersion should be offered.
+// A stable install only ever sees stable releases unless it opted into betas. An
+// install already on a beta keeps following the beta line, so the second beta of
+// a cycle arrives the same way the first one did instead of waiting for the user
+// to remember --beta; a stable release outranks the betas it supersedes, which is
+// what ends the run. A prerelease lookup that fails falls back to the stable
+// answer rather than costing the user an update that would have worked.
+func LatestFor(currentVersion string) (string, error) {
+	stable, err := FetchLatestVersion()
+	if err != nil {
+		return "", err
+	}
+	if !FollowsBetas(currentVersion) {
+		return stable, nil
+	}
+	pre, err := FetchLatestPrerelease()
+	if err != nil {
+		return stable, nil
+	}
+	if VersionGreaterThan(StripV(pre), StripV(stable)) {
+		return pre, nil
+	}
+	return stable, nil
+}
+
 func fetchPrereleaseFrom(base string) (string, error) {
 	url := base + "/releases"
-	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "lerd-cli")
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status from %s: HTTP %d", url, resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := releasesJSON(url, tokenFor(url))
 	if err != nil {
 		return "", err
 	}
@@ -172,6 +202,101 @@ func fetchPrereleaseFrom(base string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no pre-release found from %s", url)
+}
+
+// errRejectedToken marks the 401 GitHub answers with when the token it was
+// given has expired or been revoked.
+var errRejectedToken = errors.New("rejected token")
+
+// releasesJSON reads the release list, and when GitHub rejects the token it
+// asks again as nobody: a stale GITHUB_TOKEN left in a shell must not cost an
+// update that would have worked anonymously.
+func releasesJSON(url, token string) ([]byte, error) {
+	body, err := getReleases(url, token, token == "")
+	if token != "" && errors.Is(err, errRejectedToken) {
+		body, err = getReleases(url, "", false)
+		if err != nil {
+			err = fmt.Errorf("%w (GitHub rejected the token in GITHUB_TOKEN or GH_TOKEN)", err)
+		}
+	}
+	return body, err
+}
+
+// getReleases makes one call. suggestToken says whether a failure may point at
+// the token that raises the rate limit, which is wrong to offer to someone who
+// already has one set and had it turned down.
+func getReleases(url, token string, suggestToken bool) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "lerd-cli")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if err := rateLimitError(url, resp, suggestToken); err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("%w: HTTP 401 from %s", errRejectedToken, url)
+		}
+		return nil, fmt.Errorf("unexpected status from %s: HTTP %d", url, resp.StatusCode)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// githubAPIHost is the only host a token may be sent to. A
+// LERD_RELEASES_API_URL override points at a mirror or a test rig, and the
+// user's credentials have no business going there.
+const githubAPIHost = "api.github.com"
+
+// tokenFor returns the GitHub token to authenticate rawURL with, or "" when
+// none is set or the URL is not the real GitHub API over https. An
+// authenticated call gets 5,000 requests an hour instead of the 60 the whole
+// machine shares anonymously.
+func tokenFor(rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || !strings.EqualFold(u.Hostname(), githubAPIHost) {
+		return ""
+	}
+	for _, name := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// rateLimitError turns an exhausted-quota response into an error that says so
+// and when the quota comes back, instead of a bare HTTP 403 that reads like a
+// broken network. It returns nil for any other failure.
+func rateLimitError(url string, resp *http.Response, suggestToken bool) error {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") != "0" {
+		return nil
+	}
+	msg := fmt.Sprintf("GitHub API rate limit exhausted for %s", url)
+	if sec, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+		if d := time.Until(time.Unix(sec, 0)); d > 0 {
+			msg += fmt.Sprintf(", it resets in %d min", int((d+time.Minute-1)/time.Minute))
+		}
+	}
+	if suggestToken {
+		msg += "; set GITHUB_TOKEN to raise the limit"
+	}
+	return fmt.Errorf("%s", msg)
 }
 
 // StripV removes a leading "v" from a version string.

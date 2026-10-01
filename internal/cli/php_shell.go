@@ -5,6 +5,7 @@ import (
 	"os/exec"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envpass"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
@@ -50,6 +51,7 @@ func phpShellExecArgs(container, workDir string) []string {
 	args := append([]string{"exec", "-it"}, terminalColorEnvArgs()...)
 	if workDir != "" {
 		args = append(args, "-w", workDir)
+		args = append(args, envpass.Args(workDir, os.Environ())...)
 	}
 	return append(args, container, "sh", "-c", phpShellInnerScript())
 }
@@ -92,6 +94,9 @@ func runPhpShellExec(container, workDir string) error {
 
 func runPhpShell(_ *cobra.Command, args []string) error {
 	if len(args) == 1 {
+		if err := nativeVersionShellRefusal(); err != nil {
+			return err
+		}
 		return runVersionShell(args[0])
 	}
 
@@ -102,6 +107,10 @@ func runPhpShell(_ *cobra.Command, args []string) error {
 
 	version, err := phpVersionForDir(cwd)
 	if err != nil {
+		return err
+	}
+
+	if err := nativeShellRefusal(cwd); err != nil {
 		return err
 	}
 

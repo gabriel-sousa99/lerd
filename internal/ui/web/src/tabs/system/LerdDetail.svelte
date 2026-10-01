@@ -11,7 +11,7 @@
     disableRemoteControl,
     setRemoteFullAccess
   } from '$stores/remoteControl';
-  import { openRemoteControlModal, openLANProgressModal, type LANAction } from '$stores/modals';
+  import { openRemoteControlModal, openLANProgressModal, openChangelogModal, type LANAction } from '$stores/modals';
   import {
     autostartEnabled,
     loadAutostart,
@@ -19,17 +19,38 @@
     trayEnabled,
     toggleTray,
     startOnDashboardOpen,
-    toggleStartOnDashboardOpen
+    toggleStartOnDashboardOpen,
+    betaUpdates,
+    toggleBetaUpdates
   } from '$stores/autostart';
   import { idleEnabled, idleTimeoutMinutes, loadIdle, saveIdle } from '$stores/idle';
   import Toggle from '$components/Toggle.svelte';
+  import DetailButton from '$components/DetailButton.svelte';
+  import Icon from '$components/Icon.svelte';
   import StatusPill from '$components/StatusPill.svelte';
   import SettingsCard from '$components/SettingsCard.svelte';
   import LANServicesSetting from './LANServicesSetting.svelte';
   import LanguageSwitcher from '$components/LanguageSwitcher.svelte';
+  import PaletteSwitcher from '$components/PaletteSwitcher.svelte';
+  import ImportThemeModal from './ImportThemeModal.svelte';
+  import { palettes } from '$stores/theme';
+  import { paletteErrors, removePalette } from '$stores/palettes';
   import { apiFetch, apiBase } from '$lib/api';
   import { escapeHtml } from '$lib/html';
   import { m } from '../../paraglide/messages.js';
+
+  // A good-looking theme is the one thing people screenshot, so the share links
+  // carry the post ready to go; the handle and the tag stay out of translation.
+  const sharePost = $derived(m.system_theme_sharePost());
+  const shareOnX = $derived(
+    'https://x.com/intent/post?text=' + encodeURIComponent(sharePost + ' @lerdphp https://lerd.sh')
+  );
+  const shareOnBluesky = $derived(
+    'https://bsky.app/intent/compose?text=' + encodeURIComponent(sharePost + ' @lerdphp.bsky.social https://lerd.sh')
+  );
+  const shareOnReddit = $derived(
+    'https://www.reddit.com/r/lerd/submit?title=' + encodeURIComponent(sharePost) + '&text=' + encodeURIComponent('https://lerd.sh')
+  );
 
   // The remote dashboard always binds :7073; when LAN-exposed we surface the
   // address plus a scannable QR so a phone can jump straight in.
@@ -42,6 +63,12 @@
     loadAutostart();
     loadIdle();
   });
+
+  const userPalettes = $derived($palettes.filter((p) => p.source === 'user'));
+  let importThemeOpen = $state(false);
+  // Removing a theme deletes the file, and one stray click on a row that is only
+  // a swatch and a name is too easy. The row asks first.
+  let removingPalette = $state('');
 
   let idleBusy = $state(false);
   let idleMinutesInput = $state(30);
@@ -90,6 +117,20 @@
     } finally {
       trayBusy = false;
     }
+  }
+
+  let betaBusy = $state(false);
+  async function onToggleBetaUpdates() {
+    betaBusy = true;
+    try {
+      await toggleBetaUpdates(!$betaUpdates);
+    } finally {
+      betaBusy = false;
+    }
+    // The notice is filtered by channel, so the card is stale until re-checked.
+    // Deliberately not awaited inside the busy window: the check goes out to
+    // GitHub, and holding the switch disabled that long reads as a hung toggle.
+    loadVersion(true);
   }
 
   let autostartBusy = $state(false);
@@ -154,7 +195,12 @@
 
   <div class="p-3 space-y-3">
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-    <SettingsCard>
+    <!-- Both columns stack two cards so the row ends level: updates on the
+         left, appearance on the right. The cards stretch to share the row, or a
+         column that runs short leaves the page background showing through
+         beside a taller one. -->
+    <div class="flex flex-col gap-3">
+    <SettingsCard class="flex-1">
       <div class="flex items-center justify-between gap-3">
         <div class="min-w-0 text-sm">
           {#if $version.checked && !$version.hasUpdate}
@@ -181,34 +227,38 @@
           <p class="text-xs text-gray-500 dark:text-gray-400">
             {@html m.system_lerd_updateHint({ cmd: '<code class="bg-gray-100 dark:bg-white/10 px-1.5 py-0.5 rounded-sm font-mono">lerd update</code>' })}
           </p>
-          {#if $accessMode.localControl}
-            <button
-              onclick={openUpdateTerminal}
-              disabled={updateTerminalLoading}
-              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300 disabled:opacity-50 transition-colors"
-            >
-              {#if updateTerminalLoading}
-                <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
-                </svg>
-                {m.system_lerd_openingTerminal()}
-              {:else}
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-                </svg>
-                {m.system_lerd_openTerminal()}
-              {/if}
-            </button>
-          {/if}
+          <div class="flex flex-wrap items-center gap-2">
+            {#if $accessMode.localControl}
+              <button
+                onclick={openUpdateTerminal}
+                disabled={updateTerminalLoading}
+                class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300 disabled:opacity-50 transition-colors"
+              >
+                {#if updateTerminalLoading}
+                  <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                  </svg>
+                  {m.system_lerd_openingTerminal()}
+                {:else}
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                  </svg>
+                  {m.system_lerd_openTerminal()}
+                {/if}
+              </button>
+            {/if}
+            {#if $version.changelog}
+              <DetailButton onclick={openChangelogModal}>
+                {#snippet icon()}
+                  <Icon name="docs" class="w-3.5 h-3.5" />
+                {/snippet}
+                {m.system_lerd_whatsNew()}
+              </DetailButton>
+            {/if}
+          </div>
           {#if updateTerminalError}
             <p class="text-xs text-red-500">{updateTerminalError}</p>
-          {/if}
-          {#if $version.changelog}
-            <div>
-              <p class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">{m.system_lerd_whatsNew()}</p>
-              <pre class="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-white/3 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap font-mono leading-relaxed border border-gray-100 dark:border-lerd-border">{$version.changelog}</pre>
-            </div>
           {/if}
         </div>
       {/if}
@@ -225,15 +275,99 @@
       </div>
     </SettingsCard>
 
-    <SettingsCard>
-      <div class="flex items-center justify-between mb-2">
-        <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">{m.system_language_title()}</span>
+    <SettingsCard class="flex-1">
+      <div class="flex items-center justify-between gap-3 mb-2">
+        <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">{m.system_betaUpdates_title()}</span>
+        {#if $accessMode.localControl}
+          <Toggle
+            on={$betaUpdates}
+            loading={betaBusy}
+            onclick={onToggleBetaUpdates}
+            title={$betaUpdates ? m.system_betaUpdates_toggleOff() : m.system_betaUpdates_toggleOn()}
+          />
+        {:else}
+          <StatusPill
+            size="sm"
+            tone={$betaUpdates ? 'ok' : 'muted'}
+            label={$betaUpdates ? m.common_enabled() : m.common_disabled()}
+          />
+        {/if}
       </div>
-      <div class="flex items-center justify-between gap-4">
-        <p class="text-xs text-gray-500 dark:text-gray-400">{m.system_language_description()}</p>
+      <p class="text-xs text-gray-500 dark:text-gray-400">{m.system_betaUpdates_description()}</p>
+    </SettingsCard>
+    </div>
+
+    <div class="flex flex-col gap-3">
+    <SettingsCard class="flex-1">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">{m.system_theme_title()}</span>
+        <PaletteSwitcher />
+      </div>
+      <p class="text-xs text-gray-500 dark:text-gray-400">{m.system_theme_description()}</p>
+      {#each userPalettes as p (p.id)}
+        <div class="flex items-center justify-between gap-3 mt-2 text-xs">
+          <span class="flex items-center gap-2 text-gray-600 dark:text-gray-300">
+            <span class="palette-swatch w-3 h-3 rounded-full shrink-0 border border-black/10 dark:border-white/15" style="--swatch:{p.accent};--swatch-dark:{p.accentDark}"></span>
+            <span class="font-mono">{p.id}</span>
+          </span>
+          {#if $accessMode.localControl}
+            {#if removingPalette === p.id}
+              <span class="flex items-center gap-2">
+                <button
+                  type="button"
+                  onclick={() => { removePalette(p.id); removingPalette = ''; }}
+                  class="font-medium text-red-600 dark:text-red-400 hover:underline"
+                >{m.system_theme_removeConfirm()}</button>
+                <button
+                  type="button"
+                  onclick={() => (removingPalette = '')}
+                  class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                >{m.common_cancel()}</button>
+              </span>
+            {:else}
+              <button
+                type="button"
+                onclick={() => (removingPalette = p.id)}
+                class="text-gray-400 hover:text-lerd-red transition-colors"
+                title={m.system_theme_remove()}
+              >
+                <Icon name="trash" class="w-3.5 h-3.5" />
+              </button>
+            {/if}
+          {/if}
+        </div>
+      {/each}
+      {#each $paletteErrors as e (e.file)}
+        <p class="mt-2 text-xs text-red-600 dark:text-red-400"><span class="font-mono">{e.file}</span>: {e.error}</p>
+      {/each}
+      {#if $accessMode.localControl}
+        <div class="mt-3">
+          <DetailButton onclick={() => (importThemeOpen = true)}>{m.system_theme_importAction()}</DetailButton>
+        </div>
+      {/if}
+
+      <div class="flex items-start gap-2 text-xs text-gray-500 dark:text-gray-400 mt-3">
+        <Icon name="camera" class="w-3.5 h-3.5 shrink-0 mt-0.5 text-lerd-red" />
+        <p class="leading-relaxed">
+          {m.system_theme_shareBlurb()}
+          <a href={shareOnX} target="_blank" rel="noopener" class="font-medium text-lerd-red hover:text-lerd-redhov underline-offset-2 hover:underline">X</a>
+          <span aria-hidden="true">&middot;</span>
+          <a href={shareOnBluesky} target="_blank" rel="noopener" class="font-medium text-lerd-red hover:text-lerd-redhov underline-offset-2 hover:underline">Bluesky</a>
+          <span aria-hidden="true">&middot;</span>
+          <a href={shareOnReddit} target="_blank" rel="noopener" class="font-medium text-lerd-red hover:text-lerd-redhov underline-offset-2 hover:underline">Reddit</a>
+        </p>
+      </div>
+
+    </SettingsCard>
+
+    <SettingsCard class="flex-1">
+      <div class="flex items-center justify-between gap-4 mb-2">
+        <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">{m.system_language_title()}</span>
         <LanguageSwitcher />
       </div>
+      <p class="text-xs text-gray-500 dark:text-gray-400">{m.system_language_description()}</p>
     </SettingsCard>
+    </div>
     </div>
 
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -570,3 +704,5 @@
     {/if}
   </div>
 </div>
+
+<ImportThemeModal open={importThemeOpen} onclose={() => (importThemeOpen = false)} />

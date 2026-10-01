@@ -198,7 +198,12 @@ func NewPhpRebuildCmd() *cobra.Command {
 		Short: "Force-rebuild PHP-FPM image(s)",
 		Long:  "Force-rebuilds lerd PHP-FPM container images. Pulls a pre-built base from ghcr.io by default; pass --local to build entirely from source.\nPass a version (e.g. 8.3) to rebuild only that version, or omit to rebuild all installed versions.",
 		Args:  cobra.MaximumNArgs(1),
-		RunE:  runPhpRebuild,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := nativeImageCommandRefusal("php:rebuild"); err != nil {
+				return err
+			}
+			return runPhpRebuild(cmd, args)
+		},
 	}
 	cmd.Flags().Bool("local", false, "Build images locally instead of pulling pre-built base images")
 	return cmd
@@ -264,6 +269,15 @@ func runPhpRebuild(cmd *cobra.Command, args []string) error {
 	// Store the new Containerfile hash so future updates know images are current.
 	if err := podman.StoreFPMHash(); err != nil {
 		feedback.Warn("could not store image hash: %v", err)
+	}
+
+	// The image carries the extension; the files it reads at startup (the debug
+	// bridge, the collector, the store-declared capture seams) live on the host
+	// and are written by the binary. Refresh them before the containers come
+	// back up, or a rebuilt image runs against whatever the previous version
+	// left behind.
+	if err := podman.EnsureDumpAssets(); err != nil {
+		feedback.Warn("could not write debug assets: %v", err)
 	}
 
 	label := "PHP-FPM images"

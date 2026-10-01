@@ -1,5 +1,6 @@
 <script lang="ts">
   import EnvBlock from '$components/EnvBlock.svelte';
+  import CopyButton from '$components/CopyButton.svelte';
   import type { Service } from '$stores/services';
   import { loadServiceEnv, saveServiceEnv, type ServiceEnvPayload } from '$stores/services';
   import { m } from '../../paraglide/messages.js';
@@ -107,20 +108,19 @@
 </script>
 
 <div class="flex flex-col h-full overflow-hidden">
-  <!-- Connection URL (read-only, unchanged) -->
   {#if svc.connection_url}
-    <div class="p-3 sm:p-5 pb-3 shrink-0">
-      <div class="rounded-lg border border-gray-200 dark:border-lerd-border overflow-hidden">
-        <div class="flex items-center justify-between bg-gray-50 dark:bg-white/3 px-3 py-1.5 border-b border-gray-200 dark:border-lerd-border">
-          <span class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">{m.services_env_connect()}</span>
-        </div>
-        <div class="bg-gray-50 dark:bg-black/40 px-3 py-2.5">
-          <a href={svc.connection_url} class="font-mono text-[10px] text-sky-600 dark:text-sky-400 hover:underline break-all">{svc.connection_url}</a>
-          <p class="text-[10px] text-gray-400 dark:text-gray-600 mt-1.5">
-            {@html m.services_env_connectHint({ loopback4: '<code class="text-gray-500 dark:text-gray-400">127.0.0.1</code>', loopback6: '<code class="text-gray-500 dark:text-gray-400">localhost</code>' })}
-          </p>
-        </div>
+    <div class="shrink-0 m-3 sm:m-5 mb-3 rounded-xl border border-gray-200/80 dark:border-lerd-border bg-white dark:bg-lerd-card px-4 py-3 space-y-2">
+      <span class="text-sm font-medium text-gray-800 dark:text-gray-200">{m.services_env_connect()}</span>
+      <div class="flex items-start gap-3">
+        <a
+          href={svc.connection_url}
+          class="min-w-0 flex-1 break-all font-mono text-xs text-sky-600 dark:text-sky-400 hover:underline"
+        >{svc.connection_url}</a>
+        <CopyButton text={svc.connection_url} label={m.common_copy()} class="mt-0.5" />
       </div>
+      <p class="text-xs text-gray-500 dark:text-gray-400">
+        {@html m.services_env_connectHint({ loopback4: '<code class="font-mono text-gray-600 dark:text-gray-300">127.0.0.1</code>', loopback6: '<code class="font-mono text-gray-600 dark:text-gray-300">localhost</code>' })}
+      </p>
     </div>
   {/if}
 
@@ -169,14 +169,14 @@
               placeholder="KEY"
               bind:value={entry.key}
               spellcheck="false"
-              class="font-mono text-[11px] px-2 py-1 bg-white dark:bg-lerd-dark-2 border border-gray-200 dark:border-lerd-border rounded text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              class="font-mono text-[11px] px-2 py-1 bg-white dark:bg-lerd-card border border-gray-200 dark:border-lerd-border rounded text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
             <input
               type="text"
               placeholder="value"
               bind:value={entry.value}
               spellcheck="false"
-              class="font-mono text-[11px] px-2 py-1 bg-white dark:bg-lerd-dark-2 border border-gray-200 dark:border-lerd-border rounded text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              class="font-mono text-[11px] px-2 py-1 bg-white dark:bg-lerd-card border border-gray-200 dark:border-lerd-border rounded text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
             <button
               type="button"

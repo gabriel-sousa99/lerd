@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"slices"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
-	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/composer"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/tools"
 	"github.com/spf13/cobra"
@@ -79,7 +78,7 @@ func updateTool(pins *pinnedTools, name string) error {
 	case "mkcert":
 		return replaceTool(pins, name, certs.MkcertPath(), io.Discard)
 	default:
-		return replaceTool(pins, name, filepath.Join(config.BinDir(), "composer.phar"), io.Discard)
+		return replaceTool(pins, name, composer.PharPath(), io.Discard)
 	}
 }
 

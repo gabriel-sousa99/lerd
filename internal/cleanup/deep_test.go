@@ -1,6 +1,10 @@
 package cleanup
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // Catalog repos and protected refs are keyed by canonical form (the same
 // registry.ParseImage canonicalisation deepTargets applies to image names).
@@ -23,7 +27,7 @@ func TestDeepTargets_ReapsUnusedServiceImagesKeepsProtected(t *testing.T) {
 	}
 	pulled := map[string]bool{"docker.io/library/mysql:5.7": true}
 
-	got := deepTargets(imgs, repos, protected, pulled, false)
+	got := deepTargets(imgs, repos, protected, pulled, ScopeManaged)
 
 	if len(got) != 1 || got[0].ID != "docker.io/library/mysql:5.7" {
 		t.Fatalf("want only mysql:5.7 reaped, got %+v", got)
@@ -47,7 +51,7 @@ func TestDeepTargets_MultiTagRemovesAllTagsCreditsOnce(t *testing.T) {
 	protected := map[string]bool{}
 	pulled := map[string]bool{"docker.io/library/mysql:5.7": true}
 
-	got := deepTargets(imgs, repos, protected, pulled, false)
+	got := deepTargets(imgs, repos, protected, pulled, ScopeManaged)
 
 	removed := map[string]int64{}
 	for _, tg := range got {
@@ -78,7 +82,7 @@ func TestDeepTargets_KeepsInUseServiceImage(t *testing.T) {
 	}
 	repos := map[string]bool{"docker.io/library/redis": true}
 
-	got := deepTargets(imgs, repos, map[string]bool{}, map[string]bool{}, false)
+	got := deepTargets(imgs, repos, map[string]bool{}, map[string]bool{}, ScopeManaged)
 
 	if len(got) != 0 {
 		t.Fatalf("an in-use service image must be kept, got %+v", got)
@@ -93,33 +97,61 @@ func TestDeepTargets_KeepsCatalogImageLerdNeverPulled(t *testing.T) {
 	}
 	repos := map[string]bool{"docker.io/library/redis": true}
 
-	got := deepTargets(imgs, repos, map[string]bool{}, map[string]bool{}, false)
+	got := deepTargets(imgs, repos, map[string]bool{}, map[string]bool{}, ScopeManaged)
 
 	if len(got) != 0 {
 		t.Fatalf("a catalog image lerd never pulled must be kept, got %+v", got)
 	}
 }
 
-// With ignoreLedger on (the deep tier), an unused catalog image is reaped even
-// with no ledger entry: this recovers images podman auto-pulled on container
-// start, which the ledger never recorded. Protection and repo scoping still hold.
-func TestDeepTargets_DeepReapsCatalogImageWithoutLedger(t *testing.T) {
+// The deep tier drops the ledger gate, recovering images podman auto-pulled on
+// container start, and the catalog gate, recovering the stranded base layer of a
+// custom container (golang:1.25 here). Protection and in-use still hold.
+func TestDeepTargets_DeepReapsEveryUnusedImage(t *testing.T) {
 	imgs := []image{
 		{Names: []string{"docker.io/library/mysql:8.0"}, Size: 800},             // unused, no ledger → reap
+		{Names: []string{"docker.io/library/golang:1.25"}, Size: 900},           // stranded build base → reap
 		{Names: []string{"docker.io/library/mysql:8.4"}, Size: 500},             // protected → keep
-		{Names: []string{"ubuntu:22.04"}, Size: 700},                            // non-catalog → keep
+		{Names: []string{"alpine:latest"}, Size: 10},                            // lerd tool image → keep
 		{Names: []string{"docker.io/library/redis:7"}, Size: 40, Containers: 1}, // in use → keep
 	}
 	repos := map[string]bool{"docker.io/library/mysql": true, "docker.io/library/redis": true}
-	protected := map[string]bool{"docker.io/library/mysql:8.4": true}
-
-	got := deepTargets(imgs, repos, protected, map[string]bool{}, true)
-
-	if len(got) != 1 || got[0].ID != "docker.io/library/mysql:8.0" {
-		t.Fatalf("want only mysql:8.0 reaped without ledger, got %+v", got)
+	protected := map[string]bool{
+		"docker.io/library/mysql:8.4":     true,
+		"docker.io/library/alpine:latest": true,
 	}
-	if got[0].Bytes != 800 {
-		t.Errorf("bytes = %d, want 800", got[0].Bytes)
+
+	got := deepTargets(imgs, repos, protected, map[string]bool{}, ScopeDeep)
+
+	byRef := map[string]Target{}
+	for _, tg := range got {
+		byRef[tg.ID] = tg
+	}
+	if len(byRef) != 2 {
+		t.Fatalf("want mysql:8.0 and golang:1.25 reaped, got %+v", got)
+	}
+	if byRef["docker.io/library/mysql:8.0"].Desc != "unused service image" {
+		t.Errorf("a catalog leftover should read as a service image, got %q", byRef["docker.io/library/mysql:8.0"].Desc)
+	}
+	if byRef["docker.io/library/golang:1.25"].Desc != "unused image" {
+		t.Errorf("a non-catalog leftover should read as a plain unused image, got %q", byRef["docker.io/library/golang:1.25"].Desc)
+	}
+	if byRef["docker.io/library/golang:1.25"].Bytes != 900 {
+		t.Errorf("bytes = %d, want 900", byRef["docker.io/library/golang:1.25"].Bytes)
+	}
+}
+
+// The managed tier is what the watcher runs unattended, so widening the deep
+// tier must not let it near an image outside lerd's catalog.
+func TestDeepTargets_ManagedStillIgnoresNonCatalogImages(t *testing.T) {
+	imgs := []image{
+		{Names: []string{"docker.io/library/golang:1.25"}, Size: 900},
+		{Names: []string{"ubuntu:22.04"}, Size: 700},
+	}
+	repos := map[string]bool{"docker.io/library/mysql": true}
+
+	if got := deepTargets(imgs, repos, map[string]bool{}, map[string]bool{}, ScopeManaged); len(got) != 0 {
+		t.Fatalf("managed tier must leave non-catalog images alone, got %+v", got)
 	}
 }
 
@@ -175,5 +207,102 @@ func TestCanonRefAndRepo(t *testing.T) {
 	}
 	if got := canonRepo("docker.io/library/mysql:8.4"); got != "docker.io/library/mysql" {
 		t.Errorf("canonRepo = %q, want docker.io/library/mysql", got)
+	}
+}
+
+// The deep tier reaps any unused image, so a stopped site's PHP-FPM image has
+// to be protected by the quadlet scan or a cleanup would cost a full rebuild.
+func TestRealInstalledServiceImages_IncludesPHPFPM(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, "containers", "systemd")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	units := map[string]string{
+		"lerd-mysql.container":     "[Container]\nImage=docker.io/library/mysql:8.4\n",
+		"lerd-php84-fpm.container": "[Container]\nImage=lerd-php84-fpm:local\n",
+		"other.container":          "[Container]\nImage=someone-else:tag\n",
+	}
+	for name, body := range units {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := map[string]bool{}
+	for _, img := range realInstalledServiceImages() {
+		got[img] = true
+	}
+	if !got["lerd-php84-fpm:local"] {
+		t.Errorf("an installed PHP-FPM image must be protected, got %v", got)
+	}
+	if !got["docker.io/library/mysql:8.4"] {
+		t.Errorf("an installed service image must be protected, got %v", got)
+	}
+	if got["someone-else:tag"] {
+		t.Errorf("a non-lerd quadlet must not be scanned, got %v", got)
+	}
+}
+
+// "Used by lerd" has to mean the whole stack, not just the service catalog:
+// nginx and a stripe-listen sidecar come from quadlets, and the probe and mc
+// images from lerd's tool set, none of which the catalog knows about.
+func TestUsedImage_CountsQuadletAndToolImages(t *testing.T) {
+	repos := map[string]bool{"docker.io/library/mysql": true}
+	protected := map[string]bool{
+		"docker.io/library/nginx:alpine":     true,
+		"docker.io/stripe/stripe-cli:latest": true,
+		"docker.io/library/alpine:latest":    true,
+	}
+	cases := []struct {
+		name string
+		img  image
+		want bool
+	}{
+		{"catalog service", image{Names: []string{"docker.io/library/mysql:8.4"}}, true},
+		{"quadlet image", image{Names: []string{"docker.io/library/nginx:alpine"}}, true},
+		{"worker sidecar", image{Names: []string{"docker.io/stripe/stripe-cli:latest"}}, true},
+		{"tool image", image{Names: []string{"alpine:latest"}}, true},
+		{"someone else's", image{Names: []string{"docker.io/library/golang:1.25"}}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, ok := usedImage(c.img, repos, protected); ok != c.want {
+				t.Errorf("usedImage(%v) counted = %v, want %v", c.img.Names, ok, c.want)
+			}
+		})
+	}
+}
+
+// A dangling image has no tag left, so the breakdown has to fall back to the
+// short ID rather than showing a blank row.
+func TestUsedImage_NamesDanglingByShortID(t *testing.T) {
+	img := image{ID: "abcdef0123456789", Labels: map[string]string{"dev.lerd.kind": "fpm"}, Size: 500}
+	u, ok := usedImage(img, map[string]bool{}, map[string]bool{})
+	if !ok {
+		t.Fatal("a lerd-built image must be counted")
+	}
+	if u.Ref != shortID(img.ID) {
+		t.Errorf("ref = %q, want the short ID %q", u.Ref, shortID(img.ID))
+	}
+}
+
+// A site's workers run as plain containers rather than quadlets, so their
+// images have to come from the container list or a stripe-listen sidecar reads
+// as someone else's image on the dashboard.
+func TestRealProtectedImages_IncludesWorkerContainerImages(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("HOME", tmp)
+	containerImages = func() []string { return []string{"docker.io/stripe/stripe-cli:latest"} }
+	t.Cleanup(func() { containerImages = podmanContainerImages })
+
+	prot, err := realProtectedImages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prot[canonRef("docker.io/stripe/stripe-cli:latest")] {
+		t.Errorf("a worker container's image must be protected, got %v", prot)
 	}
 }

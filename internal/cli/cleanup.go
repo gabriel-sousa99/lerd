@@ -23,7 +23,7 @@ func NewCleanupCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be reclaimed without removing anything")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Remove without confirming")
-	cmd.Flags().BoolVar(&safe, "safe", false, "Only reclaim images provably built by lerd, keep unused service and dangling images")
+	cmd.Flags().BoolVar(&safe, "safe", false, "Only reclaim images provably built by lerd, keep unused and dangling images")
 	// --deep is now the default; kept as a hidden no-op so existing muscle memory
 	// and scripts don't break.
 	cmd.Flags().BoolVar(&deep, "deep", false, "")
@@ -123,7 +123,10 @@ func runCleanup(dryRun, yes, safe bool) error {
 	}
 	feedback.Header("Reclaimable lerd disk")
 	feedback.Table([]string{"TARGET", "KIND", "RECLAIMABLE"}, rows)
-	feedback.Note(fmt.Sprintf("About %s across %d item(s).", humanSize(plan.ReclaimBytes()), len(plan.Targets)))
+	// A floor, not an estimate: each row is the disk only that image holds, so a
+	// chain of superseded builds that goes when its last tag does is credited to
+	// nobody here and turns up in the measured total afterwards.
+	feedback.Note(fmt.Sprintf("At least %s across %d item(s).", humanSize(plan.ReclaimBytes()), len(plan.Targets)))
 
 	if dryRun {
 		showHeldHint(plan)
@@ -135,6 +138,9 @@ func runCleanup(dryRun, yes, safe bool) error {
 
 	_, freed := cleanup.Apply(plan)
 	feedback.Done(fmt.Sprintf("Freed about %s.", humanSize(freed)))
+	if hint := reclaimedHostHint(); hint != "" && freed > 0 {
+		feedback.Note(hint)
+	}
 	showHeldHint(plan)
 	return nil
 }

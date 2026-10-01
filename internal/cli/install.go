@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gabriel-sousa99/lerd/internal/certs"
+	"github.com/gabriel-sousa99/lerd/internal/composer"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/desktopapp"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
@@ -667,20 +668,10 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// Always ensure the default PHP-FPM is available (needed for lerd new on fresh installs).
 	// Then restore quadlets for any additional PHP versions and services from registered sites.
 	{
-		cfg, _ := config.LoadGlobal()
 		seenSvc := map[string]bool{}
 
-		defaultPHP := ""
-		if cfg != nil {
-			defaultPHP = cfg.PHP.DefaultVersion
-		}
-
 		reg, regErr := config.LoadSites()
-		var sites []config.Site
-		if regErr == nil {
-			sites = reg.Sites
-		}
-		ensureFPMQuadlets(fpmVersionsToEnsure(defaultPHP, sites))
+		ensureFPMQuadlets(ensuredFPMVersions())
 
 		if regErr == nil {
 
@@ -905,7 +896,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 	ok()
 
-	if autostartOn {
+	if shouldRestartDaemon("lerd-watcher", autostartOn) {
 		step("Restarting watcher service")
 		if err := services.Mgr.Restart("lerd-watcher"); err != nil {
 			fmt.Printf("    WARN: %v\n", err)
@@ -926,7 +917,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 	ok()
 
-	if autostartOn {
+	if shouldRestartDaemon("lerd-ui", autostartOn) {
 		step("Starting lerd-ui")
 		if err := services.Mgr.Restart("lerd-ui"); err != nil {
 			fmt.Printf("    WARN: %v\n", err)
@@ -983,12 +974,10 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// quadlet refresh above already rewrote FrankenPHP quadlets to point at the
 	// localhost derived image, so the image must exist or the next container
 	// restart (reboot, manual, a php.ini save) would reference a missing image.
-	// BuildFrankenPHPImage no-ops when the image is already current; it never
-	// restarts a container, so it's safe to run with autostart disabled.
-	for _, v := range activeFrankenPHPVersions() {
-		if err := podman.BuildFrankenPHPImage(v, false, os.Stdout); err != nil {
-			fmt.Printf("  WARN: building FrankenPHP image for PHP %s: %v\n", v, err)
-		}
+	// It never restarts a container, so it's safe with autostart disabled.
+	if jobs := frankenPHPBuildJobs(activeFrankenPHPVersions()); len(jobs) > 0 {
+		feedback.Header("Building FrankenPHP images")
+		RunParallel(jobs) //nolint:errcheck
 	}
 
 	// Start service containers and workers only when autostart is on.
@@ -1002,7 +991,15 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		// new binary against stale images. Gated by autostartOn because
 		// php:rebuild restarts FPM and worker units unconditionally.
 		activeFPM, _ := phpDet.ListInstalled()
-		if podman.NeedsFPMRebuild(activeFPM) || podman.NeedsFrankenPHPRebuild(activeFrankenPHPVersions()) {
+		// A rebuild is an image operation, and php:rebuild refuses outright on
+		// the native runtime, so an install there ended on a failure for work
+		// that should never have been attempted.
+		// Judged against the versions install actually builds. An installed
+		// version nothing serves is never ensured here, so its image keeps an
+		// older recipe for as long as it stays unused, and checking it turned
+		// every install into a full rebuild of the ones just built.
+		if lifecycle.FPMContainersWanted() &&
+			(podman.NeedsFPMRebuild(ensuredFPMVersions()) || podman.NeedsFrankenPHPRebuild(activeFrankenPHPVersions())) {
 			feedback.Header("Rebuilding PHP images")
 			self, err := os.Executable()
 			if err != nil {
@@ -1078,6 +1075,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		fmt.Printf("    WARN: %v\n", err)
 	}
 	ok()
+	noteShadowedComposer()
 
 	if wantLerdNode {
 		ensureDefaultNode()
@@ -1098,6 +1096,12 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	refreshGlobalMCPSkills()
 	refreshProjectMCPSkills()
 
+	// A service whose preset declares a domain takes it here as well as at start.
+	// An update runs this path, and plenty of machines never see a `lerd start`
+	// between one release and the next, so leaving it to start alone would mean
+	// the fix arrives for some users and not others.
+	adoptDefaultServiceDomains()
+
 	// Record which version this environment is set up for, so a binary a
 	// package manager swaps underneath it is recognised on the next command.
 	writeInstalledVersion(version.Version)
@@ -1117,6 +1121,15 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	feedback.Note("Terminal:  " + feedback.Val("lerd tui"))
 	feedback.Begin()
 	return nil
+}
+
+// shouldRestartDaemon reports whether install has to bounce one of the
+// long-running lerd units onto the binary it just laid down. Autostart off
+// means install never starts a unit the user keeps stopped, but one they are
+// still running by hand would otherwise stay on the old binary for the rest of
+// the session, which is what `lerd update` used to fix on its own afterwards.
+func shouldRestartDaemon(name string, autostartOn bool) bool {
+	return autostartOn || services.Mgr.IsActive(name)
 }
 
 // writeUserServiceWithReload writes a user service unit file and reloads
@@ -1406,7 +1419,7 @@ func installLaravelInstaller() error {
 		composerHome = filepath.Join(xdgConfig, "composer")
 	}
 
-	composerPhar := filepath.Join(config.BinDir(), "composer.phar")
+	composerPhar := composer.PharPath()
 	// --no-interaction prevents composer from blocking on plugin trust prompts
 	// (e.g. "Do you trust 'symfony/flex' to execute code?") which would hang
 	// the installer with no visible output.
@@ -1762,7 +1775,7 @@ func addShellShims(manageNode bool) error {
 	// land in lerd's bin dir as wrappers (mirroring the npm flow), falling
 	// back to a direct `lerd php composer.phar` invocation when the lerd
 	// binary is not reachable (containers where the glibc binary can't run).
-	composerShim := shimPreamble(lerdBin) + fmt.Sprintf("if [ -x \"$LERD\" ]; then\n  exec \"$LERD\" composer \"$@\"\nfi\nexec \"$LERD\" php %s/.local/share/lerd/bin/composer.phar \"$@\"\n", home)
+	composerShim := shimPreamble(lerdBin) + fmt.Sprintf("if [ -x \"$LERD\" ]; then\n  exec \"$LERD\" composer \"$@\"\nfi\nexec \"$LERD\" php %q \"$@\"\n", composer.PharPath())
 	if err := os.WriteFile(filepath.Join(binDir, "composer"), []byte(composerShim), 0755); err != nil {
 		return fmt.Errorf("writing composer shim: %w", err)
 	}
@@ -1958,3 +1971,24 @@ func ensureZshFpath(zshrc, dir string) {
 	defer f.Close()
 	fmt.Fprintf(f, "\n# Lerd completions\n%s\nautoload -Uz compinit && compinit\n", line)
 }
+
+// frankenPHPBuildJobs returns a spinner job per FrankenPHP version whose derived
+// image is missing or stale. Buffering the build behind RunParallel keeps a
+// several-minute podman build from spilling its whole log over the install
+// output, the way the PHP-FPM builds already do.
+func frankenPHPBuildJobs(versions []string) []BuildJob {
+	var jobs []BuildJob
+	for _, v := range versions {
+		ver := v
+		if !needsFrankenPHPRebuild([]string{ver}) {
+			continue
+		}
+		jobs = append(jobs, BuildJob{
+			Label: "FrankenPHP " + ver,
+			Run:   func(w io.Writer) error { return podman.BuildFrankenPHPImage(ver, false, w) },
+		})
+	}
+	return jobs
+}
+
+var needsFrankenPHPRebuild = podman.NeedsFrankenPHPRebuild

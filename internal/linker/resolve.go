@@ -72,20 +72,20 @@ func Resolve(dir string, cfg *config.GlobalConfig, p Policy) (*Plan, error) {
 	// is served by proxy: no PHP version, no framework, no runtime to pick.
 	if proj != nil && proj.Container != nil && proj.Container.Port > 0 {
 		plan.Mode = ModeCustomContainer
-		plan.Site = config.Site{
+		plan.Site = keepRegistryState(dir, config.Site{
 			Name:          name,
 			Domains:       kept,
 			Path:          dir,
 			Secured:       secured,
 			ContainerPort: proj.Container.Port,
 			ContainerSSL:  proj.Container.SSL,
-		}
+		})
 		return plan, nil
 	}
 	if proj != nil && proj.Proxy != nil && proj.Proxy.Port > 0 {
 		plan.Mode = ModeHostProxy
 		plan.ProxyCommand = proj.Proxy.Command
-		plan.Site = config.Site{
+		plan.Site = keepRegistryState(dir, config.Site{
 			Name:        name,
 			Domains:     kept,
 			Path:        dir,
@@ -93,7 +93,7 @@ func Resolve(dir string, cfg *config.GlobalConfig, p Policy) (*Plan, error) {
 			HostPort:    proj.Proxy.Port,
 			HostSSL:     proj.Proxy.SSL,
 			HostCommand: proj.Proxy.Command,
-		}
+		})
 		return plan, nil
 	}
 
@@ -115,6 +115,9 @@ func Resolve(dir string, cfg *config.GlobalConfig, p Policy) (*Plan, error) {
 	phpVersion, nodeVersion := versions.PHP, versions.Node
 	if proj != nil && proj.PHPVersion != "" {
 		phpVersion = phpDet.ClampToRange(proj.PHPVersion, versions.PHPMin, versions.PHPMax)
+		if phpVersion != proj.PHPVersion {
+			plan.PHPPinned = proj.PHPVersion
+		}
 	}
 	// A version the framework's range moved us off is worth reporting, and when
 	// a better one could be installed the caller may offer to build it.
@@ -162,7 +165,7 @@ func Resolve(dir string, cfg *config.GlobalConfig, p Policy) (*Plan, error) {
 		}
 	}
 
-	plan.Site = site
+	plan.Site = keepRegistryState(dir, site)
 	switch {
 	case site.IsCustomFPM():
 		plan.Mode = ModeCustomFPM
@@ -172,6 +175,41 @@ func Resolve(dir string, cfg *config.GlobalConfig, p Policy) (*Plan, error) {
 		plan.Mode = ModeFPM
 	}
 	return plan, nil
+}
+
+// keepRegistryState carries an existing site's entry forward onto the one this
+// link just derived. A re-link re-reads the directory, and the directory is the
+// authority on what it names below; everything else in the entry is state the
+// registry alone holds, approved host commands and pinned ports among it, and
+// rebuilding from scratch dropped all of it. Re-linking is the only way to
+// re-check a site's framework, so that is what it used to cost to pick up a
+// definition the store published after the site was linked.
+//
+// Starting from the existing entry and overwriting what was derived, rather
+// than copying the state across field by field, is what keeps a field added to
+// the registry later from being forgotten here.
+func keepRegistryState(dir string, derived config.Site) config.Site {
+	existing, err := config.FindSiteByPath(dir)
+	if err != nil || existing == nil {
+		return derived
+	}
+	site := *existing
+	site.Name = derived.Name
+	site.Domains = derived.Domains
+	site.Path = derived.Path
+	site.PHPVersion = derived.PHPVersion
+	site.NodeVersion = derived.NodeVersion
+	site.Secured = derived.Secured
+	site.Framework = derived.Framework
+	site.PublicDir = derived.PublicDir
+	site.ContainerPort = derived.ContainerPort
+	site.ContainerSSL = derived.ContainerSSL
+	site.Runtime = derived.Runtime
+	site.RuntimeWorker = derived.RuntimeWorker
+	site.HostPort = derived.HostPort
+	site.HostSSL = derived.HostSSL
+	site.HostCommand = derived.HostCommand
+	return site
 }
 
 // desiredDomains builds the domain list to attempt, before conflict filtering.

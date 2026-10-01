@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,11 +17,13 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/dns"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/nativephp"
 	"github.com/gabriel-sousa99/lerd/internal/origin"
 	phpPkg "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/gabriel-sousa99/lerd/internal/services"
 	lerdSystemd "github.com/gabriel-sousa99/lerd/internal/systemd"
+	"github.com/gabriel-sousa99/lerd/internal/tools"
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 	"github.com/gabriel-sousa99/lerd/internal/version"
 	"github.com/gabriel-sousa99/lerd/internal/wsl"
@@ -345,6 +348,25 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 			ok(fmt.Sprintf("PHP default version (%s)", cfg.PHP.DefaultVersion))
 		}
 
+		// The shims dir is prepended to PATH once, at install. Anything that
+		// appends its own PHP to the rc afterwards wins, and the only symptom
+		// is container hostnames failing to resolve for CLI commands.
+		if !cfg.Shims.PathDisabled {
+			for _, tool := range []string{"php", "composer"} {
+				if !shimInstalled(tool) {
+					continue
+				}
+				shim, resolved, lookErr := resolvedShimPath(tool)
+				switch status, detail := shimShadowFinding(tool, shim, resolved, lookErr); status {
+				case "warn":
+					warn(tool+" on PATH", detail)
+					rep.fixLast(manualFixWith("put lerd's shims back in front: move its PATH line to the end of your shell rc, or run `lerd path:disable` to keep your own " + tool))
+				default:
+					ok(tool + " on PATH (lerd shim)")
+				}
+			}
+		}
+
 		if cfg.Nginx.HTTPPort <= 0 || cfg.Nginx.HTTPSPort <= 0 {
 			fail("nginx ports", fmt.Sprintf("http=%d https=%d", cfg.Nginx.HTTPPort, cfg.Nginx.HTTPSPort), "set valid ports in "+cfgFile)
 		} else {
@@ -458,6 +480,7 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 	// config change can resolve (#1544).
 	httpPort, httpsPort := config.NginxPorts()
 	nginxRunning, _ := podman.ContainerRunning("lerd-nginx")
+	nginxInstalled := services.Mgr.ContainerUnitInstalled("lerd-nginx")
 	for _, p := range []int{httpPort, httpsPort} {
 		port := strconv.Itoa(p)
 		switch {
@@ -465,6 +488,11 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 			ok(fmt.Sprintf("port %-4s (nginx running)", port))
 		case PortInUse(port):
 			fail("port "+port, "in use by another process", "find the process: "+FindListenerCmd(port))
+		case nginxInstalled:
+			// Free is the right answer to "is anything squatting here", and the
+			// wrong thing to read as health: nothing is serving. The finding
+			// belongs to the nginx check below, so say why rather than tick.
+			ok(fmt.Sprintf("port %-4s (free — nginx is not running)", port))
 		default:
 			ok(fmt.Sprintf("port %-4s (free)", port))
 		}
@@ -537,18 +565,39 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 	section = "Containers & Images"
 	fmt.Fprintln(w, "\n[Containers & Images]")
 
-	if !services.Mgr.ContainerUnitInstalled("lerd-nginx") {
-		fail("lerd-nginx service", "not installed", "run: lerd install")
-		rep.fixLast(autoFix(fixInstall, "", "install the lerd services (lerd install)"))
+	if detail, hint, healthy := nginxServiceFinding(nginxInstalled, nginxRunning); healthy {
+		ok("lerd-nginx service running")
 	} else {
-		ok("lerd-nginx service installed")
+		fail("lerd-nginx service", detail, hint)
+		if !nginxInstalled {
+			rep.fixLast(autoFix(fixInstall, "", "install the lerd services (lerd install)"))
+		}
 	}
 
-	phpVersions, _ := phpPkg.ListInstalled()
+	// The native runtime has no images, and the rebuild these findings point at
+	// refuses there, so the host builds are reported instead. They are also the
+	// list to walk: judging the container-registered versions failed ones that
+	// exist only as a quadlet and that this runtime is never asked to serve.
+	native := false
+	if cfg, cerr := config.LoadGlobal(); cerr == nil {
+		native = cfg.PHPRuntimeMode() == config.PHPRuntimeNative
+	}
+	containerVersions, _ := phpPkg.ListInstalled()
+	phpVersions, imageVersions := phpVersionsForDoctor(native, containerVersions, nativephp.ListInstalled())
 	if len(phpVersions) == 0 {
 		warn("PHP versions", "none installed — run: lerd use 8.4")
 	}
-	for _, v := range phpVersions {
+	if native {
+		printNativePHPFindings(phpVersions, tools.Load(context.Background()),
+			func(v string) string { return tools.InstalledVersion(nativeTool(v)) }, ok, warn)
+	}
+	// A version no site is pinned to is never built by `lerd fetch` and never
+	// started, so a missing image there is a deliberate absence, not a fault.
+	imagesUsed := map[string]bool{}
+	for _, v := range versionsInUse(imageVersions) {
+		imagesUsed[v] = true
+	}
+	for _, v := range imageVersions {
 		short := strings.ReplaceAll(v, ".", "")
 		image := "lerd-php" + short + "-fpm:local"
 		// The base tag is the recipe hash, so an upstream PHP or Alpine fix
@@ -560,6 +609,8 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 			base = podman.CheckBaseImageFreshness(v)
 		}
 		switch {
+		case !exists && !imagesUsed[v]:
+			info(fmt.Sprintf("PHP %s image", v), "not built — no site uses it; build with: lerd php:rebuild "+v)
 		case !exists:
 			fail(fmt.Sprintf("PHP %s image", v), "missing", "lerd php:rebuild "+v)
 			rep.fixLast(autoFix(fixPhpRebuild, v, "rebuild the PHP "+v+" image"))
@@ -572,7 +623,7 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 	}
 
 	if plan, planErr := cleanup.Inspect(cleanupScope(false)); planErr == nil && plan.ReclaimBytes() > 0 {
-		info("Reclaimable disk", fmt.Sprintf("about %s (run: lerd cleanup)", humanSize(plan.ReclaimBytes())))
+		info("Reclaimable disk", fmt.Sprintf("at least %s (run: lerd cleanup)", humanSize(plan.ReclaimBytes())))
 		rep.fixLast(autoFix(fixCleanup, "", "reclaim disk space (lerd cleanup)"))
 	}
 
@@ -609,27 +660,6 @@ func runDoctorInto(w io.Writer, useColor bool) (DoctorReport, error) {
 			}
 			warn(fmt.Sprintf("site %s", site.Name),
 				fmt.Sprintf("%s; switch with: lerd runtime frankenphp", hints[0].Reason))
-		}
-	}
-
-	// ── Sites ────────────────────────────────────────────────────────────────
-	// The broad command has to be broad: an environment that passes every check
-	// above while three sites are failing is not a healthy machine. Each site
-	// gets the cheap half of `lerd site:doctor`, which is named for the detail.
-	section = "Sites"
-	fmt.Fprintln(w, "\n[Sites]")
-	swept := sweepSites()
-	if len(swept) == 0 {
-		ok("no linked sites to check")
-	}
-	for _, s := range swept {
-		switch {
-		case s.Failures > 0:
-			fail(s.Label, s.Summary, "run: lerd site:doctor "+s.Label)
-		case s.Warnings > 0:
-			warn(s.Label, s.Summary+", run: lerd site:doctor "+s.Label)
-		default:
-			ok(s.Label)
 		}
 	}
 
@@ -693,4 +723,41 @@ func checkDirWritable(dir string) error {
 // checkPortConflicts in startstop.go for batch checks.
 func PortInUseIn(port, output string) bool {
 	return strings.Contains(output, ":"+port+" ")
+}
+
+// nativeBuildFinding decides what doctor says about one version's native build.
+// A pin that could not be fetched leaves an installed build alone: being
+// offline is not a reason to call a working PHP stale.
+func nativeBuildFinding(installed, pinned string) (status, detail string) {
+	// A build installed before lerd recorded patches carries no stamp. It is on
+	// disk and serving, so the only honest thing is to leave it alone.
+	if installed != "" && pinned != "" && pinned != installed {
+		return "warn", "a newer build is published (" + pinned + ")"
+	}
+	return "ok", ""
+}
+
+// phpVersionsForDoctor splits the versions to report from the ones with an
+// image to inspect. Under the native runtime there are no images, but the host
+// builds are still installed and still belong in Version Info, which used to
+// read the same slice the image loop emptied and say none were.
+func phpVersionsForDoctor(native bool, container, host []string) (reported, images []string) {
+	if native {
+		return host, nil
+	}
+	return container, container
+}
+
+// printNativePHPFindings reports each installed host build against the patch
+// lerd publishes for it.
+func printNativePHPFindings(versions []string, pins *tools.Manifest,
+	installed func(string) string, ok func(string), warn func(string, string)) {
+	for _, v := range versions {
+		status, detail := nativeBuildFinding(installed(v), pins.Tools[nativeTool(v)].Version)
+		if status == "warn" {
+			warn("PHP "+v, detail+", run: lerd php:update "+v)
+			continue
+		}
+		ok("PHP " + v)
+	}
 }

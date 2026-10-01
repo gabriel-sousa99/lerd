@@ -62,9 +62,21 @@ workers:
         - /apps
       port_env_key: REVERB_SERVER_PORT  # env key holding the port
       default_port: 8080            # starting port for auto-assignment
+      upstream: container           # where the server listens: container (default) or host
+      port: pinned                  # optional: lerd owns the port instead of .env
 ```
 
 A server that answers on more than one path lists them all under `paths`, and each gets its own location block on the same port. Reverb is the case in point: the WebSocket connection lands on `/app` while the HTTP broadcasting API a server-side `ShouldBroadcast` event posts to lives on `/apps/{app_id}/events`, and a path left out falls through to PHP and answers 404. Where both are set, `paths` is the list that gets proxied and `path` is ignored, so a definition keeps `path` alongside it and still proxies on lerd versions released before `paths` existed.
+
+Every worker that declares a proxy gets its own locations, so an asset server and a websocket server run side by side on the same site rather than the first one declared taking it.
+
+`upstream` names where the server actually listens. The default, `container`, proxies to the site's own PHP-FPM container, which is where a worker without `host: true` runs. A worker marked `host: true` runs on your machine instead and is unreachable from inside that container, so its proxy needs `upstream: host` to be routed to the host address the vhost already knows.
+
+The port comes from one of two places. Naming a `port_env_key` suits a server configured from the site's `.env`: lerd assigns a free port on first start, writes it to that key, and appends `--port` to the command. `port: pinned` suits everything else: lerd owns the port, keeps it clear of every other site's pinned ports and dev servers, records it on the site so it survives restarts, and hands it to the worker as `KEY=port` in front of its command, where `KEY` is the `port_env_key` the definition names. The project's own config reads it from the environment, and nothing is written to `.env`.
+
+The environment reaches the process lerd starts and everything it spawns, including a command that re-enters the container on its way: lerd names the key for passthrough, so the `php` shim carries it into the site's runtime and a tool started through `php artisan something` binds the same port the vhost proxies to.
+
+Stopping a worker clears what it left inside the container. A command that re-enters the runtime leaves the real process there when its unit stops, holding whatever port it bound, so lerd sweeps the site's container for processes matching that worker's command and working directory and signals the process group, which is what catches the tool a console command started.
 
 Port assignment scans all proxy port env keys across all sites to prevent collisions between different workers and frameworks.
 
@@ -112,13 +124,39 @@ Host workers run with lerd's bin dir prepended to `PATH`, so subprocesses spawne
 
 On macOS the unit is a launchd plist (`~/Library/LaunchAgents/lerd-<worker>-<site>[-<branch>].plist`) backed by a guard script under `~/.local/share/lerd/run/workers/` that `cd`s into the site/worktree and `fnm exec`s the command. The guard records its own pid, which is the process group leader, and stopping the worker signals that whole group: launchd only signals the leader, so a worker that hands off to a launcher (`npm` to `electron-vite` to Electron) would otherwise leave the app running, reparented to init, with no unit left to stop it. The watcher self-heals the unit independently of the worker exec mode, host workers always need launchd-level supervision because they aren't behind podman's `--restart=always`. Scheduled workers (`schedule != ""`) still aren't supported on macOS; launchd's `StartCalendarInterval` isn't wired through the unit translator yet.
 
+**Declaring the dev server a worker starts**: lerd recognises a dev server by reading the worker's command, following one level of `npm run`. A framework that starts the same tool through its own console command is invisible to that, so the worker can say so instead:
+
+```yaml
+workers:
+  vite:
+    command: php artisan vite:watch theme-vampire
+    host: true
+    dev_server:
+      tool: vite
+```
+
+A declaration is believed whatever the command looks like, and it is what opts a framework in rather than lerd inferring it. Naming a tool lerd has no integration for changes nothing.
+
+Where the command starts the tool itself, lerd hands it a generated config and everything below applies unchanged. Where it does not, there is no flag to put that config on and the tool loads whatever the console command decides, so lerd writes the values instead, to `node_modules/.lerd/dev-server.mjs`, and the project imports them into its own config:
+
+```js
+import lerd from '../../node_modules/.lerd/dev-server.mjs';
+
+export default defineConfig({
+    server: { ...lerd.server },
+    // the rest of the project's config
+});
+```
+
+That file carries the site's origin, the hosts the server may answer for, the origins allowed to fetch from it, and the port, which is the worker's pinned proxy port when it declares one. lerd rewrites it and restarts the server whenever those addresses move, which is what `lerd secure`, `lerd domain add` and grouping all do, so the one thing a project cannot keep current by hand stops going stale.
+
 **Dev servers on the site's own domain**: A dev server normally advertises its own address, so a Vite app renders asset URLs pointing at `localhost:5173`. That address means nothing to anyone else, so the page arrives unstyled over a share tunnel, over [LAN sharing](/usage/lan-sharing), or on any host other than the one that started it.
 
 lerd puts a supported dev server behind the site's own domain instead. Everything the tool serves lives under one prefix (`/@lerd-vite/`), which the site's vhost proxies to it, so the assets and the hot-reload websocket both travel on whatever hostname the visitor actually used. Nothing needs rewriting, because the client derives its host, port and protocol from the URL it was loaded from.
 
 This needs no configuration and no framework definition. A host worker qualifies when the project has the tool installed and the worker command starts it directly, following one level of `npm run` indirection. A command that only reaches the tool through a runner such as `concurrently` is left alone, since the flags lerd appends would land on the wrong process.
 
-Nothing in the project is edited. lerd writes a generated config to `node_modules/.lerd/` that imports the project's own config and merges in the base, origin and allowed hosts for `serve` only, then starts the tool against it. That file is rewritten on every start, since a worktree seeds `node_modules` from its parent and would otherwise inherit the parent's domain. A project with no config file for the tool, or one that tracks the generated path in git rather than ignoring it, keeps its dev server exactly as it was.
+Nothing in the project is edited. lerd writes a generated config to `node_modules/.lerd/` that merges in the base, origin and allowed hosts for `serve` only, then starts the tool against it. The project's own config is not imported there, it is handed back to the tool's own loader: a config's module format decides which build of every plugin it pulls in, and importing it into a generated file would resolve those plugins differently than a plain run of the same command does. A plugin whose ESM and CommonJS builds are not interchangeable would otherwise fail under lerd alone. That file is rewritten on every start, since a worktree seeds `node_modules` from its parent and would otherwise inherit the parent's domain. A project with no config file for the tool, or one that tracks the generated path in git rather than ignoring it, keeps its dev server exactly as it was.
 
 Framework plugins released before Vite grew `server.origin` ignore it and publish whatever address the server bound to, writing it to the file the app reads to find its dev server. That address is a wildcard nothing can route to, and on a secured site the browser blocks the plain-HTTP request as mixed content and drops the padlock, so the page arrives unstyled. The generated config catches that one value as it is written and stores the site's own URL instead, which is what a current plugin writes there anyway. Upgrading the plugin remains worthwhile, but an old one no longer breaks the page.
 
@@ -202,6 +240,8 @@ journalctl --user -u lerd-messenger-myapp -f
 ```
 
 In the dashboard, a worker keeps its Logs tab whatever state it is in, drawn muted while it is stopped. The journal outlives the unit, so the tab is still the place to read why a worker died after it has gone down, or after the health banner stopped it.
+
+Each worker's toggle carries a shortcut straight to that journal: the log-lines button on the right of the toggle opens the Logs tab with the worker's source already selected, without hunting through the tab strip.
 
 ## Managing custom workers
 

@@ -19,8 +19,10 @@ import lanStatus from './fixtures/lan_status.json';
 import dumpsStatus from './fixtures/dumps_status.json';
 import profilerStatus from './fixtures/profiler_status.json';
 import stats from './fixtures/stats.json';
+import disk from './fixtures/disk.json';
 import workersHealth from './fixtures/workers_health.json';
 import databasesFixture from './fixtures/databases.json';
+import autoSnapshot from './fixtures/auto-snapshot.json';
 import docsFixture from './fixtures/docs.json';
 
 // Demo follows the system theme (auto). Reset any stale value a previous demo
@@ -35,6 +37,16 @@ try {
 const sites = structuredClone(sitesFixture) as Array<Record<string, unknown>>;
 const services = structuredClone(servicesFixture) as Array<Record<string, unknown>>;
 const presets = structuredClone(presetsFixture) as Array<Record<string, unknown>>;
+// A service dashboard is framed same-origin by the real app, so the captured
+// localhost URLs would load nothing here. Point them at the same mockup an
+// external open gets, which keeps the rail icons and the overlay honest.
+for (const svc of services) {
+  if (typeof svc.dashboard === 'string') {
+    const host = new URL(svc.dashboard).host;
+    svc.dashboard = `preview.html?host=${encodeURIComponent(host)}&url=${encodeURIComponent(svc.dashboard)}`;
+  }
+}
+
 // Status is mutable too, so applying a tool update lands on the card that asked.
 const status = structuredClone(statusFixture) as Record<string, unknown>;
 
@@ -52,6 +64,7 @@ const ROUTES: Record<string, unknown> = {
   '/api/devtools/status': { enabled: true },
   '/api/profiler/status': profilerStatus,
   '/api/stats': stats,
+  '/api/disk': disk,
   '/api/workers/health': workersHealth,
 };
 
@@ -364,6 +377,7 @@ function analyticsFor(domain: string, range: string): unknown {
       millis: r.millis,
       cold: !!r.cold,
     })),
+    excluded: [],
   };
 }
 
@@ -572,6 +586,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
 
   // Live (mutable) collections
   if (path === '/api/sites') return jsonResponse(sites);
+  if (path === '/api/auto-snapshot') return jsonResponse(autoSnapshot);
   if (path === '/api/services') return jsonResponse(services);
   if (path === '/api/services/presets') return jsonResponse(presets);
   // Marks and brand colours captured from the store the same way every other

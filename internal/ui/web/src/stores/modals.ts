@@ -35,6 +35,7 @@ export type ModalKind =
   | "workspaceDelete"
   | "siteUnlink"
   | "serviceInstall"
+  | "changelog"
   | "error"
   | null;
 
@@ -246,6 +247,10 @@ export function openWorkspaceDeleteModal(target: WorkspaceDeleteTarget) {
 
 export function openSiteUnlinkModal(target: SiteUnlinkTarget) {
   modal.set({ kind: "siteUnlink", siteUnlink: target });
+}
+
+export function openChangelogModal() {
+  modal.set({ kind: "changelog" });
 }
 
 export function openServiceInstallModal(name: string) {

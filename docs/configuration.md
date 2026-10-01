@@ -40,6 +40,12 @@ share:
                             # localhost-run or pinggy. Written by lerd
                             # share:tool; omitted (the default) means
                             # auto-detect.
+  ngrok_args: --host-header=rewrite
+                            # optional. Extra flags every ngrok share passes to
+                            # ngrok, for the ngrok features lerd has no setting
+                            # of its own for (a host-header rewrite, a traffic
+                            # policy file). Written by lerd share:ngrok-args;
+                            # lerd share --ngrok-args wins for a single run.
 nginx:
   http_port: 80        # host ports nginx publishes. Change these when another
   https_port: 443      # service already owns 80/443; nginx still listens on
@@ -78,6 +84,13 @@ host_proxy:
                           # "start this command on your host?" confirmation.
                           # Default false so a command from a cloned repo is
                           # never run unconfirmed. See usage/host-proxy.md.
+ui:
+  theme: nord             # optional. The dashboard colour theme, by id: a built-in
+                          # one or a file in ~/.config/lerd/themes. It lives here
+                          # rather than in the browser so every device that opens
+                          # the dashboard shows the same lerd. Empty means the
+                          # default theme. Set from the dashboard's System page.
+                          # See features/dashboard-themes.md.
 tray:
   disabled: false         # optional. Set true (or run lerd tray off) to keep the
                           # system tray applet out of lerd start and lerd install,
@@ -150,7 +163,7 @@ A portable, self-contained description of a project's local environment. Created
 
 | Field | Description |
 |---|---|
-| `php_version` | PHP version for this project (highest priority, overrides `.php-version` and `composer.json`) |
+| `php_version` | PHP version for this project (highest priority, overrides `.php-version` and `composer.json`). The framework definition's range still applies, and `lerd link` reports when it moves the pin |
 | `node_version` | Node version (highest priority, overrides `.nvmrc`, `.node-version`, and `package.json`); writes `.node-version` on apply if the file does not already exist |
 | `framework` | Framework name (overrides auto-detection) |
 | `framework_def` | Full framework definition, embedded automatically for custom (non-Laravel) frameworks so the project is portable across machines |
@@ -160,6 +173,8 @@ A portable, self-contained description of a project's local environment. Created
 | `domains` | Site hostnames, with or without the TLD (e.g. `[myapp, api]` or `[myapp.test, api.test]`, both register the same pair). The first entry is the primary; additional entries become aliases. Conflict-filtered domains stay in this list on disk but are not registered. A hostname may not contain whitespace, a slash, or nginx punctuation (`{`, `}`, `;`, `#`), since it is written into the generated vhost's `server_name` |
 | `app_url` | Override for `APP_URL` (or the framework's URL key) written to `.env`. Highest priority, it beats the per-machine `sites.yaml` override and the default `<scheme>://<primary-domain>` generator. Use for custom path prefixes, ports, or unrelated hostnames you want shared across machines |
 | `env_overrides` | Map of env var names to templated or static values applied to `.env` on `lerd setup` and to per-worktree `.env` files when worktrees are created. Values may use <code v-pre>{{domain}}</code>, <code v-pre>{{scheme}}</code>, <code v-pre>{{site}}</code>, <code v-pre>{{branch}}</code>, and <code v-pre>{{parent}}</code> placeholders, or be plain strings. When `APP_URL` is in `env_overrides` it takes precedence over the default rewrite; declared keys override defaults, undeclared defaults still apply. The one exception is `DB_DATABASE` on a worktree whose `db_isolated` is true: the isolation flow owns that key and the watcher won't re-render it from the parent's template until isolation is turned back off. See [Env overrides](./features/git-worktrees.md#env-overrides) |
+| `worktree_include` | Paths, relative to the project root, copied from the main repo into every new worktree, for gitignored files the app needs to run (`auth.json`, a `storage/oauth-private.key`, a local config folder). Files and directories both work; a path the worktree already has is left alone, and a path that escapes the project root is ignored. See [Extra files in a worktree](./features/git-worktrees.md#extra-files-in-a-worktree) |
+| `env_passthrough` | Host environment variable names, glob patterns allowed, forwarded from lerd's own process into the one-shot commands it runs in the container (`lerd php`, console commands, composer, tests, tinker, `lerd shell`, MCP). Names only, never values. For an environment exported into the shell by a provider like direnv or sops; a provider that wraps the command sets `LERD_PASSTHROUGH_ENV` instead. See [External environment providers](./usage/php.md#external-environment-providers) |
 | `services` | Services to start on apply. Accepts built-in names, custom service names, or full inline definitions |
 | `workers` | Active worker names for the site (e.g. `queue`, `horizon`, `schedule`, `reverb`, `stripe`). Automatically kept in sync by start/stop commands. Used by `lerd start` to restore workers after reinstall |
 | `worker_options` | Values for a worker's tunable options, keyed by worker name then option (e.g. `queue: {queue: high,default,low}`). Written by `lerd queue:start --queue …` and by the dashboard's worker gear; read by every later start, so the project's own queues and limits survive a restart, a reinstall and a fresh clone. See [Worker options](./usage/queue-workers.md#worker-options) |
@@ -355,3 +370,22 @@ The Lerd watcher also monitors `.lerd.yaml` for changes. When you switch branche
 `lerd isolate`, the UI PHP version selector, and the MCP `site` tool's `php` action all keep `php_version` in sync when this file exists.
 
 `lerd secure`, `lerd unsecure`, the UI HTTPS toggle, and the MCP `secure`/`unsecure` tools keep `secured` in sync when this file exists.
+
+### Local overrides: `.lerd.local.yaml`
+
+A second, untracked file next to `.lerd.yaml`. Every key it sets wins over the committed one, and nothing lerd writes ever moves those keys back into `.lerd.yaml`. Use it when a machine, or a temporary worktree, needs a setting the repository should not carry: an extra domain, an isolated database, a different PHP version for one branch.
+
+```yaml
+# .lerd.local.yaml
+domains:
+  - acme-checkout
+db_isolated: true
+```
+
+The file takes the same fields as `.lerd.yaml`, in the same shapes. Merging is per top-level key: a list replaces the committed list entirely, a map (`env_overrides`, `worker_options`) merges key by key, and everything the local file does not mention keeps the committed value. The file is optional and may exist on its own, without a `.lerd.yaml` next to it.
+
+Add it to `.gitignore`. Lerd never creates it, never writes to it, and will not clean it up for you.
+
+Because the committed file stays the source of truth for everything else, commands that persist a setting still write `.lerd.yaml`, and a save never leaks a locally overridden value into it. Changing a setting the local file owns, say running `lerd runtime frankenphp` while the local file pins `runtime`, is refused before anything is written: the local file has to change for that value to change. That includes the pins that also have a dotfile of their own, so `lerd isolate` and `lerd isolate:node` refuse rather than writing a `.php-version` or `.node-version` the next link would undo.
+
+`lerd site:doctor` names the overridden keys in its `project_config` line, so a domain or a database that is not in `.lerd.yaml` is visible rather than looking like lerd ignoring the committed file. The watcher monitors the local file exactly like `.lerd.yaml`, so editing it re-applies the PHP and Node versions on the spot.

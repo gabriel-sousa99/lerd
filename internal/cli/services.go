@@ -128,8 +128,180 @@ func NewServiceCmd() *cobra.Command {
 	cmd.AddCommand(newServicePinCmd())
 	cmd.AddCommand(newServiceUnpinCmd())
 	cmd.AddCommand(newServicePortCmd())
+	cmd.AddCommand(newServiceDomainCmd())
 
 	return cmd
+}
+
+// newServiceDomainCmd returns the `service domain` command.
+func newServiceDomainCmd() *cobra.Command {
+	var remove bool
+	var port int
+	var cors, noCORS bool
+	cmd := &cobra.Command{
+		Use:   "domain <service> [domain]",
+		Short: "Serve a service on its own domain, reachable from the app and the browser",
+		Long: `Give a service a hostname nginx serves it on, over HTTPS:
+
+    lerd service domain rustfs rustfs.test
+
+serves lerd-rustfs at https://rustfs.test. A bare name is qualified with lerd's
+TLD, so "storage" means storage.test.
+
+An app reaches a service by container name, which resolves nowhere outside the
+podman network. That is fine until something hands the browser a URL built from
+it: an S3 presigned URL carries its host inside the signature, so the app and
+the browser have to agree on one name before the URL is signed, and rewriting
+the host afterwards invalidates the signature. A service domain is that shared
+name, resolving to nginx from inside the app container and from the host alike.
+
+A service exposing more than one port declares which one its domain serves, and
+lerd falls back to the primary otherwise. Override it with --port when the
+service is yours or the preset says nothing:
+
+    lerd service domain rustfs console.rustfs.test --port 9001
+
+A page that talks to the service directly, rather than through the app, needs
+the browser preflight answered: a presigned upload is issued by the app but sent
+by the browser, which asks first and sends nothing if the answer does not name
+the origin it came from. Services that work this way ask for it themselves, and
+--cors turns it on for one that does not, --no-cors off for one that does:
+
+    lerd service domain rustfs --cors
+
+Only origins lerd serves are answered, never "*".
+
+Run with no domain to show the current one, or --remove to stop serving it. The
+service stays reachable at lerd-<name> on the podman network either way.`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			name := args[0]
+			feedback.Begin()
+			if cors && noCORS {
+				return fmt.Errorf("--cors and --no-cors ask for opposite things; pass one")
+			}
+			// Resolved before the change: a site is recognised by whichever
+			// address its env currently names, so removing the domain first
+			// would lose every site the domain itself is what wired.
+			affected := config.SitesUsingService(name)
+			if remove {
+				if err := serviceops.RemoveServiceDomain(name); err != nil {
+					return err
+				}
+				feedback.Done("removed the domain for " + feedback.Val(name))
+				syncServiceDomainSites(name, affected)
+				return nil
+			}
+			// --cors alone changes the answer on the domain the service already
+			// has, so it does not have to be renamed to its current value to
+			// turn the preflight on.
+			if len(args) == 1 && (cors || noCORS) {
+				if err := serviceops.SetServiceDomainCORS(name, cors); err != nil {
+					return err
+				}
+				feedback.Done(corsDoneMessage(name, cors))
+				return nil
+			}
+			if len(args) == 1 {
+				if current := config.ServiceDomain(name); current != "" {
+					fmt.Printf("%s is served at https://%s -> port %d%s\n", name, current,
+						serviceops.ServiceDomainPort(name), corsSuffix(name))
+					return nil
+				}
+				fmt.Printf("%s has no domain. Give it one with: lerd service domain %s %s\n",
+					name, name, serviceops.DefaultServiceDomain(name))
+				return nil
+			}
+			domain, err := serviceops.SetServiceDomain(name, args[1], port)
+			if err != nil {
+				return err
+			}
+			if cors || noCORS {
+				if err := serviceops.SetServiceDomainCORS(name, cors); err != nil {
+					return err
+				}
+			}
+			feedback.Done("serving " + feedback.Val(name) + " at https://" + domain + corsSuffix(name))
+			syncServiceDomainSites(name, affected)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&remove, "remove", false, "Stop serving the service on its domain")
+	cmd.Flags().IntVar(&port, "port", 0, "Container port the domain proxies to (default: the preset's, then the service's primary)")
+	cmd.Flags().BoolVar(&cors, "cors", false, "Answer browser preflights on the domain, for a page that uploads to the service directly")
+	cmd.Flags().BoolVar(&noCORS, "no-cors", false, "Stop answering browser preflights on a service whose preset asks for them")
+	return cmd
+}
+
+// corsSuffix names the preflight answer wherever the domain is reported, so the
+// state is visible without opening config.yaml to find it.
+func corsSuffix(service string) string {
+	if serviceops.ServiceDomainCORS(service) {
+		return ", answering browser preflights"
+	}
+	return ""
+}
+
+func corsDoneMessage(service string, enabled bool) string {
+	if enabled {
+		return "answering browser preflights on " + feedback.Val(service)
+	}
+	return "no longer answering browser preflights on " + feedback.Val(service)
+}
+
+// adoptDefaultServiceDomains takes the domain each preset declares for a service
+// that has none, then rewrites the env of the sites using it. Together those two
+// are what make the fix arrive with an update: the domain is provisioned and the
+// projects pointing at the service are repointed at it in the same pass.
+func adoptDefaultServiceDomains() {
+	for _, service := range serviceops.AdoptDefaultServiceDomains() {
+		// Resolved after the adoption on purpose: the sites still name the
+		// container at this point, which is what the lookup matches on.
+		sites := config.SitesUsingService(service)
+		step := feedback.Start("serving " + feedback.Val(service) + " at https://" + config.ServiceDomain(service))
+		step.OK("")
+		syncServiceDomainSites(service, sites)
+	}
+}
+
+// domainSyncEnvFn is the seam the domain sweep re-execs the env step through,
+// swapped in tests so the sweep can be driven without a real project to write.
+var domainSyncEnvFn = runLerdEnvTo
+
+// syncServiceDomainSites rewrites the env of every site that uses the service,
+// so a domain that just appeared or just went away reaches the projects pointing
+// at it. Without this a domain does nothing until each project runs `lerd env`
+// itself, and removing one leaves every project on a name that resolves nowhere.
+// It re-execs the env step rather than editing the values here, so both
+// directions are computed by the one path that owns them. The sites are resolved
+// by the caller before the domain changes, since a site wired to the domain
+// names the container nowhere and would vanish from the list the moment the
+// domain does.
+func syncServiceDomainSites(service string, sites []config.Site) {
+	if len(sites) == 0 {
+		return
+	}
+	bar := feedback.StartProgress(
+		fmt.Sprintf("rewriting .env for %d site%s using %s", len(sites), pluralS(len(sites)), service),
+		len(sites))
+	for _, site := range sites {
+		if err := domainSyncEnvFn(site.Path, io.Discard); err != nil {
+			bar.Failed(site.Name, err.Error())
+			continue
+		}
+		bar.Step(site.Name)
+	}
+	bar.Done(envSyncTally(bar.Completed(), bar.Failures()))
+}
+
+// envSyncTally summarises the sweep the way the store refresh does: the count
+// alone when every site took the change, and the failures named when some did
+// not, since a site left on the old address is the thing worth noticing.
+func envSyncTally(done, failed int) string {
+	if failed == 0 {
+		return fmt.Sprintf("%d updated", done)
+	}
+	return fmt.Sprintf("%d updated, %d failed", done, failed)
 }
 
 func newServiceStartCmd() *cobra.Command {
@@ -171,9 +343,34 @@ func newServiceStartCmd() *cobra.Command {
 				return err
 			}
 			svcStep.OK("")
+			// `service preset` registers without starting, and tells the user to
+			// come here next, so this is where a two-step install first has a
+			// running service to provision against. Nothing else in that path
+			// would ever create the databases and buckets its linked sites
+			// already point at.
+			reprovisionOnStart(name)
 			printEnvVars(name)
 			return nil
 		},
+	}
+}
+
+// reprovisionOnStartFn is the seam the start path provisions through, swapped in
+// tests so the reporting can be asserted without a service to provision against.
+var reprovisionOnStartFn = serviceops.ReprovisionLinkedSites
+
+// reprovisionOnStart recreates the per-site state a freshly started service is
+// missing. Idempotent through the same lookups the reinstall path uses, so a
+// service that already holds everything reports nothing and costs one lookup a
+// site.
+func reprovisionOnStart(name string) {
+	emit := func(e serviceops.PhaseEvent) {
+		if e.Phase == "reprovisioning_site" {
+			feedback.Note(e.Message)
+		}
+	}
+	if err := reprovisionOnStartFn(name, emit); err != nil {
+		feedback.Warn("reprovisioning linked sites: %v", err)
 	}
 }
 
@@ -621,6 +818,9 @@ stopped, removed, exposed, or pinned with the usual service subcommands.`,
 				return err
 			}
 			fmt.Printf("Installed preset %q. Start it with: lerd service start %s\n", svc.Name, svc.Name)
+			if domain := config.ServiceDomain(svc.Name); domain != "" {
+				fmt.Printf("Served at: https://%s\n", domain)
+			}
 			if svc.Dashboard != "" {
 				fmt.Printf("Dashboard: %s\n", svc.Dashboard)
 			}
@@ -765,17 +965,30 @@ func printPresetList() error {
 	return nil
 }
 
-// newServiceSearchCmd returns the `service search` command, which queries the
-// external service-preset store so users can discover presets that aren't
-// bundled with this build. Install any hit with `lerd service preset <name>`,
-// which fetches it on demand.
+// matchPresets filters the installable presets by a case-insensitive substring
+// of the name, description or category. An empty query matches everything.
+func matchPresets(presets []config.PresetMeta, query string) []config.PresetMeta {
+	q := strings.ToLower(strings.TrimSpace(query))
+	out := make([]config.PresetMeta, 0, len(presets))
+	for _, p := range presets {
+		haystack := strings.ToLower(p.Name + " " + p.Description + " " + p.Category)
+		if q == "" || strings.Contains(haystack, q) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// newServiceSearchCmd returns the `service search` command, which filters every
+// installable preset, bundled and store alike. Searching only the store made a
+// service that is already installed answer as if it did not exist.
 func newServiceSearchCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "search [query]",
-		Short: "Search the external service-preset store",
-		Long: `Search the external service-preset store for installable presets.
+		Short: "Search the service presets",
+		Long: `Search the service presets, bundled and store alike.
 
-Run with no query to list everything the store offers:
+Run with no query to list everything on offer:
   lerd service search
 
 Filter by a substring of the name, description, or family:
@@ -789,12 +1002,13 @@ Install any result with the usual command, which fetches it on demand:
 			if len(args) > 0 {
 				query = args[0]
 			}
-			results, err := store.NewServiceClient().SearchServices(query)
+			presets, err := ListInstallablePresets()
 			if err != nil {
-				return fmt.Errorf("searching the service store: %w", err)
+				return fmt.Errorf("searching the service presets: %w", err)
 			}
+			results := matchPresets(presets, query)
 			if len(results) == 0 {
-				fmt.Println("No matching presets in the service store.")
+				fmt.Println("No matching service presets.")
 				return nil
 			}
 			var rows [][]string
@@ -805,7 +1019,7 @@ Install any result with the usual command, which fetches it on demand:
 				} else if config.PresetExists(e.Name) {
 					where = "local"
 				}
-				family := e.Family
+				family := e.Category
 				if family == "" {
 					family = "-"
 				}
@@ -914,6 +1128,10 @@ func newServiceReinstallCmd() *cobra.Command {
 					feedback.Note(e.Message)
 				case "reprovisioning_skipped":
 					feedback.Note("reprovisioning skipped: " + e.Message)
+				case "reprovisioning_failed":
+					feedback.Warn("reprovisioning linked sites: %s", e.Message)
+				case "domain_adopted":
+					feedback.Note("serving on its own domain: " + e.Message)
 				}
 			}
 			opts := serviceops.ReinstallOptions{ResetData: resetData, SkipSnapshot: noSnapshot}
@@ -1133,6 +1351,22 @@ container-internal port of the mapping to move:
 	return cmd
 }
 
+// sitesToRefreshForPortMove picks the sites whose .env has to follow a service's
+// published port. Both host-proxy and native-runtime sites connect over loopback
+// on that published port, so both go stale when it moves; container sites reach
+// the service by name on its unchanged internal port. A site with no framework
+// has no env mapping to write, and `lerd env` there only fails noisily.
+func sitesToRefreshForPortMove(sites []config.Site, mode string) []config.Site {
+	out := make([]config.Site, 0, len(sites))
+	for _, s := range sites {
+		if s.Framework == "" || !usesLoopbackServicesIn(&s, mode) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // refreshHostProxySitesForService regenerates the .env of every host-proxy site
 // that uses service, so a published-port change — set manually via `lerd service
 // port` or by the auto port-ownership guard — is reflected in the loopback
@@ -1141,19 +1375,20 @@ container-internal port of the mapping to move:
 // container-internal port, which a published-port move never alters. Per site it
 // warns rather than failing, so one unwritable site can't block the rest.
 func refreshHostProxySitesForService(service string) {
+	mode := config.PHPRuntimeContainer
+	if cfg, err := config.LoadGlobal(); err == nil {
+		mode = cfg.PHPRuntimeMode()
+	}
 	refreshed := 0
-	for _, s := range config.SitesUsingService(service) {
-		if !s.IsHostProxy() {
-			continue
-		}
+	for _, s := range sitesToRefreshForPortMove(config.SitesUsingService(service), mode) {
 		if err := runLerdEnv(s.Path); err != nil {
-			fmt.Printf("Warning: could not refresh host-proxy site %q for the new %s port: %v\n", s.Name, service, err)
+			fmt.Printf("Warning: could not refresh site %q for the new %s port: %v\n", s.Name, service, err)
 			continue
 		}
 		refreshed++
 	}
 	if refreshed > 0 {
-		fmt.Printf("Refreshed %d host-proxy site(s) to follow %s's published port.\n", refreshed, service)
+		fmt.Printf("Refreshed %d site(s) to follow %s's published port.\n", refreshed, service)
 	}
 }
 

@@ -25,6 +25,7 @@ const (
 	// The fork's `main` still tracks upstream, so anything fetched by raw URL
 	// has to name this branch explicitly or it silently serves upstream's file.
 	defaultBranch = "oracle-oci8-support"
+	nativePHPRepo = "lerd-env/php" // static PHP builds for the native runtime
 )
 
 // StoreBaseURLs returns the framework-store base. The definitions live under a
@@ -96,6 +97,16 @@ func ToolsManifestURLs() []string {
 		return list
 	}
 	return []string{"https://raw.githubusercontent.com/" + mainRepo + "/" + defaultBranch + "/internal/tools/tools.yaml"}
+}
+
+// NativePHPManifestURLs lists raw URLs of the native PHP pins. They live in
+// their own repository because the builds are published there, on the cadence
+// PHP releases patches rather than lerd's.
+func NativePHPManifestURLs() []string {
+	if list := splitList(os.Getenv("LERD_NATIVE_PHP_URL")); len(list) > 0 {
+		return list
+	}
+	return []string{"https://raw.githubusercontent.com/" + nativePHPRepo + "/main/native-php.yaml"}
 }
 
 // ExtraToolHosts lists additional hosts a published tool manifest may point at,

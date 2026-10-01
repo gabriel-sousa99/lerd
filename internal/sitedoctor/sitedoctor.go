@@ -69,6 +69,10 @@ const (
 	// does not hold, a host action like the service fixes since a site cannot
 	// create its own schema from inside its container.
 	FixCreateDatabase = "database_create"
+	// FixCreateBucket creates the entities a site claims on a service that does
+	// not hold them, buckets today. A host action for the same reason the schema
+	// one is: the create runs against the service, not the site's container.
+	FixCreateBucket = "bucket_create"
 	// FixStaleWorkers disables and deletes the unit files left behind for
 	// workers the site no longer declares, a host action for the same reason the
 	// vhost fix is one: the units live outside the container.
@@ -249,6 +253,11 @@ func RunWith(ctx context.Context, path string, fw *config.Framework, opts Option
 		resp.add(c)
 		dbBroken = dbBroken || c.Status == StatusFail
 	}
+	// Same shape one layer over: the service preset names the env key holding
+	// the entity a site owns, so this is asked of every format too.
+	if c, ok := checkServerBucket(path); ok {
+		resp.add(c)
+	}
 	if envFormat == "dotenv" {
 		if c, ok := checkAppKey(envPath, fw); ok {
 			resp.add(c)
@@ -285,6 +294,11 @@ func RunWith(ctx context.Context, path string, fw *config.Framework, opts Option
 	if c, ok := checkPHPVersion(path, fw); ok {
 		resp.add(c)
 	}
+	if cs, ok := checkNativeRuntime(path); ok {
+		for _, c := range cs {
+			resp.add(c)
+		}
+	}
 	if c, ok := checkVhost(path); ok {
 		resp.add(c)
 	}
@@ -292,6 +306,9 @@ func RunWith(ctx context.Context, path string, fw *config.Framework, opts Option
 		resp.add(c)
 	}
 	if !opts.Quick {
+		if c, ok := checkHTTPResponse(path); ok {
+			resp.add(c)
+		}
 		if c, ok := checkSlowRoutes(path); ok {
 			resp.add(c)
 		}
@@ -524,6 +541,7 @@ var universalLabels = map[string]string{
 	"env_duplicates":    "Env Keys",
 	"sqlite_database":   "Database",
 	"server_database":   "Database",
+	"server_bucket":     "Bucket",
 	"composer_deps":     "Composer Dependencies",
 	"composer_audit":    "Composer Audit",
 	"node_deps":         "Node Dependencies",

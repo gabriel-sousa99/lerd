@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -888,5 +889,38 @@ func TestShouldStartFrameworkService_neverForSQLite(t *testing.T) {
 		if !startableFrameworkService(svc) {
 			t.Errorf("%s is a service lerd runs and must still be started", svc)
 		}
+	}
+}
+
+func TestEnvProvisionFailure_NoErrors_ReturnsNil(t *testing.T) {
+	if err := envProvisionFailure(nil); err != nil {
+		t.Errorf("expected nil for a clean run, got %v", err)
+	}
+}
+
+// The .env is already on disk when this fires, so the message has to say the
+// file is fine and the service behind it is not, and name every missing piece.
+func TestEnvProvisionFailure_NamesEveryMissingEntity(t *testing.T) {
+	err := envProvisionFailure([]error{
+		errors.New(`bucket "uploads": mc mb refused`),
+		errors.New(`database "shop_testing": connection refused`),
+	})
+	if err == nil {
+		t.Fatal("expected an error when state could not be created")
+	}
+	msg := err.Error()
+	for _, want := range []string{".env was written", "rerun `lerd env`", `bucket "uploads"`, `database "shop_testing"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message missing %q, got %q", want, msg)
+		}
+	}
+}
+
+// A service declaration with no detect rules is not written: nothing says the
+// project uses it. The database-target lookup treats empty rules the other way
+// round, and the two must not be collapsed into one another.
+func TestFrameworkServiceDetectedIgnoresARuleLessDeclaration(t *testing.T) {
+	if frameworkServiceDetected(config.FrameworkServiceDef{}, map[string]string{"DB_CONNECTION": "mysql"}) {
+		t.Error("a declaration with no rules must not be written")
 	}
 }
