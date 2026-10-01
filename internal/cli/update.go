@@ -11,13 +11,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/download"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/origin"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
-	"github.com/gabriel-sousa99/lerd/internal/services"
 	"github.com/gabriel-sousa99/lerd/internal/store"
 	lerdUpdate "github.com/gabriel-sousa99/lerd/internal/update"
 	"github.com/spf13/cobra"
@@ -61,7 +61,9 @@ func runUpdate(currentVersion string, beta bool) error {
 			return fmt.Errorf("could not fetch latest pre-release: %w", err)
 		}
 	} else {
-		latest, err = lerdUpdate.FetchLatestVersion()
+		// Not --beta, but an install already on a beta keeps following the beta
+		// line here too, so `lerd update` is the same command for both.
+		latest, err = lerdUpdate.LatestFor(currentVersion)
 		if err != nil {
 			return fmt.Errorf("could not fetch latest version: %w", err)
 		}
@@ -171,8 +173,8 @@ func runUpdate(currentVersion string, beta bool) error {
 		return err
 	}
 
-	refreshGlobalMCPSkills()
-	refreshProjectMCPSkills()
+	// The install pass above already refreshed the global and per-project AI
+	// skills, so calling them again here only wrote every file a second time.
 
 	// Offer MinIO → RustFS migration if legacy data directory exists and the
 	// minio container is still running (skip if already migrated to RustFS).
@@ -185,10 +187,9 @@ func runUpdate(currentVersion string, beta bool) error {
 		}
 	}
 
-	// FPM rebuild + container starts now happen inside `lerd install`
-	// (gated on autostart), so we don't repeat them here.
-
-	restartLerdUserServices()
+	// FPM rebuild, container starts and the lerd-ui / lerd-watcher / tray
+	// restarts onto the swapped binary all happen inside `lerd install`, so we
+	// don't repeat them here.
 
 	if feedback.Interactive() {
 		fmt.Printf("\nWhat's new in v%s (you had v%s):\n\n", lat, cur)
@@ -265,16 +266,31 @@ func refreshStoreFrameworks(idx *store.Index) {
 	// One line for the whole catalogue: a machine holding every framework the
 	// store publishes plus the package layer is dozens of fetches, and a line
 	// each buries the rest of the install in a wall nobody reads.
-	client := store.NewClient()
 	bar := feedback.StartProgress(fmt.Sprintf("refreshing %d store definition%s", len(targets), pluralS(len(targets))), len(targets))
-	for _, t := range targets {
-		if err := t.fetch(client); err != nil {
-			bar.Failed(t.label, err.Error())
-			continue
-		}
-		bar.Step(t.label)
-	}
+	runStoreRefresh(store.NewClient(), targets, bar)
 	bar.Done(storeRefreshTally(bar.Completed(), bar.Failures()))
+}
+
+// runStoreRefresh pulls every target, a bounded number at a time, reporting each
+// outcome on the progress line. A definition fetch is nearly all round trip, so
+// a whole catalogue done one at a time is minutes of waiting for nothing.
+func runStoreRefresh(client *store.Client, targets []storeRefreshTarget, bar *feedback.Progress) {
+	slot := make(chan struct{}, store.FetchConcurrency)
+	var wg sync.WaitGroup
+	for _, t := range targets {
+		wg.Add(1)
+		slot <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-slot }()
+			if err := t.fetch(client); err != nil {
+				bar.Failed(t.label, err.Error())
+				return
+			}
+			bar.Step(t.label)
+		}()
+	}
+	wg.Wait()
 }
 
 // storeRefreshTarget is one file to pull from the store, named for the progress
@@ -434,14 +450,18 @@ func refreshStorePresets() {
 		return
 	}
 	sort.Strings(names)
-	bar := feedback.StartProgress(fmt.Sprintf("refreshing %d service preset%s", len(names), pluralS(len(names))), len(names))
+	targets := make([]storeRefreshTarget, 0, len(names))
 	for _, name := range names {
-		if _, err := client.FetchServicePreset(name); err != nil {
-			bar.Failed(name, err.Error())
-			continue
-		}
-		bar.Step(name)
+		targets = append(targets, storeRefreshTarget{
+			label: name,
+			fetch: func(c *store.Client) error {
+				_, err := c.FetchServicePreset(name)
+				return err
+			},
+		})
 	}
+	bar := feedback.StartProgress(fmt.Sprintf("refreshing %d service preset%s", len(names), pluralS(len(names))), len(names))
+	runStoreRefresh(client, targets, bar)
 	bar.Done(storeRefreshTally(bar.Completed(), bar.Failures()))
 }
 
@@ -602,36 +622,6 @@ func mcpEnabledGlobally(home string) bool {
 		}
 	}
 	return false
-}
-
-// restartLerdUserServices restarts the long-running lerd user units (systemd on
-// Linux, launchd on macOS) so they pick up the freshly replaced binary. Both
-// keep the old executable alive for processes that already have it open, so
-// without an explicit restart the daemons keep running the pre-update code and
-// report the old version. Only currently-active units are restarted, so
-// disabled services are left alone.
-func restartLerdUserServices() {
-	units := []string{"lerd-ui", "lerd-watcher", "lerd-tray"}
-	var active []string
-	for _, u := range units {
-		if services.Mgr.IsActive(u) {
-			active = append(active, u)
-		}
-	}
-	if len(active) == 0 {
-		return
-	}
-	feedback.Header("Restarting lerd services to pick up the new binary")
-	for _, u := range active {
-		s := feedback.Start(u)
-		if err := services.Mgr.Restart(u); err != nil {
-			// Best-effort: the binary swap already succeeded, so a restart that
-			// didn't take is a warning, not a failure of the update itself.
-			s.Warn(err)
-			continue
-		}
-		s.OK("")
-	}
 }
 
 // downloadReleaseBinary downloads and extracts the release archive for the

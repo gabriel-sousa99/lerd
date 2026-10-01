@@ -21,6 +21,7 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/envfile"
+	"github.com/gabriel-sousa99/lerd/internal/nativephp"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 )
 
@@ -43,30 +44,64 @@ import (
 // under it) and a missing leading slash is added (`^app(/|$)` can never match a
 // URI, which always starts with "/"). A proxy declaring no path at all names
 // nothing to proxy, and is reported as no proxy rather than capturing the site.
-func detectSiteProxy(site config.Site) (paths []string, port int, ok bool) {
+// VhostProxy is one worker's proxy: the paths it answers on, already
+// regex-escaped, the port it listens on, and whether it listens on the host
+// rather than inside the site's FPM container.
+type VhostProxy struct {
+	Paths  []string
+	Port   int
+	OnHost bool
+}
+
+func detectSiteProxies(site config.Site) []VhostProxy {
 	fw, fwOK := config.GetFrameworkForDir(site.Framework, site.Path)
 	if !fwOK {
-		return nil, 0, false
+		return nil
 	}
-	proxy, _ := fw.DetectProxy(site.Path)
-	if proxy == nil {
-		return nil, 0, false
+	var out []VhostProxy
+	for _, np := range fw.DetectProxies(site.Path) {
+		paths := proxyPaths(np.Proxy)
+		if len(paths) == 0 {
+			continue
+		}
+		out = append(out, VhostProxy{
+			Paths:  paths,
+			Port:   proxyPort(site, np),
+			OnHost: np.Proxy.OnHost(),
+		})
 	}
-	proxyPort := proxy.DefaultPort
-	if proxyPort == 0 {
-		proxyPort = 8080
+	return out
+}
+
+// proxyPort is the port this worker's server listens on: the one lerd pinned
+// for it, the one the site's .env names, or the definition's default.
+func proxyPort(site config.Site, np config.NamedProxy) int {
+	if np.Proxy.PinnedPort() {
+		if p := site.WorkerPorts[np.Worker]; p > 0 {
+			return p
+		}
 	}
-	if proxy.PortEnvKey != "" {
-		if v := envfile.ReadKey(filepath.Join(site.Path, ".env"), proxy.PortEnvKey); v != "" {
+	port := np.Proxy.DefaultPort
+	if port == 0 {
+		port = 8080
+	}
+	if np.Proxy.PortEnvKey != "" {
+		if v := envfile.ReadKey(filepath.Join(site.Path, ".env"), np.Proxy.PortEnvKey); v != "" {
 			if p, err := strconv.Atoi(v); err == nil && p > 0 {
-				proxyPort = p
+				port = p
 			}
 		}
 	}
+	return port
+}
+
+// proxyPaths normalises and escapes the declared paths.
+func proxyPaths(proxy *config.WorkerProxy) []string {
 	declared := proxy.Paths
 	if len(declared) == 0 {
 		declared = []string{proxy.Path}
 	}
+	var paths []string
 	for _, raw := range declared {
 		if raw == "" {
 			continue
@@ -80,10 +115,7 @@ func detectSiteProxy(site config.Site) (paths []string, port int, ok bool) {
 		}
 		paths = append(paths, regexp.QuoteMeta(p))
 	}
-	if len(paths) == 0 {
-		return nil, 0, false
-	}
-	return paths, proxyPort, true
+	return paths
 }
 
 // detectSiteDevServer returns the prefix and host port for a site whose
@@ -133,12 +165,15 @@ type VhostData struct {
 	// FPMContainer is the container nginx fastcgi's to: the shared
 	// lerd-php<ver>-fpm, or a per-site container for custom-FPM sites.
 	FPMContainer string
-	CertDomain   string // domain whose cert files to use (defaults to Domain)
-	PublicDir    string // document root subdirectory, e.g. "public", "web", "."
-	// ProxyPaths are the URL paths a worker's server answers on (e.g. "/app",
-	// "/apps"), one location block each. Empty when the site has no proxy.
-	ProxyPaths      []string
-	ProxyPort       int    // port the worker listens on inside the PHP-FPM container
+	// FPMPort is the port on FPMContainer nginx fastcgi's to: 9000 for a
+	// container, the version's host listener for a native site.
+	FPMPort    int
+	CertDomain string // domain whose cert files to use (defaults to Domain)
+	PublicDir  string // document root subdirectory, e.g. "public", "web", "."
+	// Proxies are the worker servers this site answers for, one location per
+	// path. A site can run more than one, an asset server next to a websocket
+	// server, and each has its own port and upstream.
+	Proxies         []VhostProxy
 	CustomContainer string // container name for custom container sites (e.g. "lerd-custom-nestapp")
 	CustomPort      int    // port the app listens on inside the custom container
 	// DevServerBase is the URL prefix a host dev server serves everything
@@ -274,9 +309,11 @@ func (d VhostData) validate() error {
 			return fmt.Errorf("nginx %s %q contains %q, which would end the directive it lands in", name, v, string(v[i]))
 		}
 	}
-	for _, v := range d.ProxyPaths {
-		if i := strings.IndexAny(v, nginxValueForbidden); i >= 0 {
-			return fmt.Errorf("nginx proxy path %q contains %q, which would end the directive it lands in", v, string(v[i]))
+	for _, p := range d.Proxies {
+		for _, v := range p.Paths {
+			if i := strings.IndexAny(v, nginxValueForbidden); i >= 0 {
+				return fmt.Errorf("nginx proxy path %q contains %q, which would end the directive it lands in", v, string(v[i]))
+			}
 		}
 	}
 	// The paths reach the templates only through Root(), which quotes them, so
@@ -466,9 +503,9 @@ func renderFPMVhost(site config.Site, phpVersion string, ssl bool) ([]byte, erro
 	}
 
 	publicDir := resolvePublicDir(site)
-	proxyPaths, proxyPort, _ := detectSiteProxy(site)
+	proxies := detectSiteProxies(site)
 	devBase, devPort := detectSiteDevServer(site)
-	fpmContainer := podman.FPMContainerName(site, phpVersion)
+	fpmContainer, fpmPort := fpmUpstream(&site, phpVersion)
 	data := VhostData{
 		Domain:          site.PrimaryDomain(),
 		ServerNames:     serverNamesWithWildcards(site.Domains),
@@ -476,9 +513,9 @@ func renderFPMVhost(site config.Site, phpVersion string, ssl bool) ([]byte, erro
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
 		FPMContainer:    fpmContainer,
+		FPMPort:         fpmPort,
 		PublicDir:       publicDir,
-		ProxyPaths:      proxyPaths,
-		ProxyPort:       proxyPort,
+		Proxies:         proxies,
 		UpstreamHost:    hostProxyUpstream(),
 		DevServerBase:   devBase,
 		DevServerPort:   devPort,
@@ -690,11 +727,11 @@ func worktreeSite(domain, path, siteName string) config.Site {
 
 // worktreeVhostConfig resolves the framework-dependent parts of a worktree
 // vhost, the same three the main-site generators resolve for the parent.
-func worktreeVhostConfig(domain, path, phpVersion, siteName string) (publicDir, fpmContainer, frameworkNginx string) {
+func worktreeVhostConfig(domain, path, phpVersion, siteName string) (publicDir, fpmContainer, frameworkNginx string, fpmPort int) {
 	site := worktreeSite(domain, path, siteName)
 	publicDir = resolvePublicDir(site)
-	fpmContainer = podman.FPMContainerName(site, phpVersion)
-	return publicDir, fpmContainer, resolveFrameworkNginx(site, publicDir, fpmContainer)
+	fpmContainer, fpmPort = fpmUpstream(&site, phpVersion)
+	return publicDir, fpmContainer, resolveFrameworkNginx(site, publicDir, fpmContainer), fpmPort
 }
 
 // GenerateWorktreeVhost renders the HTTP vhost template for a worktree checkout
@@ -710,7 +747,7 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 		return err
 	}
 
-	publicDir, fpmContainer, frameworkNginx := worktreeVhostConfig(domain, path, phpVersion, siteName)
+	publicDir, fpmContainer, frameworkNginx, fpmPort := worktreeVhostConfig(domain, path, phpVersion, siteName)
 	devBase, devPort := detectWorktreeDevServer(siteName, path)
 	data := VhostData{
 		Domain:          domain,
@@ -719,6 +756,7 @@ func GenerateWorktreeVhost(domain, path, phpVersion, siteName, branch string) er
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
 		FPMContainer:    fpmContainer,
+		FPMPort:         fpmPort,
 		PublicDir:       publicDir,
 		LerdSite:        siteName,
 		LerdBranch:      branch,
@@ -756,7 +794,7 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 		return err
 	}
 
-	publicDir, fpmContainer, frameworkNginx := worktreeVhostConfig(domain, path, phpVersion, siteName)
+	publicDir, fpmContainer, frameworkNginx, fpmPort := worktreeVhostConfig(domain, path, phpVersion, siteName)
 	devBase, devPort := detectWorktreeDevServer(siteName, path)
 	data := VhostData{
 		Domain:          domain,
@@ -765,6 +803,7 @@ func GenerateWorktreeSSLVhost(domain, path, phpVersion, parentDomain, siteName, 
 		PHPVersion:      phpVersion,
 		PHPVersionShort: phpShort(phpVersion),
 		FPMContainer:    fpmContainer,
+		FPMPort:         fpmPort,
 		CertDomain:      parentDomain,
 		PublicDir:       publicDir,
 		LerdSite:        siteName,
@@ -972,6 +1011,26 @@ type proxyVhostData struct {
 	UpstreamPort   int
 	UpstreamScheme string
 	RequestTimeout int
+	// CORS answers the browser preflight on this domain, and CORSOrigin is the
+	// nginx regex deciding which origins are answered for.
+	CORS       bool
+	CORSOrigin string
+}
+
+// tldLabel is what a TLD may look like before it is interpolated into the CORS
+// origin regex. It comes from user config, and a value that was never a TLD
+// would otherwise build a pattern matching more than the hosts lerd serves.
+var tldLabel = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
+
+// corsOriginPattern builds the regex matching every origin lerd serves: any host
+// under the configured TLD, on either scheme, with or without an explicit port,
+// since nginx's own ports are configurable. Reflecting these rather than
+// answering "*" keeps a page on the open internet from reading a local service.
+func corsOriginPattern(tld string) string {
+	if !tldLabel.MatchString(tld) {
+		tld = "test"
+	}
+	return `^https?://[^/]+\.` + strings.ReplaceAll(tld, ".", `\.`) + `(:[0-9]+)?$`
 }
 
 // ProxyVhostOptions is the declarative input for a manual single-upstream
@@ -1077,6 +1136,42 @@ func GenerateProxyVhostWithOptions(opts ProxyVhostOptions) error {
 	}
 	_ = os.Remove(filepath.Join(config.NginxConfD(), stale))
 	return nil
+}
+
+// GenerateServiceProxyVhost writes the vhost that serves a service on its own
+// domain: HTTP when ssl is false, HTTPS with an HTTP redirect in front when it
+// is. It is the plain proxy vhost with TLS, kept separate so the LAN proxy above
+// keeps its narrower shape. cors additionally answers the browser preflight, for
+// a service a page talks to directly rather than through the app.
+func GenerateServiceProxyVhost(domain, upstreamHost string, upstreamPort int, ssl, cors bool) error {
+	if !ssl {
+		return GenerateProxyVhost(domain, upstreamHost, upstreamPort, false)
+	}
+	tmplData, err := GetTemplate("vhost-service-proxy-ssl.conf.tmpl")
+	if err != nil {
+		return err
+	}
+	tmpl, err := template.New("vhost-service-proxy-ssl").Parse(string(tmplData))
+	if err != nil {
+		return err
+	}
+	rendered, err := renderProxyVhost(tmpl, proxyVhostData{
+		Domain:         domain,
+		UpstreamHost:   upstreamHost,
+		UpstreamPort:   upstreamPort,
+		RequestTimeout: resolveRequestTimeout("", ""),
+		CORS:           cors,
+		CORSOrigin:     corsOriginPattern(config.EffectiveTLD()),
+	})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(config.NginxConfD(), 0755); err != nil {
+		return err
+	}
+	confPath := filepath.Join(config.NginxConfD(), domain+".conf")
+	config.GuardRealWrite(confPath)
+	return os.WriteFile(confPath, rendered, 0644)
 }
 
 // ErrNotRunning reports that lerd-nginx is down, so there is no process to
@@ -1189,6 +1284,11 @@ func RepairVhosts() []VhostRepair {
 		return nil
 	}
 
+	serviceDomains := map[string]bool{}
+	for _, domain := range config.ServiceDomains() {
+		serviceDomains[domain] = true
+	}
+
 	var repairs []VhostRepair
 	dirty := false
 
@@ -1198,6 +1298,11 @@ func RepairVhosts() []VhostRepair {
 		}
 		// Skip internal configs (default catch-all and lerd dashboard proxy).
 		if entry.Name() == "_default.conf" || entry.Name() == "lerd.localhost.conf" {
+			continue
+		}
+		// A service domain is served by no site, so the orphan rule below would
+		// delete the vhost that makes it answer at all.
+		if serviceDomains[strings.TrimSuffix(entry.Name(), ".conf")] {
 			continue
 		}
 
@@ -1433,7 +1538,10 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-// renderDefaultVhost returns the canonical _default.conf content.
+// renderDefaultVhost returns the canonical _default.conf content. An unknown or
+// just-unlinked domain lands here and has to be told so with a 404: try_files
+// serves the page it finds with a 200, and its =404 only fires when the file is
+// missing, which left an unlinked site looking like it was still served.
 // Separate from the writer so callers (and tests) can compute the same
 // bytes lerd would write without touching disk.
 func renderDefaultVhost() []byte {
@@ -1443,7 +1551,11 @@ func renderDefaultVhost() []byte {
     listen [::]:80 default_server;
     root %s;
     location / {
-        try_files /404.html =404;
+        return 404;
+    }
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
         default_type text/html;
     }
 }
@@ -1846,34 +1958,7 @@ func EnsureProfilerVhost() error {
 	if cfg.IsProfilerEnabled() {
 		state = "on"
 	}
-	// SCRIPT_FILENAME just needs a real file to exist; SPX intercepts the
-	// SPX_UI_URI request and serves its UI. It must point at the dedicated
-	// spx-entry.php, NOT at dump-bridge.php: the latter is the
-	// auto_prepend_file, so naming it here makes PHP compile it twice per
-	// request (prepend + main script). Its top-level functions are early-bound
-	// at compile time, so the second compile fatals with "Cannot redeclare ..."
-	// → HTTP 500 before SPX renders. spx-entry.php declares nothing, so the
-	// prepend runs once and the main script is a clean no-op.
-	content := fmt.Sprintf(`server {
-    listen 80;
-    listen [::]:80;
-    server_name profiler.localhost;
-
-    location = %s {
-        access_log off;
-        default_type text/plain;
-        return 200 %q;
-    }
-
-    location / {
-        set $fpm "lerd-php%s-fpm";
-        fastcgi_pass $fpm:9000;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME /usr/local/etc/lerd/spx-entry.php;
-        fastcgi_param HTTP_COOKIE "SPX_KEY=$spx_key";
-    }
-}
-`, ProfilerStatePath, state, phpShort(cfg.PHP.DefaultVersion))
+	content := profilerVhost(cfg.PHPRuntimeMode(), cfg.PHP.DefaultVersion, ProfilerStatePath, state)
 	config.GuardRealWrite(filepath.Join(config.NginxConfD(), "_profiler.conf"))
 	return os.WriteFile(filepath.Join(config.NginxConfD(), "_profiler.conf"), []byte(content), 0644)
 }
@@ -1948,4 +2033,50 @@ func RewriteNginxQuadlet() (changed bool, err error) {
 	content = podman.ApplyNginxPorts(content, httpPort, httpsPort)
 	content = podman.InjectExtraVolumes(content, podman.ExtraVolumePaths())
 	return podman.WriteQuadletDiff("lerd-nginx", content)
+}
+
+// profilerVhost renders the profiler.localhost vhost for the runtime serving
+// PHP. Under the native runtime nothing listens on the FPM container, so a
+// vhost naming it answered 502 for SPX's own dashboard, and the bridge it names
+// as SCRIPT_FILENAME lives at a path that only exists inside the image.
+//
+// SCRIPT_FILENAME just needs a real file to exist: SPX intercepts the
+// SPX_UI_URI request and serves its UI before the bridge runs.
+func profilerVhost(mode, defaultVersion, statePath, state string) string {
+	upstream := fmt.Sprintf(`set $fpm "lerd-php%s-fpm";
+        fastcgi_pass $fpm:9000;`, phpShort(defaultVersion))
+	script := "/usr/local/etc/lerd/dump-bridge.php"
+	if mode == config.PHPRuntimeNative {
+		// An unparseable version falls back to the container, the same way a
+		// site vhost does, so a bad value can never render port 0 and fail the
+		// whole configuration.
+		if port, err := nativephp.PortFor(defaultVersion); err == nil {
+			upstream = fmt.Sprintf(`set $fpm "%s";
+        fastcgi_pass $fpm:%d;`, hostGateway, port)
+			script = config.DumpsBridgeFile()
+		}
+	}
+	return fmt.Sprintf(`server {
+    listen 80;
+    listen [::]:80;
+    server_name profiler.localhost;
+
+    location = %s {
+        access_log off;
+        default_type text/plain;
+        return 200 %q;
+    }
+
+    location / {
+        %s
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME %s;
+        # The bridge is auto-prepended into every request, and it is also the
+        # script named above, so without this it is loaded twice and the second
+        # load fatals on redeclaring its own functions.
+        fastcgi_param PHP_VALUE "auto_prepend_file=";
+        fastcgi_param HTTP_COOKIE "SPX_KEY=$spx_key";
+    }
+}
+`, statePath, state, upstream, script)
 }

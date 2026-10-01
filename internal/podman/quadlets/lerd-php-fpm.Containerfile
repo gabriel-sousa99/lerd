@@ -202,7 +202,7 @@ RUN set -eux; \
 # rebuilds the base; TestDevtoolsSourceMarkerInSync keeps the marker honest.
 # No-op at runtime on PHP < 8.0 (no zend_observer); the || true degrades a
 # compile failure to "Debug window unavailable" rather than bricking the image.
-# lerd_devtools-src-sha256: 4d7c5e0c3032
+# lerd_devtools-src-sha256: f3b7353d45f2
 COPY internal/podman/devtools /tmp/lerd-devtools
 RUN { cd /tmp/lerd-devtools && phpize && ./configure --enable-lerd-devtools && make -j$(nproc) && make install && docker-php-ext-enable lerd_devtools; } || true; \
     rm -rf /tmp/lerd-devtools /var/cache/apk/*

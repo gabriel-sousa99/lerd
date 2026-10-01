@@ -11,6 +11,20 @@ import (
 	"github.com/gabriel-sousa99/lerd/internal/config"
 )
 
+// withoutDiskReadings stops a test shelling out to the real podman for its disk
+// accounting. With no reading available the code falls back to the per-target
+// estimate, which is what most of these tests assert; the ones that care about
+// the measured delta stub these seams themselves.
+func withoutDiskReadings(t *testing.T) {
+	t.Helper()
+	readStoreBytes = func() int64 { return 0 }
+	readUniqueBytes = func() map[string]int64 { return nil }
+	t.Cleanup(func() {
+		readStoreBytes = podmanStoreBytes
+		readUniqueBytes = podmanUniqueBytes
+	})
+}
+
 // withImages swaps the image-scan and layer-inspect seams for fixtures and
 // restores them after. layers maps an image ID to its RootFS layers.
 func withImages(t *testing.T, imgs []image, layers map[string][]string) {
@@ -34,6 +48,7 @@ func withImages(t *testing.T, imgs []image, layers map[string][]string) {
 	// Default to an empty ledger so a test that doesn't care never reads the real
 	// on-disk file; catalog-reap tests override this after calling withImages.
 	loadPulledImages = func() map[string]bool { return map[string]bool{} }
+	withoutDiskReadings(t)
 	t.Cleanup(func() {
 		scanImages = podmanImages
 		imageLayers = podmanImageLayers
@@ -298,6 +313,7 @@ func TestInspect_ReclaimsOrphanBasesKeepsInUse(t *testing.T) {
 
 func TestApply_RemovesTargetsAndSumsReclaimed(t *testing.T) {
 	var removed []string
+	withoutDiskReadings(t)
 	removeImage = func(id string) error { removed = append(removed, id); return nil }
 	t.Cleanup(func() { removeImage = podmanRemoveImage })
 
@@ -318,6 +334,7 @@ func TestApply_RemovesTargetsAndSumsReclaimed(t *testing.T) {
 // a later pass once the child is gone, so a single Apply reclaims the whole
 // dangling build chain even when the parent is listed first.
 func TestApply_RetriesUntilDependentsFreed(t *testing.T) {
+	withoutDiskReadings(t)
 	present := map[string]bool{"child": true, "parent": true}
 	removeImage = func(id string) error {
 		if id == "parent" && present["child"] {
@@ -344,6 +361,7 @@ func TestApply_RetriesUntilDependentsFreed(t *testing.T) {
 // A removal that fails (e.g. the image became referenced since Inspect) is
 // skipped so one stuck image can't abort the sweep, and its bytes aren't counted.
 func TestApply_SkipsFailedRemovalsButContinues(t *testing.T) {
+	withoutDiskReadings(t)
 	removeImage = func(id string) error {
 		if id == "bad" {
 			return errors.New("image is in use")
@@ -424,5 +442,21 @@ func TestApply_RemovesRenderedFileTargets(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("directory should be gone, stat err = %v", err)
+	}
+}
+
+func TestDedupeImages_CollapsesMultiRepoTags(t *testing.T) {
+	// podman lists an image once per repository it is tagged under, each row
+	// carrying the same ID and the same full Names list.
+	imgs := dedupeImages([]image{
+		{ID: "sha256:mc", Names: []string{"quay.io/minio/mc:latest", "docker.io/minio/mc:latest"}, Size: 85},
+		{ID: "sha256:mc", Names: []string{"quay.io/minio/mc:latest", "docker.io/minio/mc:latest"}, Size: 85},
+		{ID: "sha256:other", Names: []string{"redis:7"}, Size: 40},
+	})
+	if len(imgs) != 2 {
+		t.Fatalf("want 2 images, got %d: %+v", len(imgs), imgs)
+	}
+	if imgs[0].ID != "sha256:mc" || imgs[1].ID != "sha256:other" {
+		t.Fatalf("order not preserved: %+v", imgs)
 	}
 }

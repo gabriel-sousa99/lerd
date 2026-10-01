@@ -5,6 +5,7 @@ import (
 	"os/exec"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/envpass"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -32,6 +33,7 @@ func consoleCmdArgs(cwd, container, consoleCmd string, tty bool, args []string) 
 		execFlags = append(execFlags, "-t")
 	}
 	cmdArgs := append(execFlags, terminalColorEnvArgs()...)
+	cmdArgs = append(cmdArgs, envpass.Args(cwd, os.Environ())...)
 	cmdArgs = append(cmdArgs, "-w", cwd, container, "php", consoleCmd)
 	return append(cmdArgs, args...)
 }
@@ -64,6 +66,19 @@ func runConsole(_ *cobra.Command, args []string) error {
 	version, err := phpVersionForDir(cwd)
 	if err != nil {
 		return err
+	}
+
+	// A native site has no FPM container to run the console in, and ensuring one
+	// below would start the very container the runtime switch just stopped.
+	if nv, ok := nativeRuntimeVersion(cwd); ok {
+		code, runErr := runNativePHP(cwd, nv, append([]string{consoleCmd}, args...), nil)
+		if runErr != nil {
+			return runErr
+		}
+		if code != 0 {
+			os.Exit(code)
+		}
+		return nil
 	}
 
 	container := fpmContainerForDir(cwd, version)

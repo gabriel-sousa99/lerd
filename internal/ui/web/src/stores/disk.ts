@@ -5,12 +5,23 @@ import { apiJson, apiFetch } from '$lib/api';
 export interface DiskImage {
   id: string;
   desc: string;
+  owner: string;
+  bytes: number;
+}
+
+export interface UsedImage {
+  ref: string;
+  in_use: boolean;
   bytes: number;
 }
 
 export interface DiskSnapshot {
   available: boolean;
+  used_by_lerd_bytes: number;
+  used_images: UsedImage[];
   reclaimable_bytes: number;
+  lerd_bytes: number;
+  other_bytes: number;
   images: DiskImage[];
   held_bytes: number;
   held_count: number;
@@ -18,7 +29,11 @@ export interface DiskSnapshot {
 
 const empty: DiskSnapshot = {
   available: false,
+  used_by_lerd_bytes: 0,
+  used_images: [],
   reclaimable_bytes: 0,
+  lerd_bytes: 0,
+  other_bytes: 0,
   images: [],
   held_bytes: 0,
   held_count: 0

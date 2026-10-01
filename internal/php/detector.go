@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	"gopkg.in/yaml.v3"
 )
 
 // DetectExtensions reads composer.json in dir and returns the list of PHP extensions
@@ -83,15 +82,10 @@ func SiteUsesPHP(s config.Site) bool {
 //  3. composer.json require.php semver (project requirement)
 //  4. global config default
 func DetectVersion(dir string) (string, error) {
-	// 1. .lerd.yaml — explicit lerd override takes top priority
-	lerdYaml := filepath.Join(dir, ".lerd.yaml")
-	if data, err := os.ReadFile(lerdYaml); err == nil {
-		var lerdCfg struct {
-			PHPVersion string `yaml:"php_version"`
-		}
-		if yaml.Unmarshal(data, &lerdCfg) == nil && lerdCfg.PHPVersion != "" {
-			return lerdCfg.PHPVersion, nil
-		}
+	// 1. .lerd.yaml, with .lerd.local.yaml over it — an explicit lerd override
+	//    takes top priority
+	if cfg, err := config.LoadProjectConfig(dir); err == nil && cfg.PHPVersion != "" {
+		return cfg.PHPVersion, nil
 	}
 
 	// 2. .php-version file — explicit per-project pin
@@ -398,6 +392,54 @@ func ComposerPHPConstraint(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(composer.Require["php"])
+}
+
+// Satisfies reports whether version meets a composer-style constraint. An empty
+// constraint constrains nothing, so everything satisfies it.
+func Satisfies(version, constraint string) bool {
+	return constraint == "" || satisfiesConstraint(version, constraint)
+}
+
+// SatisfiesAll reports whether version meets every constraint given. Empty
+// constraints are skipped, so a project with no composer requirement is judged
+// on the framework definition alone.
+func SatisfiesAll(version string, constraints ...string) bool {
+	for _, c := range constraints {
+		if !Satisfies(version, c) {
+			return false
+		}
+	}
+	return true
+}
+
+// BestInstalledFor returns the newest installed version satisfying every
+// constraint, or "" when the constraints have no installed version in common.
+func BestInstalledFor(constraints ...string) string {
+	installed, err := ListInstalled()
+	if err != nil {
+		return ""
+	}
+	for i := len(installed) - 1; i >= 0; i-- {
+		if SatisfiesAll(installed[i], constraints...) {
+			return installed[i]
+		}
+	}
+	return ""
+}
+
+// ConstraintsOverlap reports whether any PHP version could satisfy every
+// constraint at once. It sweeps the whole plausible range of releases rather
+// than what is installed here, so the answer is about the constraints
+// themselves and does not change with the machine.
+func ConstraintsOverlap(constraints ...string) bool {
+	for major := 5; major <= 9; major++ {
+		for minor := 0; minor <= 9; minor++ {
+			if SatisfiesAll(fmt.Sprintf("%d.%d", major, minor), constraints...) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ClampToConstraint returns version when it satisfies constraint, else the best

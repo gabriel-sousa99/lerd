@@ -610,9 +610,30 @@ func TestIsLerdBuiltImage_matchers(t *testing.T) {
 // definition, which replace the three queue arguments the tool used to name
 // itself and cover every worker a definition makes tunable, then 33650 → 34100
 // for the image download an assistant has to relay and confirm rather than
-// start on someone else's connection.
+// start on someone else's connection, then 34100 → 34800 for scheduled
+// snapshots: an assistant that cannot see the schedule offers a snapshot as a
+// rollback point without knowing retention is about to drop it, and cannot tell
+// the user how to keep the one they care about. The two lines were written
+// tight and the action list carries the rest, then 34800 → 34950 for the
+// schedule's selection mode, which decides whether an unlisted site is covered
+// or ignored: without it an assistant reads an opt-in policy's empty covered
+// list as a broken schedule and tells the user to fix what is working, and
+// 34950 → 35000 for the line saying the schedule's own switch overrides a
+// site that opted in, which is the difference between "off" and "mostly off".
 func TestLerdReference_underSizeCeiling(t *testing.T) {
-	const ceiling = 34100
+	// Raised for 1.35.0, which adds the native runtime and the registry
+	// backups to the surface an assistant has to know about. Around 800 bytes
+	// of existing prose was compressed first, which is what the message below
+	// asks for before the number moves.
+	//
+	// 35500 → 36500 for the refusals this release introduces, which an
+	// assistant meets rather than reads about: every db action refuses on a
+	// sqlite project, which is the state a fresh Laravel clone is in; a version
+	// pin is refused by the floor composer recorded when it installed, not only
+	// by what composer.json declares; and a key .lerd.local.yaml owns cannot be
+	// set from here at all. Each one looks like a broken tool if it arrives
+	// unexplained. The site_doctor entry was compressed first.
+	const ceiling = 36500
 	if got := len(lerdReference); got > ceiling {
 		t.Errorf("lerd-reference.md is %d bytes, ceiling is %d — trim before raising", got, ceiling)
 	}

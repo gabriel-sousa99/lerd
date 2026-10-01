@@ -27,6 +27,9 @@ lerd doctor --fix --yes       # apply without prompting (heavy fixes still confi
 lerd doctor --fix --dry-run   # list what would be repaired, change nothing
 ```
 
+Run without a terminal, over ssh with no tty or from a script, every prompt takes its own default rather than waiting for an answer that cannot come, and says which way it went. The defaults are the cautious ones, so a confirmation nobody is there to give is declined: `lerd uninstall` piped from a script stops rather than proceeding, and `--yes` is how you say you meant it. Reading a prompt from a pipe that stays open used to block until the command was killed.
+
+
 The fixes fall into three groups. lerd applies the safe ones itself, creating a missing data or config directory, enabling linger so services survive logout, installing the network-online drop-in, rebuilding a missing PHP image, and, after you confirm the heavier ones, reinstalling the services or reclaiming podman disk. Anything that needs `sudo` lerd never runs for you; it prints the exact command to copy. That covers installing podman, crun, fuse-overlayfs, the rootless network helpers or adding a subuid range, and also `lerd dns:repair` and `lerd wsl:setup`, which rewrite the resolver and podman configuration through `sudo` and so are yours to run even though lerd knows the command. Findings that are external state, a foreign process already holding port 80, a config file with a syntax error, are left untouched with their hint. The same safe, non-heavy repairs are available to AI assistants through the MCP `diag` tool's `doctor_fix` action, which therefore never elevates on your behalf.
 
 Reclaimable disk is listed separately as optional, because nothing is wrong when there is disk to reclaim. It runs the same interactive reclaim as `lerd cleanup`, so it takes the deep scope and can remove an unreferenced catalog image whoever pulled it, and the size doctor quotes is that same deep scope. If you run other podman workloads on the machine, run [`lerd cleanup --safe`](usage/cleanup.md) yourself instead. Optional fixes never count towards what a re-check reports as still outstanding.
@@ -193,6 +196,21 @@ The dnsmasq image is the one thing lerd builds rather than pulls, and the `apk a
 lerd retries the build with your host's real upstream nameservers pinned, which covers the common case of a stub resolver (`127.0.0.53`) that podman's default handling does not translate correctly on your setup. When that still resolves nothing, it builds once more on the host network, which is the namespace that pulled the base image a moment earlier and so is known to work. A rootless build cannot join the lerd network, so those two are the levers available.
 
 If every attempt fails, lerd says so at the end of the install rather than reporting a clean finish: without the image, lerd-dns cannot start and no `.test` name resolves. Check what the container network can reach with `lerd doctor`, in particular the `internet DNS from containers` line, fix it, then run `lerd install` again.
+:::
+
+::: details `php artisan` fails with "could not translate host name lerd-postgres" while the site works in the browser
+The site's `.env` names the service container and its internal port, `lerd-postgres:5432`, which is correct: that is how nginx and PHP-FPM reach the database, and it is why the browser is fine. The name exists only on the lerd network, so a PHP that runs on the host cannot look it up, and every console command fails on the name while nothing else does. Pointing the `.env` at `127.0.0.1` swaps the symptom rather than fixing it, the CLI starts working and the site stops.
+
+The command is meant to run inside the container, and normally does: `lerd install` puts a `php` shim in `~/.local/share/lerd/bin/` ahead of your PATH, and `php artisan migrate` routes through the project's PHP-FPM container. What breaks it is another PHP arriving in front of the shim. lerd writes its PATH line to your shell rc once, at install, so anything appended below it later, Herd, a Homebrew `shellenv`, mise, asdf or phpenv, takes `php` back, and so does an install that wrote to a different rc than your terminal reads.
+
+Check which one you have:
+
+```bash
+which php        # expect ~/.local/share/lerd/bin/php
+lerd doctor      # the Configuration section reports what leads
+```
+
+Doctor's `php on PATH` line names the binary in front when it is not lerd's. Move lerd's `export PATH` line to the end of your shell rc and open a new shell, and if the entry is missing entirely, `lerd path:enable` writes it back. To keep your own PHP in front deliberately, run `lerd path:disable` and type `lerd artisan migrate` instead, which always runs in the container whatever your PATH says.
 :::
 
 ::: details composer or npm fails with "could not resolve host" inside a container
@@ -462,6 +480,23 @@ Everything from 1.26 onwards resolves the organisation move on its own, so this 
 On Homebrew, apt, dnf, or if you'd rather not pipe a script anywhere, [Updating from a version before 1.26](getting-started/updating-from-pre-1.26.md) has the route for each.
 :::
 
+::: details Error: could not fetch latest pre-release: GitHub API rate limit exhausted
+Symptom: `lerd update --beta` stops with `GitHub API rate limit exhausted for https://api.github.com/repos/lerd-env/lerd/releases, it resets in 46 min`.
+
+Cause: pre-releases are not covered by the `/releases/latest` redirect the stable channel follows, so the beta check asks the GitHub API instead. An anonymous API call is charged to a bucket of 60 requests an hour shared by everything on your IP, and any other tooling on the machine can empty it before lerd gets there. The stable channel is unaffected.
+
+Fix: wait for the reset the message names, or authenticate the call. Lerd sends `GITHUB_TOKEN` or `GH_TOKEN` if either is set in the environment, which raises the ceiling to 5,000 requests an hour:
+
+```bash
+export GITHUB_TOKEN=$(gh auth token)
+lerd update --beta
+```
+
+The token needs no scopes, public release metadata is all lerd reads, and it is only ever sent to `api.github.com` over https, never to a mirror configured through `LERD_RELEASES_API_URL`.
+
+A token that has expired or been revoked costs you nothing: GitHub answers it with a 401, and lerd drops the token and asks again anonymously, so the check still works on the 60 requests an hour every IP gets.
+:::
+
 ::: details Error: NetworkUpdate is not supported for backend CNI: invalid argument
 Your system is likely configured to use the older CNI backend, which lacks support for the requested network operation. Edit or create the Podman configuration file at `/etc/containers/containers.conf` and add or modify the `network_backend` setting to `netavark`:
 
@@ -634,4 +669,35 @@ lerd machine reset
 ```
 
 This stops the VM, removes it, and re-initialises it. Databases and site data are preserved (they live on the host); container images are rebuilt automatically on the next `lerd start`. See [Start, Stop & Autostart → `lerd machine reset`](usage/lifecycle.md#lerd-machine-reset-macos).
+:::
+
+::: details A project on an external drive is created inside the VM (macOS)
+Symptom: on macOS, `lerd new` on a path outside your home directory reports the project as created, then the run warns `chdir /Volumes/<drive>/<project>: no such file or directory` and the folder is nowhere on the drive.
+
+Cause: on macOS every bind mount is resolved inside the Podman Machine VM, and the VM only sees the host trees it was given when it was created. A drive mounted under `/Volumes` is often not among them, so the container sees an empty directory at that path, composer writes the whole project into the VM, and it never lands on the disk.
+
+lerd now checks that the container is really looking at your directory before it scaffolds, and stops with an explanation instead of creating a project you cannot find.
+
+Machines lerd creates share `/Users`, `/private`, `/var/folders` and `/Volumes` with the VM, but a machine created before lerd asked for `/Volumes` (or one created by hand with `podman machine init`) keeps Podman's own defaults and never got it. Podman writes the guest mount units once at init, so this cannot be repaired by editing the machine config; recreate the VM instead:
+
+```bash
+lerd machine reset
+```
+
+`lerd start` points this out on its own when something is already served from outside your home directory. If the drive is still invisible after a reset, macOS is withholding access to it from the VM process rather than lerd failing to ask; keep the project under your home directory.
+:::
+
+::: details An external drive will not eject while lerd is running (macOS)
+Symptom: `diskutil unmount` or the eject button refuses with `dissented by PID ... com.apple.Virtualization.VirtualMachine`.
+
+Cause: the Podman Machine VM shares `/Volumes` for as long as it runs, so macOS treats every drive under it as in use. Stopping the containers is not enough, the VM itself has to go down:
+
+```bash
+lerd stop
+podman machine stop
+```
+
+The drive ejects after that, and `lerd start` brings the VM and your other sites back. Plugging the drive in again is picked up by a running VM on its own, no restart needed.
+
+While the drive is away, lerd starts normally and every other site is unaffected: the missing path is dropped from the container mounts and the site on the drive stops being served. Your files are untouched, but the site is removed from `lerd sites`, so bring it back with `lerd link` and, if it was on HTTPS, `lerd secure` from the project directory.
 :::

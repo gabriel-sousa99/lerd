@@ -40,6 +40,9 @@ func newPhpExtAddCmd() *cobra.Command {
 			"The version you are on is rebuilt and verified now; other versions rebuild the next time they are used.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := nativeImageCommandRefusal("php:ext"); err != nil {
+				return err
+			}
 			ext := args[0]
 			if !validExtNameRe.MatchString(ext) {
 				return fmt.Errorf("invalid extension name %q: must contain only letters, digits, hyphens, and underscores", ext)
@@ -129,6 +132,9 @@ func newPhpExtRemoveCmd() *cobra.Command {
 		Short: "Remove a custom PHP extension from every PHP version",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if err := nativeImageCommandRefusal("php:ext"); err != nil {
+				return err
+			}
 			ext := args[0]
 			if !validExtNameRe.MatchString(ext) {
 				return fmt.Errorf("invalid extension name %q: must contain only letters, digits, hyphens, and underscores", ext)
@@ -139,6 +145,13 @@ func newPhpExtRemoveCmd() *cobra.Command {
 			version, err := phpExtVersion(nil)
 			if err != nil {
 				return err
+			}
+			// A bundled extension lives in the base image, so a rebuild leaves it
+			// loaded. Removing it used to pay for a rebuild and an FPM restart and
+			// then report a removal that had not happened, while `add` refused the
+			// same extension outright.
+			if len(podman.WithoutBundled(version, []string{ext})) == 0 {
+				return fmt.Errorf("extension %q ships in the PHP %s image and cannot be removed", ext, version)
 			}
 
 			if err := config.UpdateGlobal(func(c *config.GlobalConfig) { c.RemoveExtension(ext) }); err != nil {
@@ -166,6 +179,9 @@ func newPhpExtListCmd() *cobra.Command {
 		Short: "List your custom PHP extensions and where they did not build",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := nativeImageCommandRefusal("php:ext"); err != nil {
+				return err
+			}
 			cfg, err := config.LoadGlobal()
 			if err != nil {
 				return err

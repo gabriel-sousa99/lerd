@@ -57,13 +57,15 @@ lerd service reinstall postgres --reset-data   # same version, fresh data
 - A service update produced data incompatible with the new image and you want a clean slate.
 - The container has drifted into a bad state and a full quadlet rewrite would be cleaner than a restart.
 
-`--reset-data` adds a data-dir rename-aside (same recovery semantics as `--purge`, including the pre-wipe snapshot, named `pre-reset-data-<timestamp>` here) and **automatically reprovisions linked-site state** on the freshly installed service:
+`--reset-data` adds a data-dir rename-aside (same recovery semantics as `--purge`, including the pre-wipe snapshot, named `pre-reset-data-<timestamp>` here).
+
+Every reinstall **reprovisions linked-site state** on the service that comes back, with or without `--reset-data`. So does starting a service, which is where a two-step install (`lerd service preset <name>` then `lerd service start <name>`) first has something running to provision against:
 
 - For database families (mysql, mariadb, postgres): each linked site's expected database is created via `CREATE DATABASE IF NOT EXISTS`. The database name comes from `.lerd.yaml` `db.database`, then `.env` `DB_DATABASE`, then the site name with hyphens converted to underscores.
-- For object-storage families (rustfs): each linked site's expected bucket is created via `mc mb`. The bucket name comes from `.env` `AWS_BUCKET`, otherwise derived from the site name.
+- For object-storage families (rustfs): each linked site's expected bucket is created over the S3 API. The bucket name comes from `.env` `AWS_BUCKET`, otherwise derived from the site name.
 - For cache services (redis, memcached): no per-site state to recreate, so reprovisioning is a no-op.
 
-If a single linked site fails to reprovision (e.g. malformed `.env`), the reinstall continues with the remaining sites and reports the joined errors at the end.
+Every entity is looked up before it is created, so reprovisioning a service whose data survived leaves it untouched and reports nothing. If a single linked site fails to reprovision (e.g. malformed `.env`), the run continues with the remaining sites and reports the joined errors at the end.
 
 ## Tuning a service
 
@@ -274,6 +276,8 @@ stop_timeout: 60
 ```
 
 The unit that runs the container is given that window plus fifteen seconds, because podman only starts counting once the stop reaches it and still has to reap and remove the container afterwards. That matters more than it sounds: a unit inherits `DefaultTimeoutStopSec` when nothing sets it, and Arch-family distributions ship that at 10 seconds, so without the longer unit timeout systemd would `SIGKILL` the stop long before podman had spent the grace the service asked for.
+
+Lerd waits out that same window whenever it starts or restarts the service too, not only when it stops it. systemd queues a start behind a stop that is already running, so a start issued during one spends the stop's window before its own work begins. Giving it the shorter default made commands fail on a service that was coming back perfectly well: a `lerd db:export` issued while MySQL was restarting reported `could not start mysql: start lerd-mysql timed out after 30s` even though the server was accepting a second after its turn arrived.
 
 ::: tip
 Raise this only for services that flush on shutdown. A longer window on an image that hangs rather than exits just makes every stop wait it out.

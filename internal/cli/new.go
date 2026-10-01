@@ -115,6 +115,20 @@ func prepareScaffoldParent(target string) error {
 		return fmt.Errorf("cannot scaffold into %s: lerd does not mount temporary system directories (/tmp, /var/tmp, /run) into containers, so composer would have no such directory to run in. Pick a path under your home directory, or park the parent first with 'lerd park %s'", parent, parent)
 	}
 	ensurePathMounted(parent, version)
+	if !containerSeesHostDir(parent, version) {
+		return fmt.Errorf("cannot scaffold into %s: the PHP container sees an empty directory there rather than the one on this machine, so the project would be created inside the Podman Machine VM and never appear on disk. That happens when the path is not shared with the VM, which is the usual answer for a drive mounted under /Volumes. Run 'lerd machine reset' to recreate the VM with every mount lerd asks for, or scaffold under your home directory instead", parent)
+	}
+	return nil
+}
+
+// scaffoldLanded confirms the create command wrote to the host. A container
+// whose bind mount does not reach the real directory takes the whole project
+// with it and composer still exits 0, so a run only reports success once the
+// project is on disk.
+func scaffoldLanded(target string) error {
+	if info, err := os.Stat(target); err != nil || !info.IsDir() {
+		return fmt.Errorf("the create command reported success but %s is not on disk, so it was written inside the container instead. That happens when the project path is not shared with the Podman Machine VM, which is the usual answer for a drive mounted under /Volumes. Run 'lerd machine reset' to recreate the VM with every mount lerd asks for, or scaffold under your home directory instead", target)
+	}
 	return nil
 }
 
@@ -144,7 +158,7 @@ func scaffoldPlan(create, target string, extraArgs []string) scaffold {
 	}
 	return scaffold{
 		inContainer: true,
-		args:        append([]string{filepath.Join(config.BinDir(), "composer.phar")}, tail...),
+		args:        append([]string{composer.PharPath()}, tail...),
 	}
 }
 
@@ -193,6 +207,20 @@ func runScaffold(plan scaffold, workDir, version string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
+}
+
+// scaffoldUnavailableError explains a framework lerd cannot start a project
+// from. A major that ships no project skeleton while the ones before it do is
+// not a broken definition, so it names the run that would work instead.
+func scaffoldUnavailableError(name, version string) error {
+	if version != "" {
+		for _, scaffolds := range config.FrameworkScaffoldSupport(name) {
+			if scaffolds {
+				return fmt.Errorf("%s %s ships no project skeleton — leave --framework-version off to scaffold the newest major that does", name, version)
+			}
+		}
+	}
+	return fmt.Errorf("framework %q has no create command — add a 'create' field to its YAML definition", name)
 }
 
 func runNew(target, frameworkName, frameworkVersion string, extraArgs []string) error {
@@ -246,7 +274,7 @@ func runNew(target, frameworkName, frameworkVersion string, extraArgs []string) 
 		return fmt.Errorf("unknown framework %q — run 'lerd framework list' to see available frameworks", frameworkName)
 	}
 	if fw.Create == "" {
-		return fmt.Errorf("framework %q has no create command — add a 'create' field to its YAML definition", frameworkName)
+		return scaffoldUnavailableError(frameworkName, frameworkVersion)
 	}
 
 	if err := prepareScaffoldParent(target); err != nil {
@@ -271,6 +299,9 @@ func runNew(target, frameworkName, frameworkVersion string, extraArgs []string) 
 
 	if err := runScaffold(plan, filepath.Dir(target), scaffoldVersion); err != nil {
 		return fmt.Errorf("scaffold command failed: %w", err)
+	}
+	if err := scaffoldLanded(target); err != nil {
+		return err
 	}
 
 	feedback.Success("created "+filepath.Base(target), time.Since(start))

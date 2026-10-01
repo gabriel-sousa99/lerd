@@ -19,6 +19,12 @@
   }
   let { site, branch = '' }: Props = $props();
 
+  // The sites store replaces every site object on each snapshot, so an effect
+  // reading site.domain re-runs on a payload that changed nothing here and
+  // reloads the list under the user. A derived stops at the value.
+  const siteDomain = $derived(site.domain);
+  const suspended = $derived(site.idle_suspended === true);
+
   let files = $state<AppLogFile[]>([]);
   let selectedFile = $state('');
   let entries = $state<AppLogEntry[]>([]);
@@ -46,7 +52,7 @@
     if (clearing) return;
     clearing = true;
     try {
-      const r = await clearAppLogs(site.domain, branch);
+      const r = await clearAppLogs(siteDomain, branch);
       if (!r.ok) {
         // The confirmation closes first, or the failure stacks on top of it.
         confirmOpen = false;
@@ -63,7 +69,7 @@
   async function loadFiles() {
     loading = true;
     try {
-      const list = await listAppLogFiles(site.domain, branch);
+      const list = await listAppLogFiles(siteDomain, branch);
       files = list;
       if (list.length > 0) {
         selectedFile = list[0].name;
@@ -81,12 +87,29 @@
     if (!selectedFile) return;
     loading = true;
     try {
-      entries = await loadAppLogEntries(site.domain, selectedFile, showAll, branch);
+      entries = await loadAppLogEntries(siteDomain, selectedFile, showAll, branch);
     } finally {
       loading = false;
     }
     await tick();
     if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+  }
+
+  // The tab has no log stream of its own, so without a timer it only ever showed
+  // what was on disk when it opened. It is mounted only while it is the selected
+  // source, so the poll lives and dies with the tab; a suspended site writes
+  // nothing worth asking for.
+  $effect(() => {
+    if (suspended) return;
+    const poll = setInterval(refreshEntries, 5000);
+    return () => clearInterval(poll);
+  });
+
+  // The poll must not flicker the spinner or move the reader's scroll, so it
+  // swaps the entries in and leaves the view exactly where it was.
+  async function refreshEntries() {
+    if (!selectedFile || loading) return;
+    entries = await loadAppLogEntries(siteDomain, selectedFile, showAll, branch);
   }
 
   // Re-fetch the file list whenever the active site or branch changes.
@@ -95,7 +118,7 @@
   // stale "No log entries found." state — the API was scoped to the
   // wrong path, not actually empty.
   $effect(() => {
-    site.domain;
+    siteDomain;
     branch;
     untrack(() => loadFiles());
   });

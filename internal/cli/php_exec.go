@@ -9,13 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gabriel-sousa99/lerd/internal/agentenv"
 	"github.com/gabriel-sousa99/lerd/internal/config"
+	"github.com/gabriel-sousa99/lerd/internal/logcolor"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
-
-	"github.com/gabriel-sousa99/lerd/internal/logcolor"
-
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -120,10 +117,24 @@ func RunPHPVersionCaptureEnv(cwd, version string, args []string, extraEnv []stri
 	if code, took, err := runDeclaredHostCommand(cwd, args, extraEnv); took {
 		return code, err
 	}
+	// The same for a CLI composer installed globally, which has no project and
+	// so no framework to declare it.
+	if code, took, err := runGlobalHostCLI(cwd, args, extraEnv); took {
+		return code, err
+	}
 	recordCwdActivity(cwd) // keep the site awake under idle-suspend while you work in the terminal
 	// The CLI SAPI ignores a project's .user.ini, so a framework declaring
 	// php.cli_ini gets it as -d on every PHP process lerd starts for it.
 	args = prependPHPIniArgs(phpIniArgsForDir(cwd), args)
+
+	// Under the native runtime PHP lives on the host next to the project, so
+	// there is no container to exec into and nothing to stage across a mount
+	// boundary. This covers directories that are not registered sites too: the
+	// shim runs everywhere, and starting an FPM container for it would undo the
+	// runtime it is meant to be serving.
+	if v, ok := nativeRuntimeVersion(cwd); ok {
+		return runNativePHP(cwd, v, args, extraEnv)
+	}
 
 	container := fpmContainerForDir(cwd, version)
 
@@ -133,17 +144,6 @@ func RunPHPVersionCaptureEnv(cwd, version string, args []string, extraEnv []stri
 	}
 
 	home := os.Getenv("HOME")
-	composerHome := os.Getenv("COMPOSER_HOME")
-	if composerHome == "" {
-		// Respect XDG: prefer ~/.config/composer, fall back to ~/.composer
-		xdgConfig := os.Getenv("XDG_CONFIG_HOME")
-		if xdgConfig == "" {
-			xdgConfig = filepath.Join(home, ".config")
-		}
-		composerHome = filepath.Join(xdgConfig, "composer")
-	}
-	composerBin := filepath.Join(composerHome, "vendor", "bin")
-	projectVendorBin := filepath.Join(cwd, "vendor", "bin")
 
 	// A cwd the container can't reach (an ephemeral /tmp path, not parked and not
 	// listed under mounts:) makes `podman exec -w <cwd>` fail with an opaque crun
@@ -201,31 +201,13 @@ func RunPHPVersionCaptureEnv(cwd, version string, args []string, extraEnv []stri
 		execFlags = append(execFlags, "-t")
 	}
 
-	cmdArgs := append(execFlags, "-w", cwd,
-		"--env", "HOME="+home,
-		"--env", "COMPOSER_HOME="+composerHome,
-		"--env", "PATH="+projectVendorBin+":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:"+composerBin,
-	)
-	cmdArgs = append(cmdArgs, debugSiteEnvArgs(cwd)...)
-	cmdArgs = append(cmdArgs, terminalColorEnvArgs()...)
-	// Forward SPX_* profiler vars from the host so `SPX_ENABLED=1 php ...` (or
-	// any shim'd tool like composer) reaches SPX inside the container. extraEnv
-	// is applied after, so an explicit caller like `lerd profile run` wins.
-	for _, e := range spxPassthroughEnv(os.Environ()) {
-		cmdArgs = append(cmdArgs, "--env", e)
-	}
-	// Forward AI agent detection vars so agent-detector (e.g. laravel/pao)
-	// still emits JSON when run inside the container.
-	for _, e := range agentenv.Passthrough(os.Environ()) {
-		cmdArgs = append(cmdArgs, "--env", e)
-	}
+	cmdArgs := append(execFlags, "-w", cwd)
+	cmdArgs = append(cmdArgs, containerExecEnvArgs(cwd)...)
+	// extraEnv is applied last so an explicit caller like `lerd profile run`
+	// wins over the shared environment.
 	for _, e := range extraEnv {
 		cmdArgs = append(cmdArgs, "--env", e)
 	}
-	// Point composer/git at the shared ssh-agent when it's running, so private
-	// packages with passphrase-protected keys authenticate over SSH. No-op when
-	// the agent isn't up (falls back to the bind-mounted on-disk keys).
-	cmdArgs = append(cmdArgs, podman.SSHAuthSockEnv()...)
 	cmdArgs = append(cmdArgs, container, "php")
 	cmdArgs = append(cmdArgs, args...)
 

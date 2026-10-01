@@ -4,7 +4,7 @@
 // promise, so the module, the worker wiring, and the themes are set up
 // exactly once.
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-import { configLanguages } from '$lib/monaco-langs';
+import { configLanguages, phpFragmentLanguage } from '$lib/monaco-langs';
 
 // We deliberately load the bare editor API rather than the `monaco-editor`
 // barrel: the barrel registers every bundled language plus the ts/json/
@@ -53,7 +53,15 @@ const CONFIG_RULES_DARK = [
   { token: 'cfgValue', foreground: 'e5e7eb' }
 ];
 
+// The editor's selection tint is the dashboard accent at low alpha, read off
+// the root element rather than hardcoded so it follows the chosen theme.
+function accent(): string {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--color-lerd-red').trim();
+  return /^#[0-9a-f]{6}$/i.test(v) ? v : '#ff2d20';
+}
+
 function defineThemes(monaco: MonacoModule) {
+  const tint = accent();
   monaco.editor.defineTheme('lerd-light', {
     base: 'vs',
     inherit: true,
@@ -61,7 +69,7 @@ function defineThemes(monaco: MonacoModule) {
     colors: {
       'editor.background': '#f9fafb',
       'editorLineNumber.foreground': '#9ca3af',
-      'editor.selectionBackground': '#ff2d2033',
+      'editor.selectionBackground': tint + '33',
       'editor.lineHighlightBackground': '#00000008'
     }
   });
@@ -74,7 +82,7 @@ function defineThemes(monaco: MonacoModule) {
       'editorGutter.background': '#161616',
       'editorLineNumber.foreground': '#6b7280',
       'editorLineNumber.activeForeground': '#d1d5db',
-      'editor.selectionBackground': '#ff2d2055',
+      'editor.selectionBackground': tint + '55',
       'editor.lineHighlightBackground': '#ffffff0a'
     }
   });
@@ -95,8 +103,11 @@ export function loadMonaco(): Promise<MonacoModule> {
     monacoPromise = (async () => {
       const monaco = await import('monaco-editor/esm/vs/editor/editor.api');
       // PHP highlighting for tinker; config-format grammars for the
-      // nginx/ini/dotenv editors.
+      // nginx/ini/dotenv editors. The stock PHP grammar is re-registered to
+      // start inside PHP, since tinker's buffer carries no `<?php` opener.
       await import('monaco-editor/esm/vs/basic-languages/php/php.contribution');
+      const { language: php } = await import('monaco-editor/esm/vs/basic-languages/php/php');
+      monaco.languages.setMonarchTokensProvider('php', phpFragmentLanguage(php) as any);
       configureWorkers();
       defineThemes(monaco);
       registerConfigLanguages(monaco);
@@ -112,4 +123,12 @@ export function loadMonaco(): Promise<MonacoModule> {
 export function lerdThemeName(t: 'light' | 'dark' | 'auto'): 'lerd-light' | 'lerd-dark' {
   const dark = t === 'dark' || (t === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
   return dark ? 'lerd-dark' : 'lerd-light';
+}
+
+// applyEditorAccent re-derives the editor themes after a theme change. It does
+// nothing until monaco has been pulled in, so a theme switch on a page with no
+// editor on it costs nothing.
+export function applyEditorAccent() {
+  if (!monacoPromise) return;
+  void monacoPromise.then((monaco) => defineThemes(monaco));
 }

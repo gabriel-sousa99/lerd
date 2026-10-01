@@ -233,6 +233,24 @@ On macOS, `lerd start` detects this exact error and attempts an automatic recove
 
 ---
 
+## `lerd machine reclaim` (macOS)
+
+```bash
+lerd machine reclaim
+```
+
+Returns disk the Podman Machine VM is holding but no longer using.
+
+The VM stores everything in a sparse disk image on the host, and a sparse image only ever grows. When a container image is removed inside the VM the blocks are freed in the guest filesystem, but the host still counts them as allocated, so a VM genuinely using 14 GB can sit on 22 GB of your disk. `lerd machine reclaim` trims the guest filesystem, which hands those blocks back to macOS.
+
+It also caps the VM's systemd journal at 200 MB and vacuums whatever it had grown past that. The journal inside the VM is container and machine noise with no reason to keep weeks of it, and left alone it reached 4 GB on a five-day-old machine. The cap is installed automatically on every `lerd start`, so this only matters on a VM created before lerd shipped it.
+
+Nothing is deleted: containers, images, volumes and site data are all untouched. If you also want the images no container is using, that is `podman image prune` and it is not something lerd does for you.
+
+This command is macOS-only. On Linux podman writes to the host filesystem directly, so there is no image holding freed blocks.
+
+---
+
 ## Autostart on login
 
 Lerd can boot itself every time you log in. Autostart is a single switch over every lerd-owned systemd user unit on the machine:
@@ -244,6 +262,7 @@ Lerd can boot itself every time you log in. Autostart is a single switch over ev
 ```bash
 lerd autostart enable      # boot lerd on every login
 lerd autostart disable     # stop booting on login
+lerd autostart status      # report which one is in force
 ```
 
 `lerd autostart enable` runs `systemctl --user enable` on the full set; `lerd autostart disable` runs the matching `disable`. The dashboard's enabled state is the canonical "is autostart on" indicator surfaced by the UI and tray.
@@ -322,9 +341,10 @@ Where a digest is given the download is checked against it and rejected on a mis
 | Free up CPU / RAM during a heavy build | `lerd stop` |
 | Full shutdown before a reinstall | `lerd quit` |
 | `lerd start` fails with an overlay / graph-driver storage error (macOS) | `lerd machine reset` |
+| lerd's VM is holding more host disk than it uses (macOS) | `lerd machine reclaim` |
 | Verify everything's healthy | `lerd status` |
 | Update Composer / fnm / mkcert to their pinned versions | `lerd tools:update` |
 | Uninstall a service entirely (data preserved) | `lerd service remove <name>` |
 | Uninstall and wipe data (snapshots the databases first) | `lerd service remove <name> --purge` |
 | Reinstall a service in place | `lerd service reinstall <name>` |
-| Reinstall with fresh data + reprovision linked sites (snapshots the databases first) | `lerd service reinstall <name> --reset-data` |
+| Reinstall with fresh data (snapshots the databases first) | `lerd service reinstall <name> --reset-data` |

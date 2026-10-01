@@ -102,6 +102,8 @@ func runRuntime(cmd *cobra.Command, args []string) error {
 			wantWorker = false
 		}
 		return switchToFrankenPHP(site, wantWorker)
+	case "native":
+		return fmt.Errorf("the native runtime is install-wide, not per site: the FPM container is shared by every site on a PHP version. Use 'lerd php:runtime native'")
 	default:
 		return fmt.Errorf("unknown runtime %q — use 'fpm' or 'frankenphp'", target)
 	}
@@ -161,6 +163,9 @@ func runtimeLabel(site *config.Site) string {
 		}
 		return "frankenphp"
 	}
+	if site.IsNative() {
+		return "native"
+	}
 	return "fpm"
 }
 
@@ -204,7 +209,24 @@ func switchToFPM(site *config.Site) error {
 	return nil
 }
 
+// requireOctaneForWorkerMode refuses worker mode on a project that cannot run
+// it. FrankenPHP worker mode serves the site through artisan octane, so without
+// laravel/octane the container exits on its first command and systemd retries
+// it until it gives up, leaving the site at 502 behind a switch that reported
+// success.
+func requireOctaneForWorkerMode(sitePath string) error {
+	if config.ComposerHasInstalled(sitePath, "laravel/octane") {
+		return nil
+	}
+	return fmt.Errorf("FrankenPHP worker mode runs the site through Octane, and laravel/octane is not installed in this project\nInstall it with: composer require laravel/octane\nOr switch without it: lerd runtime frankenphp")
+}
+
 func switchToFrankenPHP(site *config.Site, worker bool) error {
+	if worker {
+		if err := requireOctaneForWorkerMode(site.Path); err != nil {
+			return err
+		}
+	}
 	// Workers currently exec into the shared FPM container; stop them so they
 	// can be recreated against the per-site FrankenPHP container below.
 	running := collectRunningWorkers(site)

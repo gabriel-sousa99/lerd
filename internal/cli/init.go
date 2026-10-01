@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,6 +57,12 @@ func runInit(fresh bool) error {
 	feedback.Begin()
 
 	if initShouldRunWizard(hasExisting, fresh) {
+		// The wizard is a full-screen form and cannot open one without a
+		// terminal. Entering it anyway surfaced the form library's own
+		// "error opening TTY", which names nothing the user can act on.
+		if !initInteractiveFn() {
+			return errors.New("lerd init runs a wizard and needs a terminal\n       run 'lerd link' to register this project without one, or write .lerd.yaml yourself")
+		}
 		existing, err := config.LoadProjectConfig(cwd)
 		if err != nil {
 			return err
@@ -99,6 +106,9 @@ func runInit(fresh bool) error {
 func initShouldRunWizard(hasExisting, fresh bool) bool {
 	return !hasExisting || fresh
 }
+
+// initInteractiveFn is a seam so the no-terminal refusal can be tested.
+var initInteractiveFn = isInteractive
 
 // nodeVersionDefault prefills the Node field the way the PHP one above it is
 // prefilled: a version already saved in .lerd.yaml wins, otherwise the version
@@ -1195,15 +1205,14 @@ func detectServicesFromRules(envFilePath, envFormat string, rules map[string]con
 		if !ok || len(def.Detect) == 0 {
 			continue
 		}
+		vals := make(map[string]string, len(def.Detect))
 		for _, cond := range def.Detect {
-			val := readKey(cond.Key)
-			if val == "" {
-				continue
+			if v := readKey(cond.Key); v != "" {
+				vals[cond.Key] = v
 			}
-			if cond.ValuePrefix == "" || strings.HasPrefix(val, cond.ValuePrefix) {
-				detected = append(detected, svc)
-				break
-			}
+		}
+		if config.DetectRulesMatch(def.Detect, vals) {
+			detected = append(detected, svc)
 		}
 	}
 	return detected

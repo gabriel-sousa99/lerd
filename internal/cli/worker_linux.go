@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
-	"github.com/gabriel-sousa99/lerd/internal/envfile"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
 	"github.com/gabriel-sousa99/lerd/internal/logcolor"
 	nodeDet "github.com/gabriel-sousa99/lerd/internal/node"
@@ -229,19 +227,11 @@ func restoreWorker(siteName, sitePath, phpVersion, workerName string, w config.F
 			return
 		}
 	}
-	if w.Proxy != nil && w.Proxy.PortEnvKey != "" {
-		envPath := filepath.Join(sitePath, ".env")
-		port := envfile.ReadKey(envPath, w.Proxy.PortEnvKey)
-		if port == "" {
-			port = strconv.Itoa(assignWorkerProxyPort(sitePath, w.Proxy.PortEnvKey, w.Proxy.DefaultPort))
-			_ = envfile.ApplyUpdates(envPath, map[string]string{w.Proxy.PortEnvKey: port})
-		}
-		command = command + " --port=" + port
-	}
+	command = withWorkerProxyPort(siteName, sitePath, workerName, w, command)
 	// The unit is rewritten here on every `lerd start`, so the dev server flags
 	// have to be rebuilt with it or the worker comes back on its own port and
 	// the site's page is refused the assets it asks for.
-	command = devServerCommand(siteName, sitePath, workerName, command, w.Host)
+	command = devServerCommand(siteName, sitePath, workerName, command, w)
 
 	fpmUnit := resolveWorkerFPMUnit(siteName, phpVersion)
 	unitName, displaySite := workerNames(siteName, sitePath, workerName)

@@ -3,11 +3,16 @@
   import DetailTabs, { type TabItem } from '$components/DetailTabs.svelte';
   import AppLogsTab from './AppLogsTab.svelte';
   import { type Site, fpmContainer } from '$stores/sites';
+  import { logHighlight } from '$lib/logHighlight';
+  import { routeRest, goToTab } from '$stores/route';
   import { m } from '../../paraglide/messages.js';
 
   function fpmTabLabelI18n(site: Site): string {
     if (site.custom_container) return m.sites_tabs_container();
     if (site.runtime === 'frankenphp') return m.sites_tabs_frankenphp();
+    // Under the native runtime this tab reads the host listener's log, not a
+    // container's, so calling it PHP-FPM would point at the wrong thing.
+    if (site.php_log_unit?.startsWith('lerd-native-php')) return m.sites_tabs_nativePhp();
     return m.sites_tabs_phpFpm();
   }
 
@@ -69,6 +74,20 @@
 
   let active = $state<TabId>('app');
 
+  // A worker's toggle links straight at its journal (#sites/<domain>/logs/<id>),
+  // so the selected source lives in the hash and a tab click mirrors back into
+  // it. Without the mirror the link would go dead once the user picked another
+  // tab by hand: the hash would still name the old source and never change.
+  $effect(() => {
+    const source = $routeRest.split('/').slice(2).join('/');
+    if (source) active = source;
+  });
+
+  function selectSource(id: TabId) {
+    active = id;
+    goToTab('sites', `${site.domain}/logs/${id}`);
+  }
+
   // If the active tab isn't available, snap to the first one. Falling back to
   // '' (not 'fpm') matters for static sites with no tabs: defaulting to 'fpm'
   // would stream the shared FPM container's logs even though the tab is hidden.
@@ -79,15 +98,11 @@
 
   const name = $derived(site.name || site.domain);
 
-  function fpmHighlight(line: string): string | null {
-    if (/ERROR|Error|PHP Fatal|PHP Warning/.test(line)) return 'text-red-500';
-    if (/WARNING|Warning|PHP Notice/.test(line)) return 'text-yellow-600 dark:text-yellow-400';
-    return null;
-  }
-
   const streamPath = $derived.by(() => {
     if (active === 'fpm') {
-      const c = fpmContainer(site);
+      // The daemon names the unit only under the native runtime, where the log
+      // is a host listener's rather than a container's.
+      const c = site.php_log_unit || fpmContainer(site);
       return c ? '/api/logs/' + c : '';
     }
     if (active === 'queue') return `/api/queue/${name}/logs`;
@@ -112,14 +127,14 @@
 </script>
 
 <div class="flex-1 flex flex-col overflow-hidden min-h-0">
-  <DetailTabs {tabs} {active} onchange={(id) => (active = id)} />
+  <DetailTabs {tabs} {active} onchange={selectSource} />
   {#if active === 'app' && site.has_app_logs}
     {#key site.domain + '@' + activeWorktreeBranch}
       <AppLogsTab {site} branch={activeWorktreeBranch} />
     {/key}
   {:else if streamPath}
     {#key active + '@' + streamPath}
-      <LogViewer path={streamPath} highlight={active === 'fpm' ? fpmHighlight : undefined} />
+      <LogViewer path={streamPath} highlight={logHighlight} />
     {/key}
   {:else}
     <div class="flex-1 flex items-center justify-center text-xs text-gray-400 dark:text-gray-500">

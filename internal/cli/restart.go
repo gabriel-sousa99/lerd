@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/feedback"
+	"github.com/gabriel-sousa99/lerd/internal/nativephp"
 	phpDet "github.com/gabriel-sousa99/lerd/internal/php"
 	"github.com/gabriel-sousa99/lerd/internal/podman"
 	"github.com/spf13/cobra"
@@ -17,10 +19,13 @@ import (
 func NewRestartCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "restart [site]",
-		Short: "Restart the container for the current or named site",
-		Args:  cobra.MaximumNArgs(1),
+		Short: "Restart a site's container, not lerd itself",
+		Long: `Restart the container serving one site: its PHP-FPM, custom container or dev server.
+
+Run it from inside the site's directory, or name the site. This does not restart lerd; for that, use 'lerd stop' then 'lerd start', or 'lerd service restart <name>' for a single service.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			name, err := resolveSiteName(args)
+			name, err := restartTargetName(args, siteRegistered)
 			if err != nil {
 				return err
 			}
@@ -28,6 +33,26 @@ func NewRestartCmd() *cobra.Command {
 			return RestartSite(name)
 		},
 	}
+}
+
+// restartTargetName resolves the site to restart, and says what the command is
+// for when the directory is not one. Falling through to the directory name
+// reported `site "Downloads" not found`, which reads as a site that went
+// missing rather than as a command that has to be pointed at one.
+func restartTargetName(args []string, exists func(string) bool) (string, error) {
+	name, err := resolveSiteName(args)
+	if err != nil {
+		return "", err
+	}
+	if len(args) == 0 && !exists(name) {
+		return "", errors.New("no site registered for this directory: run 'lerd restart' inside a site, or name one with 'lerd restart <site>'. It restarts that site's container, not lerd itself; for lerd run 'lerd stop' and then 'lerd start'")
+	}
+	return name, nil
+}
+
+func siteRegistered(name string) bool {
+	_, err := config.FindSite(name)
+	return err == nil
 }
 
 // hostProxyStopTimeout bounds how long an explicit restart waits for the old
@@ -134,11 +159,39 @@ func RestartSite(name string) error {
 	if site.PHPVersion == "" {
 		return fmt.Errorf("site %q has no PHP version set", name)
 	}
-	short := strings.ReplaceAll(site.PHPVersion, ".", "")
-	unit := "lerd-php" + short + "-fpm"
-	if err := podman.RestartUnit(unit); err != nil {
-		return fmt.Errorf("restarting %s: %w", unit, err)
+	mode := config.PHPRuntimeContainer
+	if cfg, cfgErr := config.LoadGlobal(); cfgErr == nil {
+		mode = cfg.PHPRuntimeMode()
 	}
-	feedback.Done("restarted " + feedback.Val(name) + " · " + unit)
+	target, err := restartPlainFPM(name, site.PHPVersion, mode)
+	if err != nil {
+		return err
+	}
+	feedback.Done("restarted " + feedback.Val(name) + " · " + target)
 	return nil
+}
+
+// Seams for the plain-FPM restart, so the runtime split is testable without
+// podman or launchd.
+var (
+	restartFPMContainer = podman.RestartUnit
+	restartNativePool   = nativephp.Reload
+)
+
+// restartPlainFPM bounces whatever serves a plain FPM site on this runtime and
+// names it. Under native that is the version's host pool: the shared FPM
+// container does not exist there, and reaching for it sent the command after an
+// image nothing had built.
+func restartPlainFPM(name, version, mode string) (string, error) {
+	if mode == config.PHPRuntimeNative {
+		if err := restartNativePool(version); err != nil {
+			return "", fmt.Errorf("restarting PHP %s on the host: %w", version, err)
+		}
+		return "PHP " + version + " on the host", nil
+	}
+	unit := "lerd-php" + strings.ReplaceAll(version, ".", "") + "-fpm"
+	if err := restartFPMContainer(unit); err != nil {
+		return "", fmt.Errorf("restarting %s: %w", unit, err)
+	}
+	return unit, nil
 }

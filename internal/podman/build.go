@@ -14,8 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gabriel-sousa99/lerd/internal/composer"
 	"github.com/gabriel-sousa99/lerd/internal/config"
 	"github.com/gabriel-sousa99/lerd/internal/imagepull"
+	"github.com/gabriel-sousa99/lerd/internal/nativephp"
 	"github.com/gabriel-sousa99/lerd/internal/origin"
 )
 
@@ -864,8 +866,33 @@ func WriteXdebugIni(version, mode, start string) error {
 	if start == "" {
 		start = "trigger"
 	}
-	content := fmt.Sprintf("[xdebug]\nxdebug.mode=%s\nxdebug.start_with_request=%s\nxdebug.client_host=host.containers.internal\nxdebug.client_port=%d\n", mode, start, config.XdebugClientPort)
+	content := xdebugIniContent(mode, start, nativeXdebugModule(version), config.XdebugClientPort)
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// xdebugIniContent builds the ini body. A container image installs xdebug as a
+// package and its own ini loads it, so there only settings are needed. A native
+// build ships the .so beside the binary with nothing loading it, and the IDE
+// listens on the host rather than across the podman gateway.
+func xdebugIniContent(mode, start, modulePath string, port int) string {
+	clientHost := "host.containers.internal"
+	load := ""
+	if modulePath != "" {
+		clientHost = "127.0.0.1"
+		load = "zend_extension=" + modulePath + "\n"
+	}
+	return fmt.Sprintf("[xdebug]\n%sxdebug.mode=%s\nxdebug.start_with_request=%s\nxdebug.client_host=%s\nxdebug.client_port=%d\n",
+		load, mode, start, clientHost, port)
+}
+
+// nativeXdebugModule returns the path the native build's xdebug.so lives at, or
+// "" under the container runtime or when the build did not ship one.
+func nativeXdebugModule(version string) string {
+	cfg, err := config.LoadGlobal()
+	if err != nil || cfg.PHPRuntimeMode() != config.PHPRuntimeNative {
+		return ""
+	}
+	return nativephp.XdebugExtensionPath(version)
 }
 
 // healStaleHostsDir removes a directory podman auto-created at a hosts
@@ -1054,6 +1081,7 @@ func renderFPMQuadletContent(version string) (string, error) {
 	content = strings.ReplaceAll(content, "{{.HostNameLine}}", hostNameLine())
 	content = strings.ReplaceAll(content, "{{.HostSSHDir}}", hostSSHDir())
 	content = strings.ReplaceAll(content, "{{.OracleTNSAdminDir}}", hostOracleTNSAdminDir())
+	content = strings.ReplaceAll(content, "{{.ComposerMountLine}}", composerMountLine())
 	content = applyShellMounts(content, short)
 	content = InjectExtraVolumes(content, ExtraVolumePaths())
 	return content, nil
@@ -1085,7 +1113,7 @@ func RewriteFPMQuadlets() error {
 		// An unchanged file is not proof the container has the mounts: an
 		// earlier writer in the same run may have written them without ever
 		// restarting the unit (#914).
-		if changed || UnitMissingMounts(unitName, extraPaths) {
+		if changed || UnitMissingMounts(unitName, extraPaths) || composerMountDrifted(unitName) {
 			changedUnits = append(changedUnits, unitName)
 		}
 	}
@@ -1201,6 +1229,29 @@ func hostNameLine() string {
 }
 
 // applyShellMounts substitutes shell-related template fields.
+// composerMountLine binds lerd's composer.phar onto the container's composer.
+// The image carries its own, frozen at build time and never rebuilt for a tag
+// that already exists, so without this a shell inside the container runs a
+// different composer than every lerd command does. Empty when the phar is not
+// downloaded yet, because a bind mount with no source makes podman create a
+// directory and there would be no composer in the container at all.
+func composerMountLine() string {
+	phar := composer.PharPath()
+	if _, err := os.Stat(phar); err != nil {
+		return ""
+	}
+	return "Volume=" + phar + ":/usr/local/bin/composer:ro"
+}
+
+// composerMountDrifted reports a running container that predates the composer
+// mount its quadlet now carries. The per-version writer updates the file without
+// restarting anything, so without this the mount would sit in the unit and the
+// container would keep serving the image's composer until something else
+// restarted it (#914 in a different shape).
+func composerMountDrifted(unit string) bool {
+	return composerMountLine() != "" && UnitMissingComposerMount(unit)
+}
+
 func applyShellMounts(content, versionShort string) string {
 	content = strings.ReplaceAll(content, "{{.ZshHistoryDir}}", zshHistoryDir(versionShort))
 	content = strings.ReplaceAll(content, "{{.BunVolumeDir}}", BunVolumeDir())
@@ -1445,8 +1496,10 @@ func EnsurePathMounted(path, phpVersion string) {
 		if strings.Contains(string(existing), volumePrefix) {
 			// The quadlet is already right, but writing one never touches a
 			// running container: whoever wrote this line may have left the
-			// container running without the mount (#914).
+			// container running without the mount (#914). The platform unit can
+			// be behind for the same reason, so re-sync it before restarting.
 			if UnitMissingMounts(q.unitName, []string{path}) {
+				_, _ = WriteQuadletDiff(q.unitName, string(existing))
 				changedUnits = append(changedUnits, q.unitName)
 			}
 			continue
@@ -1456,20 +1509,13 @@ func EnsurePathMounted(path, phpVersion string) {
 		if updated == string(existing) {
 			continue
 		}
-		// Route through WriteQuadletDiff (not os.WriteFile) so the same
-		// transformations every other writer applies — BindForLAN,
-		// PairIPv6Binds, StripInstallSection, PlatformPodmanArgs — and the
-		// platform sync hook (AfterQuadletWriteFn, which keeps the macOS
-		// launchd plist consistent with the .container file) run here too.
-		// Without this, lazy mount injection on macOS used to update the
-		// quadlet without ever syncing the plist that launchd actually runs.
-		changed, writeErr := WriteQuadletDiff(q.unitName, updated)
-		if writeErr != nil {
+		// WriteQuadletDiff, never a raw write: macOS turns each quadlet into a
+		// launchd plist on write, and a container restarted from a stale plist
+		// comes back without the new mount (#1725).
+		if changed, writeErr := WriteQuadletDiff(q.unitName, updated); writeErr != nil || !changed {
 			continue
 		}
-		if changed {
-			changedUnits = append(changedUnits, q.unitName)
-		}
+		changedUnits = append(changedUnits, q.unitName)
 	}
 
 	if len(changedUnits) > 0 {
@@ -1590,4 +1636,10 @@ func EnsureSitePHPUserIni(siteName string) error {
 		"; post_max_size = 64M\n" +
 		"; max_execution_time = 60\n"
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// RemoveFPMImage deletes the shared PHP-FPM image for a version. Used to
+// reclaim the disk those images hold once PHP runs on the host instead.
+func RemoveFPMImage(version string) error {
+	return execCommand(PodmanBin(), "rmi", "-f", FPMImageName(version)).Run()
 }

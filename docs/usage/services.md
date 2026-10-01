@@ -9,7 +9,7 @@
 | `lerd service restart <name>` | Restart a service container; refreshes the quadlet first so config edits land |
 | `lerd service status <name>` | Show systemd unit status |
 | `lerd service list` | All services with status, version, and an Update column |
-| `lerd service search [query]` | Browse the external service-preset store; install a hit with `lerd service preset <name>` |
+| `lerd service search [query]` | Browse every service preset, bundled and store alike; install a hit with `lerd service preset <name>` |
 | `lerd service update <name> [tag]` | Pull a newer image and restart; tag selects an explicit upgrade target |
 | `lerd service migrate <name> <version>` | SQL dump + restore for cross-version moves (mysql, mariadb, postgres); `<version>` is a preset version label such as `18` |
 | `lerd service rollback <name>` | Swap back to the previously-running image (toggles) |
@@ -83,7 +83,7 @@ lerd service port mysql 3307
 lerd service port mysql --reset   # or: lerd service port mysql 0
 ```
 
-The container-internal port never changes, so containerized apps (which reach the service by name over the `lerd` network) are unaffected. Only host clients pointed at the old published port need to follow. [Host-proxy sites](host-proxy.md) that connect over the published loopback port have their `.env` regenerated automatically when the port moves. A host-proxy site that is paused when the port moves is skipped at that moment and picks up the new port when it is next unpaused.
+The container-internal port never changes, so containerized apps (which reach the service by name over the `lerd` network) are unaffected. Only host clients pointed at the old published port need to follow. Sites that connect over the published loopback port have their `.env` regenerated automatically when the port moves: [host-proxy sites](host-proxy.md), and every site under the [native runtime](../features/native-runtime.md), whose PHP runs on the host and reaches services the same way. A site that is paused when the port moves is skipped at that moment and picks up the new port when it is next unpaused.
 
 Some services publish more than one host port: Mailpit exposes SMTP on `1025` and its web UI on `8025`, RustFS the S3 API on `9000` and the console on `9001`, Selenium the WebDriver on `4444` and the noVNC view on `7900`. `lerd service port <name> <port>` moves the primary (first) mapping. To move any other published port, name the mapping by its container-internal port with `--container`:
 
@@ -113,7 +113,7 @@ The shift is decided at quadlet-write time, from whether the port can be bound r
 
 Moving lerd's published port lets a host-installed server keep its own. The step past that is pointing a project at your server instead of lerd's container: the database you already have, with your data and your users, while lerd keeps managing everything else.
 
-It takes two things, both in the project's personal, gitignored [`.env.lerd_override`](../features/env-setup.md#personal-overrides-env-lerd-override): the connection values that point at your server, and the reserved `LERD_EXTERNAL_SERVICES` key that tells lerd to stay out of the way.
+It takes two things, both in the project's personal, gitignored [`.env.lerd_override`](../features/env-setup.md#personal-overrides-envlerd_override): the connection values that point at your server, and the reserved `LERD_EXTERNAL_SERVICES` key that tells lerd to stay out of the way.
 
 ```dotenv
 # .env.lerd_override: this project uses the MySQL installed on the machine
@@ -195,7 +195,7 @@ Captured emails can pop a notification with the subject and sender; clicking the
 
 Mail sent through PHP's own `mail()` reaches Mailpit too, without any project configuration. The FPM image's `sendmail` is BusyBox's, which talks to `127.0.0.1:25` and finds nothing listening inside the container, so lerd writes a `sendmail_path` pointing at the mail catcher it runs and mounts it into every PHP container. That covers the frameworks that send through `mail()` rather than SMTP, Drupal and WordPress among them, which would otherwise report that mail could not be sent with nothing to show for it. A `sendmail_path` you set yourself in the shared or per-version `php.ini` wins, since lerd's file loads before both.
 
-RustFS is an S3-compatible object storage service (a drop-in replacement for MinIO). When `lerd env` detects it is needed (via `FILESYSTEM_DISK=s3` or `AWS_ENDPOINT` in `.env`), it automatically:
+RustFS is an S3-compatible object storage service (a drop-in replacement for MinIO). A site's bucket is ensured at every point the site and the service are brought together: `lerd link` when `.lerd.yaml` lists rustfs, `lerd env` when it detects rustfs is needed (via `FILESYSTEM_DISK=s3` or `AWS_ENDPOINT` in `.env`), and any install or reinstall of the service itself, which walks every already linked site. The bucket is looked up before it is created, so the repeats cost a lookup. In each case lerd:
 
 1. Creates a bucket named after the site handle, sanitised to match the S3 naming rules (lowercase, digits, hyphens, dots only, max 63 chars). Underscores in the handle are rewritten as hyphens, so `admin_astrolov` becomes bucket `admin-astrolov`.
 2. Sets the bucket to **public access** (suitable for local development)
@@ -215,6 +215,64 @@ AWS_USE_PATH_STYLE_ENDPOINT=true
 If a historical `AWS_BUCKET` value with underscores (or other S3-invalid characters) is present from an earlier lerd run or Sail import, `lerd env` will sanitise it in place on the next run.
 
 `AWS_URL` points to the public bucket URL (browser-reachable). `AWS_ENDPOINT` is the internal container address used by PHP.
+
+### Serving a service on its own domain
+
+An app reaches a service by container name, `lerd-rustfs`, which resolves only inside the podman network. That is fine until something hands the browser a URL built from it. An S3 presigned URL carries its host inside the signature, so rewriting the host afterwards produces `SignatureDoesNotMatch`; the app and the browser have to agree on one name *before* the URL is signed. `AWS_URL` cannot solve it either, because stock Laravel signs against the endpoint, not the public base.
+
+RustFS ships with one: its preset declares `domain: rustfs`, so an install that has it takes `rustfs.test` on the next start and the sites using it are repointed in the same pass. That is deliberate rather than opt-in, because a service whose URLs reach a browser is broken without a name both sides resolve, and a fix nobody runs is not a fix.
+
+```bash
+lerd service domain rustfs storage.test  # choose a different name
+lerd service domain rustfs               # show the current domain
+lerd service domain rustfs --remove      # stop serving it there
+```
+
+Removing it is recorded, so the preset's default is not handed back on the next start; naming one by hand clears that again. Any preset can declare a default the same way, which is why the value lives in the store and reaches every install without a release.
+
+The domain is a name both sides resolve: nginx serves it over HTTPS with a certificate from lerd's own CA, and the hosts file mounted into every PHP container points it at nginx, so the app signs for the same host the browser opens. A bare name is qualified with lerd's TLD, so `storage` means `storage.test`, and a domain outside that TLD is refused because nothing else resolves on both sides. The service stays reachable at `lerd-<name>` on the podman network throughout.
+
+A service exposing more than one port declares which one its domain serves, so Mailpit's `mailpit.test` would land on its web UI rather than on the SMTP port that happens to be listed first. Override it with `--port` when the preset says nothing:
+
+```bash
+lerd service domain rustfs console.rustfs.test --port 9001
+```
+
+A port the service does not expose is refused rather than written into a vhost that answers nothing.
+
+A subdomain of a site works just as well if you prefer the storage to sit under the app it belongs to, `lerd service domain rustfs rustfs.myapp.test`. lerd runs one RustFS for every site, so the default is a name of its own rather than one borrowed from a project, and per-site subdomains share a namespace with grouped sites and worktree domains; but nothing stops you naming it that way.
+
+The domain is taken during `lerd install` as well as at start, so an update reaches a machine that never sees a `lerd start` between releases.
+
+Setting or removing a domain sweeps the sites that use the service and rewrites their env files right away, so the change reaches the projects instead of waiting for each to run `lerd env` itself. That matters most on removal: without the sweep every project would be left pointing at a name that no longer resolves.
+
+Once a service has a domain, `lerd env` writes it into the sites that use the service: the container URL and the `localhost` published-port URL both become the domain, and the port the scheme now implies is dropped. Values that are not URLs are left alone, so a bare `REDIS_HOST=lerd-redis` keeps pointing at the container.
+
+```ini
+AWS_ENDPOINT=https://rustfs.test
+AWS_URL=https://rustfs.test/my-project
+```
+
+#### Uploading to the service from the browser
+
+A presigned upload is issued by the app but sent by the browser, and it goes to a different origin than the page it was issued to. The browser asks the service for permission first, and sends nothing at all unless the answer names that page's origin. Server-side uploads and plain `<img>` or download links never ask, so they were never affected.
+
+RustFS's preset asks for the preflight to be answered, so an install that has its domain gets it. For a service whose preset says nothing, or one of your own:
+
+```bash
+lerd service domain rustfs --cors      # answer preflights on the domain
+lerd service domain rustfs --no-cors   # stop answering them
+```
+
+The origin is reflected rather than answered with `*`: the vhost matches the request's `Origin` against the hosts lerd serves and echoes it back, so `https://myapp.test` is answered and a page on the open internet is not. A wildcard would let any site the browser happens to have open read the service over JS. An origin lerd does not serve leaves the header off entirely, which the browser refuses exactly as it would with nothing configured.
+
+Whatever the service says about CORS itself is dropped before lerd's answer is added. An object store that sends its own `Access-Control-Allow-Origin` would otherwise leave two on the response, and a browser rejects that outright rather than picking one. If you would rather configure CORS on the bucket, turn lerd's off with `--no-cors` and the service's own headers pass through untouched.
+
+The preflight answer reflects the headers the browser asked for rather than replying `*`, which Safari does not accept, and `ETag` is exposed because a multipart upload confirms each part by the ETag it comes back with.
+
+If a bucket a site points at is not there, `lerd site:doctor` reports it under **Bucket** with a fix that creates it. Such a site serves every page fine and fails on the first upload, which is exactly the kind of thing that reads as an application bug. The check is driven by the service preset rather than by any framework: the preset names the `.env` key holding the entity a site owns (`owner_env: AWS_BUCKET` for RustFS), and only a project whose env also points at the lerd service is measured against it, so one configured for real AWS is left alone.
+
+`lerd env` writes the `.env` even when it could not create the database or bucket behind it, and then exits non-zero naming what is missing. It used to warn in passing and exit 0, which left a file claiming storage that was never created.
 
 ### Migrating from MinIO to RustFS
 
