@@ -166,6 +166,7 @@ jobs:
       # both the summary and the workflow warnings.
       - name: Report a conflicted merge
         if: steps.merge.outputs.clean == 'false'
+        continue-on-error: true
         env:
           TAG: ${{ steps.upstream.outputs.tag }}
           BASE: ${{ github.ref_name }}
