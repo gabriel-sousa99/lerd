@@ -114,7 +114,7 @@ jobs:
           sudo apt-get install -y --fix-missing libayatana-appindicator3-dev
 
       - name: Download macOS tray binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.1.3
         with:
           pattern: lerd-tray-darwin-*
           path: dist-tray
