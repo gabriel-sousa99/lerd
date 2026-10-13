@@ -25,6 +25,16 @@ func DumpBridgePHP() (string, error) {
 	return string(b), nil
 }
 
+// DumpBridgeImplPHP returns the embedded dump-bridge-impl.php, the real bridge
+// that the dump-bridge.php stub includes on PHP 7.2 and newer.
+func DumpBridgeImplPHP() (string, error) {
+	b, err := dumpBridgeFS.ReadFile("dumpbridge/dump-bridge-impl.php")
+	if err != nil {
+		return "", fmt.Errorf("debug bridge impl embed: %w", err)
+	}
+	return string(b), nil
+}
+
 // DevtoolsCollectorPHP returns the embedded devtools-collector.php. The dump
 // bridge's auto_prepend requires it for its shared transport, so it rides the
 // same down-to-7.2 parse constraint and tests assert that.
@@ -113,6 +123,10 @@ func WriteDumpBridgeAssets() error {
 	if err != nil {
 		return err
 	}
+	implContent, err := DumpBridgeImplPHP()
+	if err != nil {
+		return err
+	}
 	iniContent, err := DumpBridgeIni()
 	if err != nil {
 		return err
@@ -135,6 +149,7 @@ func WriteDumpBridgeAssets() error {
 		content string
 	}{
 		{config.DumpsBridgeFile(), phpContent},
+		{config.DumpsBridgeImplFile(), implContent},
 		{config.DumpsIniFile(), iniContent},
 		{config.LaravelAdapterFile(), string(adapterContent)},
 		{config.DevtoolsCollectorFile(), string(collectorContent)},
@@ -164,6 +179,7 @@ func WriteDumpBridgeAssets() error {
 func RemoveDumpAssets() error {
 	for _, p := range []string{
 		config.DumpsBridgeFile(),
+		config.DumpsBridgeImplFile(),
 		config.DumpsIniFile(),
 		config.LaravelAdapterFile(),
 		config.DevtoolsCollectorFile(),
@@ -194,7 +210,7 @@ func RemoveDumpAssets() error {
 // regardless of Dumps.Enabled because the FPM quadlet always mounts these
 // paths; the bridge's runtime sentinel check controls active behaviour.
 func EnsureDumpAssets() error {
-	for _, p := range []string{config.DumpsBridgeFile(), config.DumpsIniFile(), config.LaravelAdapterFile(), config.DevtoolsCollectorFile(), config.SpxEntryFile(), config.DevtoolsSeamsFile()} {
+	for _, p := range []string{config.DumpsBridgeFile(), config.DumpsBridgeImplFile(), config.DumpsIniFile(), config.LaravelAdapterFile(), config.DevtoolsCollectorFile(), config.SpxEntryFile(), config.DevtoolsSeamsFile()} {
 		if info, err := os.Stat(p); err == nil && info.IsDir() {
 			if rmErr := os.RemoveAll(p); rmErr != nil {
 				return fmt.Errorf("removing stale dump asset directory %s: %w", p, rmErr)
