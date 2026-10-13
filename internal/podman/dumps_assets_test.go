@@ -10,9 +10,9 @@ import (
 // directory through an ini value so one asset serves both runtimes, and falls
 // back to the container path when that value is absent.
 func TestDumpBridgeResolvesItsAssetsDir(t *testing.T) {
-	src, err := DumpBridgePHP()
+	src, err := DumpBridgeImplPHP()
 	if err != nil {
-		t.Fatalf("DumpBridgePHP: %v", err)
+		t.Fatalf("DumpBridgeImplPHP: %v", err)
 	}
 	if !strings.Contains(src, "lerd.assets_dir") {
 		t.Error("the bridge should read its assets dir from lerd.assets_dir")

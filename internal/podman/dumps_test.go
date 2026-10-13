@@ -28,9 +28,12 @@ func TestWriteDumpBridgeAssets_WritesPHPAndIni(t *testing.T) {
 		t.Fatalf("WriteDumpBridgeAssets: %v", err)
 	}
 
-	php, err := os.ReadFile(config.DumpsBridgeFile())
+	if _, err := os.Stat(config.DumpsBridgeFile()); err != nil {
+		t.Fatalf("stat bridge stub: %v", err)
+	}
+	php, err := os.ReadFile(config.DumpsBridgeImplFile())
 	if err != nil {
-		t.Fatalf("read bridge: %v", err)
+		t.Fatalf("read bridge impl: %v", err)
 	}
 	if !strings.Contains(string(php), "enabled.flag") {
 		t.Errorf("bridge content missing sentinel check: %s", string(php)[:min(80, len(string(php)))])
@@ -157,9 +160,9 @@ func TestDumpBridgeIsLegacyPHPCompatible(t *testing.T) {
 	// for its shared transport, so that file rides the same constraint: a single
 	// newer-than-7.2 token in either makes the prepend unparseable and takes
 	// down every CLI command and web request there.
-	bridge, err := DumpBridgePHP()
+	bridge, err := DumpBridgeImplPHP()
 	if err != nil {
-		t.Fatalf("DumpBridgePHP: %v", err)
+		t.Fatalf("DumpBridgeImplPHP: %v", err)
 	}
 	collector, err := DevtoolsCollectorPHP()
 	if err != nil {
@@ -185,13 +188,34 @@ func TestDumpBridgeIsLegacyPHPCompatible(t *testing.T) {
 		name string
 		src  string
 	}{
-		{"dump-bridge.php", bridge},
+		{"dump-bridge-impl.php", bridge},
 		{"devtools-collector.php", collector},
 	} {
 		for tok, desc := range forbidden {
 			if strings.Contains(f.src, tok) {
 				t.Errorf("%s contains %q — %s; it must parse on PHP 7.2", f.name, tok, desc)
 			}
+		}
+	}
+}
+
+// The stub is the only bridge file PHP 5.x ever compiles. It must stay free of
+// every construct a PHP 5.3 parser rejects, and it must bail on PHP < 7.2
+// before it includes the real bridge.
+func TestDumpBridgeStubIsPHP5Parseable(t *testing.T) {
+	stub, err := DumpBridgePHP()
+	if err != nil {
+		t.Fatalf("DumpBridgePHP: %v", err)
+	}
+	if !strings.Contains(stub, "PHP_VERSION_ID < 70200") {
+		t.Error("the stub must return early on PHP older than 7.2")
+	}
+	if !strings.Contains(stub, "dump-bridge-impl.php") {
+		t.Error("the stub must hand over to dump-bridge-impl.php")
+	}
+	for _, tok := range []string{"function", "): ", "?string", "??", "::class", "namespace", "[]", "__DIR__"} {
+		if strings.Contains(stub, tok) {
+			t.Errorf("stub contains %q, which PHP 5.3 cannot parse or which is unnecessary here", tok)
 		}
 	}
 }
