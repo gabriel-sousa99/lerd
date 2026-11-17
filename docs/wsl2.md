@@ -142,6 +142,13 @@ Opções:
 O `lerd-tray` precisa de uma bandeja gráfica (`StatusNotifierItem` /
 `AppIndicator`), que o WSL2 não fornece nativamente. Sem prejuízo
 funcional — pilote tudo via CLI ou pelo dashboard web em `http://lerd.localhost`.
+
+Se o dashboard abre mas os serviços não aparecem e o console registra
+`ERR_EMPTY_RESPONSE` para `http://localhost:7073/api/...`, confirme se
+`http://127.0.0.1:7073/api/version` responde no Windows. A versão
+`1.35.0-oracle.1` usa IPv4 explícito na API e no WebSocket para evitar esse
+problema de encaminhamento. Após atualizar, recarregue a página com `Ctrl+Shift+R`
+para carregar o JavaScript novo. A API continua separada do vhost nginx.
 Para desativar e não ver erros de log:
 
 ```bash

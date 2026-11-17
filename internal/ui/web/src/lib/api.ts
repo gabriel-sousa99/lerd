@@ -1,6 +1,8 @@
+// Windows localhost forwarding can select an unreachable IPv6 listener in WSL.
+// Keep the dashboard API on explicit IPv4 loopback, separate from nginx.
 export const apiBase =
   typeof location !== 'undefined' && location.hostname === 'lerd.localhost'
-    ? 'http://localhost:7073'
+    ? 'http://127.0.0.1:7073'
     : '';
 
 export function apiUrl(path: string): string {

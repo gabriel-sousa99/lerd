@@ -1,6 +1,31 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { apiUrl, wsUrl, apiFetch } from './api';
 
+describe('dashboard API transport', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it('uses IPv4 loopback from lerd.localhost when Windows localhost forwarding fails', async () => {
+    vi.stubGlobal('location', new URL('http://lerd.localhost/'));
+    vi.resetModules();
+    const api = await import('./api');
+
+    expect(api.apiUrl('/api/settings')).toBe('http://127.0.0.1:7073/api/settings');
+    expect(api.wsUrl('/api/ws')).toBe('ws://127.0.0.1:7073/api/ws');
+  });
+
+  it('keeps direct and remote dashboard requests on their current origin', async () => {
+    vi.stubGlobal('location', new URL('https://192.168.1.20:7073/'));
+    vi.resetModules();
+    const api = await import('./api');
+
+    expect(api.apiUrl('/api/services')).toBe('/api/services');
+    expect(api.wsUrl('/api/ws')).toBe('wss://192.168.1.20:7073/api/ws');
+  });
+});
+
 describe('apiUrl', () => {
   it('passes absolute URLs through', () => {
     expect(apiUrl('https://example.com/foo')).toBe('https://example.com/foo');
