@@ -159,12 +159,31 @@ podman logs lerd-oracle-xe 2>&1 | grep -i "cannot open" | head
 cat ~/.config/containers/systemd/lerd-oracle-xe.container | grep -E "UserNS|Volume.*oradata"
 ```
 
-🟢 Conserto (a partir de oracle.8): o preset já tem `userns: keep-id:uid=54321,gid=54321` + `chown_data: true`. Pra reinstalar limpo:
+🟢 O preset usa `userns: keep-id:uid=54321,gid=54321` + `chown_data: true` para permitir escrita. Uma inicialização interrompida pode deixar o diretório incompleto. Preserve os arquivos existentes e consulte a recuperação abaixo antes de reinstalar.
+
+### `ORA-00205` e reinícios contínuos no Oracle XE local
+
+A imagem `21-slim-faststart` pode trazer os arquivos do banco já descompactados em `/opt/oracle/oradata`. Um bind mount vazio nesse caminho oculta esses arquivos. O script da imagem pode criar `dbconfig/XE` e, nos próximos inícios, tratar essa pasta como prova de que o banco existe, mesmo sem os arquivos `.ctl` e `.dbf`.
+
+O preset declara os arquivos obrigatórios em `data_seed`. Antes da primeira partida, o lerd copia o conteúdo original da imagem para uma pasta temporária, verifica os arquivos e publica o diretório completo. Um banco existente e válido permanece intacto. Uma falha na cópia permite tentar novamente, sem publicar dados parciais. No Linux, uma condição do systemd também verifica o diretório antes de cada partida e impede o ciclo de reinício quando ele está incompleto.
+
+Para diagnosticar:
+
 ```bash
-systemctl --user stop lerd-oracle-xe
-rm -rf ~/.local/share/lerd/data/oracle-xe       # CUIDADO: apaga dados
-lerd service reinstall oracle-xe
+lerd service stop oracle-xe
+ls -lh ~/.local/share/lerd/data/oracle-xe/XE/control*.ctl
+ls -lh ~/.local/share/lerd/data/oracle-xe/XE/system01.dbf
 ```
+
+Se os arquivos faltam mas a pasta contém configurações, restaure uma cópia completa compatível. Não copie apenas um control file de outro banco. O lerd preserva esse diretório e informa que os dados estão incompletos.
+
+Se os dados são descartáveis, uma reinstalação com `lerd service reinstall oracle-xe --reset-data` solicita a confirmação do reset e segue a política de snapshot. Um banco que não inicia pode não permitir esse snapshot; não pule a proteção sem preservar e revisar os arquivos existentes. Reiniciar repetidamente não repara um diretório incompleto.
+
+### Escolher Oracle XE ao vincular um projeto
+
+No `lerd link` ou `lerd init`, selecione **Oracle XE local (lerd-oracle-xe)** no campo Database para usar o container local. Ao selecionar Oracle externo no terminal, o lerd também pergunta se você prefere Oracle XE local. A resposta padrão mantém a escolha externa. O dashboard mostra as duas opções no mesmo seletor de banco.
+
+A escolha local salva o serviço `oracle-xe` e usa as variáveis declaradas no preset, incluindo `DB_HOST=lerd-oracle-xe`. A escolha externa mantém o formulário de conexão e o bloco `oracle:`. Um projeto que só declarou serviços como Redis ainda recebe a pergunta de banco; projetos com banco já configurado mantêm sua escolha.
 
 ### 🔴 Connection lenta (segundos por query) mesmo em rede local
 

@@ -41,6 +41,27 @@ files:
 
 Static files are declared inline with `content`. A file whose body must be computed at install time (for example pgAdmin's `servers.json`, built from the discovered Postgres family) names a built-in `generator` instead. Presets can reference the existing generators but can't ship new ones, that needs a lerd release, so most auto-login patterns (a static file reading `dynamic_env` values, as phpMyAdmin does) need no generator at all. Files are re-sourced from the preset on every service start, so updating lerd or the store definition rolls out new contents without a reinstall. Only presets may declare files; a `files:` block in a hand-written custom service is stripped on load.
 
+### Pre-populated image data
+
+A preset whose image already contains database files can declare `data_seed`, a list of required files relative to `data_dir`. It may also declare this per version, so a pre-populated image uses seeding while a version that initializes its own database keeps its normal startup:
+
+```yaml
+data_dir: /opt/oracle/oradata
+database_label: Oracle XE local
+versions:
+  - tag: 21-slim-faststart
+    image: docker.io/gvenzl/oracle-xe:21-slim-faststart
+    canonical: true
+    data_seed:
+      - XE/control01.ctl
+      - XE/control02.ctl
+      - XE/system01.dbf
+```
+
+Before starting the service, lerd copies the image's `data_dir` into a temporary directory without starting its entrypoint or mounting the live data. It checks that each required file exists and is nonempty, then publishes the directory. Existing complete data is never recopied. Nonempty incomplete directories are rejected with recovery guidance; they are never merged with a new seed. On Linux, the same check runs as a systemd start condition, so invalid data does not trigger a restart loop. Images must already be installed; the copy step never downloads an image silently.
+
+`database_label` supplies the database selector's display label. The service name remains the stored value, and the generic selector still groups the service by its declared `family`.
+
 ## Default service presets
 
 | Preset | Default image | Update strategy | Notes |

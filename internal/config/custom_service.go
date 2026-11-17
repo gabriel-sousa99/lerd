@@ -199,19 +199,23 @@ type FileMount struct {
 
 // CustomService represents a user-defined OCI-based service.
 type CustomService struct {
-	Name          string            `yaml:"name"`
-	Image         string            `yaml:"image"`
-	Ports         []string          `yaml:"ports,omitempty"`
-	Environment   map[string]string `yaml:"environment,omitempty"`
-	DataDir       string            `yaml:"data_dir,omitempty"`
-	Exec          string            `yaml:"exec,omitempty"`
-	EnvVars       []string          `yaml:"env_vars,omitempty"`
-	EnvDetect     *EnvDetect        `yaml:"env_detect,omitempty"`
-	SiteInit      *SiteInit         `yaml:"site_init,omitempty"`
-	Dashboard     string            `yaml:"dashboard,omitempty"`
-	ConnectionURL string            `yaml:"connection_url,omitempty"`
-	Description   string            `yaml:"description,omitempty"`
-	DependsOn     []string          `yaml:"depends_on,omitempty"`
+	Name        string            `yaml:"name"`
+	Image       string            `yaml:"image"`
+	Ports       []string          `yaml:"ports,omitempty"`
+	Environment map[string]string `yaml:"environment,omitempty"`
+	DataDir     string            `yaml:"data_dir,omitempty"`
+	// DataSeed lists files relative to DataDir that must exist before startup.
+	// An empty data directory is seeded from the image before it is mounted.
+	DataSeed      []string   `yaml:"data_seed,omitempty"`
+	DatabaseLabel string     `yaml:"database_label,omitempty"`
+	Exec          string     `yaml:"exec,omitempty"`
+	EnvVars       []string   `yaml:"env_vars,omitempty"`
+	EnvDetect     *EnvDetect `yaml:"env_detect,omitempty"`
+	SiteInit      *SiteInit  `yaml:"site_init,omitempty"`
+	Dashboard     string     `yaml:"dashboard,omitempty"`
+	ConnectionURL string     `yaml:"connection_url,omitempty"`
+	Description   string     `yaml:"description,omitempty"`
+	DependsOn     []string   `yaml:"depends_on,omitempty"`
 	// Category groups the service under a discovery heading and Icon names an
 	// entry in the UI's icon set, so a new preset needs no UI edit to appear.
 	// Color is the brand tint the dashboard paints the mark with, a plain hex
@@ -886,10 +890,21 @@ func ValidateCustomService(svc *CustomService) error {
 	if !validServiceName.MatchString(svc.Name) {
 		return fmt.Errorf("invalid service name %q: must match [a-z0-9][a-z0-9-]*", svc.Name)
 	}
+	if len(svc.DataSeed) > 0 {
+		if !filepath.IsAbs(svc.DataDir) || filepath.Clean(svc.DataDir) == "/" {
+			return fmt.Errorf("data_seed for %q requires an absolute data_dir other than /", svc.Name)
+		}
+		for _, name := range svc.DataSeed {
+			if !filepath.IsLocal(name) || filepath.Clean(name) == "." || ContainsUnitInjectionChars(name) {
+				return fmt.Errorf("invalid data_seed path %q for service %q", name, svc.Name)
+			}
+		}
+	}
 	scalars := map[string]string{
 		"image": svc.Image, "exec": svc.Exec, "userns": svc.Userns,
 		"data_dir": svc.DataDir, "description": svc.Description,
-		"dashboard": svc.Dashboard, "connection_url": svc.ConnectionURL,
+		"database_label": svc.DatabaseLabel,
+		"dashboard":      svc.Dashboard, "connection_url": svc.ConnectionURL,
 	}
 	if svc.SiteInit != nil {
 		scalars["site_init.exec"] = svc.SiteInit.Exec

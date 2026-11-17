@@ -155,7 +155,7 @@ Esta fork adiciona, por cima de tudo isso:
 | `memcached` / `amqp`               | precisa `lerd php:ext`       | **pré-instaladas**                                                  |
 | `openssh-client` no container      | ausente (composer ssh falha) | **instalado** + `$HOME/.ssh` montado em `/root/.ssh`                |
 | Suporte PHP                        | 7.4 → 8.6                    | **5.6 → 8.6** (5.6 legacy com libresolv shim)                       |
-| `lerd init`/`link` → Database      | sqlite / mysql / postgres    | **+ Oracle (externo)**, bloco `oracle:` no `.lerd.yaml`             |
+| `lerd init`/`link` → Database      | sqlite / mysql / postgres    | **+ Oracle XE local ou Oracle externo**, escolhido no assistente    |
 | DNS padrão                         | `lerd-dns` + `.test` (sudo)  | **off, `.localhost`** (sem sudo, RFC 6761)                          |
 | Comandos destrutivos no dashboard  | um clique                    | **filtrados em 2 camadas** (lista + HTTP 403)                       |
 | Comandos artisan customizados      | só os do framework           | **auto-discovery de `app/Console/Commands/*.php`**                  |
@@ -163,7 +163,7 @@ Esta fork adiciona, por cima de tudo isso:
 | Instalar versão PHP                | só CLI                       | **botão no dashboard + SSE logs ao vivo**                           |
 | Service presets adicionais         | mysql/postgres/redis/…       | **+ `oracle-xe` + `typesense` + `typesense-dashboard`**             |
 | Xdebug por padrão                  | `start_with_request=yes`     | **`=trigger`** (sem spam em CLI sem IDE)                            |
-| Versão                             | `1.35.0`                     | `1.35.0-oracle.0`                                                   |
+| Versão                             | `1.35.0`                     | `1.35.0-oracle.1`                                                   |
 
 ### Extensões PHP nas imagens
 
@@ -278,7 +278,7 @@ O script verifica `podman`/`git`/`mkcert`, baixa o binário para
 NÃO** → sites em `http://meusite.localhost/` (sem sudo, RFC 6761).
 
 ```bash
-lerd about    # confirma "Lerd Oracle Edition" e versão 1.35.0-oracle.0
+lerd about    # confirma "Lerd Oracle Edition" e versão 1.35.0-oracle.1
 ```
 
 ### macOS

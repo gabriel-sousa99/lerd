@@ -138,6 +138,10 @@ func GenerateCustomQuadlet(svc *config.CustomService) string {
 	}
 
 	b.WriteString("\n[Service]\n")
+	if len(svc.DataSeed) > 0 {
+		fmt.Fprintf(&b, "ExecCondition=%%h/.local/bin/lerd service prepare-data %s\n", svc.Name)
+		b.WriteString("TimeoutStartSec=300\n")
+	}
 	b.WriteString("Restart=always\n")
 	// Outlast the container's own grace. Without this the unit inherits
 	// DefaultTimeoutStopSec, which Arch-family distributions ship at 10s, so
