@@ -8,12 +8,17 @@ update_strategy: patch
 track_latest: false
 description: Oracle Database 21c XE para dev local (gvenzl/oracle-xe)
 family: oracle
+database_label: Oracle XE local
 default_version: "21-slim-faststart"
 init: true
 versions:
   - tag: "21-slim-faststart"
     label: "21c XE — slim-faststart (snapshot prébuild, ~30s startup) — recomendado"
     image: docker.io/gvenzl/oracle-xe:21-slim-faststart
+    data_seed:
+      - XE/control01.ctl
+      - XE/control02.ctl
+      - XE/system01.dbf
     canonical: true
     host_port: 1521
   - tag: "21-slim"
@@ -35,6 +40,7 @@ data_dir: /opt/oracle/oradata
 # e :U faz podman re-chownar a pasta no mount time para esse uid.
 userns: keep-id:uid=54321,gid=54321
 chown_data: true
+stop_timeout: 60
 environment:
   ORACLE_PASSWORD: lerd
   ORACLE_DATABASE: LERDPDB

@@ -28,9 +28,10 @@ var presetFS embed.FS
 // phpmyadmin or pgadmin omit Versions entirely and use the embedded
 // CustomService image directly.
 type PresetVersion struct {
-	Tag   string `yaml:"tag" json:"tag"`
-	Label string `yaml:"label,omitempty" json:"label,omitempty"`
-	Image string `yaml:"image" json:"image"`
+	Tag      string   `yaml:"tag" json:"tag"`
+	Label    string   `yaml:"label,omitempty" json:"label,omitempty"`
+	Image    string   `yaml:"image" json:"image"`
+	DataSeed []string `yaml:"data_seed,omitempty" json:"data_seed,omitempty"`
 	// HostPort is the host-side port published for this version. Since #704
 	// every member of a family shares the family's canonical port (e.g. 3306,
 	// 5432); the runtime port-ownership guard shifts a later sibling off it only
@@ -310,6 +311,9 @@ func (p *Preset) Resolve(version string) (*CustomService, error) {
 	svc.Image = picked.Image
 	svc.Preset = p.Name
 	svc.PresetVersion = picked.Tag
+	if picked.DataSeed != nil {
+		svc.DataSeed = append([]string(nil), picked.DataSeed...)
+	}
 	if !picked.Canonical {
 		svc.Name = p.Name + "-" + safe
 	}
@@ -388,6 +392,9 @@ func (p *Preset) ResolvePinned(tag string) (*CustomService, error) {
 	svc.Image = picked.Image
 	svc.Preset = p.Name
 	svc.PresetVersion = picked.Tag
+	if picked.DataSeed != nil {
+		svc.DataSeed = append([]string(nil), picked.DataSeed...)
+	}
 	// The bare canonical instance always occupies the canonical port; only the
 	// image follows the pinned version, so {{host_port}} must not drift onto a
 	// non-canonical version's alternate port (e.g. a migrated pg16 → 18).

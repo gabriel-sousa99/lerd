@@ -7,6 +7,37 @@ Lerd uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.35.0-oracle.1] — 2026-11-17
+
+Fork (Oracle Edition). Corrige a preparação do volume persistente do Oracle XE
+local e torna explícita a escolha entre o container local e um servidor externo.
+
+### Fixed
+
+- **Oracle XE faststart iniciava sem os arquivos do banco.** O bind mount vazio
+  ocultava os dados pré-criados da imagem. O preset agora declara `data_seed`:
+  antes da primeira partida, o lerd copia os dados para uma pasta temporária,
+  valida os arquivos obrigatórios e publica o diretório completo. Uma cópia
+  interrompida não deixa um banco parcial no diretório definitivo. Bancos
+  existentes permanecem intactos; diretórios incompletos exigem recuperação
+  explícita e são bloqueados antes da partida, inclusive pelo systemd no Linux.
+- **Um app com Redis mas sem banco configurado pulava a pergunta de banco no
+  `lerd link`.** A pergunta agora depende da existência de uma escolha de banco.
+- **Selecionar Oracle XE podia manter o app em SQLite.** O serviço local passa
+  a contar como escolha explícita e recebe suas variáveis mesmo quando a
+  definição do framework não mapeia o preset diretamente. Falhas de partida
+  do banco são devolvidas ao chamador.
+
+### Changed
+
+- O seletor de banco diferencia **Oracle XE local** e **Oracle externo**. Ao
+  selecionar Oracle externo no terminal, `lerd init` e `lerd link` também
+  perguntam se o usuário prefere o XE local, mantendo a escolha externa por
+  padrão. A conexão externa existente é preservada ao editar o projeto.
+- O Oracle XE recebe até 60 segundos para desligar e concluir suas gravações.
+
+---
+
 ## [1.35.0-oracle.0] — 2026-10-01 — merge upstream v1.34.3 → v1.35.0
 
 Fork (Oracle Edition). Integra 166 commits do upstream (`lerd-env/lerd`), de

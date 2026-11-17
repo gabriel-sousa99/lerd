@@ -1093,6 +1093,9 @@ func EnsureServiceRunning(name string) error {
 			return err
 		}
 	}
+	if err := PrepareServiceData(name); err != nil {
+		return err
+	}
 	if err := startUnitRetry(unit); err != nil {
 		return err
 	}

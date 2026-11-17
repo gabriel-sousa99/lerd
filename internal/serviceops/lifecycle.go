@@ -35,6 +35,9 @@ func StartService(name string) error {
 			return err
 		}
 	}
+	if err := PrepareServiceData(name); err != nil {
+		return err
+	}
 	if err := startUnitRetry(unit); err != nil {
 		return err
 	}
@@ -72,6 +75,9 @@ func RestartService(name string) error {
 	unit := "lerd-" + name
 	if err := refreshServiceQuadlet(name); err != nil {
 		feedback.Warn("regenerating quadlet for %s failed: %v; restarting with the existing one", name, err)
+	}
+	if err := PrepareServiceData(name); err != nil {
+		return err
 	}
 	if err := podman.RestartUnit(unit); err != nil {
 		return err

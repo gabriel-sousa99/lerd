@@ -111,6 +111,10 @@ func NewServiceCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newServiceStartCmd())
+	cmd.AddCommand(&cobra.Command{
+		Use: "prepare-data <service>", Hidden: true, Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error { return serviceops.PrepareServiceData(args[0]) },
+	})
 	cmd.AddCommand(newServiceStopCmd())
 	cmd.AddCommand(newServiceRestartCmd())
 	cmd.AddCommand(newServiceStatusCmd())

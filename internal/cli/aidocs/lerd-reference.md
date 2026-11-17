@@ -45,6 +45,9 @@ Actions: `list` (discover sites — CALL FIRST), `link`, `unlink`, `domain_add`,
 - `park` registers a parent dir and auto-registers every PHP project under it; `unpark` reverses it (project files kept)
 
 #### `service` — built-in & custom services
+
+Oracle XE `data_seed` fills empty directories; incomplete data requires recovery. MCP callers select `oracle-xe` in project services. Link/init offer local or external Oracle.
+
 Actions: `start`, `stop`, `restart`, `pin`, `unpin`, `update`, `rollback`, `migrate`, `remove`, `reinstall`, `add`, `expose`, `port`, `env`, `config_read`, `config_write`, `config_restore`, `config_reset`, `config_list_backups`, `preset_list`, `preset_search`, `preset_install`, `check_updates`, `entities`, `entity_action`.
 - `update` pulls a newer image (in-strategy); `migrate` dumps + restores across a cross-strategy upgrade; `reinstall` with `reset_data: true` wipes and reprovisions; `remove` with `remove_data: true` renames the data dir aside. Both wipes snapshot every database first (`pre-remove-<ts>` / `pre-reset-data-<ts>`, restore with `db` `restore` + `all_databases`): the renamed data dir only reads back under the image that wrote it, so the dump is the recovery path. A snapshot that fails stops the wipe; `no_snapshot: true` goes ahead without one
 - `preset_install`, `update`, `migrate`, `rollback` and `reinstall` disclose an image they would fetch instead of fetching it: the reply names it and its size, nothing is downloaded, and a repeat with `confirm: true` goes ahead. Relay the size first, it is the user's bandwidth. An image already on the machine is never disclosed

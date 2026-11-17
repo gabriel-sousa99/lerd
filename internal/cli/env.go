@@ -781,8 +781,10 @@ func userPickedDBFromYAML(lerdYAMLServices map[string]bool) bool {
 		return true
 	}
 	for name := range lerdYAMLServices {
-		switch config.FamilyOfName(name) {
-		case "mysql", "mariadb", "postgres", "mongo":
+		if dbFamilies[config.FamilyOfName(name)] {
+			return true
+		}
+		if meta, err := config.DefaultPresetMeta(name); err == nil && dbFamilyOf(meta) != "" {
 			return true
 		}
 	}
@@ -1073,6 +1075,20 @@ func runEnv(_ *cobra.Command, _ []string) error {
 	}
 
 	if len(fw.Env.Services) > 0 {
+		// A selected default preset can add a service the framework does not map.
+		// Wire it through the same preset path as a custom service.
+		for _, name := range knownServices() {
+			if !(lerdYAMLServices[name] || extServices[name]) || frameworkMapsService(fw, name) {
+				continue
+			}
+			if _, seen := customFromYAML[name]; seen {
+				continue
+			}
+			if svc, err := config.DefaultPresetMeta(name); err == nil {
+				pickedCustoms = append(pickedCustoms, svc)
+				customFromYAML[name] = true
+			}
+		}
 		replaced := replacedFrameworkRoles(fw, pickedCustoms)
 		// Framework defines its own service detection and vars — use those.
 		// A service applies when its env_detect rule matches the existing env
@@ -1361,7 +1377,7 @@ func runEnv(_ *cobra.Command, _ []string) error {
 			continue
 		}
 		if err := ensureServiceRunning(svc.Name); err != nil {
-			if isDB {
+			if dbFamilyOf(svc) != "" {
 				provisionErrs = append(provisionErrs, fmt.Errorf("%s did not start, so its databases were not created: %w", svc.Name, err))
 			} else {
 				feedback.Warn("could not start %s: %v", svc.Name, err)

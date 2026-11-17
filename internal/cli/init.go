@@ -344,6 +344,7 @@ func runWizard(cwd string, defaults *config.ProjectConfig) (*config.ProjectConfi
 	// pass through to .env unchanged so users can fill secrets later
 	// without re-running the wizard.
 	var oracleCfg *config.ProjectOracleConfig
+	dbChoice = promptOracleLocation(dbChoice, feedback.Confirm)
 	if dbChoice == "oracle" {
 		cfg, err := promptOracleConnection(defaults.Oracle)
 		if err != nil {
@@ -847,6 +848,13 @@ func frameworkSupportsSQLite(fw *config.Framework) bool {
 }
 
 func formatDBOptionLabel(name string) string {
+	svc, err := config.DefaultPresetMeta(name)
+	if err != nil {
+		svc, _ = config.LoadCustomService(name)
+	}
+	if svc != nil && svc.DatabaseLabel != "" {
+		return fmt.Sprintf("%s (lerd-%s)", svc.DatabaseLabel, name)
+	}
 	family := name
 	version := ""
 	if inferred := config.FamilyOfName(name); inferred != "" {
@@ -864,6 +872,13 @@ func formatDBOptionLabel(name string) string {
 		label += " " + version
 	}
 	return fmt.Sprintf("%s (lerd-%s)", label, name)
+}
+
+func promptOracleLocation(choice string, confirm func(string, bool) bool) string {
+	if choice == "oracle" && confirm("Usar Oracle XE local, gerenciado pelo lerd?", false) {
+		return "oracle-xe"
+	}
+	return choice
 }
 
 // buildDatabaseOptions returns the Database select options and a set of every

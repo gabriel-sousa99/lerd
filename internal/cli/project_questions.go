@@ -475,6 +475,9 @@ func projectConfigFromAnswers(cwd string, defaults *config.ProjectConfig, a Proj
 		NodeVersion:   nodeVersion,
 		CustomWorkers: defaults.CustomWorkers,
 	}
+	if a.Database == "oracle" {
+		cfg.Oracle = defaults.Oracle
+	}
 
 	switch a.Kind {
 	case ProjectKindProxy:

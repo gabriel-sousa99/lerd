@@ -200,15 +200,9 @@ func runLink(args []string) error {
 			fwStep.Info(plan.FrameworkLabel)
 		}
 
-		// Fork addition: when linking a PHP project that has no DB choice yet
-		// (no Services in .lerd.yaml AND no `oracle:` block), prompt for
-		// DB_CONNECTION right here so .env doesn't end up half-configured. The
-		// wizard-style Database select stays consistent with `lerd init`'s UX
-		// (SQLite / MySQL / PostgreSQL / Oracle externally). Skipped when
-		// non-interactive (CI, MCP) — those callers handle DB config explicitly.
-		// Runs before the framework's required services are folded in, so the
-		// gate below reads the project's own committed choice.
-		if isInteractive() && proj != nil && len(proj.Services) == 0 && proj.Oracle == nil {
+		// Ask before required services are folded in, so a non-database service
+		// cannot hide the database question. Unattended callers configure it explicitly.
+		if isInteractive() && proj != nil && linkNeedsDatabaseChoice(proj) {
 			proj = promptLinkDatabaseChoice(cwd, proj)
 			plan.Project = proj
 		} else if isInteractive() && proj == nil {
@@ -697,6 +691,7 @@ func promptLinkDatabaseChoice(cwd string, proj *config.ProjectConfig) *config.Pr
 		return proj
 	}
 
+	dbChoice = promptOracleLocation(dbChoice, feedback.Confirm)
 	proj.Services = append(proj.Services, config.ProjectService{Name: dbChoice})
 
 	// Oracle needs the host/port/credentials sub-form.
@@ -712,6 +707,22 @@ func promptLinkDatabaseChoice(cwd string, proj *config.ProjectConfig) *config.Pr
 		fmt.Printf("[WARN] saving .lerd.yaml: %v\n", err)
 	}
 	return proj
+}
+
+func linkNeedsDatabaseChoice(proj *config.ProjectConfig) bool {
+	if proj == nil {
+		return true
+	}
+	if proj.Oracle != nil || proj.DB.Service != "" {
+		return false
+	}
+	_, names := buildDatabaseOptions(nil)
+	for _, svc := range proj.Services {
+		if names[svc.Name] {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchFrameworkFromStore attempts to install a framework definition from the
