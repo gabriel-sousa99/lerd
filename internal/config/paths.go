@@ -277,6 +277,12 @@ func DumpsBridgeFile() string {
 	return filepath.Join(DumpsAssetsDir(), "dump-bridge.php")
 }
 
+// DumpsBridgeImplFile is the host path for dump-bridge-impl.php, the real
+// bridge that the PHP 5.3-safe dump-bridge.php stub includes on PHP 7.2+.
+func DumpsBridgeImplFile() string {
+	return filepath.Join(DumpsAssetsDir(), "dump-bridge-impl.php")
+}
+
 // DumpsIniFile is the host path for the conf.d ini that turns the bridge on.
 func DumpsIniFile() string {
 	return filepath.Join(DumpsAssetsDir(), "97-lerd-dump.ini")
