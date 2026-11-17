@@ -14,6 +14,10 @@ local e torna explícita a escolha entre o container local e um servidor externo
 
 ### Fixed
 
+- **O dashboard no WSL podia abrir sem carregar serviços ou configurações.**
+  As chamadas da API e do WebSocket saíam de `lerd.localhost` para
+  `localhost:7073`, cujo encaminhamento no Windows podia falhar. O cliente agora
+  usa `127.0.0.1:7073`, mantendo a API no loopback e o bloqueio do nginx.
 - **Oracle XE faststart iniciava sem os arquivos do banco.** O bind mount vazio
   ocultava os dados pré-criados da imagem. O preset agora declara `data_seed`:
   antes da primeira partida, o lerd copia os dados para uma pasta temporária,
